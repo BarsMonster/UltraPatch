@@ -1,9 +1,22 @@
 # Ultrapatcher
 
-This is the local repository for the ultrapatcher experiments and A1 decoder work.
+Final A1 firmware patcher for the Sensor Watch target.
 
-Primary code lives under `v3/nvm/hybrid12k`. The legacy `detools-dev` checkout is intentionally outside this repository boundary; keep it as an external dependency only when a research script still needs it.
+Production code lives in `v3/nvm/hybrid12k/c`:
 
-`test-bench/Sensor-Watch` is also an external worktree. It is used for firmware build and patch-size experiments, but it keeps its own Git history and is ignored here.
+- `rc_v3_enc.c`: host-side C encoder.
+- `rc_v3.c`: streaming in-place C decoder.
+- `flash_nvm.c`: host NVM emulator used by `hy_dec`.
+- `libdivsufsort/`: vendored C suffix sorter used by the host encoder.
 
-The benchmark image and fixture corpora live locally under `test-bench/images` and `test-bench/fixtures`; they are ignored binary test data. The source tree keeps lightweight symlinks at `v3/nvm/hybrid12k/images` and `v3/nvm/hybrid12k/fixtures` so existing tools can find them.
+Build and smoke-test:
+
+```sh
+cd v3/nvm/hybrid12k/c
+make
+make check
+```
+
+The local binary corpora live outside Git under `test-bench/images` and
+`test-bench/fixtures`; `v3/nvm/hybrid12k` keeps lightweight symlinks to those
+directories for verification runs.

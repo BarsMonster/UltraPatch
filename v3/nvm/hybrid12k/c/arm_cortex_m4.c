@@ -1,48 +1,8 @@
-/*
- * arm-cortex-m4 data-format transform — apply side, C port of
- * detools/data_format/arm_cortex_m4.py (+ utils.py).
- *
- * Given the decompressed data-format patch ("dfpatch"), the from-image and the
- * to-size, this reconstructs the two buffers the sequential applier needs:
- *   - fromzero: the from-image with address fields zeroed   (FromReader)
- *   - dfdiff:   a to_size overlay of re-encoded to-addresses (DiffReader)
- * so that  to[i] = patch[i] + fromzero[i] + dfdiff[i].
- *
- * Host/correctness-first: buffers are malloc'd. MCU streaming is a later step.
- */
+/* ARM Cortex-M relocation field scanner and packers for the final A1 encoder. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "arm_cortex_m4.h"
-
-/* ---------- varint (matches common.unpack_size_with_length) ---------- */
-typedef struct { const uint8_t *p; size_t size; size_t pos; } rd_t;
-
-static int rd_byte(rd_t *r, uint8_t *b) {
-    if (r->pos >= r->size) return -1;
-    *b = r->p[r->pos++];
-    return 0;
-}
-/* signed size — 32-bit only: offset>28 (a 6th group) means the value exceeds 32 bits. */
-static int rd_size(rd_t *r, int32_t *out) {
-    uint8_t b;
-    if (rd_byte(r, &b)) return -1;
-    int is_signed = (b & 0x40);
-    int32_t value = (b & 0x3f);
-    int offset = 6;
-    while (b & 0x80) {
-        if (offset > 28 || rd_byte(r, &b)) return -1;
-        value |= ((int32_t)(b & 0x7f) << offset);
-        offset += 7;
-    }
-    if (is_signed) value = -value;
-    *out = value;
-    return 0;
-}
-/* unsigned size (reinterpret) — for our positive offsets == rd_size */
-static int rd_usize(rd_t *r, uint32_t *out) {
-    int32_t v; if (rd_size(r, &v)) return -1; *out = (uint32_t)v; return 0;
-}
 
 /* ---------- address->value maps ---------- */
 typedef struct { uint32_t addr; int32_t val; } kv_t;
@@ -65,9 +25,8 @@ static int kv_cmp(const void *x, const void *y) {
 /* sort by addr, drop duplicate addrs (keep last seen, mirroring dict overwrite) */
 static void map_finalize(map_t *m) {
     if (m->n == 0) return;
-    /* stable-ish: stamp original index in val's high bits? values can be large.
-       duplicates here always carry equal values (same memory word), so plain
-       sort + unique-by-addr is equivalent to Python's dict+sorted. */
+    /* Duplicate addresses here carry equal values, so sort + unique-by-address
+       preserves the scanner result. */
     qsort(m->a, m->n, sizeof(kv_t), kv_cmp);
     size_t w = 0;
     for (size_t i = 0; i < m->n; i++) {
@@ -164,9 +123,8 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
     if (map_push(ldr, address, v) == 0) uset_add(lit, address);
 }
 
-/* The python code builds ldr/ldr_w incrementally and tests `addr in ldr` as it scans,
-   to skip literal-pool words. We mirror that exactly with the `lit` hash set: every
-   address pushed to ldr/ldr_w is recorded, and membership is a single O(1) lookup. */
+/* The scanner records literal-pool target addresses as it finds them, then skips
+   those words later in the same pass. */
 
 /* emit_bw/emit_ldr_w default-on (Cortex-M4/Thumb-2). Off for Thumb-1/ARMv6-M (M0+),
  * where B.W and LDR.W cannot occur, so any match is a spurious decode of data. Byte
@@ -215,8 +173,8 @@ static void disassemble(const uint8_t *f, size_t fsize,
             }
         }
     }
-    /* ldr_w IS used for in-scan membership (skipping literal-pool words), so it must be
-     * built during the loop; clear only the returned result. Mirrors the Python patch. */
+    /* ldr_w is used for in-scan literal-pool membership even when it is not
+     * returned to the caller. */
     if (!emit_ldr_w) d->ldr_w.n = 0;
     uset_free(&d->lit);   /* only needed during the scan */
     map_finalize(&d->bw); map_finalize(&d->bl);
@@ -224,154 +182,11 @@ static void disassemble(const uint8_t *f, size_t fsize,
     map_finalize(&d->data_ptr); map_finalize(&d->code_ptr);
 }
 
-/* ---------- block header/body ---------- */
-typedef struct { int32_t from_offset; int32_t to_address; int32_t n; int32_t *values; } block_t;
-typedef struct { block_t *b; size_t n; } blocks_t;
-
-static int unpack_block_header(rd_t *r, blocks_t *bl) {
-    int32_t nb; if (rd_size(r, &nb)) return -1;
-    /* corrupt-input guard: a block costs >=3 size bytes, so nb can't exceed bytes left */
-    if (nb < 0 || (size_t)nb > r->size) return -1;
-    bl->n = (size_t)nb;
-    bl->b = nb ? calloc(nb, sizeof(block_t)) : NULL;
-    if (nb && !bl->b) return -1;
-    for (size_t i=0;i<bl->n;i++) {
-        if (rd_size(r,&bl->b[i].from_offset)||rd_size(r,&bl->b[i].to_address)||rd_size(r,&bl->b[i].n))
-            return -1;
-        if (bl->b[i].n < 0 || (size_t)bl->b[i].n > r->size) return -1;  /* >=1 byte/value */
-    }
-    return 0;
-}
-static int load_block_values(rd_t *r, blocks_t *bl) {
-    for (size_t i=0;i<bl->n;i++) {
-        bl->b[i].values = bl->b[i].n ? malloc(bl->b[i].n*sizeof(int32_t)) : NULL;
-        if (bl->b[i].n && !bl->b[i].values) return -1;
-        for (int32_t k=0;k<bl->b[i].n;k++)
-            if (rd_size(r,&bl->b[i].values[k])) return -1;
-    }
-    return 0;
-}
-static void blocks_free(blocks_t *bl){ for(size_t i=0;i<bl->n;i++) free(bl->b[i].values); free(bl->b); bl->b=NULL; bl->n=0; }
-
-/* apply a block set: zero from-fields, overlay re-encoded to-values into dfdiff */
-enum pack_kind { PK_S32, PK_BL, PK_BW };
-static void apply_blocks(const blocks_t *bl, const map_t *sorted,
-                         uint8_t *fromzero, size_t from_size,
-                         uint8_t *dfdiff, size_t to_size, enum pack_kind pk) {
-    for (size_t i=0;i<bl->n;i++) {
-        block_t *b = &bl->b[i];
-        if ((size_t)b->from_offset >= sorted->n) continue;
-        uint32_t base = sorted->a[b->from_offset].addr;
-        for (int32_t k=0;k<b->n;k++) {
-            size_t idx = (size_t)b->from_offset + k;
-            if (idx >= sorted->n) break;
-            uint32_t faddr = sorted->a[idx].addr;
-            int32_t fval = sorted->a[idx].val;
-            /* FromReader: zero 4 bytes at faddr */
-            if ((size_t)faddr + 4 <= from_size) memset(fromzero + faddr, 0, 4);
-            /* DiffReader: write packed(fval - value) at to_address+faddr-base */
-            int32_t to_pos = b->to_address + (int32_t)faddr - (int32_t)base;
-            if (to_pos < 0 || (size_t)to_pos + 4 > to_size) continue;
-            int32_t diff = (int32_t)((uint32_t)fval - (uint32_t)b->values[k]);
-            uint8_t enc[4];
-            if (pk == PK_S32) wr32(enc, (uint32_t)diff);
-            else if (pk == PK_BL) pack_bl(diff, enc);
-            else pack_bw(diff, enc);
-            memcpy(dfdiff + to_pos, enc, 4);
-        }
-    }
-}
-
-/* ---------- top-level ---------- */
-int detools_m4_build(const uint8_t *dfpatch, size_t dfpatch_size,
-                     const uint8_t *from, size_t from_size, size_t to_size,
-                     uint8_t **fromzero_out, uint8_t **dfdiff_out) {
-    rd_t r = { dfpatch, dfpatch_size, 0 };
-
-    /* All allocations are released once at `cleanup`; every error path goes through it.
-       Variables referenced by cleanup are declared+initialized up front so no `goto`
-       jumps over their initialization. */
-    int rc = -1, dis_live = 0;
-    uint8_t *fromzero = NULL, *dfdiff = NULL;
-    blocks_t data_blk={0}, code_blk={0}, bw_blk={0}, bl_blk={0}, ldr_blk={0}, ldrw_blk={0};
-    dis_t d;
-
-    /* pointers header */
-    uint8_t present;
-    uint32_t from_data_offset=0, from_data_begin=0, from_data_end=0;
-    uint32_t from_code_begin=0, from_code_end=0;
-    int data_present, code_present;
-    if (rd_byte(&r,&present)) goto cleanup;
-    data_present = (present==1);
-    if (data_present) { if(rd_usize(&r,&from_data_offset)||rd_usize(&r,&from_data_begin)||rd_usize(&r,&from_data_end)) goto cleanup; }
-    if (rd_byte(&r,&present)) goto cleanup;
-    code_present = (present==1);
-    if (code_present) { if(rd_usize(&r,&from_code_begin)||rd_usize(&r,&from_code_end)) goto cleanup; }
-
-    if (data_present) { if (unpack_block_header(&r,&data_blk)) goto cleanup; }
-    if (code_present) { if (unpack_block_header(&r,&code_blk)) goto cleanup; }
-    if (unpack_block_header(&r,&bw_blk)) goto cleanup;
-    if (unpack_block_header(&r,&bl_blk)) goto cleanup;
-    if (unpack_block_header(&r,&ldr_blk)) goto cleanup;
-    if (unpack_block_header(&r,&ldrw_blk)) goto cleanup;
-    /* bodies, in the order create wrote them: data, code, bw, bl, ldr, ldr_w */
-    if (data_present && load_block_values(&r,&data_blk)) goto cleanup;
-    if (code_present && load_block_values(&r,&code_blk)) goto cleanup;
-    if (load_block_values(&r,&bw_blk)) goto cleanup;
-    if (load_block_values(&r,&bl_blk)) goto cleanup;
-    if (load_block_values(&r,&ldr_blk)) goto cleanup;
-    if (load_block_values(&r,&ldrw_blk)) goto cleanup;
-
-    /* disassemble the from-image */
-    uint32_t data_off_end = (uint32_t)(from_data_offset + (from_data_end - from_data_begin));
-    disassemble(from, from_size,
-                (uint32_t)from_data_offset, data_off_end,
-                (uint32_t)from_data_begin, (uint32_t)from_data_end,
-                (uint32_t)from_code_begin, (uint32_t)from_code_end,
-                /*emit_bw=*/1, /*emit_ldr_w=*/1, &d);   /* legacy M4 build path */
-    dis_live = 1;
-
-    fromzero = malloc(from_size ? from_size : 1);
-    dfdiff = calloc(to_size ? to_size : 1, 1);
-    if (!fromzero || !dfdiff) goto cleanup;
-    memcpy(fromzero, from, from_size);
-
-    /* order matches DiffReader.__init__: ldr, ldr_w, bl, bw, data, code */
-    apply_blocks(&ldr_blk,  &d.ldr,      fromzero, from_size, dfdiff, to_size, PK_S32);
-    apply_blocks(&ldrw_blk, &d.ldr_w,    fromzero, from_size, dfdiff, to_size, PK_S32);
-    apply_blocks(&bl_blk,   &d.bl,       fromzero, from_size, dfdiff, to_size, PK_BL);
-    apply_blocks(&bw_blk,   &d.bw,       fromzero, from_size, dfdiff, to_size, PK_BW);
-    if (data_present) apply_blocks(&data_blk, &d.data_ptr, fromzero, from_size, dfdiff, to_size, PK_S32);
-    if (code_present) apply_blocks(&code_blk, &d.code_ptr, fromzero, from_size, dfdiff, to_size, PK_S32);
-
-    *fromzero_out = fromzero; *dfdiff_out = dfdiff;
-    fromzero = dfdiff = NULL;   /* ownership transferred to caller */
-    rc = 0;
-
-cleanup:
-    if (dis_live) {
-        map_free(&d.bw); map_free(&d.bl); map_free(&d.ldr); map_free(&d.ldr_w);
-        map_free(&d.data_ptr); map_free(&d.code_ptr);
-    }
-    blocks_free(&data_blk); blocks_free(&code_blk); blocks_free(&bw_blk);
-    blocks_free(&bl_blk); blocks_free(&ldr_blk); blocks_free(&ldrw_blk);
-    free(fromzero); free(dfdiff);
-    return rc;
-}
-
-/* ---- ultrapatch v2: expose disassembler + re-encoder ---- */
-int detools_m4_disassemble(const uint8_t *from, size_t from_size,
-                           uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
-                           uint32_t code_begin, uint32_t code_end,
-                           m4_stream_t streams[M4_NSTREAMS]) {
-    return detools_m4_disassemble_ex(from, from_size, data_offset, data_begin, data_end,
-                                     code_begin, code_end, 0, 0, streams);
-}
-int detools_m4_disassemble_ex(const uint8_t *from, size_t from_size,
-                              uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
-                              uint32_t code_begin, uint32_t code_end,
-                              int emit_bw, int emit_ldr_w,
-                              m4_stream_t streams[M4_NSTREAMS]) {
+int a1_m4_disassemble(const uint8_t *from, size_t from_size,
+                      uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
+                      uint32_t code_begin, uint32_t code_end,
+                      int emit_bw, int emit_ldr_w,
+                      m4_stream_t streams[M4_NSTREAMS]) {
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
     disassemble(from, from_size, data_offset, data_off_end, data_begin, data_end,
@@ -389,35 +204,16 @@ int detools_m4_disassemble_ex(const uint8_t *from, size_t from_size,
             streams[s].a[i].val  = src[s]->a[i].val;   /* maps already sorted by addr */
         }
     }
-    if (rc) detools_m4_free_streams(streams);   /* release any partial allocation on OOM */
+    if (rc) a1_m4_free_streams(streams);   /* release any partial allocation on OOM */
     map_free(&d.bw); map_free(&d.bl); map_free(&d.ldr); map_free(&d.ldr_w);
     map_free(&d.data_ptr); map_free(&d.code_ptr);
     return rc;
 }
-void detools_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
+void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
     for (int s = 0; s < M4_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }
 }
-void detools_m4_pack(int pk, int32_t value, uint8_t out[4]) {
+void a1_m4_pack(int pk, int32_t value, uint8_t out[4]) {
     if (pk == M4_PK_BL) pack_bl(value, out);
     else if (pk == M4_PK_BW) pack_bw(value, out);
     else wr32(out, (uint32_t)value);
 }
-
-#ifdef M4_TEST_MAIN
-#include <stdio.h>
-static uint8_t* slurp(const char *path, size_t *n){
-    FILE *f=fopen(path,"rb"); if(!f){perror(path);exit(2);}
-    fseek(f,0,SEEK_END); long s=ftell(f); fseek(f,0,SEEK_SET);
-    uint8_t *b=malloc(s); fread(b,1,s,f); fclose(f); *n=s; return b;
-}
-int main(int argc, char **argv){
-    if (argc != 6){ fprintf(stderr,"usage: %s dfpatch from.bin to_size out.fromzero out.dfdiff\n",argv[0]); return 2; }
-    size_t dn, fn; uint8_t *df=slurp(argv[1],&dn), *fr=slurp(argv[2],&fn);
-    size_t to_size=(size_t)strtoul(argv[3],NULL,10);
-    uint8_t *fz=NULL,*dd=NULL;
-    if (detools_m4_build(df,dn,fr,fn,to_size,&fz,&dd)){ fprintf(stderr,"build failed\n"); return 1; }
-    FILE *a=fopen(argv[4],"wb"); fwrite(fz,1,fn,a); fclose(a);
-    FILE *b=fopen(argv[5],"wb"); fwrite(dd,1,to_size,b); fclose(b);
-    return 0;
-}
-#endif

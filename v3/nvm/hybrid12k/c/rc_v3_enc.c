@@ -2,8 +2,7 @@
  * A1 host encoder (C) for the rc_v3 decoder wire.
  *
  * This is intentionally a host-side encoder: compression-side memory/CPU are
- * allowed to be large. The emitted blob is byte-for-byte intended to match the
- * Python golden rc_hybrid.encode_v3() for the same from/to directories.
+ * allowed to be large. It emits the final A1 blob consumed by rc_v3.c.
  */
 #include <errno.h>
 #include <limits.h>
@@ -231,18 +230,6 @@ static void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *va
     memcpy(b->values, vals, (size_t)n * sizeof(int64_t));
 }
 
-static void blocks_to_bytes(const BlockVec *v, Buf *header, Buf *data) {
-    put_pack_size(header, (int64_t)v->n);
-    for (size_t i = 0; i < v->n; i++) {
-        put_pack_size(header, v->v[i].from_offset);
-        put_pack_size(header, v->v[i].to_address);
-        put_pack_size(header, v->v[i].n);
-    }
-    for (size_t i = 0; i < v->n; i++)
-        for (int32_t k = 0; k < v->v[i].n; k++)
-            put_pack_size(data, v->v[i].values[k]);
-}
-
 static int cmp_fd(const void *a, const void *b) {
     const FieldDelta *x = (const FieldDelta *)a, *y = (const FieldDelta *)b;
     return (x->addr > y->addr) - (x->addr < y->addr);
@@ -281,7 +268,7 @@ static const FieldDelta *fd_find(const FieldDeltaVec *v, uint32_t addr) {
 }
 
 /* ------------------------------------------------------------------------------------- */
-/* Minimal ELF32 little-endian range extraction matching detools.data_format.elf.          */
+/* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
 typedef struct { uint32_t type, off, addr, size, entsize, link; } Shdr;
 typedef struct { uint32_t value, size; uint8_t type; uint16_t sec; } Sym;
@@ -435,7 +422,7 @@ static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which
 }
 
 /* ------------------------------------------------------------------------------------- */
-/* Python difflib.SequenceMatcher subset for create_patch_block().                         */
+/* SequenceMatcher-style subset for create_patch_block().                                  */
 /* ------------------------------------------------------------------------------------- */
 typedef struct { int32_t val; int32_t *idx; size_t n, cap; int popular; } B2J;
 typedef struct { B2J *v; size_t n, cap; } B2JVec;
@@ -608,47 +595,26 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     free(ao); free(bo); free(m.v);
 }
 
-static Buf build_dfpatch(const Ranges *fr, BlockVec blocks[STREAM_N]) {
-    Buf patch = {0}, h[STREAM_N] = {{0}}, d[STREAM_N] = {{0}};
-    buf_put(&patch, fr->data_end ? 1 : 0);
-    if (fr->data_end) {
-        put_pack_size(&patch, fr->data_off_begin);
-        put_pack_size(&patch, fr->data_begin);
-        put_pack_size(&patch, fr->data_end);
-    }
-    buf_put(&patch, fr->code_end ? 1 : 0);
-    if (fr->code_end) {
-        put_pack_size(&patch, fr->code_begin);
-        put_pack_size(&patch, fr->code_end);
-    }
-    for (int s = 0; s < STREAM_N; s++) blocks_to_bytes(&blocks[s], &h[s], &d[s]);
-    for (int s = 0; s < STREAM_N; s++) buf_write(&patch, h[s].d, h[s].n);
-    for (int s = 0; s < STREAM_N; s++) buf_write(&patch, d[s].d, d[s].n);
-    for (int s = 0; s < STREAM_N; s++) { buf_free(&h[s]); buf_free(&d[s]); }
-    return patch;
-}
-
 static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], Buf *dfpatch) {
+                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N]) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n; memcpy(from_mut->d, from->d, from->n);
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n; memcpy(to_mut->d, to->d, to->n);
     m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
-    if (detools_m4_disassemble_ex(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                                  fr->code_begin, fr->code_end, 1, 1, fs)) die("from disassemble failed");
-    if (detools_m4_disassemble_ex(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                                  tr->code_begin, tr->code_end, 1, 1, ts)) die("to disassemble failed");
+    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                          fr->code_begin, fr->code_end, 1, 1, fs)) die("from disassemble failed");
+    if (a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
+                          tr->code_begin, tr->code_end, 1, 1, ts)) die("to disassemble failed");
     create_patch_block(from_mut, to_mut, &fs[M4_DATA], &ts[M4_DATA], &blocks[STREAM_DATA]);
     create_patch_block(from_mut, to_mut, &fs[M4_CODE], &ts[M4_CODE], &blocks[STREAM_CODE]);
     create_patch_block(from_mut, to_mut, &fs[M4_BW], &ts[M4_BW], &blocks[STREAM_BW]);
     create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDRW], &ts[M4_LDRW], &blocks[STREAM_LDRW]);
-    detools_m4_free_streams(fs); detools_m4_free_streams(ts);
-    *dfpatch = build_dfpatch(fr, blocks);
+    a1_m4_free_streams(fs); a1_m4_free_streams(ts);
 }
 
 /* ------------------------------------------------------------------------------------- */
-/* bsdiff op generation, ported from detools-dev/detools/bsdiff.c.                         */
+/* bsdiff op generation.                                                                  */
 /* ------------------------------------------------------------------------------------- */
 static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *to, int32_t to_size) {
     int32_t n = from_size < to_size ? from_size : to_size;
@@ -764,7 +730,7 @@ static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
 }
 
 static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
-    detools_m4_pack(M4_PK_BL, imm32, out);
+    a1_m4_pack(M4_PK_BL, imm32, out);
 }
 
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
@@ -841,8 +807,8 @@ static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, 
 static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
     FieldDeltaVec out = {0};
     m4_stream_t st[M4_NSTREAMS];
-    if (detools_m4_disassemble_ex(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                                  fr->code_begin, fr->code_end, 0, 0, st)) die("M0 disassemble failed");
+    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                          fr->code_begin, fr->code_end, 0, 0, st)) die("M0 disassemble failed");
     int active[STREAM_N] = {1, 1, 0, 1, 1, 0};
     int mapidx[STREAM_N] = {M4_DATA, M4_CODE, M4_BW, M4_BL, M4_LDR, M4_LDRW};
     for (int s = 0; s < STREAM_N; s++) {
@@ -856,7 +822,7 @@ static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const
             }
         }
     }
-    detools_m4_free_streams(st);
+    a1_m4_free_streams(st);
     fd_finalize(&out);
     return out;
 }
@@ -1654,16 +1620,15 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     return body;
 }
 
-static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out,
-                      const char *cfg_out, int W) {
+static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out, int W) {
     char *fbin = join2(from_dir, "watch.bin"), *tbin = join2(to_dir, "watch.bin");
     char *felf = join2(from_dir, "watch.elf"), *telf = join2(to_dir, "watch.elf");
     Buf from = slurp(fbin), to = slurp(tbin);
     Ranges fr = elf_ranges(felf, &from, "from");
     Ranges tr = elf_ranges(telf, &to, "to");
     BlockVec blocks[STREAM_N] = {{0}};
-    Buf from_df = {0}, to_df = {0}, dfpatch = {0};
-    data_format_encode(&from, &to, &fr, &tr, &from_df, &to_df, blocks, &dfpatch);
+    Buf from_df = {0}, to_df = {0};
+    data_format_encode(&from, &to, &fr, &tr, &from_df, &to_df, blocks);
     OpVec ops = bsdiff_ops(&from_df, &to_df);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     int32_t fp_end_s = 0;
@@ -1682,14 +1647,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     buf_write(&blob, body.d, body.n);
     buf_put_u32le(&blob, crc32_buf(to.d, to.n));
     write_file(blob_out, blob.d, blob.n);
-    FILE *cf = fopen(cfg_out, "w");
-    if (!cf) { perror(cfg_out); exit(2); }
-    fprintf(cf, "%u %u %u %u %u %u %u\n",
-            fr.data_end ? 1u : 0u, fr.data_off_begin, fr.data_begin, fr.data_end,
-            fr.code_end ? 1u : 0u, fr.code_begin, fr.code_end);
-    fclose(cf);
-    (void)dfpatch;
-    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to); buf_free(&from_df); buf_free(&to_df); buf_free(&dfpatch);
+    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to); buf_free(&from_df); buf_free(&to_df);
     free(presset); free(corr); free(fd.v);
     for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
     free(pc); free(ops.v);
@@ -1699,13 +1657,13 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
 
 #ifdef RC_V3_ENC_MAIN
 int main(int argc, char **argv) {
-    if (argc != 6) {
-        fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out> <cfg_out> <W>\n", argv[0]);
+    if (argc != 5) {
+        fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out> <W>\n", argv[0]);
         return 2;
     }
-    int W = atoi(argv[5]);
+    int W = atoi(argv[4]);
     if (W <= 0) W = PATHE_W;
-    encode_a1(argv[1], argv[2], argv[3], argv[4], W);
+    encode_a1(argv[1], argv[2], argv[3], W);
     return 0;
 }
 #endif

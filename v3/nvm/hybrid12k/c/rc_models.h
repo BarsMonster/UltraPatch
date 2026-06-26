@@ -1,7 +1,7 @@
-/* ultrapatch DIVIDE-FREE range-coder decoder + models (C port of sim/ultrapatch/rc_codec.py).
+/* A1 divide-free range-coder decoder + shared models.
  * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
  * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; shared by the unit
- * test and the full decoder. */
+ * host decoder harness and the device decoder. */
 #ifndef RC_MODELS_H
 #define RC_MODELS_H
 #include <stdint.h>
@@ -69,9 +69,9 @@ static inline void lit_tree_seed(const uint8_t*frm,size_t n,int parity,BitTree*t
 }
 
 /* ---- seeded Golomb: adaptive unary prefix + adaptive mantissa (static==gamma/Rice) ----
- * UG_CTX = context clamp (SPEC §6 RAM lever). A1 uses 7 (down from v2's 32): m[] is the
- * dominant model array at (UG_CTX+1)^2 u16 each, so this roughly quarters the matrix vs 16.
- * ENCODING-AFFECTING: the golden encoder (rc_codec.UG_CTX) MUST use the identical value. */
+ * UG_CTX = context clamp. A1 uses 7: m[] is the dominant model array at
+ * (UG_CTX+1)^2 u16 each. ENCODING-AFFECTING: hy_enc and hy_dec must use the
+ * same value. */
 #define UG_CTX 7
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGolomb;

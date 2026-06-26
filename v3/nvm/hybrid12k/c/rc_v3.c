@@ -1,6 +1,6 @@
 /*
  * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
- * Production solution; full design in ../RESULT.md + ../A1_FEASIBILITY.md.
+ * Production solution; full design and measured gates are in ../RESULT.md.
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. A single divide-free binary range coder (LZMA
  * bound; no division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols
@@ -143,7 +143,7 @@ typedef struct { uint32_t range, code; } SDec;
 static SDec RC;
 static void rc_init(void){
     RC.range = 0xFFFFFFFFu; RC.code = 0;
-    (void)next_byte();                 /* skip the leading flush byte (golden BinDec p=1) */
+    (void)next_byte();                 /* skip the leading range-coder flush byte */
     for (int i=0;i<4;i++) RC.code = (RC.code<<8) | next_byte();
 }
 static int s_bit_r(uint16_t*prob,int rate){
@@ -264,8 +264,8 @@ static uint32_t crc32_flash(uint32_t n){
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
  * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. Each delta on the wire: rep-bit (==last?)
  * | else hit-bit (in dict? -> MTF index via the index UGolomb | else escape value via M_dval, MTF-
- * inserted at front). Mirrors rc_hybrid.emit_delta/pull_delta bit-for-bit. The dict array is OUT of
- * the struct so bl/ex get separate caps (distinct-value peaks: bl 180, ex 106). */
+ * inserted at front). The dict array is outside the struct so bl/ex get separate caps
+ * (distinct-value peaks: bl 180, ex 106). */
 typedef struct {
     int32_t *dic; uint16_t cap, K;    /* MTF dict (index 0 = most-recently-used) + its capacity */
     int32_t  last;                    /* repeat-last fast path */
@@ -281,7 +281,7 @@ typedef struct {
 #define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (2712, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
 /* LZSS window W (defined here so SA_ARENA can size the apply phase). W=10 (ring 1024) is the
- * default that keeps the decoder within the 12 KiB SRAM cap; MUST match the golden encoder opt['W']. */
+ * default that keeps the decoder within the 12 KiB SRAM cap; MUST match the encoder W. */
 #ifndef SA_W
 #define SA_W 10
 #endif
@@ -419,12 +419,10 @@ static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (residen
 /* field (the field TYPE is known from detection, so no untyped up-front decode is needed). Per      */
 /* stream we keep only a small MOVE-TO-FRONT dict of the distinct delta values (the frequently-      */
 /* repeated relocation offsets keep tiny MTF indices) + a repeat-last bit keyed by previous repeat   */
-/* and last-is-zero + a dict-hit bit. pull_delta() mirrors rc_hybrid.pull_delta bit-for-bit. This    */
-/* fixed stream state replaces the old 8,080 B generator stores. */
+/* and last-is-zero + a dict-hit bit. This fixed stream state replaces the old resident stores.      */
 /* ===================================================================================== */
-/* (A1 derives bl/ldr positions on-device, so there is NO on-device disassembler and NO device
- * "ranges" config — the host main() still accepts a ranges.cfg arg for tooling compatibility but
- * the decoder ignores it; nothing is stored.) */
+/* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
+ * and no ranges side table. */
 /* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
 static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>8)&0xff; out[2]=(v>>16)&0xff; out[3]=(v>>24)&0xff; }
 
@@ -434,7 +432,7 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
     for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
     d->rh=0; d->hit=DR_HIT_INIT;
 }
-/* pull the next delta of a stream (bl/ex), inline. mirrors rc_hybrid.pull_delta exactly:
+/* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
@@ -547,7 +545,7 @@ static int32_t corr_at(SA*s, int32_t off){
 #define PSRC_MASK 2047u
 static uint8_t g_psrc[2048];
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
- * IN THIS op [fp0,fp0+dl)? Mirrors rc_hybrid._op_ldr_set exactly: scan even a in [max(fp0,fpk-1024),
+ * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024),
  * fpk-2]; an ldr literal `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a
  * targets fpk and fpk+4<=fp0+dl. Reads PRISTINE source: FWD from the psrc ring, grow via hy_src().
  * No resident target store. */
@@ -620,7 +618,7 @@ static uint8_t hy_src(SA*s, int32_t fp){
         g_psrc[(uint32_t)fp & PSRC_MASK]=v; return v; }
     return 0;
 }
-/* journal-aware pristine source halfword/word (mirrors golden's frm_snap reads in field_at): the
+/* journal-aware pristine source halfword/word: the
  * from-image flash may already be overwritten by the monotonic output frontier, so reads MUST be
  * journal-aware (preserves hold the original bytes) — a raw flash read would return clobbered output. */
 static uint16_t hy_src16(SA*s, uint32_t a){ return (uint16_t)(hy_src(s,(int32_t)a)|(hy_src(s,(int32_t)a+1)<<8)); }
@@ -892,14 +890,8 @@ void flash_write(uint32_t a, uint8_t v){ if(a<g_flash_n) g_flash[a]=v; }
 #endif
 
 int main(int argc,char**argv){
-    if(argc<4||argc>5){ fprintf(stderr,"usage: %s <memfile> <blob> <ranges.cfg> [byte_mode]\n",argv[0]); return 2; }
-    int byte_mode = (argc==5);   /* arg5 present -> push 1 byte at a time (suspend/resume proof) */
-    /* ranges.cfg (dpres doff dbeg dend cpres cbeg cend): IGNORED by the A1 no-bake decoder; we still
-     * validate it parses so the tooling contract (hy_verify passes it as argv[3]) is unchanged. */
-    { FILE*rf=fopen(argv[3],"r"); if(!rf){perror("ranges");return 2;}
-      unsigned _cfg[7];
-      if(fscanf(rf,"%u %u %u %u %u %u %u",&_cfg[0],&_cfg[1],&_cfg[2],&_cfg[3],&_cfg[4],&_cfg[5],&_cfg[6])!=7){ fprintf(stderr,"bad ranges\n"); fclose(rf); return 2; }
-      fclose(rf); }
+    if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
+    int byte_mode = (argc==4);   /* arg3 present -> push 1 byte at a time (suspend/resume proof) */
     /* load blob fully (this is the patch bytes; we push them through the FIFO) */
     FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);

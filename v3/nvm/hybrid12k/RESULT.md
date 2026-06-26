@@ -1,141 +1,96 @@
-# ultrapatch v3-on-flash (A1) — PRODUCTION RESULT
+# A1 Production Result
 
-The selected production decoder. Streaming, in-place, real-NVM firmware patcher (SAML22,
-Cortex-M0+): a single divide-free range stream is decoded byte by byte and the new image is
-reconstructed directly in flash, honoring page/row erase semantics with no write amplification.
+Final implementation: C encoder and C decoder only.
+
+- Encoder: `c/rc_v3_enc.c` (`c/hy_enc`)
+- Decoder: `c/rc_v3.c` (`c/hy_dec` host harness, `RC_V3_ARM` device build)
+- NVM emulator for host verification: `c/flash_nvm.c`
+
+The patch stream is a single range-coded A1 blob. There is no side table and no
+secondary reference implementation in this tree.
 
 ## Requirements
-1. **≤ 1 write per flash page/row** (no write amplification) — every row is erased+programmed 0 or 1
-   times, never more (`nvm_rows_amplified` MUST be 0). The hard gate.
-2. **In-place, no scratch flash** — no second bank or staging region.
-3. **≤ 12 KiB SRAM** during decode (device has 32 KiB; updates run in a dedicated updater mode).
-4. **No power-fail atomicity** — on power loss the host does a full reflash, so the decoder needs no
-   rollback and may freely destroy source as it goes (this is what lets it overwrite source in-place).
 
-Requirements 1 + 2 are why the decoder does **no baking / no source rewrites**: physically baking
-de-relocated values into source rows that the in-place apply later overwrites would write those rows
-≥ 2 times. Instead, relocations are applied at the monotonic output frontier (below).
+1. At most one erase/program pass per 256 B flash row.
+2. Pure in-place apply, no scratch flash region.
+3. Decode SRAM at or below 12 KiB.
+4. No power-fail rollback; the host can recover by full reflash.
 
-## Gates — all PASS (measured under `c/flash_nvm.c` + `arm-none-eabi`, full 256-pair matrix)
+## Measured Gates
 
 | gate | result |
 |---|---|
-| byte-exact 256/256, fed 1 byte at a time, under the NVM emulator | **PASS** |
-| ≤ 1 write/page — `rows_amplified = 0`, max 1 erase/row | **PASS** (wear mean 0.763× the span/256 floor) |
-| sequential page writes — `frontier_inversions = 0` (rows finalized in one monotonic direction) | **PASS** (now an explicit emulator gate, not an inference) |
-| in-place, no scratch flash | **PASS** |
-| **≤ 12 KiB SRAM** (ARM `arm-none-eabi-size`, `.bss`) | **PASS — 11,024 B** (1,264 B margin; `.data = 0`) |
-| divide-free hot path (`tools/check_divfree.sh`) | **PASS** (2 `__aeabi_uidiv`, both once-per-decode in the init path; 0 HW udiv/sdiv) |
-| crash-safe (plain build, 300 corrupt patches) | **PASS** — 0 crash/hang (300 clean-reject); a reject now reports a reason (resource-cap vs corrupt) and an 8-byte coroutine-stack canary turns any overflow into a clean reject |
+| C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
+| NVM row write amplification | 0 amplified rows, max 1 erase/row |
+| Sequential row frontier | 0 inversions |
+| ARM object at `SA_W=10` | text 5,772 B, data 0 B, bss 11,024 B |
+| ARM divide check | 0 hardware divide instructions; 2 soft-divide calls in init |
+| Coroutine stack high-water | 504 B of 512 B |
 
-## Patch size
-Corpus total **4,866,646 B**: **−1.378 % vs the prior best-compression reference** (4,934,646),
-**−4.645 % vs v2**, and **−3.159 % vs the byte-addressable byte model** (5,025,418 — a NVM-invalid
-reference: it assumes byte-writable flash). The flash-compliant patch is now smaller than all tracked
-references. The latest A1 follow-up wins are pauseable LZSS tokens across op/delta interleave points
-(no decoder SRAM cost), encoder-only Rice-distance-aware LZSS match selection, a
-`UG_CTX=7`/one-shot-model-slot SRAM retune, a repeat-last delta context that separates zero from
-nonzero previous values, adaptive coding of `[C]` correction bytes through the existing `M_dval`
-byte tree (no new decoder SRAM), encoder-only coercion of relocation-field literal bytes back to pure
-copies, and small state-layout packing.
+Patch-size metrics:
 
-Real one-face firmware update (v0_base 113,124 ↔ v1_one_face 113,484, +360 B), decoded under the
-emulator, `rows_amplified=0`: **grow = 901 B, revert = 615 B** (byte model: 933 / 647).
+- W=10 full 16x16 corpus total: **4,866,646 B**.
+- W=10 non-self corpus total: **4,865,962 B**.
+- Real one-face 360-byte firmware update:
+  - `v0_base -> v1_one_face`: **901 B**
+  - `v1_one_face -> v0_base`: **615 B**
 
 ## Architecture
-No baking, no source writes. The `[A]` copy reads raw `from[fp]`; reconstruction is corrected at the
-monotonic output frontier (Path-style `[C]`). Relocation fields are de-relocated in apply order:
-- **`bl`** positions are derived on-device by a local halfword pattern match (self-framing). A
-  BL-looking field whose 4 bytes are not a pure copy is an implicit suppressed-BL normal copy, so
-  no suppressed-BL positions are shipped or stored.
-- **`ldr`** positions are **derived on-device per op** (A1): a field at `fpk` is `ldr` iff an `ldr`
-  literal instruction in the *same op's* copy range targets it (`(a&~3)+4*(up&0xff)+4 == fpk`),
-  reading pristine source. FWD reads instructions from a 2048 B ring of the walk's own pristine
-  reads; grow reads via the journal (its lower instruction-window bytes are preserved copy-source).
-  Encoder and decoder run the identical per-op predicate, so positions are never shipped; cross-op
-  pairs are absorbed by `[C]`. (See `A1_FEASIBILITY.md`.)
-- Per-field **delta values** are pulled inline from the single range stream at detection (adaptive
-  MTF dict + an **order-1/zero-context repeat bit** + a dict-hit bit; the MTF index encodes `j−1`
-  since index 0 is unreachable), so no resident delta store.
-- Output via a monotonic **row write-back cache** (assemble each 256 B row in RAM, commit once =
-  1 erase+program ⇒ `rows_amplified=0`). The never-evict journal covers raw source
-  read-after-overwrite (peak 903 slots).
 
-## Build / verify
+A1 is no-bake: the decoder never rewrites source rows before the output frontier.
+`[A]` copy reads raw source bytes, and corrections are applied at the monotonic
+output frontier. Relocation field positions are derived instead of shipped:
+
+- `bl` positions are derived from the local Thumb halfword pattern.
+- `ldr` positions are derived per op: a copied 4-byte field is an `ldr` target
+  only when an `ldr` literal instruction in the same op's copy range targets it.
+- Delta values are pulled inline from the single range stream using adaptive MTF
+  dictionaries and repeat/hit models.
+
+Output is staged through a 256 B row write-back cache. The preserve journal keeps
+pristine source bytes that would otherwise be lost after an in-place overwrite.
+
+## Build And Check
+
+```sh
+cd /ai_sw/v3/nvm/hybrid12k/c
+make
+make check
 ```
-make -C c                                                            # builds c/hy_enc + c/hy_dec
-c/hy_enc fixtures/v0_base fixtures/v1_one_face /tmp/grow.blob /tmp/grow.cfg 10
-c/hy_dec /tmp/from.bin /tmp/grow.blob /tmp/grow.cfg 1                # byte-streamed C decoder/NVM harness
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/hy_verify.py 10 c/hy_dec  # 256/256 + amp=0 + inversions=0
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c && arm-none-eabi-size rc_v3.o
-sh tools/check_divfree.sh                                            # req#5: hot path divide-free
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fixture_gate.py c/hy_dec   # real-firmware generalization (6/6)
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fuzz_gate.py c/hy_dec 300  # 300 corrupt patches -> 0 crash/hang
+
+`make check` performs a C-only real-fixture smoke test in both directions and
+prints the real one-face blob sizes. Expected blob sizes are `901` and `615`
+bytes.
+
+Manual one-direction check:
+
+```sh
+./hy_enc ../fixtures/v0_base ../fixtures/v1_one_face /tmp/grow.blob 10
+cp ../fixtures/v0_base/watch.bin /tmp/mem.bin
+./hy_dec /tmp/mem.bin /tmp/grow.blob 1
+cmp /tmp/mem.bin ../fixtures/v1_one_face/watch.bin
 ```
-Production encoder: `c/rc_v3_enc.c`. Production decoder: `c/rc_v3.c`.
-The Python `sim/ultrapatch/rc_hybrid.py` path is now the parity reference; `c/hy_enc` matches its
-blob and `cfg7` byte-for-byte over the W=10 16x16 image matrix. Encoder `W` MUST equal decoder
-`SA_W` (default 10).
 
-The matrix gates are meant to be CI-hard gates, not advisory scripts:
-- `tools/hy_verify.py` now requires NVM metrics to be present, fails if byte-exact / amplification /
-  inversion checks fail, and gates the W=10 corpus total at **4,866,646 B**.
-- `tools/a1_golden_rt.py` gates W=10 at **4,865,962 B** for non-self pairs and journal peak
-  **903**.
-- The real 1-face 360-byte update stays **901 B** grow (`v0_base -> v1_one_face`) and **615 B**
-  revert (`v1_one_face -> v0_base`) with C-produced blobs.
-- `sim/ultrapatch/rc_hybrid.py` preflights streamed-delta dictionary caps before emitting a patch, so
-  the Python encoder fails early instead of producing a blob the production decoder would reject.
+ARM object check:
 
-## Optional build: W = 11 (larger LZSS window) — opt-in, slim SRAM margin
-The default LZSS window is **W = 10** (`SA_W` / `PATHE_W`), which is what keeps `.bss ≤ 12 KiB`.
-Building both sides at **W = 11** saves **−15,308 B** on the corpus (4,866,646 → **4,851,338**, still
-256/256, `rows_amplified=0`, `frontier_inversions=0`) and now fits the SRAM cap after the model
-reclaim, but with only **240 B margin** (`.bss = 12,048 B`). Keep W = 10 as the default unless the
-deployment values those patch bytes more than SRAM headroom:
+```sh
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c -o /tmp/rc_v3_arm.o
+arm-none-eabi-size /tmp/rc_v3_arm.o
 ```
-cc -O2 -DRC_V3_MAIN -DRC_V3_NVM -DSA_W=11 -I c -o dec c/rc_v3.c c/flash_nvm.c
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/hy_verify.py 11 dec        # encoder PATHE_W=11 + decoder SA_W=11
-```
-Keep encoder `PATHE_W` and decoder `SA_W` identical or every pair fails (the wire is unframed).
 
-## Known limitations / robustness notes
-- **Flash layer is emulator-shaped.** `orow_commit` forces a row erase by probing
-  `flash_write(addr, 0xFF)` until a bit needs setting, and programs byte-by-byte — correct under the
-  emulator. On real SAML22 NVMCTRL this must become an explicit **Erase-Row** command + **64 B
-  page-buffer program**. The decode logic (byte-exact, `rows_amplified=0`, `frontier_inversions=0`) is
-  validated; the physical NVMCTRL driver behind `flash_read`/`flash_write` is the remaining device-port work.
-- **`g_psrc` (2048 B) is a hard correctness floor, NOT reclaimable.** The FWD ldr back-scan touches a
-  1028-byte span (1024 B ldr reach + the 4-byte bl lookahead that must stay pristine in the ring for
-  the encoder-matching derivation), so any power-of-two ring < 2048 aliases. A 1024 B ring — even one
-  re-reading the 4 deepest addresses from the journal/flash — reads a clobbered byte and is only
-  *corpus-lucky* (measured to mis-read the aliasing slot ~72k times over 8 pairs while still passing
-  256/256). Do not shrink it. SRAM margin is now **1,264 B** at W=10 (`.bss` 11,024 / 12,288);
-  W=11 consumes most of that and leaves **240 B**.
-- **Caps are corpus-peak + margin; over-cap input is REJECTED** (CRC-gated, never silent-wrong — but
-  cannot apply). Peaks / caps: `OPC_CAP` 68/80, `DR_KCAP_BL` 180/208, `DR_KCAP_EX`
-  106/128, and **`JSLOTS` 903/904** (the tightest cap; a journal-heavier firmware rejects with
-  `reason=1`, distinguishable from a corrupt-stream `reason=2`). All caps are `-D` overridable;
-  raising journal capacity normally costs ≈ 3 B/slot, though slot 904 is free from alignment. If
-  `DR_KCAP_BL` / `DR_KCAP_EX` are retuned in C, pass matching caps to the Python encoder preflight
-  (`DR_KCAP_BL`, `DR_KCAP_EX`) so encode-time and decode-time resource checks stay aligned.
-- **Coroutine stack high-water is 504 B** of 512 (data-independent call depth); the deepest 8 B are a
-  `0xC5` canary checked at decode end, so an overflow rejects rather than silently corrupts.
-- `main()` still accepts a `ranges.cfg` arg for tooling compatibility; the no-bake decoder ignores it
-  (nothing is stored on-device).
+The encoder `W` argument must match decoder `SA_W`. The production default is
+`W=10` / `SA_W=10`. `W=11` saves bytes but leaves only a narrow SRAM margin, so
+keep W=10 unless the deployment explicitly accepts that trade.
 
-## Development guardrails
-- Treat the Python golden and C decoder as one wire contract. Any change to `SA_W`/`PATHE_W`,
-  `UG_CTX`, delta dictionary caps, literal models, or field-detection order needs both golden and C
-  matrix verification.
-- Do not accept a memory win unless `RC_V3_STACKMEAS` still reports ≤ 504 B high-water on representative
-  grow and shrink fixtures. A static `.bss` reduction that increases the coroutine frame can trip the
-  canary.
-- Do not commit decoder-memory changes based only on host `size`; run the ARM object check:
-  `arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c -o /tmp/rc_v3_arm.o`
-  followed by `arm-none-eabi-size /tmp/rc_v3_arm.o`.
-- Keep `tools/check_divfree.sh` in the verification set. The two current soft divides are confined to
-  initialization; any hot-path divide is a regression on Cortex-M0+.
-- Compression experiments that change BL/LDR ambiguity handling, delta value coding, or shared
-  dictionaries are wire-format/model changes. Measure them as separate branches and require unchanged
-  NVM gates before comparing patch totals.
+## Caps
+
+The decoder rejects over-cap inputs rather than silently producing wrong output.
+Current production caps and measured peaks:
+
+- Per-op correction entries: `OPC_CAP=80`, measured peak 68.
+- BL delta dictionary: `DR_KCAP_BL=208`, measured peak 180.
+- EX/LDR delta dictionary: `DR_KCAP_EX=128`, measured peak 106.
+- Preserve journal: `JSLOTS=904`, measured peak 903.
+
+Raising caps is a wire-compatible decoder resource change only when the encoder
+uses the same build-time limits.
