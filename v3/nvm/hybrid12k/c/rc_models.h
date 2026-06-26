@@ -69,10 +69,10 @@ static inline void lit_tree_seed(const uint8_t*frm,size_t n,int parity,BitTree*t
 }
 
 /* ---- seeded Golomb: adaptive unary prefix + adaptive mantissa (static==gamma/Rice) ----
- * UG_CTX = context clamp (SPEC §6 RAM lever). v3 uses 8 (down from v2's 32): m[] is the
+ * UG_CTX = context clamp (SPEC §6 RAM lever). A1 uses 7 (down from v2's 32): m[] is the
  * dominant model array at (UG_CTX+1)^2 u16 each, so this roughly quarters the matrix vs 16.
  * ENCODING-AFFECTING: the golden encoder (rc_codec.UG_CTX) MUST use the identical value. */
-#define UG_CTX 8
+#define UG_CTX 7
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
 typedef struct { char code; int k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGolomb;
 static inline void ug_init(UGolomb*g,char code,int k){

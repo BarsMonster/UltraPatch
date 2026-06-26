@@ -13,7 +13,7 @@ Architecture (full design in ../../RESULT.md + ../../A1_FEASIBILITY.md):
     MTF dict + repeat-bit) — no resident delta store.
   * Output via a monotonic row write-back cache (C decoder) -> 1 write/row, nvm_rows_amplified=0.
 
-Reuses the streaming core (rc_v3: cut-LZSS content, per-op direct geometry/[P]/[C]). The C decoder
+Reuses the streaming core (rc_v3: pauseable LZSS content, per-op direct geometry/[P]/[C]). The C decoder
 (c/rc_v3.c) mirrors this module bit-for-bit.
 """
 import sys, os, struct, zlib, subprocess
@@ -163,7 +163,7 @@ def _op_delta_content_pos(o, FWD, frm, fp0, dl, from_size, fielddelta, pred_set=
     field detection, and return a list of (content_pos, kind, delta) — content_pos = the number of
     THIS OP's content bytes consumed at the instant the decoder pulls the field's delta (i.e. when
     field_at() runs, BEFORE the field's own copy bytes). kind in {'bl','ex'}; 'sbl' carries no value
-    so it is omitted. Both encoder (here, to cut tokens + interleave the enc) and decoder (pulls the
+    so it is omitted. Both encoder (here, to pause tokens + interleave the enc) and decoder (pulls the
     delta inline at field detection) reach each field with the IDENTICAL content-consumption count,
     so the single range stream stays in sync with ZERO resident delta store."""
     lits = [(k, b) for k, b in enumerate(o.diff) if b]
@@ -304,7 +304,7 @@ def encode_v3(F, T, opt=None):
 
 
 def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fielddelta, pred_set=None):
-    """Path F [A] (cut-LZSS content + per-op direct [dl,el,adj,P,C]) plus inline relocation-delta
+    """Path F [A] (pauseable LZSS content + per-op direct [dl,el,adj,P,C]) plus inline relocation-delta
     values. BL suppression is implicit (`!pure`), and ldr positions are derived per op."""
     from rc_v3 import (_op_meta, _build_content, _content_tags, _preserve_corr_per_op)
     FWD, emit_ops, apply_meta = _op_meta(ops, from_size, to_size)
@@ -322,23 +322,19 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
         tp0, fp0, dl, el, adj, diff, extra = apply_meta[oi]
         op_ldr.append(_op_ldr_set(M['frm'], fp0, dl, from_size))
     # ---- STREAMED-DELTA injection plan: each bl/ex field's delta VALUE is emitted INLINE at the
-    # content position the decoder pulls it (op content base + per-op content-consumption count). We
-    # cut tokens at every injection content position (so a token never straddles a delta pull) and
-    # emit the delta right before the token starting there. Decoder mirrors via field_at() inline. ----
+    # content position the decoder pulls it (op content base + per-op content-consumption count).
+    # LZSS tokens are pauseable at those interleave points: the token header is emitted once, then
+    # active span/backref state survives while geometry or deltas are emitted between content bytes.
+    # The decoder already keeps the same active token state in sa_next_content(). ----
     # per-op delta list (cc within the op, in detection order) — the op's deltas interleave with its
     # OWN content; op N's deltas are all emitted before op N+1's block (decode order).
     op_inj = []   # op_inj[oi] = sorted list of (cc, delta) for op oi
-    inj_bounds = set()
     for oi in range(len(emit_ops)):
         o = emit_ops[oi]
         tp0, fp0, dl, el, adj, diff, extra = apply_meta[oi]
-        base = 0 if oi == 0 else ends[oi - 1]
         evs = [(cc, kind, delta) for (cc, kind, delta) in
                _op_delta_content_pos(o, FWD, M['frm'], fp0, dl, from_size, fielddelta, op_ldr[oi])]
         op_inj.append(evs)
-        for (cc, _k, _d) in evs: inj_bounds.add(base + cc)
-    # cut tokens at op boundaries AND at every delta content position so a token never straddles a pull
-    seq = _cut_tokens(seq, sorted(set(ends) | inj_bounds))
     kd = fit_k([x[1] - 1 for x in seq if x[0] == 'R'])
     M['k'] = {'backref_dist': kd}
     enc_int(rc_, M, 'token_count', len(seq)); _put_bits(rc_, kd, 4)
@@ -354,17 +350,39 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
         for (t, bb) in cl:
             gC.encode(rc_, t - pt); pt = t
             for bit in range(7, -1, -1): rc_.encode_raw((bb >> bit) & 1)
-    # token cursor: tokens are in content order, cut at op + delta boundaries. Walk op by op.
+    # token cursor: tokens are in content order and may span op/delta interleave boundaries.
+    # A span emits its literal bytes only as far as the current content boundary; a backref emits
+    # only its header, then advances without more range symbols until exhausted.
     tok_i = [0]; pos = [0]
+    tok_mode = [None]; tok_left = [0]; span_data = [b'']; span_pos = [0]
+    def start_token():
+        if tok_i[0] >= len(seq):
+            raise RuntimeError("content token underrun")
+        x = seq[tok_i[0]]; tok_i[0] += 1
+        if x[0] == 'S':
+            M['flag'].encode(rc_, 0); enc_int(rc_, M, 'span_len', len(x[1]) - 1)
+            tok_mode[0] = 'S'; tok_left[0] = len(x[1]); span_data[0] = x[1]; span_pos[0] = 0
+        else:
+            M['flag'].encode(rc_, 1); enc_int(rc_, M, 'backref_dist', x[1] - 1)
+            enc_int(rc_, M, 'backref_len_v3', x[2] - 1)
+            tok_mode[0] = 'R'; tok_left[0] = x[2]
     def emit_tokens_to(end):
-        while tok_i[0] < len(seq) and pos[0] < end:
-            x = seq[tok_i[0]]; tok_i[0] += 1
-            if x[0] == 'S':
-                M['flag'].encode(rc_, 0); enc_int(rc_, M, 'span_len', len(x[1]) - 1)
-                for byte in x[1]: M['lit'][tags[pos[0]]].encode(rc_, byte); pos[0] += 1
+        if end < pos[0] or end > len(content):
+            raise RuntimeError("invalid content cursor")
+        while pos[0] < end:
+            if tok_mode[0] is None:
+                start_token()
+            n = min(tok_left[0], end - pos[0])
+            if tok_mode[0] == 'S':
+                st = span_pos[0]
+                for byte in span_data[0][st:st + n]:
+                    M['lit'][tags[pos[0]]].encode(rc_, byte); pos[0] += 1
+                span_pos[0] += n
             else:
-                M['flag'].encode(rc_, 1); enc_int(rc_, M, 'backref_dist', x[1] - 1)
-                enc_int(rc_, M, 'backref_len_v3', x[2] - 1); pos[0] += x[2]
+                pos[0] += n
+            tok_left[0] -= n
+            if tok_left[0] == 0:
+                tok_mode[0] = None
     # STREAMABLE ADAPTIVE-DICT value coder (recovers the old dict+RLE gain without a resident store):
     # per-stream the en/decoder build an IDENTICAL incremental dictionary of seen delta values. Each
     # delta codes: hit-flag (adaptive bit) + either its dict-index (adaptive UGolomb -> learns the
@@ -400,6 +418,8 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
             emit_tokens_to(base + cc)          # all content tokens before this delta's content pos
             emit_delta(kind, delta)            # delta pulled here (before the content byte at cc)
         emit_tokens_to(op_end)                 # remaining content of this op
+    if pos[0] != len(content) or tok_i[0] != len(seq) or tok_mode[0] is not None:
+        raise RuntimeError("content token cursor ended out of sync")
 
 
 def _corrections_hybrid(ops, frm, fielddelta, from_size, to_size, presset, true_to, pred_set=None):

@@ -24,20 +24,20 @@ de-relocated values into source rows that the in-place apply later overwrites wo
 | ≤ 1 write/page — `rows_amplified = 0`, max 1 erase/row | **PASS** (wear mean 0.763× the span/256 floor) |
 | sequential page writes — `frontier_inversions = 0` (rows finalized in one monotonic direction) | **PASS** (now an explicit emulator gate, not an inference) |
 | in-place, no scratch flash | **PASS** |
-| **≤ 12 KiB SRAM** (ARM `arm-none-eabi-size`, `.bss`) | **PASS — 11,616 B** (672 B margin; `.data = 0`) |
+| **≤ 12 KiB SRAM** (ARM `arm-none-eabi-size`, `.bss`) | **PASS — 11,168 B** (1,120 B margin; `.data = 0`) |
 | divide-free hot path (`tools/check_divfree.sh`) | **PASS** (2 `__aeabi_uidiv`, both once-per-decode in the init path; 0 HW udiv/sdiv) |
 | crash-safe (plain build, 300 corrupt patches) | **PASS** — 0 crash/hang (300 clean-reject); a reject now reports a reason (resource-cap vs corrupt) and an 8-byte coroutine-stack canary turns any overflow into a clean reject |
 
 ## Patch size
-Corpus total **4,919,618 B**: **−0.305 % vs the prior best-compression reference** (4,934,646),
-**−3.607 % vs v2**, and **−2.105 % vs the byte-addressable byte model** (5,025,418 — a NVM-invalid
+Corpus total **4,902,207 B**: **−0.657 % vs the prior best-compression reference** (4,934,646),
+**−3.948 % vs v2**, and **−2.452 % vs the byte-addressable byte model** (5,025,418 — a NVM-invalid
 reference: it assumes byte-writable flash). The flash-compliant patch is now smaller than all tracked
-references. The main A1 follow-up wins are implicit suppressed-BL handling (no `gS` offset stream or
-resident sbl gap buffer) and replacing 1/2-byte post-cut LZ backrefs with literal spans inside the
-same interleave segment; together they save **61,972 B** vs the prior A1 full-matrix total.
+references. The latest A1 follow-up wins are pauseable LZSS tokens across op/delta interleave points
+(no decoder SRAM cost) plus a `UG_CTX=7`/one-shot-model-slot SRAM retune; together they save
+**17,411 B** and **448 B `.bss`** vs the prior A1 full-matrix total.
 
 Real one-face firmware update (v0_base 113,124 ↔ v1_one_face 113,484, +360 B), decoded under the
-emulator, `rows_amplified=0`: **grow = 925 B, revert = 635 B** (byte model: 933 / 647).
+emulator, `rows_amplified=0`: **grow = 917 B, revert = 627 B** (byte model: 933 / 647).
 
 ## Architecture
 No baking, no source writes. The `[A]` copy reads raw `from[fp]`; reconstruction is corrected at the
@@ -70,13 +70,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fuzz_gate.py dec 300       # 300 corr
 Golden encoder/decoder: `sim/ultrapatch/rc_hybrid.py` (the C mirrors it bit-for-bit). The encoder's
 `rc_hybrid.PATHE_W` MUST equal the decoder's `SA_W` (default 10).
 
-## Optional build: W = 11 (larger LZSS window) — opt-in, NOT default
+## Optional build: W = 11 (larger LZSS window) — opt-in, slim SRAM margin
 The default LZSS window is **W = 10** (`SA_W` / `PATHE_W`), which is what keeps `.bss ≤ 12 KiB`.
-Building both sides at **W = 11** saves **−8,872 B** on the corpus (4,919,618 → **4,910,746**, still
-256/256, `rows_amplified=0`, `frontier_inversions=0`) but the LZSS history ring doubles, taking `.bss`
-to **12,640 B — 352 B OVER the 12,288 cap**. The sbl-stream reclaim is not enough to fund it
-(`g_psrc` is a hard floor; see below), so W = 11 is offered only for a target whose updater can spend
-> 12 KiB:
+Building both sides at **W = 11** saves **−8,731 B** on the corpus (4,902,207 → **4,893,476**, still
+256/256, `rows_amplified=0`, `frontier_inversions=0`) and now fits the SRAM cap after the model
+reclaim, but with only **96 B margin** (`.bss = 12,192 B`). Keep W = 10 as the default unless the
+deployment values those patch bytes more than SRAM headroom:
 ```
 cc -O2 -DRC_V3_MAIN -DRC_V3_NVM -DSA_W=11 -I c -o dec c/rc_v3.c c/flash_nvm.c
 PYTHONDONTWRITEBYTECODE=1 python3 -B tools/hy_verify.py 11 dec        # encoder PATHE_W=11 + decoder SA_W=11
@@ -94,13 +93,13 @@ Keep encoder `PATHE_W` and decoder `SA_W` identical or every pair fails (the wir
   the encoder-matching derivation), so any power-of-two ring < 2048 aliases. A 1024 B ring — even one
   re-reading the 4 deepest addresses from the journal/flash — reads a clobbered byte and is only
   *corpus-lucky* (measured to mis-read the aliasing slot ~72k times over 8 pairs while still passing
-  256/256). Do not shrink it. SRAM margin is now **672 B** (`.bss` 11,616 / 12,288), still not enough
-  to enable W = 11 without a further reclaim or model retune.
+  256/256). Do not shrink it. SRAM margin is now **1,120 B** at W=10 (`.bss` 11,168 / 12,288);
+  W=11 consumes most of that and leaves **96 B**.
 - **Caps are corpus-peak + margin; over-cap input is REJECTED** (CRC-gated, never silent-wrong — but
   cannot apply). Peaks / caps: `OPC_CAP` 68/80, `DR_KCAP_BL` 180/208, `DR_KCAP_EX`
-  106/128, and **`JSLOTS` 903/903 — zero margin** (the tightest cap; a journal-heavier firmware rejects
-  with `reason=1`, distinguishable from a corrupt-stream `reason=2`). All caps are `-D` overridable;
-  raising one costs SRAM (e.g. `JSLOTS` ≈ 3 B/slot).
+  106/128, and **`JSLOTS` 903/904** (the tightest cap; a journal-heavier firmware rejects with
+  `reason=1`, distinguishable from a corrupt-stream `reason=2`). All caps are `-D` overridable;
+  raising journal capacity normally costs ≈ 3 B/slot, though slot 904 is free from alignment.
 - **Coroutine stack high-water is 504 B** of 512 (data-independent call depth); the deepest 8 B are a
   `0xC5` canary checked at decode end, so an overflow rejects rather than silently corrupts.
 - `main()` still accepts a `ranges.cfg` arg for tooling compatibility; the no-bake decoder ignores it

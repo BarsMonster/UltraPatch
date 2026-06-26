@@ -2,8 +2,9 @@
 
 The PRODUCTION codec is `rc_hybrid.encode_v3`/`decode_v3` (no-bake; see ../../RESULT.md). This module
 provides the shared streaming machinery rc_hybrid imports: the apply-order walk (_walk), preserve
-analysis (_preserve_indices), the cut-LZSS content builder (_op_meta/_op_content/_build_content/
-_content_tags/_cut_tokens), the per-op preserve/correction layout (_preserve_corr_per_op), the parity
+analysis (_preserve_indices), the LZSS content builder (_op_meta/_op_content/_build_content/
+_content_tags), the legacy token cutter (_cut_tokens), the per-op preserve/correction layout
+(_preserve_corr_per_op), the parity
 content scanner (_ContentScanner), op splitting (_split_ops), and the wire constants (PATHE_W etc.).
 
 The old top-level BAKED codec (encode_v3/decode_v3 + _bake/_encode_B/_decode_B/_encode_A/_encode_A_pc/
@@ -15,8 +16,8 @@ Wire / range-coder framing details now live with the production codec in rc_hybr
 """
 import sys, os, struct, zlib, subprocess
 from collections import Counter
-# Import the AGENT-LOCAL sim copies (UG_CTX=8 etc.). The harness puts agent07/sim and
-# agent07/sim/ultrapatch on sys.path first; we only add detools-dev for the `detools` package.
+# Import the local sim copies (UG_CTX=7 etc.). The harness puts hybrid12k/sim and
+# hybrid12k/sim/ultrapatch on sys.path first; we only add detools-dev for the `detools` package.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = ['/ai_sw/detools-dev', os.path.dirname(_HERE), _HERE]
 import rc_codec as rc
@@ -35,11 +36,10 @@ JCAP = 1024  # v3 journal budget (slots); corpus peak ~903 -> 1024 covers it.
 OPCAP = 1 << 30  # Path F: split_ops DISABLED (cap = infinity). The streaming decoder writes
                  # in stream order with NO per-op literal/extra buffer, so ops are kept whole.
                  # (kept as a knob for A/B size measurement; default is no-split.)
-# Path E SUPERSOLUTION: W=10 (LZSS ring 1024) is the locked RAM lever that crosses <=8192 B true
-# SRAM (it cuts the C decoder's SA ring 2048->1024, the single biggest reducible apply-phase
-# structure, -1024 B). Measured size cost: 256-pair total +1.472% vs v2 (vs +1.312% at W=11),
-# still <=+1.5%. DEFAULT_OPT comes from the read-only upstream m4reloc (W=11), so we inject W=10
-# here in encode_v3/decode_v3. The C decoder c/rc_v3.c SA_W MUST equal this. Override via opt={'W':N}.
+# A1 default: W=10 (LZSS ring 1024) keeps comfortable SRAM margin. W=11 now fits the 12 KiB cap
+# after the UG_CTX/model-slot reclaim, but only with a slim margin; keep it opt-in. DEFAULT_OPT comes
+# from the read-only upstream m4reloc (W=11), so we inject W=10 here. The C decoder c/rc_v3.c SA_W
+# MUST equal this. Override via opt={'W':N}.
 PATHE_W = 10
 
 

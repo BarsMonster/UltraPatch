@@ -130,7 +130,7 @@ class BitTree:                              # 256-symbol byte via 8 binary decis
         return m-256
 
 # ---------- seeded Golomb: adaptive unary prefix + adaptive mantissa (static==gamma/Rice) ----------
-UG_CTX=8                                    # context cap (bounds decoder model arrays); v3 RAM lever (was 32->16->8). MUST match c/rc_models.h.
+UG_CTX=7                                    # context cap (bounds decoder model arrays); A1 RAM lever (was 32->16->8->7). MUST match c/rc_models.h.
 class UGolomb:
     def __init__(s,code,k=0): s.code=code; s.k=k; s.u={}; s.m={}
     def _u(s,pos): pos=pos if pos<UG_CTX else UG_CTX; return s.u.setdefault(pos,[PHALF])

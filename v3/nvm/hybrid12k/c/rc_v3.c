@@ -274,8 +274,9 @@ typedef struct {
 #define DR_HIT_INIT 512u              /* zero-seeded MTF dict makes hit-bit==1 likely */
 
 #ifndef JSLOTS
-#define JSLOTS 903u                          /* packed journal capacity == corpus peak (measured
-                                              * journal_used max=903 over 240 pairs); refuse above. */
+#define JSLOTS 904u                          /* packed journal capacity; 903 is the measured corpus
+                                              * peak, and the 8-byte-aligned region gives slot 904
+                                              * for free. Refuse above. */
 #endif
 #define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (2712, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
@@ -397,15 +398,15 @@ static uint8_t out_read(uint32_t a){
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
 /* pg/cg (preserve/correction) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval       */
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
-static UGolomb UG_POOL[8];   /* A1: M_gE and M_gS offset streams removed. */
-#define M_tc   UG_POOL[0]
-#define M_gd   UG_POOL[1]
-#define M_gl   UG_POOL[2]   /* backref_len_v3 (len-1, gamma) */
-#define M_gs   UG_POOL[3]   /* span_len */
-#define M_pg   UG_POOL[4]   /* preserve gaps (gP) */
-#define M_cg   UG_POOL[5]   /* correction gaps (gC) */
-#define M_dibl UG_POOL[6]   /* bl MTF dict-index (gamma) */
-#define M_diex UG_POOL[7]   /* ex MTF dict-index (gamma) */
+static UGolomb UG_POOL[7];   /* A1: M_gE/M_gS removed; one-shot M_tc reuses M_gd's slot. */
+#define M_tc   UG_POOL[0]   /* token_count only, dead before M_gd is initialized */
+#define M_gd   UG_POOL[0]   /* backref_dist */
+#define M_gl   UG_POOL[1]   /* backref_len_v3 (len-1, gamma) */
+#define M_gs   UG_POOL[2]   /* span_len */
+#define M_pg   UG_POOL[3]   /* preserve gaps (gP) */
+#define M_cg   UG_POOL[4]   /* correction gaps (gC) */
+#define M_dibl UG_POOL[5]   /* bl MTF dict-index (gamma) */
+#define M_diex UG_POOL[6]   /* ex MTF dict-index (gamma) */
 static BitTree M_lit0, M_lit1;
 static BitTree M_dval;             /* DEREL escape-value bit-tree (ByteVarint); RESIDENT through apply */
 static Flag1   M_flag;
@@ -506,7 +507,7 @@ static void cs_adv(CScan*s, uint8_t b){
 
 typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
-    /* cut-LZSS token replay state (pull-driven content producer) */
+    /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
     int tok_mode;                                 /* 0=idle, 1=span, 2=backref */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
