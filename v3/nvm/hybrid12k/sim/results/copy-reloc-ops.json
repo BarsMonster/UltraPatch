@@ -1,0 +1,242 @@
+{
+  "v0v1_one_face": {
+    "from_size": 113124,
+    "to_size": 113484,
+    "shift": 360,
+    "dfpatch_size": 5441,
+    "results": [
+      {
+        "ram_kb": 4,
+        "patch_bytes": 1463,
+        "byte_exact": true,
+        "peak_ram_bytes": 1768,
+        "order": "fwd",
+        "w": 8
+      },
+      {
+        "ram_kb": 8,
+        "patch_bytes": 1463,
+        "byte_exact": true,
+        "peak_ram_bytes": 1768,
+        "order": "fwd",
+        "w": 8
+      },
+      {
+        "ram_kb": 16,
+        "patch_bytes": 1463,
+        "byte_exact": true,
+        "peak_ram_bytes": 1768,
+        "order": "fwd",
+        "w": 8
+      },
+      {
+        "ram_kb": 24,
+        "patch_bytes": 1463,
+        "byte_exact": true,
+        "peak_ram_bytes": 1768,
+        "order": "fwd",
+        "w": 8
+      }
+    ],
+    "detail": {
+      "candidates": [
+        {
+          "w": 8,
+          "patch": 1463,
+          "ctrl": 630,
+          "dfp": 833,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 9,
+          "patch": 1472,
+          "ctrl": 626,
+          "dfp": 846,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 10,
+          "patch": 1520,
+          "ctrl": 637,
+          "dfp": 883,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 11,
+          "patch": 1596,
+          "ctrl": 653,
+          "dfp": 943,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 12,
+          "patch": 1688,
+          "ctrl": 671,
+          "dfp": 1017,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 13,
+          "patch": 1774,
+          "ctrl": 685,
+          "dfp": 1089,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 14,
+          "patch": 1860,
+          "ctrl": 699,
+          "dfp": 1161,
+          "raw_ctrl": 2212,
+          "fwd_ok": true,
+          "fifo": 360,
+          "back_ok": true,
+          "conflicts": 0
+        }
+      ]
+    }
+  },
+  "v0v2_three_faces": {
+    "from_size": 113124,
+    "to_size": 116980,
+    "shift": 3856,
+    "dfpatch_size": 6269,
+    "results": [
+      {
+        "ram_kb": 4,
+        "patch_bytes": -1,
+        "byte_exact": false,
+        "peak_ram_bytes": -1
+      },
+      {
+        "ram_kb": 8,
+        "patch_bytes": 6222,
+        "byte_exact": true,
+        "peak_ram_bytes": 5080,
+        "order": "fwd",
+        "w": 8
+      },
+      {
+        "ram_kb": 16,
+        "patch_bytes": 6222,
+        "byte_exact": true,
+        "peak_ram_bytes": 5080,
+        "order": "fwd",
+        "w": 8
+      },
+      {
+        "ram_kb": 24,
+        "patch_bytes": 6222,
+        "byte_exact": true,
+        "peak_ram_bytes": 5080,
+        "order": "fwd",
+        "w": 8
+      }
+    ],
+    "detail": {
+      "candidates": [
+        {
+          "w": 8,
+          "patch": 6222,
+          "ctrl": 4338,
+          "dfp": 1884,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 9,
+          "patch": 6324,
+          "ctrl": 4340,
+          "dfp": 1984,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 10,
+          "patch": 6493,
+          "ctrl": 4370,
+          "dfp": 2123,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 11,
+          "patch": 6702,
+          "ctrl": 4430,
+          "dfp": 2272,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 12,
+          "patch": 6958,
+          "ctrl": 4547,
+          "dfp": 2411,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 13,
+          "patch": 7152,
+          "ctrl": 4592,
+          "dfp": 2560,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        },
+        {
+          "w": 14,
+          "patch": 7346,
+          "ctrl": 4638,
+          "dfp": 2708,
+          "raw_ctrl": 6148,
+          "fwd_ok": true,
+          "fifo": 3672,
+          "back_ok": true,
+          "conflicts": 0
+        }
+      ]
+    }
+  }
+}

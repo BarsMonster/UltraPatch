@@ -1,0 +1,360 @@
+{
+  "algorithm": "field-journal",
+  "description": "global single m4 object + capped in-flight reloc-field journal, forward TRUE in-place, graceful spill on overflow",
+  "pairs": {
+    "v0v1_small_+360B": {
+      "from_size": 113124,
+      "to_size": 113484,
+      "insertion_shift": 360,
+      "reloc_fields": 4332,
+      "dfpatch_raw_bytes": 5441,
+      "results": [
+        {
+          "ram_kb": 4,
+          "patch_bytes": 1885,
+          "byte_exact": true,
+          "peak_ram_bytes": 3057,
+          "window_sz2": 11,
+          "journal_cap_bytes": 368,
+          "n_spill_bytes": 0,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 8,
+          "patch_bytes": 1845,
+          "byte_exact": true,
+          "peak_ram_bytes": 5105,
+          "window_sz2": 12,
+          "journal_cap_bytes": 368,
+          "n_spill_bytes": 0,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 16,
+          "patch_bytes": 1845,
+          "byte_exact": true,
+          "peak_ram_bytes": 5105,
+          "window_sz2": 12,
+          "journal_cap_bytes": 368,
+          "n_spill_bytes": 0,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 24,
+          "patch_bytes": 1845,
+          "byte_exact": true,
+          "peak_ram_bytes": 5105,
+          "window_sz2": 12,
+          "journal_cap_bytes": 368,
+          "n_spill_bytes": 0,
+          "order": "forward"
+        }
+      ],
+      "size_vs_cap_curve": [
+        {
+          "journal_cap_bytes": 0,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 1
+        },
+        {
+          "journal_cap_bytes": 64,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 65
+        },
+        {
+          "journal_cap_bytes": 128,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 129
+        },
+        {
+          "journal_cap_bytes": 192,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 193
+        },
+        {
+          "journal_cap_bytes": 256,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 257
+        },
+        {
+          "journal_cap_bytes": 320,
+          "best_patch_bytes": 53369,
+          "n_spill_bytes": 68518,
+          "byte_exact": true,
+          "peak_journal_entries": 321
+        },
+        {
+          "journal_cap_bytes": 360,
+          "best_patch_bytes": 2107,
+          "n_spill_bytes": 330,
+          "byte_exact": true,
+          "peak_journal_entries": 361
+        },
+        {
+          "journal_cap_bytes": 368,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 369
+        },
+        {
+          "journal_cap_bytes": 384,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 385
+        },
+        {
+          "journal_cap_bytes": 512,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 513
+        },
+        {
+          "journal_cap_bytes": 768,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 769
+        },
+        {
+          "journal_cap_bytes": 1024,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 1025
+        },
+        {
+          "journal_cap_bytes": 1536,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 1537
+        },
+        {
+          "journal_cap_bytes": 2048,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 2049
+        },
+        {
+          "journal_cap_bytes": 3072,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 3073
+        },
+        {
+          "journal_cap_bytes": 4096,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 4097
+        },
+        {
+          "journal_cap_bytes": 6144,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 6145
+        },
+        {
+          "journal_cap_bytes": 8192,
+          "best_patch_bytes": 1845,
+          "n_spill_bytes": 0,
+          "byte_exact": true,
+          "peak_journal_entries": 8193
+        }
+      ]
+    },
+    "v0v2_three_faces_+3856B": {
+      "from_size": 113124,
+      "to_size": 116980,
+      "insertion_shift": 3856,
+      "reloc_fields": 4316,
+      "dfpatch_raw_bytes": 6269,
+      "results": [
+        {
+          "ram_kb": 4,
+          "patch_bytes": 18210,
+          "byte_exact": true,
+          "peak_ram_bytes": 3777,
+          "window_sz2": 10,
+          "journal_cap_bytes": 2048,
+          "n_spill_bytes": 16570,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 8,
+          "patch_bytes": 7008,
+          "byte_exact": true,
+          "peak_ram_bytes": 6609,
+          "window_sz2": 11,
+          "journal_cap_bytes": 3856,
+          "n_spill_bytes": 16,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 16,
+          "patch_bytes": 7008,
+          "byte_exact": true,
+          "peak_ram_bytes": 6609,
+          "window_sz2": 11,
+          "journal_cap_bytes": 3856,
+          "n_spill_bytes": 16,
+          "order": "forward"
+        },
+        {
+          "ram_kb": 24,
+          "patch_bytes": 7008,
+          "byte_exact": true,
+          "peak_ram_bytes": 6609,
+          "window_sz2": 11,
+          "journal_cap_bytes": 3856,
+          "n_spill_bytes": 16,
+          "order": "forward"
+        }
+      ],
+      "size_vs_cap_curve": [
+        {
+          "journal_cap_bytes": 0,
+          "best_patch_bytes": 85805,
+          "n_spill_bytes": 101236,
+          "byte_exact": true,
+          "peak_journal_entries": 1
+        },
+        {
+          "journal_cap_bytes": 64,
+          "best_patch_bytes": 85805,
+          "n_spill_bytes": 101236,
+          "byte_exact": true,
+          "peak_journal_entries": 65
+        },
+        {
+          "journal_cap_bytes": 128,
+          "best_patch_bytes": 81012,
+          "n_spill_bytes": 95360,
+          "byte_exact": true,
+          "peak_journal_entries": 129
+        },
+        {
+          "journal_cap_bytes": 192,
+          "best_patch_bytes": 58725,
+          "n_spill_bytes": 68596,
+          "byte_exact": true,
+          "peak_journal_entries": 193
+        },
+        {
+          "journal_cap_bytes": 256,
+          "best_patch_bytes": 58725,
+          "n_spill_bytes": 68596,
+          "byte_exact": true,
+          "peak_journal_entries": 257
+        },
+        {
+          "journal_cap_bytes": 320,
+          "best_patch_bytes": 58725,
+          "n_spill_bytes": 68596,
+          "byte_exact": true,
+          "peak_journal_entries": 321
+        },
+        {
+          "journal_cap_bytes": 384,
+          "best_patch_bytes": 58725,
+          "n_spill_bytes": 68596,
+          "byte_exact": true,
+          "peak_journal_entries": 385
+        },
+        {
+          "journal_cap_bytes": 512,
+          "best_patch_bytes": 58266,
+          "n_spill_bytes": 67816,
+          "byte_exact": true,
+          "peak_journal_entries": 513
+        },
+        {
+          "journal_cap_bytes": 768,
+          "best_patch_bytes": 58266,
+          "n_spill_bytes": 67816,
+          "byte_exact": true,
+          "peak_journal_entries": 769
+        },
+        {
+          "journal_cap_bytes": 1024,
+          "best_patch_bytes": 58204,
+          "n_spill_bytes": 67762,
+          "byte_exact": true,
+          "peak_journal_entries": 1025
+        },
+        {
+          "journal_cap_bytes": 1536,
+          "best_patch_bytes": 58204,
+          "n_spill_bytes": 67762,
+          "byte_exact": true,
+          "peak_journal_entries": 1537
+        },
+        {
+          "journal_cap_bytes": 2048,
+          "best_patch_bytes": 18210,
+          "n_spill_bytes": 16570,
+          "byte_exact": true,
+          "peak_journal_entries": 2049
+        },
+        {
+          "journal_cap_bytes": 3072,
+          "best_patch_bytes": 18210,
+          "n_spill_bytes": 16570,
+          "byte_exact": true,
+          "peak_journal_entries": 3073
+        },
+        {
+          "journal_cap_bytes": 3856,
+          "best_patch_bytes": 7008,
+          "n_spill_bytes": 16,
+          "byte_exact": true,
+          "peak_journal_entries": 3857
+        },
+        {
+          "journal_cap_bytes": 3864,
+          "best_patch_bytes": 7008,
+          "n_spill_bytes": 16,
+          "byte_exact": true,
+          "peak_journal_entries": 3865
+        },
+        {
+          "journal_cap_bytes": 4096,
+          "best_patch_bytes": 7008,
+          "n_spill_bytes": 16,
+          "byte_exact": true,
+          "peak_journal_entries": 4097
+        },
+        {
+          "journal_cap_bytes": 6144,
+          "best_patch_bytes": 7008,
+          "n_spill_bytes": 16,
+          "byte_exact": true,
+          "peak_journal_entries": 6145
+        },
+        {
+          "journal_cap_bytes": 8192,
+          "best_patch_bytes": 7008,
+          "n_spill_bytes": 16,
+          "byte_exact": true,
+          "peak_journal_entries": 8193
+        }
+      ]
+    }
+  }
+}

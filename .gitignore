@@ -1,0 +1,34 @@
+# External worktrees and toolchains.
+/detools-dev/
+/test-bench/Sensor-Watch/
+/test-bench/images/
+/test-bench/fixtures/
+/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/
+/armgcc.tar.xz
+/venv/
+
+# Top-level benchmark outputs; keep summary documents.
+/artifacts/*
+!/artifacts/*.md
+
+# Generated simulator outputs.
+/v3/nvm/hybrid12k/sim/artifacts/*.patch
+/v3/nvm/hybrid12k/sim/ultrapatch/__pycache__/
+
+# Python/cache noise.
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Native and firmware build products.
+*.o
+*.a
+*.so
+*.d
+*.map
+*.elf
+*.bin
+*.hex
+*.uf2
+*.zst
+*.xz

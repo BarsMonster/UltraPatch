@@ -1,0 +1,78 @@
+{
+  "v0v1": {
+    "from": 113124,
+    "to": 113484,
+    "shift": 360,
+    "min_fwd_journal": 361,
+    "frontier": [
+      {
+        "ram_kib": 4,
+        "patch": 1885,
+        "order": "fwd",
+        "w": 11,
+        "ram_bytes": 3433,
+        "sub2k": true
+      },
+      {
+        "ram_kib": 8,
+        "patch": 1845,
+        "order": "fwd",
+        "w": 12,
+        "ram_bytes": 5481,
+        "sub2k": true
+      },
+      {
+        "ram_kib": 16,
+        "patch": 1845,
+        "order": "back",
+        "w": 12,
+        "ram_bytes": 10049,
+        "sub2k": true
+      },
+      {
+        "ram_kib": 24,
+        "patch": 1845,
+        "order": "back",
+        "w": 12,
+        "ram_bytes": 10049,
+        "sub2k": true
+      }
+    ]
+  },
+  "v0v2": {
+    "from": 113124,
+    "to": 116980,
+    "shift": 3856,
+    "min_fwd_journal": 3673,
+    "frontier": [
+      {
+        "ram_kib": 4,
+        "infeasible": true
+      },
+      {
+        "ram_kib": 8,
+        "patch": 6990,
+        "order": "fwd",
+        "w": 11,
+        "ram_bytes": 6745,
+        "sub2k": false
+      },
+      {
+        "ram_kib": 16,
+        "patch": 6990,
+        "order": "back",
+        "w": 11,
+        "ram_bytes": 8829,
+        "sub2k": false
+      },
+      {
+        "ram_kib": 24,
+        "patch": 6990,
+        "order": "back",
+        "w": 11,
+        "ram_bytes": 8829,
+        "sub2k": false
+      }
+    ]
+  }
+}
