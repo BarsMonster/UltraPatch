@@ -29,11 +29,11 @@ secondary reference implementation in this tree.
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,866,646 B**.
-- W=10 non-self corpus total: **4,865,962 B**.
+- W=10 full 16x16 corpus total: **4,866,167 B**.
+- W=10 non-self corpus total: **4,865,483 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **901 B**
-  - `v1_one_face -> v0_base`: **615 B**
+  - `v0_base -> v1_one_face`: **900 B**
+  - `v1_one_face -> v0_base`: **614 B**
 
 ## Architecture
 
@@ -59,7 +59,7 @@ make check
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `901` and `615`
+prints the real one-face blob sizes. Expected blob sizes are `900` and `614`
 bytes.
 
 Manual one-direction check:

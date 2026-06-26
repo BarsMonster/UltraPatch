@@ -960,6 +960,13 @@ int main(int argc,char**argv){
 #endif
     /* post-write gate: CRC32(to) over the reconstructed flash, BEFORE committing */
     if(crc32_flash(to_size)!=want_to_crc){ fprintf(stderr,"crc(to) mismatch — corrupt patch rejected\n"); fclose(mf); free(g_flash); free(blob); return 1; }
+#ifdef RC_V3_NVM
+    if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
+        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
+                nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
+        fclose(mf); free(g_flash); free(blob); return 1;
+    }
+#endif
     /* commit to the memfile */
     fseek(mf,0,SEEK_SET);
     if(fwrite(g_flash,1,to_size,mf)!=to_size){ fclose(mf); free(g_flash); free(blob); return 1; }

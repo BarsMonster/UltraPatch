@@ -899,7 +899,10 @@ static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t 
                 int32_t tpw = tp + k;
                 if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
             }
-            wi += o->extra_len;
+            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
+                int32_t tpw = tp + o->diff_len + e;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
+            }
             tp += o->diff_len + o->extra_len;
             fp += o->diff_len + o->adj;
         }
@@ -1079,6 +1082,13 @@ typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
 typedef struct { int32_t dist, len; } Cand;
 
+#ifndef LZ_CAND_MAX
+#define LZ_CAND_MAX 32
+#endif
+#if LZ_CAND_MAX < 1
+#error "LZ_CAND_MAX must be at least 1"
+#endif
+
 static void tok_push(TokenVec *v, Token t) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 1024;
@@ -1122,13 +1132,42 @@ static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uin
 
 static uint64_t gammalen_u32(uint32_t x) { return (uint64_t)(2 * bitlen32(x) - 1); }
 
-static TokenVec lz_parse_once(const uint8_t *data, size_t n, const uint16_t *litbits,
-                              Cand (*cands)[2], uint8_t *ncand, int (*dist_bits)(int32_t, int),
+static int cand_value(Cand c) {
+    int v = c.len * 16;
+    for (int32_t d = c.dist; d > 1; d >>= 1) v--;
+    return v;
+}
+
+static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
+    if (c.len < 3) return;
+    for (uint8_t i = 0; i < *ncand; i++)
+        if (cands[i].dist <= c.dist && cands[i].len >= c.len)
+            return;
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < *ncand; i++)
+        if (!(c.dist <= cands[i].dist && c.len >= cands[i].len))
+            cands[w++] = cands[i];
+    *ncand = w;
+    if (*ncand < LZ_CAND_MAX) {
+        cands[(*ncand)++] = c;
+        return;
+    }
+    int worst = 0, worstv = cand_value(cands[0]);
+    for (int i = 1; i < LZ_CAND_MAX; i++) {
+        int v = cand_value(cands[i]);
+        if (v < worstv || (v == worstv && cands[i].dist > cands[worst].dist)) {
+            worst = i;
+            worstv = v;
+        }
+    }
+    int cv = cand_value(c);
+    if (cv > worstv || (cv == worstv && c.dist < cands[worst].dist)) cands[worst] = c;
+}
+
+static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
+                              Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, int (*dist_bits)(int32_t, int),
                               int dk) {
-    (void)data;
     uint32_t maxrun = 1024;
-    uint64_t *ph = (uint64_t *)xcalloc(n + 1, sizeof(uint64_t));
-    for (size_t i = 0; i < n; i++) ph[i + 1] = ph[i] + litbits[i];
     uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
     Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
     const uint64_t INF = UINT64_MAX / 4;
@@ -1160,7 +1199,7 @@ static TokenVec lz_parse_once(const uint8_t *data, size_t n, const uint16_t *lit
         tok_push(&tv, t);
         i += (size_t)t.len;
     }
-    free(ph); free(cost); free(nxt);
+    free(cost); free(nxt);
     return tv;
 }
 
@@ -1181,45 +1220,46 @@ static int fit_k_tokens(const TokenVec *tv) {
     return best;
 }
 
-static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litbits, int W) {
-    int32_t win = 1 << W, maxchain = 128, maxm = 2048;
-    Cand (*cands)[2] = (Cand (*)[2])xcalloc(n ? n : 1, sizeof(Cand[2]));
+static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litbits, int W, int *k_out) {
+    int32_t win = 1 << W, maxm = 2048;
+    Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
     int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
     for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
     int32_t *prev = (int32_t *)xmalloc((n ? n : 1) * sizeof(int32_t));
     for (size_t i = 0; i < n; i++) prev[i] = -1;
     for (size_t i = 0; i < n; i++) {
-        int32_t bl = 0, bd = 0;
-        Cand near = {0, 0};
         if (i + 3 <= n) {
             uint32_t key = (uint32_t)data[i] | ((uint32_t)data[i+1] << 8) | ((uint32_t)data[i+2] << 16);
-            int c = 0;
             for (int32_t pj = head[key]; pj >= 0;) {
-                if ((int32_t)i - pj > win || c >= maxchain) break;
-                c++;
+                int32_t dist = (int32_t)i - pj;
+                if (dist > win) break;
                 int32_t ml = (int32_t)((n - i) < (size_t)maxm ? (n - i) : (size_t)maxm), l = 0;
                 while (l < ml && data[(size_t)pj + (size_t)l] == data[i + (size_t)l]) l++;
-                if (l >= 3 && near.len == 0) near = (Cand){ (int32_t)i - pj, l };
-                if (l > bl) { bl = l; bd = (int32_t)i - pj; }
+                cand_add(cands[i], &ncand[i], (Cand){ dist, l });
                 pj = prev[pj];
             }
             prev[i] = head[key];
             head[key] = (int32_t)i;
         }
-        if (near.len) cands[i][ncand[i]++] = near;
-        if (bl >= 3 && !(near.len && near.dist == bd && near.len == bl)) cands[i][ncand[i]++] = (Cand){ bd, bl };
     }
     free(head); free(prev);
-    TokenVec seq = lz_parse_once(data, n, litbits, cands, ncand, fixed_dist_bits, W);
+    TokenVec seq = lz_parse_once(n, litbits, cands, ncand, fixed_dist_bits, W);
     int k = fit_k_tokens(&seq);
-    for (int pass = 0; pass < 2; pass++) {
+    int parsed_k = -1;
+    for (int pass = 0; pass < 8; pass++) {
         free(seq.v);
-        seq = lz_parse_once(data, n, litbits, cands, ncand, rice_dist_bits, k);
+        seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
+        parsed_k = k;
         int nk = fit_k_tokens(&seq);
         if (nk == k) break;
         k = nk;
     }
+    if (parsed_k != k) {
+        free(seq.v);
+        seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
+    }
+    *k_out = k;
     free(cands); free(ncand);
     return seq;
 }
@@ -1541,8 +1581,8 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     from_huff_lengths(frm, from_size, L0, L1);
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
     for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
-    TokenVec seq = lz_optimal_c(content.d, content.n, litbits, W);
-    int kd = fit_k_tokens(&seq);
+    int kd = 0;
+    TokenVec seq = lz_optimal_c(content.d, content.n, litbits, W, &kd);
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
     int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
     int32_t fp = 0;
