@@ -29,8 +29,8 @@ secondary reference implementation in this tree.
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,866,167 B**.
-- W=10 non-self corpus total: **4,865,483 B**.
+- W=10 full 16x16 corpus total: **4,866,160 B**.
+- W=10 non-self corpus total: **4,865,476 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **900 B**
   - `v1_one_face -> v0_base`: **614 B**
@@ -67,6 +67,9 @@ bytes.
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
 `make check-corpus` runs the local 16x16 image matrix and prints corpus totals
 plus the real one-face update/revert sizes.
+
+Set `A1_ENC_STATS=1` when running `hy_enc` to print one encoder study line with
+op, literal, correction, preserve, and derived-field counts for that patch.
 
 Manual one-direction check:
 

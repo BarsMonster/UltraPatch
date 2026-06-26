@@ -41,6 +41,10 @@ typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
 typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
+typedef struct {
+    size_t ops, diff_bytes, extra_bytes, literals, preserves, corrections;
+    size_t bl_fields, ex_fields, suppressed_bl;
+} EncStats;
 
 static void die(const char *msg) {
     fprintf(stderr, "rc_v3_enc: %s\n", msg);
@@ -1075,6 +1079,35 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
     return out;
 }
 
+static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                              uint32_t to_size, const FieldDeltaVec *fd, const OpPC *pc) {
+    (void)to_size;
+    EncStats st = {0};
+    int32_t fp0 = 0;
+    st.ops = ops->n;
+    for (size_t i = 0; i < ops->n; i++) {
+        st.preserves += pc[i].pres.n;
+        st.corrections += pc[i].corr.n;
+    }
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        st.diff_bytes += (size_t)o->diff_len;
+        st.extra_bytes += (size_t)o->extra_len;
+        for (int32_t k = 0; k < o->diff_len; k++) st.literals += o->diff[k] != 0;
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len;) {
+            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+            if (ev.type == EV_BL) { st.bl_fields++; k += 4; continue; }
+            if (ev.type == EV_EX) { st.ex_fields++; k += 4; continue; }
+            if (ev.type == EV_SBL) { st.suppressed_bl++; k += 4; continue; }
+            k++;
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+    return st;
+}
+
 /* ------------------------------------------------------------------------------------- */
 /* LZSS planning and entropy models.                                                       */
 /* ------------------------------------------------------------------------------------- */
@@ -1083,7 +1116,7 @@ typedef struct { Token *v; size_t n, cap; } TokenVec;
 typedef struct { int32_t dist, len; } Cand;
 
 #ifndef LZ_CAND_MAX
-#define LZ_CAND_MAX 32
+#define LZ_CAND_MAX 128
 #endif
 #if LZ_CAND_MAX < 1
 #error "LZ_CAND_MAX must be at least 1"
@@ -1209,7 +1242,7 @@ static int rice_dist_bits(int32_t d, int k) { uint32_t v = (uint32_t)d - 1u; ret
 static int fit_k_tokens(const TokenVec *tv) {
     int best = 0;
     uint64_t bestc = UINT64_MAX;
-    for (int k = 0; k < 10; k++) {
+    for (int k = 0; k < 16; k++) {
         uint64_t c = 0;
         for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'R') {
             uint32_t v = (uint32_t)tv->v[i].dist - 1u;
@@ -1671,13 +1704,15 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     data_format_encode(&from, &to, &fr, &tr, &from_df, &to_df, blocks);
     OpVec ops = bsdiff_ops(&from_df, &to_df);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
+    FieldDeltaVec fd = build_field_deltas(&from, &fr, blocks);
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
-    FieldDeltaVec fd = build_field_deltas(&from, &fr, blocks);
     coerce_reloc_literals(&ops, from.d, from_size, to_size, &fd);
     uint8_t *presset = preserve_indices(&ops, from_size, to_size);
     uint8_t *corr = corrections_hybrid(&ops, from.d, to.d, &fd, from_size, to_size, presset);
     OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
+    int stats_on = getenv("A1_ENC_STATS") != NULL;
+    EncStats st = stats_on ? collect_stats(&ops, from.d, from_size, to_size, &fd, pc) : (EncStats){0};
     Buf body = encode_body(&ops, from.d, from_size, to_size, &fd, pc, W);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
@@ -1687,6 +1722,12 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     buf_write(&blob, body.d, body.n);
     buf_put_u32le(&blob, crc32_buf(to.d, to.n));
     write_file(blob_out, blob.d, blob.n);
+    if (stats_on) {
+        fprintf(stderr,
+                "A1_STATS from=%s to=%s bytes=%zu ops=%zu diff=%zu extra=%zu lit=%zu pres=%zu corr=%zu bl=%zu ex=%zu sbl=%zu\n",
+                from_dir, to_dir, blob.n, st.ops, st.diff_bytes, st.extra_bytes, st.literals,
+                st.preserves, st.corrections, st.bl_fields, st.ex_fields, st.suppressed_bl);
+    }
     buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to); buf_free(&from_df); buf_free(&to_df);
     free(presset); free(corr); free(fd.v);
     for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
