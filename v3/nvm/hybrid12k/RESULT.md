@@ -29,17 +29,18 @@ de-relocated values into source rows that the in-place apply later overwrites wo
 | crash-safe (plain build, 300 corrupt patches) | **PASS** — 0 crash/hang (300 clean-reject); a reject now reports a reason (resource-cap vs corrupt) and an 8-byte coroutine-stack canary turns any overflow into a clean reject |
 
 ## Patch size
-Corpus total **4,882,626 B**: **−1.054 % vs the prior best-compression reference** (4,934,646),
-**−4.332 % vs v2**, and **−2.841 % vs the byte-addressable byte model** (5,025,418 — a NVM-invalid
+Corpus total **4,866,646 B**: **−1.378 % vs the prior best-compression reference** (4,934,646),
+**−4.645 % vs v2**, and **−3.159 % vs the byte-addressable byte model** (5,025,418 — a NVM-invalid
 reference: it assumes byte-writable flash). The flash-compliant patch is now smaller than all tracked
 references. The latest A1 follow-up wins are pauseable LZSS tokens across op/delta interleave points
-(no decoder SRAM cost), a `UG_CTX=7`/one-shot-model-slot SRAM retune, a repeat-last delta context
-that separates zero from nonzero previous values, adaptive coding of `[C]` correction bytes through
-the existing `M_dval` byte tree (no new decoder SRAM), encoder-only coercion of relocation-field
-literal bytes back to pure copies, and small state-layout packing.
+(no decoder SRAM cost), encoder-only Rice-distance-aware LZSS match selection, a
+`UG_CTX=7`/one-shot-model-slot SRAM retune, a repeat-last delta context that separates zero from
+nonzero previous values, adaptive coding of `[C]` correction bytes through the existing `M_dval`
+byte tree (no new decoder SRAM), encoder-only coercion of relocation-field literal bytes back to pure
+copies, and small state-layout packing.
 
 Real one-face firmware update (v0_base 113,124 ↔ v1_one_face 113,484, +360 B), decoded under the
-emulator, `rows_amplified=0`: **grow = 906 B, revert = 617 B** (byte model: 933 / 647).
+emulator, `rows_amplified=0`: **grow = 901 B, revert = 615 B** (byte model: 933 / 647).
 
 ## Architecture
 No baking, no source writes. The `[A]` copy reads raw `from[fp]`; reconstruction is corrected at the
@@ -74,15 +75,15 @@ Golden encoder/decoder: `sim/ultrapatch/rc_hybrid.py` (the C mirrors it bit-for-
 
 The matrix gates are meant to be CI-hard gates, not advisory scripts:
 - `tools/hy_verify.py` now requires NVM metrics to be present, fails if byte-exact / amplification /
-  inversion checks fail, and gates the W=10 corpus total at **4,882,626 B**.
-- `tools/a1_golden_rt.py` gates W=10 at **4,881,942 B** for non-self pairs and journal peak
+  inversion checks fail, and gates the W=10 corpus total at **4,866,646 B**.
+- `tools/a1_golden_rt.py` gates W=10 at **4,865,962 B** for non-self pairs and journal peak
   **903**.
 - `sim/ultrapatch/rc_hybrid.py` preflights streamed-delta dictionary caps before emitting a patch, so
   the Python encoder fails early instead of producing a blob the production decoder would reject.
 
 ## Optional build: W = 11 (larger LZSS window) — opt-in, slim SRAM margin
 The default LZSS window is **W = 10** (`SA_W` / `PATHE_W`), which is what keeps `.bss ≤ 12 KiB`.
-Building both sides at **W = 11** saves **−8,692 B** on the corpus (4,882,626 → **4,873,934**, still
+Building both sides at **W = 11** saves **−15,308 B** on the corpus (4,866,646 → **4,851,338**, still
 256/256, `rows_amplified=0`, `frontier_inversions=0`) and now fits the SRAM cap after the model
 reclaim, but with only **240 B margin** (`.bss = 12,048 B`). Keep W = 10 as the default unless the
 deployment values those patch bytes more than SRAM headroom:

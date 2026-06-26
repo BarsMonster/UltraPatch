@@ -230,20 +230,23 @@ def ctrl_tags(ctrl, opt=None):
 
 # ---------- [A]: LZSS-C (optimal parse, format-C pack) + from-image Huffman literals ----------
 W=9   # baseline backref-distance bits; production uses Rice (opt['rice']) with opt['W']=11
-def lz_optimal(data, litbits, win=512, maxm=2048, maxchain=64, maxrun=1024, wbits=9):
+def lz_optimal(data, litbits, win=512, maxm=2048, maxchain=64, maxrun=1024, wbits=9,
+               rice_dist=False, rice_passes=2, match_mode='longest'):
     """Cost-aware optimal LZSS parse (encoder-only; produces the SAME token format the
     decoder replays, so no decoder change). litbits[p] = Huffman code length of the
     literal at position p (per-position: depends on its table id).
-    Minimises exact emitted bits: literal span = 1+gamma(len)+sum(litbits); backref =
-    1+W+gamma(len)."""
+    By default this preserves the legacy fixed-distance cost: literal span =
+    1+gamma(len)+sum(litbits), backref = 1+W+gamma(len). A1 can opt into an
+    encoder-only approximation of its fitted Rice distance model and keep both the
+    nearest and longest match candidates at each position."""
     n=len(data)
     def gammalen(x): return 2*x.bit_length()-1          # bits of elias gamma(x), x>=1
     ph=[0]*(n+1)
     for i in range(n): ph[i+1]=ph[i]+litbits[i]
     from collections import defaultdict
-    chains=defaultdict(list); match=[(0,0)]*n
+    chains=defaultdict(list); match=[None]*n
     for i in range(n):
-        bl=bd=0
+        bl=bd=0; near=None
         if i+3<=n:
             cand=chains.get(data[i:i+3])
             if cand:
@@ -252,27 +255,45 @@ def lz_optimal(data, litbits, win=512, maxm=2048, maxchain=64, maxrun=1024, wbit
                     if i-pj>win or c>=maxchain: break
                     c+=1; l=0; ml=min(maxm,n-i)
                     while l<ml and data[pj+l]==data[i+l]: l+=1
+                    if l>=3 and near is None: near=(i-pj,l)
                     if l>bl: bl=l; bd=i-pj
             chains[data[i:i+3]].append(i)
-        match[i]=(bd,bl)
-    INF=1<<60; cost=[INF]*(n+1); cost[n]=0; nxt=[None]*(n+1)
-    for i in range(n-1,-1,-1):
-        best=INF; bc=None; runbits=0
-        for j in range(i+1,min(n,i+maxrun)+1):
-            runbits+=litbits[j-1]
-            c=1+gammalen(j-i)+runbits+cost[j]
-            if c<best: best=c; bc=('S',i,j)
-        bd,bl=match[i]
-        for l in range(3,bl+1):
-            c=1+wbits+gammalen(l)+cost[i+l]
-            if c<best: best=c; bc=('R',bd,l)
-        cost[i]=best; nxt[i]=bc
-    toks=[]; i=0
-    while i<n:
-        ch=nxt[i]
-        if ch[0]=='S': toks.append(("S",list(data[i:ch[2]]))); i=ch[2]
-        else: toks.append(("R",ch[1],ch[2])); i+=ch[2]
-    return toks
+        cands=[]
+        if match_mode=='near_long' and near: cands.append(near)
+        if bl>=3 and (match_mode!='near_long' or near!=(bd,bl)): cands.append((bd,bl))
+        match[i]=cands
+    def parse(dist_bits):
+        INF=1<<60; cost=[INF]*(n+1); cost[n]=0; nxt=[None]*(n+1)
+        for i in range(n-1,-1,-1):
+            best=INF; bc=None; runbits=0
+            for j in range(i+1,min(n,i+maxrun)+1):
+                runbits+=litbits[j-1]
+                c=1+gammalen(j-i)+runbits+cost[j]
+                if c<best: best=c; bc=('S',i,j)
+            for bd,bl in match[i]:
+                db=dist_bits(bd)
+                for l in range(3,bl+1):
+                    c=1+db+gammalen(l)+cost[i+l]
+                    if c<best: best=c; bc=('R',bd,l)
+            cost[i]=best; nxt[i]=bc
+        toks=[]; i=0
+        while i<n:
+            ch=nxt[i]
+            if ch[0]=='S': toks.append(("S",list(data[i:ch[2]]))); i=ch[2]
+            else: toks.append(("R",ch[1],ch[2])); i+=ch[2]
+        return toks
+    seq=parse(lambda _d: wbits)
+    if rice_dist:
+        def fit(vals):
+            if not vals: return 0
+            return min(range(0,10), key=lambda kk: sum((v>>kk)+1+kk for v in vals))
+        k=fit([x[1]-1 for x in seq if x[0]=='R'])
+        for _ in range(rice_passes):
+            seq=parse(lambda d, kk=k: ((d-1)>>kk)+1+kk)
+            nk=fit([x[1]-1 for x in seq if x[0]=='R'])
+            if nk==k: break
+            k=nk
+    return seq
 
 def _ricelen(v,k): return (v>>k)+1+k
 def _wr_rice(bw,v,k):

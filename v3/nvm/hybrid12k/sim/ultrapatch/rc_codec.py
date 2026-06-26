@@ -17,8 +17,10 @@ static==production (no degradation), with gentle LZMA adaptation (1/32 rate) tha
 Optimal flush (deterministic: round low to trailing-zero bytes, strip them; decoder
 zero-fills past EOF). Same wire STRUCTURE as codec_v2 (LZSS [A] + relocation [B]).
 C decoder: c/rc_ultrapatch.c + c/rc_models.h (divide-free, ~5x faster than the divide form)."""
-import sys,struct,zlib,math
-sys.path[:0]=['/ai_sw/detools-dev/m4dev/sim','/ai_sw/detools-dev/m4dev/sim/ultrapatch']
+import sys,struct,zlib,math,os
+_HERE=os.path.dirname(os.path.abspath(__file__))
+sys.path[:0]=[os.path.dirname(_HERE),_HERE,
+              '/ai_sw/detools-dev/m4dev/sim','/ai_sw/detools-dev/m4dev/sim/ultrapatch']
 import codec
 from codec import build_control,from_huff_dual,ctrl_tags,lz_optimal,parse_control,CtrlScanner,Op
 from m4reloc import (_parse_blocks,_disasm,_segs,_topos,zz,unzz,leb128,leb128_read,

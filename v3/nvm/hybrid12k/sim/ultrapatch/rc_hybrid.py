@@ -350,7 +350,8 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
     litbits = [Ls[tags[p]][content[p]] for p in range(len(content))]
     import codec as _c
     Wuse = opt.get('W', _c.W)
-    seq = lz_optimal(content, litbits, win=(1 << Wuse), wbits=Wuse)
+    seq = lz_optimal(content, litbits, win=(1 << Wuse), wbits=Wuse, maxchain=128,
+                     rice_dist=True, match_mode='near_long')
     out_p, out_c = _preserve_corr_per_op(ops, from_size, to_size, presset, corr)
     # Per-op ldr candidate sets are reused by correction simulation and delta injection planning.
     op_ldr = []

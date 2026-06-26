@@ -68,7 +68,7 @@ if __name__ == '__main__':
         print("  wear mult vs floor: min=%.3f mean=%.3f max=%.3f" % (min(mults), sum(mults) / len(mults), max(mults)))
     for f in fails[:16]:
         print("  FAIL %d->%d: %s" % (f[0], f[1], f[11]))
-    budget = {10: 4882626}.get(W)
+    budget = {10: 4866646}.get(W)
     budget_bad = budget is not None and tot > budget
     if ok != len(pairs) or amp_bad != 0 or mre_max > 1 or inv_bad != 0 or budget_bad:
         if budget_bad:
