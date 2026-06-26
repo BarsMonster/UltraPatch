@@ -63,21 +63,27 @@ monotonic output frontier (Path-style `[C]`). Relocation fields are de-relocated
 
 ## Build / verify
 ```
-cc -O2 -DRC_V3_MAIN -DRC_V3_NVM -I c -o dec c/rc_v3.c c/flash_nvm.c   # arm_cortex_m4.c NOT needed (no-bake)
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/hy_verify.py 10 dec        # 256/256 + amp=0 + inversions=0
+make -C c                                                            # builds c/hy_enc + c/hy_dec
+c/hy_enc fixtures/v0_base fixtures/v1_one_face /tmp/grow.blob /tmp/grow.cfg 10
+c/hy_dec /tmp/from.bin /tmp/grow.blob /tmp/grow.cfg 1                # byte-streamed C decoder/NVM harness
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/hy_verify.py 10 c/hy_dec  # 256/256 + amp=0 + inversions=0
 arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c && arm-none-eabi-size rc_v3.o
 sh tools/check_divfree.sh                                            # req#5: hot path divide-free
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fixture_gate.py dec        # real-firmware generalization (6/6)
-PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fuzz_gate.py dec 300       # 300 corrupt patches -> 0 crash/hang
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fixture_gate.py c/hy_dec   # real-firmware generalization (6/6)
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/fuzz_gate.py c/hy_dec 300  # 300 corrupt patches -> 0 crash/hang
 ```
-Golden encoder/decoder: `sim/ultrapatch/rc_hybrid.py` (the C mirrors it bit-for-bit). The encoder's
-`rc_hybrid.PATHE_W` MUST equal the decoder's `SA_W` (default 10).
+Production encoder: `c/rc_v3_enc.c`. Production decoder: `c/rc_v3.c`.
+The Python `sim/ultrapatch/rc_hybrid.py` path is now the parity reference; `c/hy_enc` matches its
+blob and `cfg7` byte-for-byte over the W=10 16x16 image matrix. Encoder `W` MUST equal decoder
+`SA_W` (default 10).
 
 The matrix gates are meant to be CI-hard gates, not advisory scripts:
 - `tools/hy_verify.py` now requires NVM metrics to be present, fails if byte-exact / amplification /
   inversion checks fail, and gates the W=10 corpus total at **4,866,646 B**.
 - `tools/a1_golden_rt.py` gates W=10 at **4,865,962 B** for non-self pairs and journal peak
   **903**.
+- The real 1-face 360-byte update stays **901 B** grow (`v0_base -> v1_one_face`) and **615 B**
+  revert (`v1_one_face -> v0_base`) with C-produced blobs.
 - `sim/ultrapatch/rc_hybrid.py` preflights streamed-delta dictionary caps before emitting a patch, so
   the Python encoder fails early instead of producing a blob the production decoder would reject.
 

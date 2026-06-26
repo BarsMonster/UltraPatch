@@ -25,6 +25,7 @@ Verification commands that need the ARM toolchain:
 
 ```sh
 cd /ai_sw/v3/nvm/hybrid12k
+make -C c
 arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c -o /tmp/rc_v3_arm.o
 arm-none-eabi-size /tmp/rc_v3_arm.o
 sh tools/check_divfree.sh

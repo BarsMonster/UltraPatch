@@ -1,0 +1,1711 @@
+/*
+ * A1 host encoder (C) for the rc_v3 decoder wire.
+ *
+ * This is intentionally a host-side encoder: compression-side memory/CPU are
+ * allowed to be large. The emitted blob is byte-for-byte intended to match the
+ * Python golden rc_hybrid.encode_v3() for the same from/to directories.
+ */
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "arm_cortex_m4.h"
+#include "rc_models.h"
+
+int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
+
+#ifndef PATHE_W
+#define PATHE_W 10
+#endif
+#ifndef DR_KCAP_BL
+#define DR_KCAP_BL 208
+#endif
+#ifndef DR_KCAP_EX
+#define DR_KCAP_EX 128
+#endif
+#define DR_HIT_INIT 512u
+
+enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
+
+typedef struct { uint8_t *d; size_t n, cap; } Buf;
+typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
+typedef struct { Op *v; size_t n, cap; } OpVec;
+typedef struct { int32_t from_offset, to_address, n; int64_t *values; } Block;
+typedef struct { Block *v; size_t n, cap; } BlockVec;
+typedef struct { uint32_t addr; int kind; int64_t delta; } FieldDelta;
+typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
+typedef struct { int32_t *v; size_t n, cap; } IVec;
+typedef struct { int32_t off; uint8_t byte; } CorrEnt;
+typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
+typedef struct { IVec pres; CorrVec corr; } OpPC;
+typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
+
+static void die(const char *msg) {
+    fprintf(stderr, "rc_v3_enc: %s\n", msg);
+    exit(2);
+}
+
+static void *xmalloc(size_t n) {
+    void *p = malloc(n ? n : 1);
+    if (!p) die("out of memory");
+    return p;
+}
+
+static void *xcalloc(size_t n, size_t s) {
+    void *p = calloc(n ? n : 1, s ? s : 1);
+    if (!p) die("out of memory");
+    return p;
+}
+
+static void *xrealloc(void *p, size_t n) {
+    void *q = realloc(p, n ? n : 1);
+    if (!q) die("out of memory");
+    return q;
+}
+
+static void buf_reserve(Buf *b, size_t need) {
+    if (need <= b->cap) return;
+    size_t nc = b->cap ? b->cap * 2 : 256;
+    while (nc < need) nc *= 2;
+    b->d = (uint8_t *)xrealloc(b->d, nc);
+    b->cap = nc;
+}
+
+static void buf_put(Buf *b, uint8_t v) {
+    buf_reserve(b, b->n + 1);
+    b->d[b->n++] = v;
+}
+
+static void buf_write(Buf *b, const void *p, size_t n) {
+    buf_reserve(b, b->n + n);
+    memcpy(b->d + b->n, p, n);
+    b->n += n;
+}
+
+static void buf_put_u32le(Buf *b, uint32_t v) {
+    buf_put(b, (uint8_t)v);
+    buf_put(b, (uint8_t)(v >> 8));
+    buf_put(b, (uint8_t)(v >> 16));
+    buf_put(b, (uint8_t)(v >> 24));
+}
+
+static void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
+
+static Buf slurp(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); exit(2); }
+    if (fseek(f, 0, SEEK_END)) die("seek failed");
+    long sz = ftell(f);
+    if (sz < 0) die("tell failed");
+    if (fseek(f, 0, SEEK_SET)) die("seek failed");
+    Buf b = {0};
+    buf_reserve(&b, (size_t)sz);
+    b.n = (size_t)sz;
+    if (b.n && fread(b.d, 1, b.n, f) != b.n) die("read failed");
+    fclose(f);
+    return b;
+}
+
+static void write_file(const char *path, const void *p, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); exit(2); }
+    if (n && fwrite(p, 1, n, f) != n) die("write failed");
+    fclose(f);
+}
+
+static char *join2(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    char *s = (char *)xmalloc(na + nb + 2);
+    memcpy(s, a, na);
+    s[na] = '/';
+    memcpy(s + na + 1, b, nb + 1);
+    return s;
+}
+
+static uint32_t crc32_buf(const uint8_t *p, size_t n) {
+    uint32_t c = 0xffffffffu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(c & 1u));
+    }
+    return c ^ 0xffffffffu;
+}
+
+static uint32_t zz32(int32_t v) { return v >= 0 ? ((uint32_t)v << 1) : (((uint32_t)(-v) << 1) - 1u); }
+
+static int bitlen32(uint32_t v) {
+    int n = 0;
+    do { n++; v >>= 1; } while (v);
+    return n;
+}
+
+static void put_uleb(Buf *b, uint32_t v) {
+    for (;;) {
+        uint8_t x = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        buf_put(b, v ? (uint8_t)(x | 0x80u) : x);
+        if (!v) break;
+    }
+}
+
+static int uleb_len(uint32_t v) {
+    int n = 1;
+    while (v >>= 7) n++;
+    return n;
+}
+
+static void put_pack_size(Buf *b, int64_t value) {
+    uint8_t tmp[10];
+    int n = 0;
+    if (value == 0) {
+        tmp[n++] = 0;
+    } else {
+        uint64_t u;
+        if (value > 0) {
+            tmp[n] = 0;
+            u = (uint64_t)value;
+        } else {
+            tmp[n] = 0x40;
+            u = (uint64_t)(-value);
+        }
+        tmp[n++] |= (uint8_t)(0x80u | (u & 0x3fu));
+        u >>= 6;
+        while (u > 0) {
+            tmp[n++] = (uint8_t)(0x80u | (u & 0x7fu));
+            u >>= 7;
+        }
+        tmp[n - 1] &= 0x7fu;
+    }
+    buf_write(b, tmp, (size_t)n);
+}
+
+static void ivec_push(IVec *v, int32_t x) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 16;
+        v->v = (int32_t *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = x;
+}
+
+static void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 16;
+        v->v = (CorrEnt *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n].off = off;
+    v->v[v->n].byte = byte;
+    v->n++;
+}
+
+static int cmp_i32(const void *a, const void *b) {
+    int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static int cmp_corr(const void *a, const void *b) {
+    const CorrEnt *x = (const CorrEnt *)a, *y = (const CorrEnt *)b;
+    return (x->off > y->off) - (x->off < y->off);
+}
+
+static void opvec_push(OpVec *v, Op o) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 64;
+        v->v = (Op *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = o;
+}
+
+static void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 8;
+        v->v = (Block *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    Block *b = &v->v[v->n++];
+    b->from_offset = fo;
+    b->to_address = ta;
+    b->n = n;
+    b->values = (int64_t *)xmalloc((size_t)n * sizeof(int64_t));
+    memcpy(b->values, vals, (size_t)n * sizeof(int64_t));
+}
+
+static void blocks_to_bytes(const BlockVec *v, Buf *header, Buf *data) {
+    put_pack_size(header, (int64_t)v->n);
+    for (size_t i = 0; i < v->n; i++) {
+        put_pack_size(header, v->v[i].from_offset);
+        put_pack_size(header, v->v[i].to_address);
+        put_pack_size(header, v->v[i].n);
+    }
+    for (size_t i = 0; i < v->n; i++)
+        for (int32_t k = 0; k < v->v[i].n; k++)
+            put_pack_size(data, v->v[i].values[k]);
+}
+
+static int cmp_fd(const void *a, const void *b) {
+    const FieldDelta *x = (const FieldDelta *)a, *y = (const FieldDelta *)b;
+    return (x->addr > y->addr) - (x->addr < y->addr);
+}
+
+static void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 256;
+        v->v = (FieldDelta *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n].addr = addr;
+    v->v[v->n].kind = kind;
+    v->v[v->n].delta = delta;
+    v->n++;
+}
+
+static void fd_finalize(FieldDeltaVec *v) {
+    if (!v->n) return;
+    qsort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
+    size_t w = 0;
+    for (size_t i = 0; i < v->n; i++) {
+        if (w && v->v[w - 1].addr == v->v[i].addr) v->v[w - 1] = v->v[i];
+        else v->v[w++] = v->v[i];
+    }
+    v->n = w;
+}
+
+static const FieldDelta *fd_find(const FieldDeltaVec *v, uint32_t addr) {
+    size_t lo = 0, hi = v->n;
+    while (lo < hi) {
+        size_t m = (lo + hi) >> 1;
+        if (v->v[m].addr < addr) lo = m + 1;
+        else hi = m;
+    }
+    return (lo < v->n && v->v[lo].addr == addr) ? &v->v[lo] : NULL;
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* Minimal ELF32 little-endian range extraction matching detools.data_format.elf.          */
+/* ------------------------------------------------------------------------------------- */
+typedef struct { uint32_t type, off, addr, size, entsize, link; } Shdr;
+typedef struct { uint32_t value, size; uint8_t type; uint16_t sec; } Sym;
+typedef struct { uint32_t begin, end, sec; } ARange;
+typedef struct { Sym *v; size_t n, cap; } SymVec;
+typedef struct { ARange *v; size_t n, cap; } RangeVec;
+
+static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+static void wr32le(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+static int cmp_sym_val(const void *a, const void *b) {
+    const Sym *x = (const Sym *)a, *y = (const Sym *)b;
+    if (x->sec != y->sec) return (x->sec > y->sec) - (x->sec < y->sec);
+    return (x->value > y->value) - (x->value < y->value);
+}
+
+static void sym_push(SymVec *v, Sym s) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 1024;
+        v->v = (Sym *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = s;
+}
+
+static void range_push(RangeVec *v, uint32_t begin, uint32_t end, uint32_t sec) {
+    if (end <= begin) return;
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 128;
+        v->v = (ARange *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = (ARange){ begin, end, sec };
+}
+
+static int section_for_addr(const Shdr *sh, size_t n, uint32_t addr) {
+    for (size_t i = 0; i < n; i++)
+        if (sh[i].addr <= addr && addr < sh[i].addr + sh[i].size)
+            return (int)i;
+    return -1;
+}
+
+static ARange largest_code_range(const RangeVec *funcs) {
+    ARange best = {0, 0, 0};
+    size_t i = 0;
+    while (i < funcs->n) {
+        uint32_t sec = funcs->v[i].sec;
+        ARange r = { funcs->v[i].begin, funcs->v[i].end, sec };
+        while (i + 1 < funcs->n && funcs->v[i + 1].sec == sec) {
+            i++;
+            r.end = funcs->v[i].end;
+        }
+        if (r.end - r.begin > best.end - best.begin) best = r;
+        i++;
+    }
+    return best;
+}
+
+static ARange largest_data_range(const RangeVec *objs, ARange code) {
+    ARange best = {0, 0, 0};
+    for (size_t i = 0; i < objs->n; i++) {
+        ARange r = objs->v[i];
+        if (r.begin < code.begin && code.begin < r.end) {
+            ARange left = { r.begin, code.begin, r.sec };
+            if (r.begin < code.end && code.end < r.end) {
+                ARange right = { code.end, r.end, r.sec };
+                r = ((left.end - left.begin) > (right.end - right.begin)) ? left : right;
+            } else {
+                r = left;
+            }
+        } else if (r.begin < code.end && code.end < r.end) {
+            r.begin = code.end;
+        }
+        if (r.end > r.begin && r.end - r.begin > best.end - best.begin) best = r;
+    }
+    return best;
+}
+
+static uint32_t find_data_offset_in_bin(const Buf *elf, const Shdr *sh, const Buf *bin, ARange data, const char *which) {
+    if (data.end <= data.begin) return 0;
+    if (data.sec == UINT32_MAX || data.sec >= 65535) die("bad ELF data section");
+    const Shdr *s = &sh[data.sec];
+    uint32_t in_sec = data.begin - s->addr;
+    if ((uint64_t)s->off + in_sec + (data.end - data.begin) > elf->n) die("ELF data range outside file");
+    const uint8_t *needle = elf->d + s->off + in_sec;
+    size_t nlen = data.end - data.begin;
+    for (size_t i = 0; i + nlen <= bin->n; i++)
+        if (memcmp(bin->d + i, needle, nlen) == 0)
+            return (uint32_t)i;
+    fprintf(stderr, "rc_v3_enc: data segment for %s not found in bin\n", which);
+    exit(2);
+}
+
+static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
+    Buf e = slurp(elf_path);
+    if (e.n < 52 || memcmp(e.d, "\177" "ELF", 4) || e.d[4] != 1 || e.d[5] != 1) die("expected ELF32 little-endian");
+    uint32_t shoff = rd32le(e.d + 32);
+    uint16_t shentsize = rd16le(e.d + 46), shnum = rd16le(e.d + 48);
+    if (!shoff || !shnum || shentsize < 40 || (uint64_t)shoff + (uint64_t)shentsize * shnum > e.n) die("bad ELF sections");
+    Shdr *sh = (Shdr *)xcalloc(shnum, sizeof(*sh));
+    for (uint16_t i = 0; i < shnum; i++) {
+        const uint8_t *p = e.d + shoff + (uint32_t)i * shentsize;
+        sh[i].type = rd32le(p + 4);
+        sh[i].addr = rd32le(p + 12);
+        sh[i].off = rd32le(p + 16);
+        sh[i].size = rd32le(p + 20);
+        sh[i].link = rd32le(p + 24);
+        sh[i].entsize = rd32le(p + 36);
+    }
+    SymVec syms = {0};
+    for (uint16_t si = 0; si < shnum; si++) {
+        if (sh[si].type != 2 || sh[si].entsize < 16 || sh[si].off + sh[si].size > e.n) continue;
+        size_t n = sh[si].size / sh[si].entsize;
+        for (size_t k = 0; k < n; k++) {
+            const uint8_t *p = e.d + sh[si].off + k * sh[si].entsize;
+            uint32_t value = rd32le(p + 4), size = rd32le(p + 8);
+            uint8_t type = p[12] & 0x0f;
+            if ((type != 1 && type != 2) || size == 0) continue;
+            int sec = section_for_addr(sh, shnum, value);
+            if (sec < 0) continue;
+            sym_push(&syms, (Sym){ value, size, type, (uint16_t)sec });
+        }
+    }
+    qsort(syms.v, syms.n, sizeof(syms.v[0]), cmp_sym_val);
+    RangeVec funcs = {0}, objs = {0};
+    size_t i = 0;
+    while (i < syms.n) {
+        uint16_t sec = syms.v[i].sec;
+        size_t j = i;
+        while (j < syms.n && syms.v[j].sec == sec) j++;
+        uint8_t bt = syms.v[i].type;
+        uint32_t bb = syms.v[i].value, be = syms.v[i].size;
+        for (size_t k = i; k < j; k++) {
+            if (syms.v[k].type != bt) {
+                if (bt == 2) range_push(&funcs, bb, be, sec);
+                else range_push(&objs, bb, be, sec);
+                bt = syms.v[k].type;
+                bb = syms.v[k].value;
+            }
+            be = syms.v[k].value + syms.v[k].size;
+        }
+        if (bt == 2) range_push(&funcs, bb, be, sec);
+        else range_push(&objs, bb, be, sec);
+        i = j;
+    }
+    ARange code = largest_code_range(&funcs);
+    ARange data = largest_data_range(&objs, code);
+    uint32_t doff = find_data_offset_in_bin(&e, sh, bin, data, which);
+    Ranges r = { doff, doff + (data.end - data.begin), data.begin, data.end, code.begin, code.end };
+    free(sh); free(syms.v); free(funcs.v); free(objs.v); buf_free(&e);
+    return r;
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* Python difflib.SequenceMatcher subset for create_patch_block().                         */
+/* ------------------------------------------------------------------------------------- */
+typedef struct { int32_t val; int32_t *idx; size_t n, cap; int popular; } B2J;
+typedef struct { B2J *v; size_t n, cap; } B2JVec;
+typedef struct { int32_t a, b, size; } Match;
+typedef struct { Match *v; size_t n, cap; } MatchVec;
+
+static int cmp_b2j_val(const void *a, const void *b) {
+    const B2J *x = (const B2J *)a, *y = (const B2J *)b;
+    return (x->val > y->val) - (x->val < y->val);
+}
+
+static void b2j_add(B2JVec *m, int32_t val, int32_t idx) {
+    for (size_t i = 0; i < m->n; i++) {
+        if (m->v[i].val == val) {
+            B2J *e = &m->v[i];
+            if (e->n == e->cap) {
+                e->cap = e->cap ? e->cap * 2 : 8;
+                e->idx = (int32_t *)xrealloc(e->idx, e->cap * sizeof(e->idx[0]));
+            }
+            e->idx[e->n++] = idx;
+            return;
+        }
+    }
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 64;
+        m->v = (B2J *)xrealloc(m->v, m->cap * sizeof(m->v[0]));
+    }
+    B2J *e = &m->v[m->n++];
+    memset(e, 0, sizeof(*e));
+    e->val = val;
+    e->cap = 8;
+    e->idx = (int32_t *)xmalloc(e->cap * sizeof(e->idx[0]));
+    e->idx[e->n++] = idx;
+}
+
+static B2J *b2j_find(B2JVec *m, int32_t val) {
+    size_t lo = 0, hi = m->n;
+    while (lo < hi) {
+        size_t mid = (lo + hi) >> 1;
+        if (m->v[mid].val < val) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < m->n && m->v[lo].val == val && !m->v[lo].popular) return &m->v[lo];
+    return NULL;
+}
+
+static void match_push(MatchVec *v, Match m) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 32;
+        v->v = (Match *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = m;
+}
+
+static int cmp_match(const void *a, const void *b) {
+    const Match *x = (const Match *)a, *y = (const Match *)b;
+    if (x->a != y->a) return (x->a > y->a) - (x->a < y->a);
+    if (x->b != y->b) return (x->b > y->b) - (x->b < y->b);
+    return (x->size > y->size) - (x->size < y->size);
+}
+
+static Match find_longest_match(const int32_t *a, int32_t la, const int32_t *b, int32_t lb,
+                                B2JVec *b2j, int32_t alo, int32_t ahi, int32_t blo, int32_t bhi) {
+    (void)la;
+    int32_t besti = alo, bestj = blo, bestsize = 0;
+    int32_t *prev = (int32_t *)xcalloc((size_t)lb + 1, sizeof(int32_t));
+    int32_t *cur = (int32_t *)xcalloc((size_t)lb + 1, sizeof(int32_t));
+    for (int32_t i = alo; i < ahi; i++) {
+        memset(cur, 0, ((size_t)lb + 1) * sizeof(int32_t));
+        B2J *e = b2j_find(b2j, a[i]);
+        if (e) {
+            for (size_t jj = 0; jj < e->n; jj++) {
+                int32_t j = e->idx[jj];
+                if (j < blo) continue;
+                if (j >= bhi) break;
+                int32_t k = cur[j] = (j > 0 ? prev[j - 1] : 0) + 1;
+                if (k > bestsize) {
+                    besti = i - k + 1;
+                    bestj = j - k + 1;
+                    bestsize = k;
+                }
+            }
+        }
+        int32_t *tmp = prev; prev = cur; cur = tmp;
+    }
+    free(cur); free(prev);
+    while (besti > alo && bestj > blo && a[besti - 1] == b[bestj - 1]) { besti--; bestj--; bestsize++; }
+    while (besti + bestsize < ahi && bestj + bestsize < bhi &&
+           a[besti + bestsize] == b[bestj + bestsize]) bestsize++;
+    return (Match){ besti, bestj, bestsize };
+}
+
+static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int32_t *b, int32_t lb) {
+    B2JVec b2j = {0};
+    for (int32_t i = 0; i < lb; i++) b2j_add(&b2j, b[i], i);
+    if (lb >= 200) {
+        int32_t ntest = lb / 100 + 1;
+        for (size_t i = 0; i < b2j.n; i++) if ((int32_t)b2j.v[i].n > ntest) b2j.v[i].popular = 1;
+    }
+    qsort(b2j.v, b2j.n, sizeof(b2j.v[0]), cmp_b2j_val);
+    typedef struct { int32_t alo, ahi, blo, bhi; } Region;
+    Region *q = (Region *)xmalloc(64 * sizeof(*q));
+    size_t qn = 1, qcap = 64;
+    q[0] = (Region){0, la, 0, lb};
+    MatchVec raw = {0};
+    while (qn) {
+        Region r = q[--qn];
+        Match m = find_longest_match(a, la, b, lb, &b2j, r.alo, r.ahi, r.blo, r.bhi);
+        if (m.size) {
+            match_push(&raw, m);
+            if (r.alo < m.a && r.blo < m.b) {
+                if (qn == qcap) { qcap *= 2; q = (Region *)xrealloc(q, qcap * sizeof(*q)); }
+                q[qn++] = (Region){ r.alo, m.a, r.blo, m.b };
+            }
+            if (m.a + m.size < r.ahi && m.b + m.size < r.bhi) {
+                if (qn == qcap) { qcap *= 2; q = (Region *)xrealloc(q, qcap * sizeof(*q)); }
+                q[qn++] = (Region){ m.a + m.size, r.ahi, m.b + m.size, r.bhi };
+            }
+        }
+    }
+    qsort(raw.v, raw.n, sizeof(raw.v[0]), cmp_match);
+    MatchVec out = {0};
+    int32_t i1 = 0, j1 = 0, k1 = 0;
+    for (size_t i = 0; i < raw.n; i++) {
+        Match m = raw.v[i];
+        if (i1 + k1 == m.a && j1 + k1 == m.b) {
+            k1 += m.size;
+        } else {
+            if (k1) match_push(&out, (Match){ i1, j1, k1 });
+            i1 = m.a; j1 = m.b; k1 = m.size;
+        }
+    }
+    if (k1) match_push(&out, (Match){ i1, j1, k1 });
+    match_push(&out, (Match){ la, lb, 0 });
+    for (size_t i = 0; i < b2j.n; i++) free(b2j.v[i].idx);
+    free(b2j.v); free(raw.v); free(q);
+    return out;
+}
+
+static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *from_s,
+                               const m4_stream_t *to_s, BlockVec *out) {
+    if (!from_s->n || !to_s->n) return;
+    int32_t la = (int32_t)from_s->n - 1, lb = (int32_t)to_s->n - 1;
+    if (la <= 0 || lb <= 0) return;
+    int32_t *ao = (int32_t *)xmalloc((size_t)la * sizeof(int32_t));
+    int32_t *bo = (int32_t *)xmalloc((size_t)lb * sizeof(int32_t));
+    for (int32_t i = 0; i < la; i++) ao[i] = (int32_t)(from_s->a[i + 1].addr - from_s->a[i].addr);
+    for (int32_t i = 0; i < lb; i++) bo[i] = (int32_t)(to_s->a[i + 1].addr - to_s->a[i].addr);
+    MatchVec m = sequence_matching_blocks(ao, la, bo, lb);
+    for (size_t mi = 0; mi + 1 < m.n; mi++) {
+        int32_t fo = m.v[mi].a, to = m.v[mi].b, sz = m.v[mi].size;
+        if (sz < 8) continue;
+        sz += 1;
+            int64_t *vals = (int64_t *)xmalloc((size_t)sz * sizeof(int64_t));
+            int nz = 0;
+            for (int32_t k = 0; k < sz; k++) {
+            vals[k] = (int64_t)from_s->a[fo + k].val - (int64_t)to_s->a[to + k].val;
+            if (vals[k] != 0) nz++;
+        }
+        if (nz < 8) { free(vals); continue; }
+        blockvec_push(out, fo, (int32_t)to_s->a[to].addr, vals, sz);
+        for (int32_t k = 0; k < sz; k++) {
+            uint32_t a = from_s->a[fo + k].addr;
+            if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
+            a = to_s->a[to + k].addr;
+            if (a + 4 <= to_mut->n) memset(to_mut->d + a, 0, 4);
+        }
+        free(vals);
+    }
+    free(ao); free(bo); free(m.v);
+}
+
+static Buf build_dfpatch(const Ranges *fr, BlockVec blocks[STREAM_N]) {
+    Buf patch = {0}, h[STREAM_N] = {{0}}, d[STREAM_N] = {{0}};
+    buf_put(&patch, fr->data_end ? 1 : 0);
+    if (fr->data_end) {
+        put_pack_size(&patch, fr->data_off_begin);
+        put_pack_size(&patch, fr->data_begin);
+        put_pack_size(&patch, fr->data_end);
+    }
+    buf_put(&patch, fr->code_end ? 1 : 0);
+    if (fr->code_end) {
+        put_pack_size(&patch, fr->code_begin);
+        put_pack_size(&patch, fr->code_end);
+    }
+    for (int s = 0; s < STREAM_N; s++) blocks_to_bytes(&blocks[s], &h[s], &d[s]);
+    for (int s = 0; s < STREAM_N; s++) buf_write(&patch, h[s].d, h[s].n);
+    for (int s = 0; s < STREAM_N; s++) buf_write(&patch, d[s].d, d[s].n);
+    for (int s = 0; s < STREAM_N; s++) { buf_free(&h[s]); buf_free(&d[s]); }
+    return patch;
+}
+
+static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], Buf *dfpatch) {
+    from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n; memcpy(from_mut->d, from->d, from->n);
+    to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n; memcpy(to_mut->d, to->d, to->n);
+    m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
+    if (detools_m4_disassemble_ex(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                                  fr->code_begin, fr->code_end, 1, 1, fs)) die("from disassemble failed");
+    if (detools_m4_disassemble_ex(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
+                                  tr->code_begin, tr->code_end, 1, 1, ts)) die("to disassemble failed");
+    create_patch_block(from_mut, to_mut, &fs[M4_DATA], &ts[M4_DATA], &blocks[STREAM_DATA]);
+    create_patch_block(from_mut, to_mut, &fs[M4_CODE], &ts[M4_CODE], &blocks[STREAM_CODE]);
+    create_patch_block(from_mut, to_mut, &fs[M4_BW], &ts[M4_BW], &blocks[STREAM_BW]);
+    create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
+    create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
+    create_patch_block(from_mut, to_mut, &fs[M4_LDRW], &ts[M4_LDRW], &blocks[STREAM_LDRW]);
+    detools_m4_free_streams(fs); detools_m4_free_streams(ts);
+    *dfpatch = build_dfpatch(fr, blocks);
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* bsdiff op generation, ported from detools-dev/detools/bsdiff.c.                         */
+/* ------------------------------------------------------------------------------------- */
+static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *to, int32_t to_size) {
+    int32_t n = from_size < to_size ? from_size : to_size;
+    int32_t i;
+    for (i = 0; i < n; i++) if (from[i] != to[i]) break;
+    return i;
+}
+
+static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                             const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
+                             int32_t *pos) {
+    if (end - begin < 2) {
+        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
+        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size);
+        if (x > y) { *pos = sa[begin]; return x; }
+        *pos = sa[end]; return y;
+    }
+    int32_t x = begin + (end - begin) / 2;
+    int cmp = memcmp(from + sa[x], to, (size_t)((from_size - sa[x]) < to_size ? (from_size - sa[x]) : to_size));
+    if (cmp < 0) return suffix_search(sa, from, from_size, to, to_size, x, end, pos);
+    return suffix_search(sa, from, from_size, to, to_size, begin, x, pos);
+}
+
+static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
+                           const uint8_t *to, int32_t to_size, uint8_t *debuf,
+                           int32_t scan, int32_t pos, int32_t *last_scan_p,
+                           int32_t *last_pos_p, int32_t *last_offset_p) {
+    int32_t last_scan = *last_scan_p, last_pos = *last_pos_p;
+    int32_t s = 0, sf = 0, diff_size = 0;
+    for (int32_t i = 0; (last_scan + i < scan) && (last_pos + i < from_size);) {
+        if (from[last_pos + i] == to[last_scan + i]) s++;
+        i++;
+        if (s * 2 - i > sf * 2 - diff_size) { sf = s; diff_size = i; }
+    }
+    int32_t lenb = 0;
+    if (scan < to_size) {
+        s = 0;
+        int32_t sb = 0;
+        for (int32_t i = 1; (scan >= last_scan + i) && (pos >= i); i++) {
+            if (from[pos - i] == to[scan - i]) s++;
+            if (s * 2 - i > sb * 2 - lenb) { sb = s; lenb = i; }
+        }
+    }
+    int32_t overlap = (last_scan + diff_size) - (scan - lenb);
+    if (overlap > 0) {
+        s = 0;
+        int32_t ss = 0, lens = 0;
+        for (int32_t i = 0; i < overlap; i++) {
+            if (to[last_scan + diff_size - overlap + i] == from[last_pos + diff_size - overlap + i]) s++;
+            if (to[scan - lenb + i] == from[pos - lenb + i]) s--;
+            if (s > ss) { ss = s; lens = i + 1; }
+        }
+        diff_size += (lens - overlap);
+        lenb -= lens;
+    }
+    for (int32_t i = 0; i < diff_size; i++) debuf[i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
+    int32_t extra_pos = last_scan + diff_size;
+    int32_t extra_size = scan - lenb - extra_pos;
+    Op o;
+    o.diff_len = diff_size;
+    o.diff = (uint8_t *)xmalloc((size_t)diff_size);
+    memcpy(o.diff, debuf, (size_t)diff_size);
+    o.extra_len = extra_size;
+    o.extra = (uint8_t *)xmalloc((size_t)extra_size);
+    for (int32_t i = 0; i < extra_size; i++) o.extra[i] = to[extra_pos + i];
+    o.adj = (pos - lenb) - (last_pos + diff_size);
+    opvec_push(ops, o);
+    *last_scan_p = scan - lenb;
+    *last_pos_p = pos - lenb;
+    *last_offset_p = pos - scan;
+}
+
+static OpVec bsdiff_ops(const Buf *from, const Buf *to) {
+    OpVec ops = {0};
+    int32_t from_size = (int32_t)from->n, to_size = (int32_t)to->n;
+    int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(int32_t));
+    sa[0] = from_size;
+    if (from_size && divsufsort(from->d, &sa[1], from_size) != 0) die("divsufsort failed");
+    uint8_t *debuf = (uint8_t *)xmalloc((size_t)to_size + 1);
+    int32_t scan = 0, len = 0, last_scan = 0, last_pos = 0, last_offset = 0, pos = 0;
+    while (scan < to_size) {
+        int32_t from_score = 0;
+        scan += len;
+        for (int32_t scsc = scan; scan < to_size; scan++) {
+            len = suffix_search(sa, from->d, from_size, to->d + scan, to_size - scan, 0, from_size, &pos);
+            for (; scsc < scan + len; scsc++) {
+                if ((scsc + last_offset < from_size) && (from->d[scsc + last_offset] == to->d[scsc])) from_score++;
+            }
+            if (((len == from_score) && (len != 0)) || (len > from_score + 8)) break;
+            if ((scan + last_offset < from_size) && (from->d[scan + last_offset] == to->d[scan])) from_score--;
+        }
+        if ((len != from_score) || (scan == to_size))
+            emit_bsdiff_op(&ops, from->d, from_size, to->d, to_size, debuf, scan, pos,
+                           &last_scan, &last_pos, &last_offset);
+    }
+    free(sa); free(debuf);
+    return ops;
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* A1 field and apply planning.                                                            */
+/* ------------------------------------------------------------------------------------- */
+static uint16_t u16le_at(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t u32le_at(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
+    int32_t s = (up >> 10) & 1, imm10 = up & 0x3ff, imm11 = lo & 0x7ff;
+    int32_t j1 = (lo >> 13) & 1, j2 = (lo >> 11) & 1;
+    int32_t i1 = 1 - (j1 ^ s), i2 = 1 - (j2 ^ s);
+    int32_t v = (s << 23) | (i1 << 22) | (i2 << 21) | (imm10 << 11) | imm11;
+    if (s) v -= (1 << 24);
+    return v;
+}
+
+static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
+    detools_m4_pack(M4_PK_BL, imm32, out);
+}
+
+static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
+    if (fpk & 1u) return 0;
+    if (fpk + 4u > from_size) return 0;
+    uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+    return ((up & 0xf800u) == 0xf000u) && ((lo & 0xd000u) == 0xd000u);
+}
+
+static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
+    IVec s = {0};
+    int32_t lo = fp0, hi = fp0 + dl;
+    int32_t a = (lo & 1) ? lo + 1 : lo;
+    while (a + 2 <= hi && a + 2 <= (int32_t)from_size) {
+        uint16_t up = u16le_at(frm + a);
+        if ((up & 0xf800u) == 0x4800u) {
+            int32_t t = (a & ~3) + 4 * (int32_t)(up & 0xffu) + 4;
+            if (lo <= t && t + 4 <= hi && t + 4 <= (int32_t)from_size) ivec_push(&s, t);
+        }
+        a += 2;
+    }
+    if (s.n) {
+        qsort(s.v, s.n, sizeof(s.v[0]), cmp_i32);
+        size_t w = 0;
+        for (size_t i = 0; i < s.n; i++) if (!w || s.v[w - 1] != s.v[i]) s.v[w++] = s.v[i];
+        s.n = w;
+    }
+    return s;
+}
+
+static int ivec_has(const IVec *v, int32_t x) {
+    size_t lo = 0, hi = v->n;
+    while (lo < hi) {
+        size_t m = (lo + hi) >> 1;
+        if (v->v[m] < x) lo = m + 1;
+        else hi = m;
+    }
+    return lo < v->n && v->v[lo] == x;
+}
+
+enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
+typedef struct { int type; int64_t delta; } Event;
+
+static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
+                            const IVec *ldr, const Op *o, int32_t fp0, int32_t k) {
+    uint32_t fpk = (uint32_t)(fp0 + k);
+    int pure = o->diff[k] == 0 && o->diff[k + 1] == 0 && o->diff[k + 2] == 0 && o->diff[k + 3] == 0;
+    if (is_local_bl(frm, from_size, fpk)) {
+        if (!pure) return (Event){ EV_SBL, 0 };
+        const FieldDelta *r = fd_find(fd, fpk);
+        return (Event){ EV_BL, (r && r->kind == STREAM_BL) ? r->delta : 0 };
+    }
+    if (fpk + 4 <= from_size && pure && ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find(fd, fpk);
+        return (Event){ EV_EX, (r && r->kind == STREAM_LDR) ? r->delta : 0 };
+    }
+    return (Event){ EV_NONE, 0 };
+}
+
+static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
+                                        const IVec *ldr, int32_t fp0, int32_t k) {
+    uint32_t fpk = (uint32_t)(fp0 + k);
+    if (is_local_bl(frm, from_size, fpk)) {
+        const FieldDelta *r = fd_find(fd, fpk);
+        return (Event){ EV_BL, (r && r->kind == STREAM_BL) ? r->delta : 0 };
+    }
+    if (fpk + 4 <= from_size && ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find(fd, fpk);
+        return (Event){ EV_EX, (r && r->kind == STREAM_LDR) ? r->delta : 0 };
+    }
+    return (Event){ EV_NONE, 0 };
+}
+
+static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
+    FieldDeltaVec out = {0};
+    m4_stream_t st[M4_NSTREAMS];
+    if (detools_m4_disassemble_ex(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                                  fr->code_begin, fr->code_end, 0, 0, st)) die("M0 disassemble failed");
+    int active[STREAM_N] = {1, 1, 0, 1, 1, 0};
+    int mapidx[STREAM_N] = {M4_DATA, M4_CODE, M4_BW, M4_BL, M4_LDR, M4_LDRW};
+    for (int s = 0; s < STREAM_N; s++) {
+        if (!active[s]) continue;
+        const m4_stream_t *ms = &st[mapidx[s]];
+        for (size_t bi = 0; bi < blocks[s].n; bi++) {
+            const Block *b = &blocks[s].v[bi];
+            for (int32_t k = 0; k < b->n; k++) {
+                size_t idx = (size_t)b->from_offset + (size_t)k;
+                if (idx < ms->n) fd_put(&out, ms->a[idx].addr, s, b->values[k]);
+            }
+        }
+    }
+    detools_m4_free_streams(st);
+    fd_finalize(&out);
+    return out;
+}
+
+static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                                  uint32_t to_size, const FieldDeltaVec *fd) {
+    int FWD = to_size <= from_size;
+    int32_t fp0 = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len;) {
+                if (k + 4 <= o->diff_len) {
+                    Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
+                    uint32_t fpk = (uint32_t)(fp0 + k);
+                    const FieldDelta *real = fd_find(fd, fpk);
+                    int ok = (ev.type == EV_BL && real && real->kind == STREAM_BL) ||
+                             (ev.type == EV_EX && real && real->kind == STREAM_LDR);
+                    if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
+                        memset(o->diff + k, 0, 4);
+                    }
+                    if (ev.type) { k += 4; continue; }
+                }
+                k++;
+            }
+        } else {
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
+                    uint32_t fpk = (uint32_t)(fp0 + k);
+                    const FieldDelta *real = fd_find(fd, fpk);
+                    int ok = (ev.type == EV_BL && real && real->kind == STREAM_BL) ||
+                             (ev.type == EV_EX && real && real->kind == STREAM_LDR);
+                    if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
+                        memset(o->diff + k, 0, 4);
+                    }
+                    if (ev.type) { top -= 4; continue; }
+                }
+                top--;
+            }
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+}
+
+static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t to_size) {
+    int FWD = to_size <= from_size;
+    int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
+    for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        for (int32_t k = 0; k < o->diff_len; k++) {
+            int32_t a = fp + k;
+            if (0 <= a && (uint32_t)a < from_size) {
+                int32_t t = tp + k;
+                if (FWD) { if (readarr[a] < t) readarr[a] = t; }
+                else { if (readarr[a] > t) readarr[a] = t; }
+            }
+        }
+        tp += o->diff_len + o->extra_len;
+        fp += o->diff_len + o->adj;
+    }
+    uint8_t *pres = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    int32_t wi = 0;
+    if (FWD) {
+        tp = fp = 0;
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            const Op *o = &ops->v[oi];
+            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
+                int32_t tpw = tp + k;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
+            }
+            wi += o->extra_len;
+            tp += o->diff_len + o->extra_len;
+            fp += o->diff_len + o->adj;
+        }
+    } else {
+        typedef struct { int32_t tp, fp; const Op *o; } M;
+        M *m = (M *)xmalloc(ops->n * sizeof(*m));
+        tp = fp = 0;
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            m[oi] = (M){tp, fp, &ops->v[oi]};
+            tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+            fp += ops->v[oi].diff_len + ops->v[oi].adj;
+        }
+        for (size_t rr = ops->n; rr-- > 0;) {
+            const Op *o = m[rr].o;
+            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
+                int32_t tpw = m[rr].tp + o->diff_len + e;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
+            }
+            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
+                int32_t tpw = m[rr].tp + k;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
+            }
+        }
+        free(m);
+    }
+    free(readarr);
+    return pres;
+}
+
+static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+                                   const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                                   const uint8_t *presset) {
+    int FWD = to_size <= from_size;
+    size_t span = from_size > to_size ? from_size : to_size;
+    uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
+    typedef struct { int32_t tp, fp; const Op *o; } M;
+    M *m = (M *)xmalloc(ops->n * sizeof(*m));
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        m[oi] = (M){tp, fp, &ops->v[oi]};
+        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+        fp += ops->v[oi].diff_len + ops->v[oi].adj;
+    }
+    for (size_t idx = 0; idx < ops->n; idx++) {
+        size_t oi = FWD ? idx : ops->n - 1 - idx;
+        const Op *o = m[oi].o;
+        IVec ldr = op_ldr_set(frm, m[oi].fp, o->diff_len, from_size);
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len;) {
+                if (k + 4 <= o->diff_len) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, m[oi].fp, k);
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        uint8_t packed[4];
+                        uint32_t fpk = (uint32_t)(m[oi].fp + k);
+                        if (ev.type == EV_BL) {
+                            uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+                            pack_bl_local(unpack_bl_local(up, lo) - ev.delta, packed);
+                        } else {
+                            uint32_t val = u32le_at(frm + fpk);
+                            wr32le(packed, val - (uint32_t)ev.delta);
+                        }
+                        for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
+                        k += 4; continue;
+                    } else if (ev.type == EV_SBL) { k += 4; continue; }
+                }
+                k++;
+            }
+        } else {
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, m[oi].fp, k);
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        uint8_t packed[4];
+                        uint32_t fpk = (uint32_t)(m[oi].fp + k);
+                        if (ev.type == EV_BL) {
+                            uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+                            pack_bl_local(unpack_bl_local(up, lo) - ev.delta, packed);
+                        } else {
+                            uint32_t val = u32le_at(frm + fpk);
+                            wr32le(packed, val - (uint32_t)ev.delta);
+                        }
+                        for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
+                        top -= 4; continue;
+                    } else if (ev.type == EV_SBL) { top -= 4; continue; }
+                }
+                top--;
+            }
+        }
+        free(ldr.v);
+    }
+    uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
+    memcpy(buf, frm, from_size);
+    uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
+    uint8_t *corr = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    uint8_t *chas = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    int32_t wi = 0;
+#define SIM_WRITE(TP, FP, ISD, DB) do { \
+        int32_t _tp = (TP), _fp = (FP); \
+        if (presset[wi] && 0 <= _tp && (uint32_t)_tp < from_size && !jhas[_tp]) { jhas[_tp] = 1; jval[_tp] = buf[_tp]; } \
+        uint8_t produced; \
+        if (ohas[_tp]) produced = oval[_tp]; \
+        else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) src = jhas[_fp] ? jval[_fp] : buf[_fp]; produced = (uint8_t)((DB) + src); } \
+        uint8_t want = true_to[_tp]; \
+        uint8_t c = (uint8_t)(want - produced); \
+        if (c) { corr[_tp] = c; chas[_tp] = 1; } \
+        buf[_tp] = want; wi++; \
+    } while (0)
+    if (FWD) {
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            const Op *o = m[oi].o;
+            for (int32_t k = 0; k < o->diff_len; k++) SIM_WRITE(m[oi].tp + k, m[oi].fp + k, 1, o->diff[k]);
+            for (int32_t e = 0; e < o->extra_len; e++) SIM_WRITE(m[oi].tp + o->diff_len + e, -1, 0, o->extra[e]);
+        }
+    } else {
+        for (size_t rr = ops->n; rr-- > 0;) {
+            const Op *o = m[rr].o;
+            for (int32_t e = o->extra_len - 1; e >= 0; e--) SIM_WRITE(m[rr].tp + o->diff_len + e, -1, 0, o->extra[e]);
+            for (int32_t k = o->diff_len - 1; k >= 0; k--) SIM_WRITE(m[rr].tp + k, m[rr].fp + k, 1, o->diff[k]);
+        }
+    }
+#undef SIM_WRITE
+    for (uint32_t i = 0; i < to_size; i++) if (!chas[i]) corr[i] = 0;
+    free(chas); free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
+    return corr;
+}
+
+static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                                  const uint8_t *presset, const uint8_t *corr) {
+    int FWD = to_size <= from_size;
+    OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
+    typedef struct { int32_t tp, fp; const Op *o; size_t orig; } M;
+    M *m = (M *)xmalloc(ops->n * sizeof(*m));
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        m[oi] = (M){tp, fp, &ops->v[oi], oi};
+        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+        fp += ops->v[oi].diff_len + ops->v[oi].adj;
+    }
+    int32_t wi = 0;
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        const Op *o = m[oi].o;
+        OpPC *pc = &out[step];
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
+                if (presset[wi]) ivec_push(&pc->pres, k);
+                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+            }
+            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
+                int32_t off = o->diff_len + e;
+                if (presset[wi]) ivec_push(&pc->pres, off);
+                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+            }
+        } else {
+            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
+                int32_t off = o->diff_len + e;
+                if (presset[wi]) ivec_push(&pc->pres, off);
+                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+            }
+            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
+                if (presset[wi]) ivec_push(&pc->pres, k);
+                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+            }
+            qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+        }
+    }
+    free(m);
+    return out;
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* LZSS planning and entropy models.                                                       */
+/* ------------------------------------------------------------------------------------- */
+typedef struct { int type; int32_t start, len, dist; } Token;
+typedef struct { Token *v; size_t n, cap; } TokenVec;
+typedef struct { int32_t dist, len; } Cand;
+
+static void tok_push(TokenVec *v, Token t) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 1024;
+        v->v = (Token *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = t;
+}
+
+static void huff_lengths(const uint32_t freq[256], uint8_t L[256]) {
+    int parent[512], active[512], an = 256, m = 256;
+    uint32_t wt[512];
+    for (int i = 0; i < 512; i++) parent[i] = -1, wt[i] = 0;
+    for (int i = 0; i < 256; i++) { wt[i] = freq[i]; active[i] = i; }
+    while (an > 1) {
+        int a = -1, b = -1;
+        for (int ii = 0; ii < an; ii++) {
+            int nid = active[ii];
+            if (a < 0 || wt[nid] < wt[a] || (wt[nid] == wt[a] && nid < a)) { b = a; a = nid; }
+            else if (b < 0 || wt[nid] < wt[b] || (wt[nid] == wt[b] && nid < b)) b = nid;
+        }
+        wt[m] = wt[a] + wt[b]; parent[a] = m; parent[b] = m;
+        int wn = 0;
+        for (int ii = 0; ii < an; ii++) if (active[ii] != a && active[ii] != b) active[wn++] = active[ii];
+        active[wn++] = m++;
+        an = wn;
+    }
+    for (int s = 0; s < 256; s++) {
+        int d = 0, p = s;
+        while (parent[p] != -1) { p = parent[p]; d++; }
+        L[s] = (uint8_t)d;
+    }
+}
+
+static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
+    uint32_t f0[256], f1[256];
+    for (int i = 0; i < 256; i++) f0[i] = f1[i] = 1;
+    for (size_t i = 0; i < n; i++) { if (i & 1) f1[frm[i]]++; else f0[frm[i]]++; }
+    huff_lengths(f0, L0);
+    huff_lengths(f1, L1);
+}
+
+static uint64_t gammalen_u32(uint32_t x) { return (uint64_t)(2 * bitlen32(x) - 1); }
+
+static TokenVec lz_parse_once(const uint8_t *data, size_t n, const uint16_t *litbits,
+                              Cand (*cands)[2], uint8_t *ncand, int (*dist_bits)(int32_t, int),
+                              int dk) {
+    (void)data;
+    uint32_t maxrun = 1024;
+    uint64_t *ph = (uint64_t *)xcalloc(n + 1, sizeof(uint64_t));
+    for (size_t i = 0; i < n; i++) ph[i + 1] = ph[i] + litbits[i];
+    uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+    Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
+    const uint64_t INF = UINT64_MAX / 4;
+    cost[n] = 0;
+    for (size_t ri = n; ri-- > 0;) {
+        uint64_t best = INF;
+        Token bt = {0};
+        uint64_t runbits = 0;
+        size_t lim = n < ri + maxrun ? n : ri + maxrun;
+        for (size_t j = ri + 1; j <= lim; j++) {
+            runbits += litbits[j - 1];
+            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + runbits + cost[j];
+            if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+        }
+        for (int ci = 0; ci < ncand[ri]; ci++) {
+            int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
+            uint64_t db = (uint64_t)dist_bits(bd, dk);
+            for (int32_t l = 3; l <= bl; l++) {
+                uint64_t c = 1 + db + gammalen_u32((uint32_t)l) + cost[ri + (size_t)l];
+                if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
+            }
+        }
+        cost[ri] = best;
+        nxt[ri] = bt;
+    }
+    TokenVec tv = {0};
+    for (size_t i = 0; i < n;) {
+        Token t = nxt[i];
+        tok_push(&tv, t);
+        i += (size_t)t.len;
+    }
+    free(ph); free(cost); free(nxt);
+    return tv;
+}
+
+static int fixed_dist_bits(int32_t d, int k) { (void)d; return k; }
+static int rice_dist_bits(int32_t d, int k) { uint32_t v = (uint32_t)d - 1u; return (int)((v >> k) + 1u + (uint32_t)k); }
+
+static int fit_k_tokens(const TokenVec *tv) {
+    int best = 0;
+    uint64_t bestc = UINT64_MAX;
+    for (int k = 0; k < 10; k++) {
+        uint64_t c = 0;
+        for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'R') {
+            uint32_t v = (uint32_t)tv->v[i].dist - 1u;
+            c += (v >> k) + 1u + (uint32_t)k;
+        }
+        if (c < bestc) { bestc = c; best = k; }
+    }
+    return best;
+}
+
+static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litbits, int W) {
+    int32_t win = 1 << W, maxchain = 128, maxm = 2048;
+    Cand (*cands)[2] = (Cand (*)[2])xcalloc(n ? n : 1, sizeof(Cand[2]));
+    uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
+    int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
+    for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
+    int32_t *prev = (int32_t *)xmalloc((n ? n : 1) * sizeof(int32_t));
+    for (size_t i = 0; i < n; i++) prev[i] = -1;
+    for (size_t i = 0; i < n; i++) {
+        int32_t bl = 0, bd = 0;
+        Cand near = {0, 0};
+        if (i + 3 <= n) {
+            uint32_t key = (uint32_t)data[i] | ((uint32_t)data[i+1] << 8) | ((uint32_t)data[i+2] << 16);
+            int c = 0;
+            for (int32_t pj = head[key]; pj >= 0;) {
+                if ((int32_t)i - pj > win || c >= maxchain) break;
+                c++;
+                int32_t ml = (int32_t)((n - i) < (size_t)maxm ? (n - i) : (size_t)maxm), l = 0;
+                while (l < ml && data[(size_t)pj + (size_t)l] == data[i + (size_t)l]) l++;
+                if (l >= 3 && near.len == 0) near = (Cand){ (int32_t)i - pj, l };
+                if (l > bl) { bl = l; bd = (int32_t)i - pj; }
+                pj = prev[pj];
+            }
+            prev[i] = head[key];
+            head[key] = (int32_t)i;
+        }
+        if (near.len) cands[i][ncand[i]++] = near;
+        if (bl >= 3 && !(near.len && near.dist == bd && near.len == bl)) cands[i][ncand[i]++] = (Cand){ bd, bl };
+    }
+    free(head); free(prev);
+    TokenVec seq = lz_parse_once(data, n, litbits, cands, ncand, fixed_dist_bits, W);
+    int k = fit_k_tokens(&seq);
+    for (int pass = 0; pass < 2; pass++) {
+        free(seq.v);
+        seq = lz_parse_once(data, n, litbits, cands, ncand, rice_dist_bits, k);
+        int nk = fit_k_tokens(&seq);
+        if (nk == k) break;
+        k = nk;
+    }
+    free(cands); free(ncand);
+    return seq;
+}
+
+static void build_content(const OpVec *ops, uint32_t from_size, uint32_t to_size, Buf *content, Buf *tags, size_t **ends_out) {
+    int FWD = to_size <= from_size;
+    size_t nops = ops->n;
+    size_t *ends = (size_t *)xmalloc((nops ? nops : 1) * sizeof(size_t));
+    int32_t *tp0 = (int32_t *)xmalloc((nops ? nops : 1) * sizeof(int32_t));
+    int32_t tp = 0;
+    for (size_t i = 0; i < nops; i++) { tp0[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len; }
+    for (size_t step = 0; step < nops; step++) {
+        size_t oi = FWD ? step : nops - 1 - step;
+        const Op *o = &ops->v[oi];
+        IVec lits = {0};
+        for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
+        Buf tmp = {0};
+        put_uleb(&tmp, (uint32_t)lits.n);
+        buf_write(content, tmp.d, tmp.n);
+        for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
+        tmp.n = 0;
+        if (FWD) {
+            int32_t prev = 0;
+            for (size_t li = 0; li < lits.n; li++) {
+                int32_t k = lits.v[li];
+                put_uleb(&tmp, (uint32_t)(k - prev));
+                buf_write(content, tmp.d, tmp.n);
+                for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
+                tmp.n = 0;
+                buf_put(content, o->diff[k]); buf_put(tags, 0);
+                prev = k;
+            }
+            int32_t exstart = tp0[oi] + o->diff_len;
+            for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+        } else {
+            int32_t exstart = tp0[oi] + o->diff_len;
+            for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+            int32_t prev = o->diff_len;
+            for (size_t r = lits.n; r-- > 0;) {
+                int32_t k = lits.v[r];
+                put_uleb(&tmp, (uint32_t)(prev - k));
+                buf_write(content, tmp.d, tmp.n);
+                for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
+                tmp.n = 0;
+                buf_put(content, o->diff[k]); buf_put(tags, 0);
+                prev = k;
+            }
+        }
+        ends[step] = content->n;
+        free(lits.v); buf_free(&tmp);
+    }
+    free(tp0);
+    *ends_out = ends;
+}
+
+typedef struct { uint32_t cc; int kind; int64_t delta; } Inj;
+typedef struct { Inj *v; size_t n, cap; } InjVec;
+
+static void inj_push(InjVec *v, uint32_t cc, int kind, int64_t delta) {
+    if (v->n == v->cap) {
+        v->cap = v->cap ? v->cap * 2 : 16;
+        v->v = (Inj *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
+    }
+    v->v[v->n++] = (Inj){cc, kind, delta};
+}
+
+static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
+                                   int32_t fp0, const FieldDeltaVec *fd, const IVec *ldr) {
+    IVec lits = {0};
+    for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
+    InjVec out = {0};
+    uint32_t cc = (uint32_t)uleb_len((uint32_t)lits.n);
+    if (FWD) {
+        size_t li_pf = 0;
+        int32_t nextpos = -1;
+        if (lits.n) {
+            cc += (uint32_t)uleb_len((uint32_t)lits.v[0]) + 1u;
+            nextpos = lits.v[0];
+            li_pf = 1;
+        }
+#define CONSUME_F(KK) do { if ((KK) == nextpos) { if (li_pf < lits.n) { \
+            cc += (uint32_t)uleb_len((uint32_t)(lits.v[li_pf] - lits.v[li_pf - 1])) + 1u; \
+            nextpos = lits.v[li_pf++]; } else nextpos = -1; } } while (0)
+        for (int32_t k = 0; k < o->diff_len;) {
+            if (k + 4 <= o->diff_len) {
+                Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, k);
+                if (ev.type == EV_BL || ev.type == EV_EX) { inj_push(&out, cc, ev.type, ev.delta); k += 4; continue; }
+                if (ev.type == EV_SBL) { for (int b = 0; b < 4; b++) CONSUME_F(k + b); k += 4; continue; }
+            }
+            CONSUME_F(k); k++;
+        }
+#undef CONSUME_F
+    } else {
+        size_t li_pf = 0;
+        int32_t nextpos = -1;
+        if (lits.n) {
+            cc += (uint32_t)uleb_len((uint32_t)(o->diff_len - lits.v[lits.n - 1])) + 1u;
+            nextpos = lits.v[lits.n - 1];
+            li_pf = 1;
+        }
+#define CONSUME_D(KK) do { if ((KK) == nextpos) { if (li_pf < lits.n) { \
+            size_t idx = lits.n - 1 - li_pf; \
+            cc += (uint32_t)uleb_len((uint32_t)(lits.v[idx + 1] - lits.v[idx])) + 1u; \
+            nextpos = lits.v[idx]; li_pf++; } else nextpos = -1; } } while (0)
+        cc += (uint32_t)o->extra_len;
+        for (int32_t k = o->diff_len - 1; k >= 0;) {
+            int32_t ks = k - 3;
+            if (ks >= 0) {
+                Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, ks);
+                if (ev.type == EV_BL || ev.type == EV_EX) { inj_push(&out, cc, ev.type, ev.delta); k -= 4; continue; }
+                if (ev.type == EV_SBL) { for (int b = 3; b >= 0; b--) CONSUME_D(ks + b); k -= 4; continue; }
+            }
+            CONSUME_D(k); k--;
+        }
+#undef CONSUME_D
+    }
+    free(lits.v);
+    return out;
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* Binary range encoder and models.                                                        */
+/* ------------------------------------------------------------------------------------- */
+typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
+typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
+typedef struct { uint16_t p[256]; uint8_t rate; } BTE;
+typedef struct { uint16_t m[4]; int h; } FLE;
+typedef struct { BTE t; } BVE;
+typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
+
+static void re_shift_low(REnc *r) {
+    if (r->low < 0xff000000ull || r->low > 0xffffffffull) {
+        uint8_t c = r->cache;
+        for (;;) {
+            buf_put(&r->out, (uint8_t)(c + (uint8_t)(r->low >> 32)));
+            c = 0xff;
+            r->csz--;
+            if (r->csz == 0) break;
+        }
+        r->cache = (uint8_t)(r->low >> 24);
+    }
+    r->csz++;
+    r->low = (r->low << 8) & 0xffffffffull;
+}
+
+static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz = 1; }
+
+static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
+    uint32_t p = *prob, bound = (r->range >> 12) * p;
+    if (bit == 0) { r->range = bound; *prob = (uint16_t)(p + ((RC_PBIT - p) >> rate)); }
+    else { r->low += bound; r->range -= bound; *prob = (uint16_t)(p - (p >> rate)); }
+    while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
+}
+
+static void re_raw(REnc *r, int bit) {
+    uint32_t bound = r->range >> 1;
+    if (bit == 0) r->range = bound;
+    else { r->low += bound; r->range -= bound; }
+    while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
+}
+
+static Buf re_flush_opt(REnc *r) {
+    int t = bitlen32(r->range) - 1;
+    uint64_t mask = (1ull << t) - 1ull;
+    if (r->low & mask) r->low = (r->low + (1ull << t)) & ~mask;
+    size_t base = r->out.n;
+    for (int i = 0; i < 5; i++) re_shift_low(r);
+    while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
+    Buf b = r->out;
+    r->out = (Buf){0};
+    return b;
+}
+
+static void put_raw_bits(REnc *r, uint32_t v, int nb) {
+    for (int sh = nb - 1; sh >= 0; sh--) re_raw(r, (int)((v >> sh) & 1u));
+}
+
+static void w_gamma(REnc *r, uint32_t m) {
+    int n = bitlen32(m) - 1;
+    for (int i = 0; i < n; i++) re_raw(r, 0);
+    for (int i = n; i >= 0; i--) re_raw(r, (int)((m >> i) & 1u));
+}
+
+static void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
+
+static void w_dz(REnc *r, uint32_t x) {
+    uint32_t m = x + 1u;
+    int n = bitlen32(m);
+    w_gamma(r, (uint32_t)n);
+    for (int i = n - 2; i >= 0; i--) re_raw(r, (int)((m >> i) & 1u));
+}
+
+static void bt_init_e(BTE *t) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; t->rate = 5; }
+
+static void bt_encode(BTE *t, REnc *r, uint8_t byte) {
+    int m = 1;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        re_bit(r, &t->p[m], bit, t->rate);
+        m = (m << 1) | bit;
+    }
+}
+
+static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t, int rate) {
+    uint32_t hist[256], w[512];
+    for (int i = 0; i < 256; i++) hist[i] = 1;
+    for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
+    for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
+    for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
+    t->p[0] = RC_PHALF; t->rate = (uint8_t)rate;
+    for (int m = 1; m < 256; m++) {
+        uint32_t num = w[2*m], den = w[m];
+        uint32_t pr = den ? (2u * RC_PBIT * num + den) / (2u * den) : RC_PHALF;
+        t->p[m] = (uint16_t)(pr < 1 ? 1 : (pr > RC_PBIT - 1 ? RC_PBIT - 1 : pr));
+    }
+}
+
+static void ug_init_e(UGE *g, char code, int k) {
+    g->code = (uint8_t)code; g->k = (uint8_t)k;
+    for (int i = 0; i <= UG_CTX; i++) { g->u[i] = RC_PHALF; for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF; }
+}
+
+static int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
+
+static void ug_encode(UGE *g, REnc *r, uint32_t v) {
+    uint32_t cl;
+    if (g->code == 'r') {
+        cl = v >> g->k;
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, 5);
+        re_bit(r, &g->u[ug_c((int)cl)], 0, 5);
+        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c(pos)], (int)((v >> (g->k - 1 - pos)) & 1u), 5);
+    } else {
+        uint32_t mm = v + 1u;
+        cl = (uint32_t)bitlen32(mm) - 1u;
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, 5);
+        re_bit(r, &g->u[ug_c((int)cl)], 0, 5);
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), 5);
+    }
+}
+
+static void fl_init_e(FLE *f) { for (int i = 0; i < 4; i++) f->m[i] = RC_PHALF; f->h = 0; }
+static void fl_encode(FLE *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, 5); f->h = ((f->h << 1) | b) & 3; }
+
+static void bv_encode(BVE *v, REnc *r, int64_t x) {
+    Buf tmp = {0};
+    put_pack_size(&tmp, x);
+    for (size_t i = 0; i < tmp.n; i++) bt_encode(&v->t, r, tmp.d[i]);
+    buf_free(&tmp);
+}
+
+static void dr_init_e(DRE *d, int64_t *dic, int cap) {
+    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->last = 0; d->rh = 0; d->hit = DR_HIT_INIT;
+    for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
+}
+
+typedef struct {
+    BTE lit[2];
+    FLE flag;
+    BVE dval;
+    UGE tc, gd, gl, gs, pg, cg, dibl, diex;
+    DRE dr_bl, dr_ex;
+    int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
+} Models;
+
+static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
+    DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
+    UGE *gix = kind == EV_BL ? &M->dibl : &M->diex;
+    int ri = D->rh | (D->last == 0 ? 2 : 0);
+    if (delta == D->last) {
+        re_bit(r, &D->rep[ri], 1, 5);
+        D->rh = 1;
+        return;
+    }
+    re_bit(r, &D->rep[ri], 0, 5);
+    D->rh = 0;
+    D->last = delta;
+    int j = -1;
+    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
+    if (j >= 0) {
+        if (j == 0) die("unexpected delta dict index 0");
+        re_bit(r, &D->hit, 1, 5);
+        ug_encode(gix, r, (uint32_t)(j - 1));
+        int64_t t = D->dic[j];
+        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = t;
+    } else {
+        if (D->K >= D->cap) die("delta dictionary cap exceeded");
+        re_bit(r, &D->hit, 0, 5);
+        bv_encode(&M->dval, r, delta);
+        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = delta;
+        D->K++;
+    }
+}
+
+static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
+    w_dz(r, (uint32_t)o->diff_len);
+    w_dz(r, (uint32_t)o->extra_len);
+    w_dz(r, zz32(o->adj));
+    ug_encode(&M->pg, r, (uint32_t)pc->pres.n);
+    int32_t prev = 0;
+    for (size_t i = 0; i < pc->pres.n; i++) { ug_encode(&M->pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
+    ug_encode(&M->cg, r, (uint32_t)pc->corr.n);
+    prev = 0;
+    for (size_t i = 0; i < pc->corr.n; i++) {
+        ug_encode(&M->cg, r, (uint32_t)(pc->corr.v[i].off - prev));
+        prev = pc->corr.v[i].off;
+        bt_encode(&M->dval.t, r, pc->corr.v[i].byte);
+    }
+}
+
+static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size, uint32_t to_size,
+                       const FieldDeltaVec *fd, const OpPC *pc, int W) {
+    int FWD = to_size <= from_size;
+    Buf content = {0}, tags = {0};
+    size_t *ends = NULL;
+    build_content(ops, from_size, to_size, &content, &tags, &ends);
+    uint8_t L0[256], L1[256];
+    from_huff_lengths(frm, from_size, L0, L1);
+    uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
+    for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
+    TokenVec seq = lz_optimal_c(content.d, content.n, litbits, W);
+    int kd = fit_k_tokens(&seq);
+    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
+    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    int32_t fp = 0;
+    for (size_t i = 0; i < ops->n; i++) { fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj; }
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
+        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr);
+        free(ldr.v);
+    }
+    Models M;
+    memset(&M, 0, sizeof(M));
+    lit_tree_seed_e(frm, from_size, 0, &M.lit[0], 5);
+    lit_tree_seed_e(frm, from_size, 1, &M.lit[1], 4);
+    fl_init_e(&M.flag);
+    bt_init_e(&M.dval.t);
+    ug_init_e(&M.tc, 'r', 11);
+    ug_init_e(&M.gd, 'r', kd);
+    ug_init_e(&M.gl, 'g', 0);
+    ug_init_e(&M.gs, 'g', 0);
+    ug_init_e(&M.pg, 'g', 0);
+    ug_init_e(&M.cg, 'g', 0);
+    ug_init_e(&M.dibl, 'g', 0);
+    ug_init_e(&M.diex, 'g', 0);
+    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
+    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
+    REnc rc;
+    re_init(&rc);
+    ug_encode(&M.tc, &rc, (uint32_t)seq.n);
+    put_raw_bits(&rc, (uint32_t)kd, 4);
+    w_gz(&rc, (uint32_t)ops->n);
+    size_t tok_i = 0, pos = 0, span_pos = 0;
+    int tok_mode = 0;
+    int32_t tok_left = 0;
+    Token cur = {0};
+    #define START_TOKEN() do { \
+        if (tok_i >= seq.n) die("content token underrun"); \
+        cur = seq.v[tok_i++]; \
+        if (cur.type == 'S') { fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; } \
+        else { fl_encode(&M.flag, &rc, 1); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \
+    } while (0)
+    #define EMIT_TO(ENDPOS) do { \
+        size_t _end = (ENDPOS); \
+        if (_end < pos || _end > content.n) die("invalid content cursor"); \
+        while (pos < _end) { \
+            if (!tok_mode) START_TOKEN(); \
+            size_t n = (size_t)tok_left < (_end - pos) ? (size_t)tok_left : (_end - pos); \
+            if (tok_mode == 'S') { \
+                for (size_t _em_i = 0; _em_i < n; _em_i++) { \
+                    uint8_t byte = content.d[(size_t)cur.start + span_pos + _em_i]; \
+                    bt_encode(&M.lit[tags.d[pos]], &rc, byte); pos++; \
+                } \
+                span_pos += n; \
+            } else pos += n; \
+            tok_left -= (int32_t)n; \
+            if (tok_left == 0) tok_mode = 0; \
+        } \
+    } while (0)
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        emit_geom_pc(&rc, &M, &ops->v[oi], &pc[step]);
+        size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
+        for (size_t ii = 0; ii < inj[step].n; ii++) {
+            EMIT_TO(base + inj[step].v[ii].cc);
+            emit_delta(&M, &rc, inj[step].v[ii].kind, inj[step].v[ii].delta);
+        }
+        EMIT_TO(op_end);
+    }
+    if (pos != content.n || tok_i != seq.n || tok_mode) die("content token cursor out of sync");
+    #undef START_TOKEN
+    #undef EMIT_TO
+    Buf body = re_flush_opt(&rc);
+    for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
+    free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
+    return body;
+}
+
+static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out,
+                      const char *cfg_out, int W) {
+    char *fbin = join2(from_dir, "watch.bin"), *tbin = join2(to_dir, "watch.bin");
+    char *felf = join2(from_dir, "watch.elf"), *telf = join2(to_dir, "watch.elf");
+    Buf from = slurp(fbin), to = slurp(tbin);
+    Ranges fr = elf_ranges(felf, &from, "from");
+    Ranges tr = elf_ranges(telf, &to, "to");
+    BlockVec blocks[STREAM_N] = {{0}};
+    Buf from_df = {0}, to_df = {0}, dfpatch = {0};
+    data_format_encode(&from, &to, &fr, &tr, &from_df, &to_df, blocks, &dfpatch);
+    OpVec ops = bsdiff_ops(&from_df, &to_df);
+    uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
+    int32_t fp_end_s = 0;
+    for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
+    FieldDeltaVec fd = build_field_deltas(&from, &fr, blocks);
+    coerce_reloc_literals(&ops, from.d, from_size, to_size, &fd);
+    uint8_t *presset = preserve_indices(&ops, from_size, to_size);
+    uint8_t *corr = corrections_hybrid(&ops, from.d, to.d, &fd, from_size, to_size, presset);
+    OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
+    Buf body = encode_body(&ops, from.d, from_size, to_size, &fd, pc, W);
+    Buf blob = {0};
+    buf_put_u32le(&blob, crc32_buf(from.d, from.n));
+    put_uleb(&blob, from_size);
+    put_uleb(&blob, to_size);
+    put_uleb(&blob, (uint32_t)fp_end_s);
+    buf_write(&blob, body.d, body.n);
+    buf_put_u32le(&blob, crc32_buf(to.d, to.n));
+    write_file(blob_out, blob.d, blob.n);
+    FILE *cf = fopen(cfg_out, "w");
+    if (!cf) { perror(cfg_out); exit(2); }
+    fprintf(cf, "%u %u %u %u %u %u %u\n",
+            fr.data_end ? 1u : 0u, fr.data_off_begin, fr.data_begin, fr.data_end,
+            fr.code_end ? 1u : 0u, fr.code_begin, fr.code_end);
+    fclose(cf);
+    (void)dfpatch;
+    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to); buf_free(&from_df); buf_free(&to_df); buf_free(&dfpatch);
+    free(presset); free(corr); free(fd.v);
+    for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
+    free(pc); free(ops.v);
+    for (int s = 0; s < STREAM_N; s++) { for (size_t i = 0; i < blocks[s].n; i++) free(blocks[s].v[i].values); free(blocks[s].v); }
+    free(fbin); free(tbin); free(felf); free(telf);
+}
+
+#ifdef RC_V3_ENC_MAIN
+int main(int argc, char **argv) {
+    if (argc != 6) {
+        fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out> <cfg_out> <W>\n", argv[0]);
+        return 2;
+    }
+    int W = atoi(argv[5]);
+    if (W <= 0) W = PATHE_W;
+    encode_a1(argv[1], argv[2], argv[3], argv[4], W);
+    return 0;
+}
+#endif

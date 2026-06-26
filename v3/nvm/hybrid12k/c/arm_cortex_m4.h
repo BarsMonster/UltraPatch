@@ -33,6 +33,11 @@ int  detools_m4_disassemble(const uint8_t *from, size_t from_size,
                             uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
                             uint32_t code_begin, uint32_t code_end,
                             m4_stream_t streams[M4_NSTREAMS]);
+int  detools_m4_disassemble_ex(const uint8_t *from, size_t from_size,
+                               uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
+                               uint32_t code_begin, uint32_t code_end,
+                               int emit_bw, int emit_ldr_w,
+                               m4_stream_t streams[M4_NSTREAMS]);
 void detools_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]);
 /* re-encode a relocated 32-bit field value into out[4] per pack kind */
 void detools_m4_pack(int pk, int32_t value, uint8_t out[4]);

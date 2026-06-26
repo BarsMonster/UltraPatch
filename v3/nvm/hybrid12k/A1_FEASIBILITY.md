@@ -51,9 +51,9 @@ No resident target store; the per-field delta values are pulled inline from the 
 
 ## Reproduce
 ```
-cc -O2 -DRC_V3_MAIN -DRC_V3_NVM -I c -o dec c/rc_v3.c c/flash_nvm.c
+make -C c                              # builds C encoder c/hy_enc and decoder c/hy_dec
 python3 -B tools/a1_golden_rt.py 10        # golden round-trip + size
-python3 -B tools/hy_verify.py 10 dec       # C under NVM emulator: 256/256 + amp=0
+python3 -B tools/hy_verify.py 10 c/hy_dec  # C under NVM emulator: 256/256 + amp=0
 python3 -B tools/a1_feasibility.py 10      # encoder-side derivability measurement
 arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c -o /tmp/rc_v3_arm.o
 arm-none-eabi-size /tmp/rc_v3_arm.o

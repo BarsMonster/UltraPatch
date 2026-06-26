@@ -364,11 +364,18 @@ int detools_m4_disassemble(const uint8_t *from, size_t from_size,
                            uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
                            uint32_t code_begin, uint32_t code_end,
                            m4_stream_t streams[M4_NSTREAMS]) {
+    return detools_m4_disassemble_ex(from, from_size, data_offset, data_begin, data_end,
+                                     code_begin, code_end, 0, 0, streams);
+}
+int detools_m4_disassemble_ex(const uint8_t *from, size_t from_size,
+                              uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
+                              uint32_t code_begin, uint32_t code_end,
+                              int emit_bw, int emit_ldr_w,
+                              m4_stream_t streams[M4_NSTREAMS]) {
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
-    /* ultrapatch M0+ config: suppress spurious B.W / LDR.W (Thumb-2, impossible on ARMv6-M) */
     disassemble(from, from_size, data_offset, data_off_end, data_begin, data_end,
-                code_begin, code_end, /*emit_bw=*/0, /*emit_ldr_w=*/0, &d);
+                code_begin, code_end, emit_bw, emit_ldr_w, &d);
     map_t *src[M4_NSTREAMS] = { &d.data_ptr, &d.code_ptr, &d.bw, &d.bl, &d.ldr, &d.ldr_w };
     for (int s = 0; s < M4_NSTREAMS; s++) { streams[s].a = NULL; streams[s].n = 0; }
     int rc = 0;

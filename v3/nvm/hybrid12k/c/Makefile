@@ -22,11 +22,29 @@ SRC += heatshrink/heatshrink_decoder.c
 SRC += detools.c
 SRC += main.c
 
-all:
+ROOT ?= ../../../..
+DIVSUF := $(ROOT)/detools-dev/detools/libdivsufsort
+A1_CFLAGS := $(CFLAGS) -I. -I$(DIVSUF)
+
+.PHONY: all legacy a1
+
+all: a1
+
+a1: hy_enc hy_dec
+
+legacy: detools
+
+detools:
 	$(CC) $(CFLAGS) $(SRC) -llzma -o detools
 
+hy_enc: rc_v3_enc.c arm_cortex_m4.c $(DIVSUF)/divsufsort.c
+	$(CC) $(A1_CFLAGS) -DRC_V3_ENC_MAIN $^ -o $@
+
+hy_dec: rc_v3.c flash_nvm.c
+	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L -DRC_V3_MAIN -DRC_V3_NVM -I. $^ -o $@
+
 clean:
-	rm -f detools detools.o libdetools.a esp8266-20190125-v1.10.bin
+	rm -f detools hy_enc hy_dec detools.o libdetools.a esp8266-20190125-v1.10.bin
 
 test: all
 	./detools apply_patch \
