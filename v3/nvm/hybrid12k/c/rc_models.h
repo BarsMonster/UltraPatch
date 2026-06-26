@@ -74,9 +74,9 @@ static inline void lit_tree_seed(const uint8_t*frm,size_t n,int parity,BitTree*t
  * ENCODING-AFFECTING: the golden encoder (rc_codec.UG_CTX) MUST use the identical value. */
 #define UG_CTX 7
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
-typedef struct { char code; int k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGolomb;
+typedef struct { uint8_t code, k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGolomb;
 static inline void ug_init(UGolomb*g,char code,int k){
-    g->code=code; g->k=k;
+    g->code=(uint8_t)code; g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
 static inline uint32_t ug_decode(RDec*r,UGolomb*g){

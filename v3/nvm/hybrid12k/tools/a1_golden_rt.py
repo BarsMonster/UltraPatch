@@ -42,3 +42,12 @@ if __name__ == '__main__':
     jpk = [r[4] for r in real_pairs if r[2] and r[3] > 0]
     if jpk: print("  journal peak: max=%d" % max(jpk))
     for f in fails[:12]: print("  FAIL %d->%d: %s" % (f[0], f[1], f[4] if isinstance(f[4], str) else 'mismatch'))
+    budget = {10: (4901523, 903)}.get(W)
+    total_bad = budget is not None and tot > budget[0]
+    jpeak_bad = budget is not None and bool(jpk) and max(jpk) > budget[1]
+    if ok != len(real_pairs) or fails or total_bad or jpeak_bad:
+        if total_bad:
+            print("  FAIL patch total budget: %d > %d" % (tot, budget[0]))
+        if jpeak_bad:
+            print("  FAIL journal peak budget: %d > %d" % (max(jpk), budget[1]))
+        sys.exit(1)

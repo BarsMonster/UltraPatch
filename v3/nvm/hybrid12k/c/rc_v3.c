@@ -291,7 +291,7 @@ typedef struct {
  * the old 8,080 B generator stores. Seed phase (hist0/hist1/w = 4096 B) overlays ARENA front. */
 /* SA apply state = ring(2^W) + fixed correction arrays. A1 derives ldr positions per op and infers
  * suppressed BL from `!pure`, so no ex/sbl offset buffers are resident. */
-#define SA_ARENA ((1u<<SA_W) + 5u*OPC_CAP + 116u)  /* slack covers SA non-buffer fields + align */
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 112u)  /* slack covers SA non-buffer fields + align */
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
@@ -515,10 +515,9 @@ typedef struct {
     int FWD, err;
     uint32_t from_size; int32_t to_size;
     int32_t tp, fp;                               /* running accumulators (apply order) */
-    /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size. */
-    int32_t op_corr_off[OPC_CAP]; uint8_t op_corr_b[OPC_CAP]; int32_t op_nc;
-    /* A1: BL suppression and ldr positions are derived; no per-op relocation offset buffers. */
-    int32_t jpeak;
+    /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
+     * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
+    uint32_t op_corr[OPC_CAP]; int32_t op_nc;
 } SA;
 /* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase). */
 #define SAst (*(SA*)(ARENA + JREGION))
@@ -532,8 +531,8 @@ static int32_t bb_unzz(uint32_t u){
 /* correction lookup by op-local write-offset (sorted small array; binary search) */
 static int32_t corr_at(SA*s, int32_t off){
     int32_t lo=0,hi=s->op_nc-1;
-    while(lo<=hi){ int32_t m=(int32_t)(((unsigned)lo+(unsigned)hi)>>1); int32_t o=s->op_corr_off[m];
-        if(o==off) return s->op_corr_b[m];
+    while(lo<=hi){ int32_t m=(int32_t)(((unsigned)lo+(unsigned)hi)>>1); int32_t o=(int32_t)(s->op_corr[m]>>8);
+        if(o==off) return (int32_t)(s->op_corr[m]&0xffu);
         if(o<off) lo=m+1; else hi=m-1; }
     return 0;
 }
@@ -609,7 +608,7 @@ static uint32_t sa_read_uleb(SA*s){
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
 static void sa_journal(SA*s, int32_t tp){
     if(tp>=0 && tp<(int32_t)s->from_size){ if(jr_put((uint32_t)tp, out_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
-        if(Jcount>s->jpeak) s->jpeak=Jcount; }
+    }
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
@@ -691,7 +690,7 @@ static void sa_apply_op(SA*s){
     s->op_nc=(int32_t)nc; { int32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){ coff+=(int32_t)s_ug(&M_cg);
             if(coff<0||coff>=(int32_t)nw){ s->err=1; return; }
-            s->op_corr_off[i]=coff; s->op_corr_b[i]=(uint8_t)s_raw_bits(8); } }
+            s->op_corr[i]=((uint32_t)coff<<8)|s_raw_bits(8); } }
     if(s->err||g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (is_ldr_*). */
@@ -789,9 +788,8 @@ static void decode_body(void){
       for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
       if(!s->err && (s->tp!=(s->FWD?(int32_t)g_to_size:0) || s->fp!=(s->FWD?(int32_t)g_fp_end:0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
-      orow_commit();                       /* flush the last resident output row */
-      Jpeak=s->jpeak;
       if(s->err||g_rcerr){ g_dec_err=1; goto done; }
+      orow_commit();                       /* flush the last resident output row */
     }
 done:
 #ifndef RC_V3_STACKMEAS

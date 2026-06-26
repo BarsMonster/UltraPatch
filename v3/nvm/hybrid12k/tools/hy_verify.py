@@ -23,17 +23,27 @@ def work(ij):
     r = subprocess.run([CDEC, mem, bl, cf, '1'], capture_output=True, text=True, timeout=300)
     real = open(IMG[j] + '/watch.bin', 'rb').read(); got = open(mem, 'rb').read()
     ce = (got == real)
-    er = ro = pr = amp = mre = inv = 0; span = max(os.path.getsize(IMG[i] + '/watch.bin'), len(real))
+    er = ro = pr = amp = mre = inv = -1; span = max(os.path.getsize(IMG[i] + '/watch.bin'), len(real))
     m = NVM_RE.search(r.stderr)
     if m: er, ro, pr = int(m.group(1)), int(m.group(2)), int(m.group(3))
     a = AMP_RE.search(r.stderr)
     if a: amp, mre, inv = int(a.group(1)), int(a.group(2)), int(a.group(3))
     floor = (span + 255) // 256
-    ok = (r.returncode == 0 and ce and amp == 0 and inv == 0)   # inv==0: req#2 sequential page writes
+    metrics_ok = (m is not None and a is not None)
+    ok = (r.returncode == 0 and ce and metrics_ok and amp == 0 and mre <= 1 and inv == 0)   # inv==0: req#2 sequential page writes
     for f in (mem, bl, cf):
         try: os.remove(f)
         except Exception: pass
-    err = '' if ok else ('amp=%d' % amp if (ce and amp) else ('inversions=%d' % inv if (ce and inv) else (r.stderr.strip().split(chr(10))[-1][:70] if r.stderr else 'rc=%d' % r.returncode)))
+    if ok:
+        err = ''
+    elif r.returncode == 0 and ce and not metrics_ok:
+        err = 'missing NVM metrics'
+    elif ce and amp > 0:
+        err = 'amp=%d' % amp
+    elif ce and inv > 0:
+        err = 'inversions=%d' % inv
+    else:
+        err = r.stderr.strip().split(chr(10))[-1][:70] if r.stderr else 'rc=%d' % r.returncode
     return (i, j, ok, len(blob), er, ro, pr, floor, amp, mre, inv, err)
 
 
@@ -56,3 +66,9 @@ if __name__ == '__main__':
         print("  wear mult vs floor: min=%.3f mean=%.3f max=%.3f" % (min(mults), sum(mults) / len(mults), max(mults)))
     for f in fails[:16]:
         print("  FAIL %d->%d: %s" % (f[0], f[1], f[11]))
+    budget = {10: 4902207}.get(W)
+    budget_bad = budget is not None and tot > budget
+    if ok != len(pairs) or amp_bad != 0 or mre_max > 1 or inv_bad != 0 or budget_bad:
+        if budget_bad:
+            print("  FAIL patch total budget: %d > %d" % (tot, budget))
+        sys.exit(1)

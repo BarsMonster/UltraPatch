@@ -43,6 +43,7 @@ _HYCAP = 0   # 0 = no op-split. >0 caps diff_len/op (bounds per-op delta store i
 KIND = {'data': 0, 'code': 1, 'ldr': 2}
 INV_KIND = {v: k for k, v in KIND.items()}
 DR_HIT_INIT = 512      # P(hit-bit == 0); zero-seeded dicts make hits likely.
+DR_KCAP = {'bl': 208, 'ex': 128}   # must match the production decoder defaults in c/rc_v3.c
 
 
 def _norm_opt(opt):
@@ -390,6 +391,7 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
     # Relocation deltas come from a tiny set (corpus dict peak ~180), so indices are cheap; 0 is the
     # most frequent value -> smallest index. O(dict) state, no per-detection resident array.
     dd = M['hy_dd']        # {'bl': {'dic', 'hit', 'rep', 'last'}, 'ex': ...}
+    dcap = {'bl': opt.get('DR_KCAP_BL', DR_KCAP['bl']), 'ex': opt.get('DR_KCAP_EX', DR_KCAP['ex'])}
     def emit_delta(kind, delta):
         D = dd[kind]
         # 1) "repeat last" fast path (consecutive identical deltas == the old RLE run) — 1 cheap bit.
@@ -408,6 +410,8 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
             rc_.encode_bit(D['hit'], 0, 1); enc_int(rc_, M, 'hy_di_' + kind, j - 1)
             if j: dic.insert(0, dic.pop(j))
         else:
+            if len(dic) >= dcap[kind]:
+                raise ValueError("%s delta dictionary cap exceeded (%d)" % (kind, dcap[kind]))
             rc_.encode_bit(D['hit'], 0, 0); M['dval'].encode(rc_, delta)
             dic.insert(0, delta)
     for oi in range(len(emit_ops)):
