@@ -408,7 +408,7 @@ static UGolomb UG_POOL[7];   /* A1: M_gE/M_gS removed; one-shot M_tc reuses M_gd
 #define M_dibl UG_POOL[5]   /* bl MTF dict-index (gamma) */
 #define M_diex UG_POOL[6]   /* ex MTF dict-index (gamma) */
 static BitTree M_lit0, M_lit1;
-static BitTree M_dval;             /* DEREL escape-value bit-tree (ByteVarint); RESIDENT through apply */
+static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
 static int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];   /* MTF dict arrays (separate caps) */
 static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (resident) */
@@ -685,14 +685,16 @@ static void sa_apply_op(SA*s){
         sa_journal(s, tp0+poff);
     }
     if(s->err||g_rcerr) return;
-    /* ---- [C] corrections (sorted cursor array, count-bounded) ---- */
+    /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
+     * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
     uint32_t nc=s_ug(&M_cg);
     if(nc>(uint32_t)OPC_CAP){ s->err=1; g_reject=REJ_RESOURCE; return; }
     if(nc>(uint32_t)nw){ s->err=1; return; }
     s->op_nc=(int32_t)nc; { int32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){ coff+=(int32_t)s_ug(&M_cg);
             if(coff<0||coff>=(int32_t)nw){ s->err=1; return; }
-            s->op_corr[i]=((uint32_t)coff<<8)|s_raw_bits(8); } }
+            int cbyte=s_bt(&M_dval);
+            s->op_corr[i]=((uint32_t)coff<<8)|(uint32_t)cbyte; } }
     if(s->err||g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (is_ldr_*). */
@@ -768,8 +770,8 @@ static void decode_body(void){
     rc_init();
     orow_reset();
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
-     * INLINE during apply (pull_delta in field_at). M_dval (escape values), the two MTF dict streams,
-     * and the two index UGolombs all persist through apply. ---- */
+     * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
+     * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
     ug_init(&M_dibl,'g',0); ug_init(&M_diex,'g',0);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,

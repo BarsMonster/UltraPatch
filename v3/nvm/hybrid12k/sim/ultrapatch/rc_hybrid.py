@@ -104,6 +104,40 @@ def _field_deltas(frm, dfpatch, opt):
     return out, cfg7
 
 
+def _coerce_reloc_literals(ops, frm, fielddelta, from_size, to_size):
+    """Encoder-only cleanup: if a true BL / same-op LDR field is currently blocked only by bsdiff
+    literal bytes in its 4-byte field, zero those diff bytes so the existing pure-field decoder path
+    handles it and residual [C] shrinks. Geometry is unchanged, and false positives stay untouched."""
+    FWD = to_size <= from_size
+    out = []; fp0 = 0
+    for o in ops:
+        ndiff = None
+        pred = _op_ldr_set(frm, fp0, o.diff_len, from_size)
+        for ev in _scan_op_fields(frm, fp0, o.diff_len, from_size, fielddelta, diff=None,
+                                  desc=not FWD, pred_set=pred):
+            tag = ev[0]
+            if tag == 'bl':
+                _, k, fpk, _delta = ev
+                real = fielddelta.get(fpk)
+                if not (real and real[0] == 'bl'):
+                    continue
+            elif tag == 'ex':
+                _, k, fpk, kind, _delta = ev
+                real = fielddelta.get(fpk)
+                if kind != KIND['ldr'] or not (real and real[0] == 'ldr'):
+                    continue
+            else:
+                continue
+            if any(o.diff[k + b] for b in range(4)):
+                if ndiff is None:
+                    ndiff = bytearray(o.diff)
+                for b in range(4):
+                    ndiff[k + b] = 0
+        out.append(Op(o.diff_len, bytes(ndiff) if ndiff is not None else o.diff, o.extra, o.adj))
+        fp0 += o.diff_len + o.adj
+    return out
+
+
 # ---------- build the to-order DEREL plan (encoder & decoder share the walk) ----------
 def is_local_bl(frm, fpk, from_size):
     """PURE per-position bl predicate (GLOBAL even alignment, no scan state). 0% misframe, 0
@@ -283,6 +317,7 @@ def encode_v3(F, T, opt=None):
     crc_to = zlib.crc32(true_to) & 0xffffffff
 
     fielddelta, cfg7 = _field_deltas(frm, d['dfpatch'], opt)
+    ops = _coerce_reloc_literals(ops, frm, fielddelta, from_size, to_size)
     # ---- compute the residual corrections [C] = want - (db + derel_src) for every tp ----
     # derel_src reproduces exactly what the DECODER will write at relocation fields (bl-derive +
     # ex-events), so [C] only carries true residual noise + bl false-positive repairs.
@@ -350,7 +385,8 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
         gC.encode(rc_, len(cl)); pt = 0
         for (t, bb) in cl:
             gC.encode(rc_, t - pt); pt = t
-            for bit in range(7, -1, -1): rc_.encode_raw((bb >> bit) & 1)
+            # Reuse the resident DEREL escape byte tree for correction bytes; no decoder SRAM cost.
+            M['dval'].t.encode(rc_, bb)
     # token cursor: tokens are in content order and may span op/delta interleave boundaries.
     # A span emits its literal bytes only as far as the current content boundary; a backref emits
     # only its header, then advances without more range symbols until exhausted.
@@ -535,8 +571,7 @@ def _decode_apply_hybrid(rc_, M, buf, from_size, to_size, fp_end, opt, cfg7=None
         # C
         ncv = gC.decode(rc_); cmap = {}; pt = 0
         for _ in range(ncv):
-            pt += gC.decode(rc_); bb = 0
-            for _ in range(8): bb = (bb << 1) | rc_.decode_raw()
+            pt += gC.decode(rc_); bb = M['dval'].t.decode(rc_)
             cmap[pt] = bb
         # ---- INLINE write-order field detection + streaming write (no override buffer). bl/ex deltas
         # pulled from the up-front per-stream cursors in detection order (C: O(1) lazy generators). ----

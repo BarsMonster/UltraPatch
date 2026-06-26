@@ -6,6 +6,8 @@
 /arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/
 /armgcc.tar.xz
 /venv/
+/AGENTS.md
+/CLAUDE.md
 
 # Top-level benchmark outputs; keep summary documents.
 /artifacts/*
