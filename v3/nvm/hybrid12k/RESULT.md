@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,772 B, data 0 B, bss 11,024 B |
+| ARM object at `SA_W=10` | text 5,840 B, data 0 B, bss 10,000 B |
 | ARM divide check | 0 hardware divide instructions; 2 soft-divide calls in init |
 | Coroutine stack high-water | 504 B of 512 B |
 
@@ -56,11 +56,17 @@ pristine source bytes that would otherwise be lost after an in-place overwrite.
 cd /ai_sw/v3/nvm/hybrid12k/c
 make
 make check
+make check-arm
+make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
 prints the real one-face blob sizes. Expected blob sizes are `900` and `614`
 bytes.
+
+`make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
+`make check-corpus` runs the local 16x16 image matrix and prints corpus totals
+plus the real one-face update/revert sizes.
 
 Manual one-direction check:
 

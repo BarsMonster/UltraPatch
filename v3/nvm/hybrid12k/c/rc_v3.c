@@ -22,7 +22,7 @@
  * once (no write amplification).
  *
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
- * + the 2048 B ldr-derive pristine ring; the image lives ONLY in flash (0 image bytes in RAM).
+ * + the 1024 B ldr-derive pristine ring; the image lives ONLY in flash (0 image bytes in RAM).
  *
  * Embedded target: NO 64-bit integers in the hot path; all positions/sizes are 32-bit.
  */
@@ -536,14 +536,12 @@ static int32_t corr_at(SA*s, int32_t off){
         if(o<off) lo=m+1; else hi=m-1; }
     return 0;
 }
-/* A1 ldr-derive: a 2048-byte ring of recently-read PRISTINE source bytes (psrc[a&2047] = pristine
- * byte at addr a). FWD reads source ascending, so at any field fpk the ring holds [fpk-1024,fpk]
- * pristine — the FWD ldr back-scan reads instructions from it with ZERO extra resident store. Grow
+/* A1 ldr-derive: a 1024-byte ring of recently-read PRISTINE source bytes (psrc[a&1023] = pristine
+ * byte at addr a). FWD reads source ascending; field probes PEEK at the current 4-byte field before
+ * the ldr back-scan, then record it only after the scan no longer needs the alias at fpk-1024. Grow
  * reads via the journal-aware source path because lower instruction-window bytes may be clobbered. */
-/* ring size 2048 (> the 1024-byte reach) so addr a and a+1024 never alias — a back-scan to fpk-1024
- * must read a DISTINCT slot from fpk (which the bl-check just wrote). */
-#define PSRC_MASK 2047u
-static uint8_t g_psrc[2048];
+#define PSRC_MASK 1023u
+static uint8_t g_psrc[1024];
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024),
  * fpk-2]; an ldr literal `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a
@@ -610,24 +608,31 @@ static void sa_journal(SA*s, int32_t tp){
     if(tp>=0 && tp<(int32_t)s->from_size){ if(jr_put((uint32_t)tp, out_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
     }
 }
+static uint8_t hy_src_peek(SA*s, int32_t fp){
+    if(fp>=0 && (uint32_t)fp<s->from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp); }
+    return 0;
+}
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
  * pristine read into the psrc ring (used by the FWD ldr back-scan). */
 static uint8_t hy_src(SA*s, int32_t fp){
-    if(fp>=0 && (uint32_t)fp<s->from_size){ uint8_t jb; uint8_t v=jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp);
-        g_psrc[(uint32_t)fp & PSRC_MASK]=v; return v; }
-    return 0;
+    uint8_t v=hy_src_peek(s,fp);
+    if(fp>=0 && (uint32_t)fp<s->from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
+    return v;
+}
+static void hy_note_src4(SA*s, uint32_t a){
+    for(uint32_t i=0;i<4;i++) g_psrc[(a+i)&PSRC_MASK]=hy_src_peek(s,(int32_t)(a+i));
 }
 /* journal-aware pristine source halfword/word: the
  * from-image flash may already be overwritten by the monotonic output frontier, so reads MUST be
  * journal-aware (preserves hold the original bytes) — a raw flash read would return clobbered output. */
-static uint16_t hy_src16(SA*s, uint32_t a){ return (uint16_t)(hy_src(s,(int32_t)a)|(hy_src(s,(int32_t)a+1)<<8)); }
 static uint32_t hy_src32(SA*s, uint32_t a){ return (uint32_t)hy_src(s,(int32_t)a)|((uint32_t)hy_src(s,(int32_t)a+1)<<8)|((uint32_t)hy_src(s,(int32_t)a+2)<<16)|((uint32_t)hy_src(s,(int32_t)a+3)<<24); }
+static uint16_t hy_src16_peek(SA*s, uint32_t a){ return (uint16_t)(hy_src_peek(s,(int32_t)a)|(hy_src_peek(s,(int32_t)a+1)<<8)); }
 /* journal-aware local-bl predicate (pristine source). */
 static int hy_is_local_bl(SA*s, uint32_t fpk){
     if(fpk&1u) return 0;
     if(fpk>s->from_size || s->from_size-fpk<4u) return 0;
-    uint16_t up=hy_src16(s,fpk), lo=hy_src16(s,fpk+2);
+    uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
     return ((up&0xf800)==0xf000) && ((lo&0xd000)==0xd000);
 }
 /* de-reloc field at op-local field-start ks. Returns: 0=no field; 1=bl/ex (packed4 filled,
@@ -639,8 +644,9 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     if(hy_is_local_bl(s, fpk)){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t delta=pull_delta(&DR_BL, &M_dibl);         /* INLINE pull from the single stream */
-        uint16_t up=hy_src16(s,fpk), lo=hy_src16(s,fpk+2);
+        uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
         pack_bl_buf(unpack_bl(up,lo)-delta, packed);
+        hy_note_src4(s,fpk);
         return 1;
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
