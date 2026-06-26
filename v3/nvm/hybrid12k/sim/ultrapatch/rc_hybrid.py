@@ -64,8 +64,8 @@ def _delta_models():
     current last value and is therefore unreachable for non-repeat symbols).
     """
     return {
-        'bl': {'dic': [0], 'hit': [DR_HIT_INIT], 'rep': [2048, 2048], 'rh': 0, 'last': 0},
-        'ex': {'dic': [0], 'hit': [DR_HIT_INIT], 'rep': [2048, 2048], 'rh': 0, 'last': 0},
+        'bl': {'dic': [0], 'hit': [DR_HIT_INIT], 'rep': [2048, 2048, 2048, 2048], 'rh': 0, 'last': 0},
+        'ex': {'dic': [0], 'hit': [DR_HIT_INIT], 'rep': [2048, 2048, 2048, 2048], 'rh': 0, 'last': 0},
     }
 
 
@@ -395,9 +395,10 @@ def _encode_A_hybrid(rc_, M, ops, opt, from_size, to_size, presset, corr, fieldd
     def emit_delta(kind, delta):
         D = dd[kind]
         # 1) "repeat last" fast path (consecutive identical deltas == the old RLE run) — 1 cheap bit.
+        ri = D['rh'] | (2 if D['last'] == 0 else 0)
         if delta == D['last']:
-            rc_.encode_bit(D['rep'], D['rh'], 1); D['rh'] = 1; return
-        rc_.encode_bit(D['rep'], D['rh'], 0); D['rh'] = 0; D['last'] = delta
+            rc_.encode_bit(D['rep'], ri, 1); D['rh'] = 1; return
+        rc_.encode_bit(D['rep'], ri, 0); D['rh'] = 0; D['last'] = delta
         # 2) dict hit (adaptive index over the small distinct-value set ~ the old dict) / escape.
         # MOVE-TO-FRONT: a hit moves its value to index 0, so frequently-repeated offsets keep tiny
         # indices (the adaptive UGolomb then spends ~1-2 bits on them) — recovers the old dict gain.
@@ -543,7 +544,8 @@ def _decode_apply_hybrid(rc_, M, buf, from_size, to_size, fp_end, opt, cfg7=None
         nl = read_uleb()
         def pull_delta(kind):
             D = M['hy_dd'][kind]; dic = D['dic']
-            rb = rc_.decode_bit(D['rep'], D['rh']); D['rh'] = rb
+            ri = D['rh'] | (2 if D['last'] == 0 else 0)
+            rb = rc_.decode_bit(D['rep'], ri); D['rh'] = rb
             if rb == 1: return D['last']
             if rc_.decode_bit(D['hit'], 0) == 1:
                 j = dec_int(rc_, M, 'hy_di_' + kind) + 1; v = dic[j]

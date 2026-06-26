@@ -42,9 +42,9 @@ No resident target store; the per-field delta values are pulled inline from the 
 
 | | byte-exact | `rows_amplified` | ARM `.bss` | corpus patch |
 |---|---|---|---|---|
-| **A1 (production)** | **256/256** | **0** (max 1 erase/row) | **11,040 B ≤ 12288** | **4,902,207 B = −2.452 % vs byte model** |
+| **A1 (production)** | **256/256** | **0** (max 1 erase/row) | **11,024 B ≤ 12288** | **4,898,705 B = −2.521 % vs byte model** |
 
-- Real +1-face update (113,124 ↔ 113,484, +360 B): **grow 917 / revert 627 B** (byte model 933/647).
+- Real +1-face update (113,124 ↔ 113,484, +360 B): **grow 906 / revert 617 B** (byte model 933/647).
 - Crash-safe: plain-build fuzz over 300 corrupt patches → 0 crash/hang.
 - The flash-compliant patch is **smaller than the byte-addressable byte model**, i.e. on-device flash
   correctness (no write amplification) now costs ~nothing in patch size.

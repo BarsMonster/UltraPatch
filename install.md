@@ -30,11 +30,11 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 sh tools/check_divfree.sh
 ```
 
-Known-good output after the A1 state-packing pass:
+Known-good output after the A1 repeat-context/state-packing pass:
 
 ```text
-W=10: text=5780 data=0 bss=11040
-W=11: text=5772 data=0 bss=12064
+W=10: text=5792 data=0 bss=11024
+W=11: text=5784 data=0 bss=12048
 check_divfree.sh: HW udiv/sdiv=0, soft-divide calls(total)=2, PASS
 ```
 

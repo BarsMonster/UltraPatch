@@ -8,6 +8,7 @@ sys.path[:0] = ['/ai_sw/detools-dev', HERE + '/sim', HERE + '/sim/ultrapatch']
 IMG = sorted(os.path.join(HERE + '/images', d) for d in os.listdir(HERE + '/images'))
 W = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 CDEC = sys.argv[2] if len(sys.argv) > 2 else '/tmp/hy_dec'
+RUN_TAG = str(os.getpid())
 NVM_RE = re.compile(r'erases=(\d+) rows=(\d+) programs=(\d+)')
 AMP_RE = re.compile(r'amplified=(\d+) maxrowerase=(\d+) inversions=(\d+)')
 
@@ -17,7 +18,8 @@ def work(ij):
     rc_hybrid.PATHE_W = W
     i, j = ij
     blob, cfg = rc_hybrid.encode_v3(IMG[i], IMG[j])
-    mem = '/tmp/hy_v_%d_%d.bin' % (i, j); bl = '/tmp/hy_v_%d_%d.blob' % (i, j); cf = '/tmp/hy_v_%d_%d.cfg' % (i, j)
+    base = '/tmp/hy_v_%s_%d_%d_%d' % (RUN_TAG, os.getpid(), i, j)
+    mem = base + '.bin'; bl = base + '.blob'; cf = base + '.cfg'
     open(mem, 'wb').write(open(IMG[i] + '/watch.bin', 'rb').read())
     open(bl, 'wb').write(blob); open(cf, 'w').write(' '.join(str(x) for x in cfg))
     r = subprocess.run([CDEC, mem, bl, cf, '1'], capture_output=True, text=True, timeout=300)
@@ -66,7 +68,7 @@ if __name__ == '__main__':
         print("  wear mult vs floor: min=%.3f mean=%.3f max=%.3f" % (min(mults), sum(mults) / len(mults), max(mults)))
     for f in fails[:16]:
         print("  FAIL %d->%d: %s" % (f[0], f[1], f[11]))
-    budget = {10: 4902207}.get(W)
+    budget = {10: 4898705}.get(W)
     budget_bad = budget is not None and tot > budget
     if ok != len(pairs) or amp_bad != 0 or mre_max > 1 or inv_bad != 0 or budget_bad:
         if budget_bad:

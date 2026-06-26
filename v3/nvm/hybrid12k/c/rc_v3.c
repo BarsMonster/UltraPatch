@@ -16,8 +16,8 @@
  * positions are DERIVED by a local halfword pattern; ldr positions are DERIVED per op (a field is
  * ldr iff an ldr-literal instruction in the same op's copy range targets it) — so positions are
  * never shipped, only the per-field delta VALUES, pulled inline from the single stream (adaptive
- * MTF dict + order-1 repeat bit). A copy that reads a from-byte already overwritten by the output
- * frontier reads it from the never-evict journal, driven by the preserve events [P]. Output is
+ * MTF dict + order-1/zero-context repeat bit). A copy that reads a from-byte already overwritten by
+ * the output frontier reads it from the never-evict journal, driven by the preserve events [P]. Output is
  * staged in a monotonic 256 B row write-back cache so each NVM row is erased+programmed exactly
  * once (no write amplification).
  *
@@ -269,7 +269,7 @@ static uint32_t crc32_flash(uint32_t n){
 typedef struct {
     int32_t *dic; uint16_t cap, K;    /* MTF dict (index 0 = most-recently-used) + its capacity */
     int32_t  last;                    /* repeat-last fast path */
-    uint16_t rep[2], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep order-1 on prev rep outcome */
+    uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
 #define DR_HIT_INIT 512u              /* zero-seeded MTF dict makes hit-bit==1 likely */
 
@@ -291,7 +291,7 @@ typedef struct {
  * the old 8,080 B generator stores. Seed phase (hist0/hist1/w = 4096 B) overlays ARENA front. */
 /* SA apply state = ring(2^W) + fixed correction arrays. A1 derives ldr positions per op and infers
  * suppressed BL from `!pure`, so no ex/sbl offset buffers are resident. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 112u)  /* slack covers SA non-buffer fields + align */
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 96u)  /* slack covers SA non-buffer fields + align */
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
@@ -418,9 +418,9 @@ static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (residen
 /* delta VALUE is pulled INLINE from the single range stream the instant the apply detects the      */
 /* field (the field TYPE is known from detection, so no untyped up-front decode is needed). Per      */
 /* stream we keep only a small MOVE-TO-FRONT dict of the distinct delta values (the frequently-      */
-/* repeated relocation offsets keep tiny MTF indices) + a repeat-last bit + a dict-hit bit.         */
-/* pull_delta() mirrors rc_hybrid.pull_delta bit-for-bit. ~780 B/stream resident (no per-detection   */
-/* store) -> removes the old 8,080 B generator stores. */
+/* repeated relocation offsets keep tiny MTF indices) + a repeat-last bit keyed by previous repeat   */
+/* and last-is-zero + a dict-hit bit. pull_delta() mirrors rc_hybrid.pull_delta bit-for-bit. This    */
+/* fixed stream state replaces the old 8,080 B generator stores. */
 /* ===================================================================================== */
 /* (A1 derives bl/ldr positions on-device, so there is NO on-device disassembler and NO device
  * "ranges" config — the host main() still accepts a ranges.cfg arg for tooling compatibility but
@@ -431,7 +431,8 @@ static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>
 static void dr_init(DRStream*d, int32_t*dic, int cap){
     d->dic=dic; d->cap=cap; d->K=1; d->dic[0]=0;
     d->last=0;
-    d->rep[0]=RC_PHALF; d->rep[1]=RC_PHALF; d->rh=0; d->hit=DR_HIT_INIT;
+    for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
+    d->rh=0; d->hit=DR_HIT_INIT;
 }
 /* pull the next delta of a stream (bl/ex), inline. mirrors rc_hybrid.pull_delta exactly:
  *   rep-bit: ==1 -> return last; else read hit-bit:
@@ -439,7 +440,8 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
  *   then last=v. */
 static int32_t pull_delta(DRStream*d, UGolomb*gix){
-    { int rb=s_bit(&d->rep[d->rh]); d->rh=rb; if(rb==1) return d->last; }   /* repeat-last, order-1 ctx */
+    { int ri=d->rh | (d->last==0 ? 2 : 0);
+      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->last; }   /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
         uint32_t j=s_ug(gix)+1u;                        /* cmp-1: dict idx 0 unreachable -> encode j-1 */
