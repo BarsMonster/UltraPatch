@@ -56,8 +56,8 @@ static uint32_t g_fhead, g_ftail;          /* ring indices */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
 
 #ifndef DEC_STACK_BYTES
-#define DEC_STACK_BYTES 576                /* coroutine stack; measured high-water 504 B (data-independent
-                                            * call depth) leaves a 72 B cushion for out-of-corpus call
+#define DEC_STACK_BYTES 576                /* coroutine stack; measured high-water 408 B (data-independent
+                                            * call depth) leaves a 168 B cushion for out-of-corpus call
                                             * paths. The deepest 8 B are a 0xC5 canary checked at decode
                                             * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
@@ -144,7 +144,8 @@ typedef struct { uint32_t range, code; } SDec;
 static SDec RC;
 static void rc_init(void){
     RC.range = 0xFFFFFFFFu; RC.code = 0;
-    (void)next_byte();                 /* skip the leading range-coder flush byte */
+    /* The encoder drops the always-zero LZMA leading cache byte from the wire, so the
+     * 4 code bytes are read directly (no skip). */
     for (int i=0;i<4;i++) RC.code = (RC.code<<8) | next_byte();
 }
 static int s_bit_r(uint16_t*prob,int rate){
@@ -205,11 +206,27 @@ static int32_t s_bv(BitTree*t){
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGRice;
-#if UG_CTX != 6
-#error "packed gamma UGolomb layout assumes UG_CTX=6"
-#endif
-#define UG_GAMMA_M (1 + ((UG_CTX-1)*UG_CTX)/2 + (UG_CTX+1))
+/* Packed gamma mantissa layout (a RAM win vs the encoder's square (UG_CTX+1)^2 array): the only
+ * (cl_ctx, pos_ctx) pairs that ever occur are UG_C(pos) for pos in 0..cl-1 — a TRIANGLE, not a
+ * square — so we pack one row per clamped cl level into a flat m[], using UG_GAMMA_BASE(c) as the
+ * row offset. Row widths: c==0 reserves 1 slot (no mantissa bits, but keep row offsets distinct);
+ * 1<=c<UG_CTX uses c slots (pos contexts 0..c-1, all distinct); c==UG_CTX uses UG_CTX+1 slots (the
+ * catch-all top level, where pos clamps into 0..UG_CTX). The row start has the closed form
+ *   UG_GAMMA_BASE(c) = (c==0) ? 0 : 1 + c*(c-1)/2
+ * valid for ANY UG_CTX, and UG_GAMMA_M = top-row start + its width. These derive the layout from
+ * UG_CTX (no hand-typed offsets in the size/total), and the _Static_assert below pins the runtime
+ * base[] table to the same formula — so changing UG_CTX is caught at COMPILE time (a clear assert)
+ * instead of being silently miscomputed. This is bit-exact identical to the historical layout. */
+#define UG_GAMMA_BASE(c) ((c)==0 ? 0 : 1 + ((c)*((c)-1))/2)
+#define UG_GAMMA_M (UG_GAMMA_BASE(UG_CTX) + (UG_CTX+1))
 typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_M]; } UGGamma;
+/* The packed-gamma row-offset table used in s_ug_gamma(); pinned to the UG_GAMMA_BASE formula by
+ * the asserts below so it can never silently disagree with UG_GAMMA_M (no #if/#error guard needed). */
+static const uint8_t ugg_base[UG_CTX+1] = { 0, 1, 2, 4, 7, 11, 16 };
+_Static_assert(sizeof(ugg_base)/sizeof(ugg_base[0]) == UG_CTX+1, "ugg_base must have UG_CTX+1 rows");
+_Static_assert(UG_GAMMA_BASE(0)==0 && UG_GAMMA_BASE(1)==1 && UG_GAMMA_BASE(2)==2 &&
+               UG_GAMMA_BASE(3)==4 && UG_GAMMA_BASE(4)==7 && UG_GAMMA_BASE(5)==11 &&
+               UG_GAMMA_BASE(6)==16, "UG_GAMMA_BASE formula drifted from the packed gamma layout");
 static void ugr_init(UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
@@ -234,8 +251,7 @@ static uint32_t s_ug_rice(UGRice*g){
 static uint32_t s_ug_gamma(UGGamma*g){
     int cl=0; while(s_bit(&g->u[UG_C(cl)])==1){ if(++cl>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     uint32_t mm=1u<<cl;
-    static const uint8_t base[UG_CTX+1] = { 0, 1, 2, 4, 7, 11, 16 };
-    int mb=base[UG_C(cl)];
+    int mb=ugg_base[UG_C(cl)];   /* row offset == UG_GAMMA_BASE(UG_C(cl)); pinned at file scope */
     for(int pos=0;pos<cl;pos++) mm|=(uint32_t)s_bit(&g->m[mb+UG_C(pos)])<<(cl-1-pos);
     return mm-1;
 }
@@ -291,9 +307,9 @@ typedef struct {
 #define DR_HIT_INIT 512u              /* zero-seeded MTF dict makes hit-bit==1 likely */
 
 #ifndef JSLOTS
-#define JSLOTS 904u                          /* packed journal capacity; 903 is the measured corpus
-                                              * peak, and the 8-byte-aligned region gives slot 904
-                                              * for free. Refuse above. */
+#define JSLOTS 904u                          /* packed journal capacity; corpus peak is 605, and the cap
+                                              * is kept well above it (the 8-byte-aligned journal region
+                                              * holds 904 slots) for out-of-corpus headroom. Refuse above. */
 #endif
 #define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (2712, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
@@ -548,32 +564,28 @@ static int32_t corr_at(SA*s, int32_t off){
  * reads via the journal-aware source path because lower instruction-window bytes may be clobbered. */
 #define PSRC_MASK 1023u
 static uint8_t g_psrc[1024];
-/* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
- * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024),
- * fpk-2]; an ldr literal `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a
- * targets fpk and fpk+4<=fp0+dl. Reads PRISTINE source: FWD from the psrc ring, grow via hy_src().
- * No resident target store. */
-static int is_ldr_fwd(int32_t fp0, int32_t dl, uint32_t fpk){
-    int32_t hi=fp0+dl; if((int32_t)fpk+4>hi) return 0;
-    int32_t lo=(int32_t)fpk-1024; if(lo<fp0) lo=fp0; if(lo&1) lo++;
-    for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
-        uint16_t up=(uint16_t)(g_psrc[(uint32_t)a&PSRC_MASK] | (g_psrc[((uint32_t)a+1u)&PSRC_MASK]<<8));
-        if((up&0xf800)==0x4800){ int32_t t=(a&~3)+4*(int32_t)(up&0xff)+4; if(t==(int32_t)fpk) return 1; }
-    }
-    return 0;
-}
 static uint8_t hy_src(SA*s, int32_t fp);   /* fwd decl: journal-aware pristine source read */
-static int is_ldr_grow(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
+/* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
+ * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
+ * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
+ * fpk+4<=fp0+dl. Reads PRISTINE source: the FWD and grow apply directions share ONE back-scan and
+ * differ ONLY in the halfword source — FWD reads the g_psrc ring (pristine bytes recorded at
+ * read-time), grow reads via hy_src() (journal-aware: instr-window bytes the output frontier already
+ * clobbered are preserved copy source, so raw flash would be wrong). s==NULL selects the FWD ring
+ * read. Kept static-inline so the per-direction branch folds away at each call site (no indirect
+ * call / no text bloat on Cortex-M0+). No resident target store. */
+static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     int32_t hi=fp0+dl; if((int32_t)fpk+4>hi) return 0;
     int32_t lo=(int32_t)fpk-1024; if(lo<fp0) lo=fp0; if(lo&1) lo++;
     for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
-        /* journal-aware: in grow, instr-window bytes the output frontier already clobbered are copy
-         * source the codec preserved, so hy_src returns the pristine byte (raw flash would be wrong). */
-        uint16_t up=(uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8));
+        uint16_t up = s ? (uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8))
+                        : (uint16_t)(g_psrc[(uint32_t)a&PSRC_MASK] | (g_psrc[((uint32_t)a+1u)&PSRC_MASK]<<8));
         if((up&0xf800)==0x4800){ int32_t t=(a&~3)+4*(int32_t)(up&0xff)+4; if(t==(int32_t)fpk) return 1; }
     }
     return 0;
 }
+static inline int is_ldr_fwd(int32_t fp0, int32_t dl, uint32_t fpk){ return ldr_targets(NULL,fp0,dl,fpk); }
+static inline int is_ldr_grow(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){ return ldr_targets(s,fp0,dl,fpk); }
 static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
 static uint8_t sa_next_content(SA*s, int tag){
@@ -609,7 +621,7 @@ fail:
     s->err=1;
     return 0;
 }
-/* read a uLEB from the content stream (advancing the content-scanner per byte). */
+/* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
 static uint32_t sa_read_uleb(SA*s){
     uint32_t acc=0; int sh=0;
     for(;;){ if(s->err||g_rcerr) return 0;
@@ -727,58 +739,50 @@ static void sa_apply_op(SA*s){
     fprintf(stderr,"OP tp0=%d fp0=%d dl=%d el=%d adj=%d blK=%d exK=%d\n",
         tp0,fp0,dl,el,adj,DR_BL.K,DR_EX.K);
 #endif
-    /* ---- CONTENT decode + streaming write with inline field detection ---- */
+    /* ---- CONTENT decode + streaming write with inline field detection ----
+     * Both directions process the same 4-byte ascending field windows over [0,dl); they differ only
+     * in (a) iteration direction (step), (b) when the el extra bytes are consumed relative to the dl
+     * body (FWD: after; grow: before), and (c) the literal-cursor gap encoding (FWD: absolute forward
+     * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
+     * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
     int32_t nl=(int32_t)sa_read_uleb(s);
     if(nl<0||nl>dl){ s->err=1; return; }
     uint8_t packed[4];
-    if(s->FWD){
-        int32_t nextpos=-1, litb=0, li=0;
-        if(nl>0){ nextpos=(int32_t)sa_read_uleb(s); litb=sa_next_content(s,0); }
-        #define TAKE_DB_F(K) ({ uint8_t _take_db=0; if((K)==nextpos){ _take_db=(uint8_t)litb; li++; \
-            if(li<nl){ nextpos+=(int32_t)sa_read_uleb(s); litb=sa_next_content(s,0);} else nextpos=-1; } _take_db; })
-        #define WR_COPY_F(K) do{ uint8_t _copy_db=TAKE_DB_F(K); \
-            out_write((uint32_t)(tp0+(K)), (uint8_t)(_copy_db + hy_src(s,fp0+(K)) + corr_at(s,(K)))); }while(0)
-        int32_t k=0;
-        while(k<dl && !s->err && !g_rcerr){
-            if(k+4<=dl){
-                int pure=(nextpos<0 || nextpos>=k+4);   /* no literal patch in [k,k+3] */
-                int fa=field_at(s, fp0, k, packed, pure, dl);
-                if(fa==2){ for(int b=0;b<4;b++) WR_COPY_F(k+b); k+=4; continue; }
-                if(fa==1){ for(int b=0;b<4;b++) out_write((uint32_t)(tp0+k+b),(uint8_t)(packed[b]+corr_at(s,k+b))); k+=4; continue; }
-            }
-            WR_COPY_F(k); k++;
+    int fwd=s->FWD; int32_t step=fwd?1:-1;
+    /* literal cursor over the content stream (advances in wire order regardless of write direction) */
+    int32_t nextpos=-1, litb=0, li=0;
+    #define LITCUR_INIT() do{ if(nl>0){ int32_t _g0=(int32_t)sa_read_uleb(s); \
+            nextpos=fwd?_g0:(dl-_g0); litb=sa_next_content(s,0); } }while(0)
+    #define LITCUR_NEXT() do{ if(li<nl){ int32_t _g=(int32_t)sa_read_uleb(s); \
+            nextpos+=fwd?_g:-_g; litb=sa_next_content(s,0);} else nextpos=-1; }while(0)
+    /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
+    #define WR_EXTRAS() do{ for(int32_t _i=0;_i<el && !s->err && !g_rcerr;_i++){ \
+            int32_t _e=fwd?_i:(el-1-_i); \
+            uint8_t _eb=sa_next_content(s,(int)((tp0+dl+_e)&1)); \
+            out_write((uint32_t)(tp0+dl+_e), (uint8_t)(_eb + corr_at(s,dl+_e))); } }while(0)
+    /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
+    #define WR_COPY(K) do{ int32_t _K=(K); uint8_t _db=0; \
+            if(_K==nextpos){ _db=(uint8_t)litb; li++; LITCUR_NEXT(); } \
+            out_write((uint32_t)(tp0+_K), (uint8_t)(_db + hy_src(s,fp0+_K) + corr_at(s,_K))); }while(0)
+
+    if(!fwd) WR_EXTRAS();
+    LITCUR_INIT();
+    int32_t k=fwd?0:(dl-1);
+    while(k>=0 && k<dl && !s->err && !g_rcerr){
+        int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
+        if(a0>=0 && a0+4<=dl){
+            int pure=(nextpos<0 || nextpos<a0 || nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
+            int fa=field_at(s, fp0, a0, packed, pure, dl);
+            if(fa==2){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) WR_COPY(a0+b); k+=4*step; continue; }
+            if(fa==1){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) out_write((uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_at(s,a0+b))); k+=4*step; continue; }
         }
-        for(int32_t e=0;e<el && !s->err && !g_rcerr;e++){
-            uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
-            out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
-        }
-        #undef TAKE_DB_F
-        #undef WR_COPY_F
-    } else {
-        for(int32_t e=el-1;e>=0 && !s->err && !g_rcerr;e--){
-            uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
-            out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
-        }
-        int32_t nextpos=-1, litb=0, li=0;
-        if(nl>0){ int32_t gap=(int32_t)sa_read_uleb(s); nextpos=dl-gap; litb=sa_next_content(s,0); }
-        #define TAKE_DB_D(K) ({ uint8_t _take_db=0; if((K)==nextpos){ _take_db=(uint8_t)litb; li++; \
-            if(li<nl){ int32_t _g=(int32_t)sa_read_uleb(s); nextpos-=_g; litb=sa_next_content(s,0);} else nextpos=-1; } _take_db; })
-        #define WR_COPY_D(K) do{ uint8_t _copy_db=TAKE_DB_D(K); \
-            out_write((uint32_t)(tp0+(K)), (uint8_t)(_copy_db + hy_src(s,fp0+(K)) + corr_at(s,(K)))); }while(0)
-        int32_t k=dl-1;
-        while(k>=0 && !s->err && !g_rcerr){
-            int32_t ks=k-3;
-            if(ks>=0){
-                int pure=(nextpos<ks);                  /* no literal patch in [ks,ks+3] (nextpos<0 -> pure) */
-                int fa=field_at(s, fp0, ks, packed, pure, dl);
-                if(fa==2){ for(int b=3;b>=0;b--) WR_COPY_D(ks+b); k-=4; continue; }
-                if(fa==1){ for(int b=3;b>=0;b--) out_write((uint32_t)(tp0+ks+b),(uint8_t)(packed[b]+corr_at(s,ks+b))); k-=4; continue; }
-            }
-            WR_COPY_D(k); k--;
-        }
-        #undef TAKE_DB_D
-        #undef WR_COPY_D
+        WR_COPY(k); k+=step;
     }
+    if(fwd) WR_EXTRAS();
+    #undef LITCUR_INIT
+    #undef LITCUR_NEXT
+    #undef WR_EXTRAS
+    #undef WR_COPY
 }
 
 /* ===================================================================================== */

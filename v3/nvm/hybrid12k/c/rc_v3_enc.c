@@ -1338,6 +1338,9 @@ static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu;
  * streams. MUST equal RC_S_BIT_RATE in rc_v3.c (decoder) — the wire is bit-exact. */
 #define RC_S_BIT_RATE 4
 
+/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/8), 3584. */
+#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))
+
 static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
     uint32_t p = *prob, bound = (r->range >> 12) * p;
     if (bit == 0) { r->range = bound; *prob = (uint16_t)(p + ((RC_PBIT - p) >> rate)); }
@@ -1554,6 +1557,7 @@ static uint32_t bit_price(uint32_t p, int bit) {
 
 typedef struct {
     uint32_t flag_span, flag_match;          /* avg measured flag price, per chosen token kind */
+    uint32_t rep0_yes, rep0_no;              /* avg measured rep0-flag price (reuse vs fresh distance) */
     uint32_t lit[2][256];                    /* per-parity per-byte literal price */
     UGE gs, gl, gd;                          /* snapshot of length/dist models for value pricing */
     int dk;
@@ -1606,6 +1610,9 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     ug_init_e(&gs, 'g', 0);
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
     uint64_t fs_cost = 0, fm_cost = 0; uint32_t fs_n = 0, fm_n = 0;
+    /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
+    uint16_t rep0 = RC_REP0_INIT; int32_t last_dist = 0;
+    uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
     for (size_t i = 0; i < seq->n; i++) {
         Token t = seq->v[i];
         if (t.type == 'S') {
@@ -1619,13 +1626,24 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
         } else {
             fm_cost += bit_price(flag.m[flag.h], 1); fm_n++;
             fl_encode(&flag, &r, 1);
-            ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
+            if (t.dist == last_dist) {
+                r0y_cost += bit_price(rep0, 1); r0y_n++;
+                re_bit(&r, &rep0, 1, RC_S_BIT_RATE);
+            } else {
+                r0n_cost += bit_price(rep0, 0); r0n_n++;
+                re_bit(&r, &rep0, 0, RC_S_BIT_RATE);
+                ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
+                last_dist = t.dist;
+            }
             ug_encode(&gl, &r, (uint32_t)t.len - 1u);
         }
     }
     buf_free(&r.out);
     pt->flag_span = fs_n ? (uint32_t)(fs_cost / fs_n) : PR_SCALE;
     pt->flag_match = fm_n ? (uint32_t)(fm_cost / fm_n) : PR_SCALE;
+    /* Fall back to the prior-implied price when a flavor was never used in this parse. */
+    pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
+    pt->rep0_no  = r0n_n ? (uint32_t)(r0n_cost / r0n_n) : bit_price(RC_REP0_INIT, 0);
     for (int par = 0; par < 2; par++)
         for (int b = 0; b < 256; b++) pt->lit[par][b] = bt_price(&lit[par], (uint8_t)b);
     pt->gs = gs; pt->gl = gl; pt->gd = gd; pt->dk = dk;
@@ -1671,17 +1689,20 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
     return tv;
 }
 
-/* DP parse using measured fractional prices (PR_SCALE-ths of a bit). Same structure as
- * lz_parse_once but every cost term is the real adaptive price. Length/dist prices are
- * precomputed once per pass (they only depend on the frozen model snapshot), so the inner
- * DP loops stay array lookups -- as cheap as the original integer proxy. */
+/* DP parse using measured fractional prices (PR_SCALE-ths of a bit), made rep0-aware:
+ * the wire lets a match REUSE the immediately-previous match distance for one cheap flag
+ * bit (rep0) instead of re-coding the whole gd distance value. That is a forward dependency
+ * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
+ * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
+ * there. One state per position (cheapest arrival wins) keeps it linear; the chosen parse is
+ * only ever ACCEPTED by the exact seq_real_cost gate in lz_optimal_c, so any approximation
+ * here can never corrupt the wire -- it only changes which legal parse is tried.
+ * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, const PriceTab *pt,
                                 int W) {
     uint32_t maxrun = 1024, win = 1u << W;
-    uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-    Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
-    /* slen[L]=span flag+len price, mlen[L]=match len price for L in 1..maxlen; dpr[D]=match flag+dist. */
+    /* slen[L]=span flag+len price, mlen[L]=match len price; dpr[D]=fresh-distance value price. */
     size_t maxlen = n + 1;
     uint32_t *slen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
@@ -1690,37 +1711,44 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         slen[L] = pt->flag_span + ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
     }
-    for (uint32_t D = 1; D <= win; D++) dpr[D] = pt->flag_match + ug_price(&pt->gd, D - 1u);
+    for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
+    /* match flag + fresh-distance flag + value, vs. match flag + reuse flag (rep0). */
+    uint64_t fresh_extra = (uint64_t)pt->flag_match + pt->rep0_no;
+    uint64_t reuse_extra = (uint64_t)pt->flag_match + pt->rep0_yes;
     const uint64_t INF = UINT64_MAX / 4;
-    cost[n] = 0;
-    for (size_t ri = n; ri-- > 0;) {
-        uint64_t best = INF;
-        Token bt = {0};
+    uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+    int32_t  *rep  = (int32_t *)xmalloc((n + 1) * sizeof(int32_t)); /* rep distance arriving at pos */
+    Token *via = (Token *)xcalloc(n + 1, sizeof(Token));            /* token that arrives at pos */
+    for (size_t i = 0; i <= n; i++) { cost[i] = INF; rep[i] = 0; }
+    cost[0] = 0; rep[0] = 0; /* wire seeds last_dist = 0 (never equals a real distance >= 1) */
+    for (size_t i = 0; i < n; i++) {
+        if (cost[i] >= INF) continue;            /* unreachable along any cheap path */
+        uint64_t ci = cost[i]; int32_t ri = rep[i];
+        /* spans: rep distance unchanged */
         uint64_t runbits = 0;
-        size_t lim = n < ri + maxrun ? n : ri + maxrun;
-        for (size_t j = ri + 1; j <= lim; j++) {
+        size_t lim = n < i + maxrun ? n : i + maxrun;
+        for (size_t j = i + 1; j <= lim; j++) {
             runbits += pt->lit[tags[j - 1]][content[j - 1]];
-            uint64_t c = (uint64_t)slen[j - ri] + runbits + cost[j];
-            if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+            uint64_t c = ci + (uint64_t)slen[j - i] + runbits;
+            if (c < cost[j]) { cost[j] = c; rep[j] = ri; via[j] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
         }
-        for (int ci = 0; ci < ncand[ri]; ci++) {
-            int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
-            uint64_t db = (uint64_t)dpr[bd];
+        /* matches: rep0 reuse when the candidate distance equals the incoming rep distance */
+        for (int cix = 0; cix < ncand[i]; cix++) {
+            int32_t bd = cands[i][cix].dist, bl = cands[i][cix].len;
+            uint64_t dext = (bd == ri) ? reuse_extra : (fresh_extra + dpr[bd]);
             for (int32_t l = 3; l <= bl; l++) {
-                uint64_t c = db + mlen[l] + cost[ri + (size_t)l];
-                if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
+                size_t j = i + (size_t)l;
+                uint64_t c = ci + dext + mlen[l];
+                if (c < cost[j]) { cost[j] = c; rep[j] = bd; via[j] = (Token){ 'R', (int32_t)i, l, bd }; }
             }
         }
-        cost[ri] = best;
-        nxt[ri] = bt;
     }
+    /* reconstruct backward from n */
     TokenVec tv = {0};
-    for (size_t i = 0; i < n;) {
-        Token t = nxt[i];
-        tok_push(&tv, t);
-        i += (size_t)t.len;
-    }
-    free(cost); free(nxt); free(slen); free(mlen); free(dpr);
+    size_t pos = n;
+    while (pos > 0) { tok_push(&tv, via[pos]); pos = (size_t)via[pos].start; }
+    for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
+    free(cost); free(rep); free(via); free(slen); free(mlen); free(dpr);
     return tv;
 }
 
@@ -1769,6 +1797,7 @@ static uint64_t seq_real_cost(const TokenVec *seq, const uint8_t *content, const
     lit_tree_seed_e(frm, from_size, 0, &lit[0], 5);
     lit_tree_seed_e(frm, from_size, 1, &lit[1], 4);
     fl_init_e(&flag); ug_init_e(&gd, 'r', dk); ug_init_e(&gl, 'g', 0); ug_init_e(&gs, 'g', 0);
+    uint16_t rep0 = RC_REP0_INIT; int32_t last_dist = 0;   /* mirror the wire's rep0 reuse */
     REnc r; re_init(&r);
     uint64_t cost = 0;
     for (size_t i = 0; i < seq->n; i++) {
@@ -1782,7 +1811,13 @@ static uint64_t seq_real_cost(const TokenVec *seq, const uint8_t *content, const
             }
         } else {
             cost += bit_price(flag.m[flag.h], 1); fl_encode(&flag, &r, 1);
-            cost += ug_price(&gd, (uint32_t)t.dist - 1u); ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
+            if (t.dist == last_dist) {
+                cost += bit_price(rep0, 1); re_bit(&r, &rep0, 1, RC_S_BIT_RATE);
+            } else {
+                cost += bit_price(rep0, 0); re_bit(&r, &rep0, 0, RC_S_BIT_RATE);
+                cost += ug_price(&gd, (uint32_t)t.dist - 1u); ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
+                last_dist = t.dist;
+            }
             cost += ug_price(&gl, (uint32_t)t.len - 1u); ug_encode(&gl, &r, (uint32_t)t.len - 1u);
         }
     }
@@ -1988,8 +2023,6 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap) {
 #define LIT0_CTX 5
 /* Mirrors rc_v3.c LIT0_SEL: 5-context tag0 selector, corpus-derived boundaries 0x20/0x3d/0x8e/0xf7. */
 #define LIT0_SEL(p) ( (p)<0x20 ? 0 : (p)<0x3d ? 1 : (p)<0x8e ? 2 : (p)<0xf7 ? 3 : 4 )
-/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/8), 3584. */
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))
 typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
@@ -2178,7 +2211,12 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     put_uleb(&blob, from_size);
     put_uleb(&blob, to_size);
     put_uleb(&blob, (uint32_t)fp_end_s);
-    buf_write(&blob, body.d, body.n);
+    /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
+     * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
+     * information; the decoder used to skip it in rc_init. Drop it on the wire (-1 B/patch).
+     * Bit-exact invariant: body.d[0] is always 0 here. */
+    if (body.n > 0 && body.d[0] == 0) { buf_write(&blob, body.d + 1, body.n - 1); }
+    else { die("range-coder leading byte not 0 — wire invariant broken"); }
     buf_put_u32le(&blob, crc32_buf(to.d, to.n));
     write_file(blob_out, blob.d, blob.n);
     if (stats_on) {

@@ -16,7 +16,6 @@
 /* ---- 256-symbol byte via 8-level bit-tree; probs[1..255]; rate = adaptation shift ---- */
 typedef struct { uint16_t p[256]; uint8_t rate; } BitTree;
 static inline void bt_init_rate(BitTree*t,int rate){ for(int i=0;i<256;i++) t->p[i]=RC_PHALF; t->rate=(uint8_t)rate; }
-static inline void bt_init(BitTree*t){ bt_init_rate(t,5); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.

@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,587 B, data 0 B, bss 12,000 B (<= 12 KiB cap, 288 B margin) |
+| ARM object at `SA_W=10` | text 5,335 B, data 0 B, bss 12,000 B (<= 12 KiB cap, 288 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
-| Coroutine stack high-water | 504 B of 576 B (72 B cushion; canary-guarded) |
+| Coroutine stack high-water | 408 B of 576 B (168 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,684,225 B**.
-- W=10 non-self corpus total: **4,683,662 B**.
+- W=10 full 16x16 corpus total: **4,681,556 B**.
+- W=10 non-self corpus total: **4,681,009 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **880 B**
-  - `v1_one_face -> v0_base`: **591 B**
+  - `v0_base -> v1_one_face`: **878 B**
+  - `v1_one_face -> v0_base`: **590 B**
 
 ## Architecture
 
@@ -60,8 +60,11 @@ the last distance (the flag's prior is biased toward "fresh" so it stays nearly
 free on small patches).
 The host encoder's LZ parse runs a price-feedback loop: it re-parses against bit
 prices measured from the real adaptive models and keeps the result only when its
-exact modeled cost drops. These are encoder/decoder-symmetric or encoder-only and
-leave the no-bake apply, NVM write discipline, and divide-free property unchanged.
+exact modeled cost drops, and the parse is `rep0`-aware so it deliberately prices
+and exploits last-distance reuse. The wire also omits the always-zero leading
+range-coder cache byte (a structural LZMA invariant), saving one byte per patch.
+These are encoder/decoder-symmetric or encoder-only and leave the no-bake apply,
+NVM write discipline, and divide-free property unchanged.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -79,7 +82,7 @@ make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `880` and `591`
+prints the real one-face blob sizes. Expected blob sizes are `878` and `590`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
@@ -106,8 +109,10 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 ```
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
-`W=10` / `SA_W=10`. `W=11` saves bytes but leaves only a narrow SRAM margin, so
-keep W=10 unless the deployment explicitly accepts that trade.
+`W=10` / `SA_W=10`. `W=11` was measured at -7.7 KB on the corpus but grows the
+LZSS ring to 2,048 B, pushing `.bss` to 13,024 B and exceeding the 12 KiB SRAM
+cap by 736 B; no cap-compliant reclaim was found, so `W=10` is the production
+maximum.
 
 ## Caps
 
@@ -117,7 +122,7 @@ Current production caps and measured peaks:
 - Per-op correction entries: `OPC_CAP=80`, measured peak 68.
 - BL delta dictionary: `DR_KCAP_BL=208`, measured peak 180.
 - EX/LDR delta dictionary: `DR_KCAP_EX=128`, measured peak 106.
-- Preserve journal: `JSLOTS=904`, measured peak 903.
+- Preserve journal: `JSLOTS=904`, measured peak 605.
 
 Raising caps is a wire-compatible decoder resource change only when the encoder
 uses the same build-time limits.
