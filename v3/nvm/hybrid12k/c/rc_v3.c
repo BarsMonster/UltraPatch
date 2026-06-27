@@ -252,18 +252,29 @@ static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 static void ugg_seed_cont(UGGamma*g,int depth){
     for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
 }
-static uint32_t s_ug_rice(UGRice*g){
-    uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
-    uint32_t v=cl<<g->k;
-    for(int pos=0;pos<g->k;pos++) v|=(uint32_t)s_bit(&g->m[UG_C((int)cl)][UG_C(pos)])<<(g->k-1-pos);
+/* shared adaptive unary prefix: read 1-bits on the per-clamped-level priors u[] until a 0 bit,
+ * returning the run length cl (== the value's bit-length class). `cap` bounds the run so a corrupt
+ * zero-fill stream can't spin forever / shift by >=32 (RC_UNARY_MAX for gamma, RC_RICE_UNARY_MAX for
+ * rice); on overflow it sets g_rcerr and returns 0 so the mantissa loop is a no-op and the apply
+ * cleanly rejects (same effect as the old per-function early return). Bit-exact for valid streams. */
+static uint32_t s_ug_unary(uint16_t*u,uint32_t cap){
+    uint32_t cl=0; while(s_bit(&u[UG_C((int)cl)])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
+    return cl;
+}
+/* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
+ * row already selected by caller (rice: m[UG_C(cl)] full square row; gamma: m[ugg_base[UG_C(cl)]]
+ * packed-triangle row). Bit-exact identical to the inlined per-function loops. */
+static uint32_t s_ug_mant(uint16_t*row,int cnt){
+    uint32_t v=0; for(int pos=0;pos<cnt;pos++) v|=(uint32_t)s_bit(&row[UG_C(pos)])<<(cnt-1-pos);
     return v;
 }
+static uint32_t s_ug_rice(UGRice*g){
+    uint32_t cl=s_ug_unary(g->u,RC_RICE_UNARY_MAX);
+    return (cl<<g->k) | s_ug_mant(g->m[UG_C((int)cl)],g->k);
+}
 static uint32_t s_ug_gamma(UGGamma*g){
-    int cl=0; while(s_bit(&g->u[UG_C(cl)])==1){ if(++cl>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
-    uint32_t mm=1u<<cl;
-    int mb=ugg_base[UG_C(cl)];   /* row offset == UG_GAMMA_BASE(UG_C(cl)); pinned at file scope */
-    for(int pos=0;pos<cl;pos++) mm|=(uint32_t)s_bit(&g->m[mb+UG_C(pos)])<<(cl-1-pos);
-    return mm-1;
+    int cl=(int)s_ug_unary(g->u,RC_UNARY_MAX);
+    return ((1u<<cl) | s_ug_mant(&g->m[ugg_base[UG_C(cl)]],cl)) - 1u;
 }
 /* ---- order-2 flag ---- */
 static int s_flag(Flag1*f){ int b=s_bit(&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
@@ -387,18 +398,17 @@ static int jr_get(uint32_t pos, uint8_t*out){
 /* relocation unpack/pack (Thumb bl + s32) — de-relocation override only (no flash write).      */
 /* The journal-aware pristine reads + the bl/ldr predicates live with the apply state below.    */
 /* ===================================================================================== */
-static int32_t unpack_bl(uint16_t up, uint16_t lo){
-    int32_t s=(up>>10)&1, imm10=up&0x3ff, imm11=lo&0x7ff;
-    int32_t j1=(lo>>13)&1, j2=(lo>>11)&1, i1=1-(j1^s), i2=1-(j2^s);
-    int32_t v=(s<<23)|(i1<<22)|(i2<<21)|(imm10<<11)|imm11; if(s) v-=(1<<24); return v;
-}
-/* pack a 24-bit BL immediate into 4 bytes (de-relocation override; no flash write) */
-static void pack_bl_buf(uint32_t imm24, uint8_t out[4]){
-    imm24 &= 0x00ffffffu;
-    uint32_t s=(imm24>>23)&1u,i1=(imm24>>22)&1u,i2=(imm24>>21)&1u;
-    uint32_t j1=1u-(i1^s),j2=1u-(i2^s),imm10=(imm24>>11)&0x3ffu,imm11=imm24&0x7ffu;
-    uint16_t up=(uint16_t)(0xF000u|(s<<10)|imm10), lo=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|imm11);
-    out[0]=up&0xff; out[1]=(up>>8)&0xff; out[2]=lo&0xff; out[3]=(lo>>8)&0xff;
+/* de-relocate a Thumb BL halfword pair (imm24 = imm - delta), repacked into 4 bytes (no flash write).
+ * j1/j2 are the s-conditioned complements of the imm's i1/i2 bits; the subtract is mod 2^24 (masked
+ * & repacked immediately) so no sign-extension is needed. */
+static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
+    uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
+    uint32_t imm24=(((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21)) - delta;
+    imm24&=0x00ffffffu; s=(imm24>>23)&1u;
+    uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
+    uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
+    uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
+    out[0]=u&0xff; out[1]=(u>>8)&0xff; out[2]=l&0xff; out[3]=(l>>8)&0xff;
 }
 
 /* ===================================================================================== */
@@ -695,7 +705,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     if(!(fpk&1u) && (up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t delta=pull_delta(&DR_BL, &M_dibl);          /* INLINE pull from the single stream */
-        pack_bl_buf(((uint32_t)unpack_bl(up,lo)-(uint32_t)delta)&0x00ffffffu, packed);
+        bl_dereloc(up, lo, (uint32_t)delta, packed);
         (void)hy_src32(s,fpk);                              /* record the 4 BL bytes into the psrc ring */
         return 1;
     }

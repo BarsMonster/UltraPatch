@@ -23,14 +23,14 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,255 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
+| ARM object at `SA_W=10` | text 5,239 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,658,994 B**.
-- W=10 non-self corpus total: **4,658,447 B**.
+- W=10 full 16x16 corpus total: **4,645,014 B**.
+- W=10 non-self corpus total: **4,644,467 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **874 B**
   - `v1_one_face -> v0_base`: **586 B**
@@ -75,12 +75,21 @@ wire codes them with (carrying the prevlit through the forward DP), instead of a
 order-0 average; (2) the acceptance gate is the EXACT full-body flushed byte count
 (the real geometry/preserve/delta streams emitted interleaved with the LZ tokens
 and finalized with the same optimal flush), not a token-stream-only modeled cost.
-The parse is `rep0`-aware so it deliberately prices and exploits last-distance
-reuse. The relocation-field detector also admits slightly smaller delta-bearing
-blocks (it pays off across the corpus). The wire omits the always-zero leading
-range-coder cache byte (a structural LZMA invariant), saving one byte per patch.
-These are encoder/decoder-symmetric or encoder-only and leave the no-bake apply,
-NVM write discipline, and divide-free property unchanged.
+The forward DP is also flag-history-aware: the token flag is an order-2 model
+(four contexts on the previous two token kinds), so the parse carries the flag
+history as DP state and prices each span/match transition under its real context
+instead of a washed-out scalar average. The parse is `rep0`-aware so it
+deliberately prices and exploits last-distance reuse, and it explicitly probes the
+reuse-distance match the Pareto candidate set drops (extending the previous
+distance for one cheap flag bit). The relocation-field detector also admits
+slightly smaller delta-bearing blocks (it pays off across the corpus). The wire
+omits the always-zero leading range-coder cache byte (a structural LZMA invariant),
+saving one byte per patch. These parse refinements are encoder-only (the wire
+format is unchanged; they only choose a cheaper legal parse), so the no-bake apply,
+NVM write discipline, and divide-free property are untouched. On the decoder side
+the Rice and Gamma readers now share one adaptive unary-prefix and one mantissa
+helper (emitted once instead of duplicated), and the Thumb-BL de-relocation
+collapses into a single fused round-trip; both are bit-exact and shrink the object.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal

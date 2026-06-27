@@ -1569,7 +1569,7 @@ static uint32_t bit_price(uint32_t p, int bit) {
 #define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
 
 typedef struct {
-    uint32_t flag_span, flag_match;          /* avg measured flag price, per chosen token kind */
+    uint32_t fspan_c[4], fmatch_c[4];        /* per-flag-context span/match price (order-2 Flag1) */
     uint32_t rep0_yes, rep0_no;              /* avg measured rep0-flag price (reuse vs fresh distance) */
     uint32_t lit0[LIT0_CTX][256];            /* tag0 per-prevbyte-context per-byte literal price */
     uint32_t lit1[256];                      /* tag1 per-byte literal price */
@@ -1624,7 +1624,6 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     ug_seed_cont_e(&gl, 1);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
-    uint64_t fs_cost = 0, fm_cost = 0; uint32_t fs_n = 0, fm_n = 0;
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
@@ -1632,7 +1631,6 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     for (size_t i = 0; i < seq->n; i++) {
         Token t = seq->v[i];
         if (t.type == 'S') {
-            fs_cost += bit_price(flag.m[flag.h], 0); fs_n++;
             fl_encode(&flag, &r, 0);
             ug_encode(&gs, &r, (uint32_t)t.len - 1u);
             for (int32_t j = 0; j < t.len; j++) {
@@ -1642,7 +1640,6 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
                 prevlit = byte;
             }
         } else {
-            fm_cost += bit_price(flag.m[flag.h], 1); fm_n++;
             fl_encode(&flag, &r, 1);
             if (t.dist == last_dist) {
                 r0y_cost += bit_price(rep0[rep0h], 1); r0y_n++;
@@ -1657,8 +1654,14 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
         }
     }
     buf_free(&r.out);
-    pt->flag_span = fs_n ? (uint32_t)(fs_cost / fs_n) : PR_SCALE;
-    pt->flag_match = fm_n ? (uint32_t)(fm_cost / fm_n) : PR_SCALE;
+    /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
+     * order-2 model on the previous two token kinds (Flag1, 4 contexts); a scalar span/match
+     * average would wash that out. Pricing each flag under its real context lets the rep0-aware
+     * DP (which tracks a forward flag history) value match/span transitions accurately. */
+    for (int h = 0; h < 4; h++) {
+        pt->fspan_c[h]  = bit_price(flag.m[h], 0);
+        pt->fmatch_c[h] = bit_price(flag.m[h], 1);
+    }
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
     pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
     pt->rep0_no  = r0n_n ? (uint32_t)(r0n_cost / r0n_n) : bit_price(RC_REP0_INIT, 0);
@@ -1713,72 +1716,118 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * bit (rep0) instead of re-coding the whole gd distance value. That is a forward dependency
  * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
  * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
- * there. One state per position (cheapest arrival wins) keeps it linear; the chosen parse is
- * only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation here
- * can never corrupt the wire -- it only changes which legal parse is tried.
+ * there. The wire's token flag is also an order-2 model (Flag1, 4 contexts on the previous two
+ * token kinds), so the flag history h=(prev2<<1|prev1) is part of the forward state too: we keep
+ * one DP state per (position, h) and price each flag under its real context fspan_c[h]/fmatch_c[h]
+ * instead of a washed-out scalar average. Cheapest-arrival-per-state keeps it O(n*4); the chosen
+ * parse is only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation
+ * here can never corrupt the wire -- it only changes which legal parse is tried.
  * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, const PriceTab *pt,
                                 int W) {
     uint32_t maxrun = 1024, win = 1u << W;
-    /* slen[L]=span flag+len price, mlen[L]=match len price; dpr[D]=fresh-distance value price. */
+    /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
+     * dpr[D]=fresh-distance value price. */
     size_t maxlen = n + 1;
     uint32_t *slen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
     for (size_t L = 1; L <= maxlen; L++) {
-        slen[L] = pt->flag_span + ug_price(&pt->gs, (uint32_t)L - 1u);
+        slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
     }
     for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
-    /* match flag + fresh-distance flag + value, vs. match flag + reuse flag (rep0). */
-    uint64_t fresh_extra = (uint64_t)pt->flag_match + pt->rep0_no;
-    uint64_t reuse_extra = (uint64_t)pt->flag_match + pt->rep0_yes;
+    /* per-context match-flag extras: match flag + fresh-distance flag + value, vs reuse flag (rep0). */
+    uint64_t fresh_extra[4], reuse_extra[4];
+    for (int h = 0; h < 4; h++) {
+        fresh_extra[h] = (uint64_t)pt->fmatch_c[h] + pt->rep0_no;
+        reuse_extra[h] = (uint64_t)pt->fmatch_c[h] + pt->rep0_yes;
+    }
     const uint64_t INF = UINT64_MAX / 4;
-    uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-    int32_t  *rep  = (int32_t *)xmalloc((n + 1) * sizeof(int32_t)); /* rep distance arriving at pos */
-    uint8_t  *pl   = (uint8_t *)xmalloc((n + 1) * sizeof(uint8_t)); /* prevlit byte arriving at pos */
-    Token *via = (Token *)xcalloc(n + 1, sizeof(Token));            /* token that arrives at pos */
-    for (size_t i = 0; i <= n; i++) { cost[i] = INF; rep[i] = 0; pl[i] = 0; }
-    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* wire seeds last_dist = 0 and prevlit = 0 */
+    /* one state per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1. */
+    size_t ns = (n + 1) * 4;
+    uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
+    int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
+    uint8_t  *pl   = (uint8_t *)xmalloc(ns * sizeof(uint8_t)); /* prevlit byte arriving at state */
+    Token *via = (Token *)xcalloc(ns, sizeof(Token));         /* token that arrives at state */
+    uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor h for backtrack */
+    for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; pl[s] = 0; }
+    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
     for (size_t i = 0; i < n; i++) {
-        if (cost[i] >= INF) continue;            /* unreachable along any cheap path */
-        uint64_t ci = cost[i]; int32_t ri = rep[i];
-        /* spans: rep distance unchanged. tag0 literals are priced under the wire's order-1
-         * prev-byte context (LIT0_SEL of the preceding byte). The prevlit carried into the run
-         * is the last literal byte on the cheapest path here (matches do NOT update prevlit on
-         * the wire), tracked exactly in pl[]; cheapest-arrival-wins makes this an approximation
-         * only when a costlier path would carry a different prevlit -- the chosen parse is always
-         * re-checked by the exact full-body byte gate in encode_body, so it can never corrupt the
-         * wire (it only changes which legal parse is tried). */
-        uint64_t runbits = 0;
-        size_t lim = n < i + maxrun ? n : i + maxrun;
-        uint8_t prevb = pl[i];
-        for (size_t j = i + 1; j <= lim; j++) {
-            uint8_t byte = content[j - 1];
-            runbits += tags[j - 1] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(prevb)][byte];
-            prevb = byte;
-            uint64_t c = ci + (uint64_t)slen[j - i] + runbits;
-            if (c < cost[j]) { cost[j] = c; rep[j] = ri; pl[j] = byte; via[j] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
-        }
-        /* matches: rep0 reuse when the candidate distance equals the incoming rep distance.
-         * A match does not emit a literal, so the prevlit (pl) is carried through unchanged. */
-        for (int cix = 0; cix < ncand[i]; cix++) {
-            int32_t bd = cands[i][cix].dist, bl = cands[i][cix].len;
-            uint64_t dext = (bd == ri) ? reuse_extra : (fresh_extra + dpr[bd]);
-            for (int32_t l = 3; l <= bl; l++) {
-                size_t j = i + (size_t)l;
-                uint64_t c = ci + dext + mlen[l];
-                if (c < cost[j]) { cost[j] = c; rep[j] = bd; pl[j] = pl[i]; via[j] = (Token){ 'R', (int32_t)i, l, bd }; }
+        for (int h = 0; h < 4; h++) {
+            size_t si = i * 4 + (size_t)h;
+            if (cost[si] >= INF) continue;       /* unreachable along any cheap path */
+            uint64_t ci = cost[si]; int32_t ri = rep[si];
+            /* spans: emit one span flag (kind 0) under context h, then the gamma length and the
+             * tag0/tag1 literals. New flag history after a span: h' = (h<<1|0)&3. tag0 literals are
+             * priced under the wire's order-1 prev-byte context (LIT0_SEL of the preceding byte);
+             * the prevlit carried in is the last literal byte on the cheapest path here (matches do
+             * NOT update prevlit on the wire), tracked exactly in pl[]. cheapest-arrival-per-state
+             * makes this an approximation only when a costlier path carries a different prevlit --
+             * the chosen parse is always re-checked by the exact full-body byte gate in encode_body. */
+            int hs = (h << 1) & 3;               /* history after a span flag (bit 0) */
+            uint64_t span_base = ci + pt->fspan_c[h];
+            uint64_t runbits = 0;
+            size_t lim = n < i + maxrun ? n : i + maxrun;
+            uint8_t prevb = pl[si];
+            for (size_t j = i + 1; j <= lim; j++) {
+                uint8_t byte = content[j - 1];
+                runbits += tags[j - 1] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(prevb)][byte];
+                prevb = byte;
+                uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
+                size_t sj = j * 4 + (size_t)hs;
+                if (c < cost[sj]) { cost[sj] = c; rep[sj] = ri; pl[sj] = byte; vh[sj] = (uint8_t)h;
+                                    via[sj] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
+            }
+            /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
+             * distance equals the incoming rep distance. A match does not emit a literal, so prevlit
+             * is carried through unchanged. New flag history after a match: h' = (h<<1|1)&3. */
+            int hm = ((h << 1) | 1) & 3;
+            for (int cix = 0; cix < ncand[i]; cix++) {
+                int32_t bd = cands[i][cix].dist, bl = cands[i][cix].len;
+                uint64_t dext = (bd == ri) ? reuse_extra[h] : (fresh_extra[h] + dpr[bd]);
+                uint64_t mbase = ci + dext;
+                for (int32_t l = 3; l <= bl; l++) {
+                    size_t j = i + (size_t)l;
+                    uint64_t c = mbase + mlen[l];
+                    size_t sj = j * 4 + (size_t)hm;
+                    if (c < cost[sj]) { cost[sj] = c; rep[sj] = bd; pl[sj] = pl[si]; vh[sj] = (uint8_t)h;
+                                        via[sj] = (Token){ 'R', (int32_t)i, l, bd }; }
+                }
+            }
+            /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
+             * distance == ri (the incoming rep distance) because it is not on the (dist,len) frontier,
+             * yet there it costs only the reuse flag (no fresh-distance value). Recover it directly from
+             * content so the DP can extend the previous distance for one cheap flag bit (len>=3 like the
+             * wire; the chosen parse is re-checked by encode_body's exact full-body byte gate). */
+            if (ri > 0 && (size_t)ri <= i) {
+                size_t src = i - (size_t)ri;
+                size_t rl = 0, rlim = lim - i;     /* same maxrun cap as spans (lim from the span block) */
+                while (rl < rlim && content[src + rl] == content[i + rl]) rl++;
+                for (size_t l = 3; l <= rl; l++) {
+                    size_t j = i + l;
+                    uint64_t c = ci + reuse_extra[h] + mlen[l];
+                    size_t sj = j * 4 + (size_t)hm;
+                    if (c < cost[sj]) { cost[sj] = c; rep[sj] = ri; pl[sj] = pl[si]; vh[sj] = (uint8_t)h;
+                                        via[sj] = (Token){ 'R', (int32_t)i, (int32_t)l, ri }; }
+                }
             }
         }
     }
-    /* reconstruct backward from n */
+    /* reconstruct backward from the cheapest terminal state at position n. */
+    int hbest = 0; uint64_t cbest = INF;
+    for (int h = 0; h < 4; h++) if (cost[n * 4 + (size_t)h] < cbest) { cbest = cost[n * 4 + (size_t)h]; hbest = h; }
     TokenVec tv = {0};
-    size_t pos = n;
-    while (pos > 0) { tok_push(&tv, via[pos]); pos = (size_t)via[pos].start; }
+    size_t pos = n; int h = hbest;
+    while (pos > 0) {
+        size_t s = pos * 4 + (size_t)h;
+        tok_push(&tv, via[s]);
+        pos = (size_t)via[s].start;
+        h = vh[s];
+    }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(pl); free(via); free(slen); free(mlen); free(dpr);
+    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(dpr);
     return tv;
 }
 
