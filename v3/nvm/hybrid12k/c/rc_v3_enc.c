@@ -1986,8 +1986,8 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap) {
 /* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
  * Mirrors rc_v3.c M_lit0[]/M_lit1 + g_litprev. */
 #define LIT0_CTX 5
-/* Mirrors rc_v3.c LIT0_SEL (5-context tag0 selector, splits the bottom quartile). */
-#define LIT0_SEL(p) ( (p)<0x40 ? ((p)>>5) : 1+((p)>>6) )
+/* Mirrors rc_v3.c LIT0_SEL: 5-context tag0 selector, corpus-derived boundaries 0x20/0x3d/0x8e/0xf7. */
+#define LIT0_SEL(p) ( (p)<0x20 ? 0 : (p)<0x3d ? 1 : (p)<0x8e ? 2 : (p)<0xf7 ? 3 : 4 )
 /* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/8), 3584. */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))
 typedef struct {
@@ -2088,8 +2088,8 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     ug_init_e(&M.gdl, 'g', 0);
     ug_init_e(&M.gel, 'g', 0);
     ug_init_e(&M.gadj, 'g', 0);
-    ug_seed_cont_e(&M.gdl, 3);
-    ug_seed_cont_e(&M.gadj, 2);
+    ug_seed_cont_e(&M.gdl, 6);
+    ug_seed_cont_e(&M.gadj, 3);
     ug_init_e(&M.dibl, 'g', 0);
     ug_init_e(&M.diex, 'g', 0);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);

@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,999 B, data 0 B, bss 12,000 B (<= 12 KiB cap, 288 B margin) |
+| ARM object at `SA_W=10` | text 5,587 B, data 0 B, bss 12,000 B (<= 12 KiB cap, 288 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 504 B of 576 B (72 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,692,289 B**.
-- W=10 non-self corpus total: **4,691,717 B**.
+- W=10 full 16x16 corpus total: **4,684,225 B**.
+- W=10 non-self corpus total: **4,683,662 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **882 B**
-  - `v1_one_face -> v0_base`: **594 B**
+  - `v0_base -> v1_one_face`: **880 B**
+  - `v1_one_face -> v0_base`: **591 B**
 
 ## Architecture
 
@@ -48,9 +48,10 @@ output frontier. Relocation field positions are derived instead of shipped:
   dictionaries and repeat/hit models.
 
 Entropy coding: content literals use five bit-trees selected by the previous
-literal byte's range (`LIT0_SEL`: the top three quartiles keep the `>>6` split
-and the literal-dense bottom quartile is subdivided into two octiles), each
-parity-seeded from the from-image histogram;
+literal byte's range (`LIT0_SEL`: a five-way split on boundaries
+`0x20/0x3d/0x8e/0xf7` derived by minimising the conditional entropy of the
+literal distribution over the firmware corpus), each parity-seeded from the
+from-image histogram;
 per-op geometry (diff/extra length, source skip) and the preserve/correction
 counts and gaps use dedicated adaptive Golomb models rather than a fixed raw code.
 Match distances carry an adaptive `rep0` reuse flag: when a match repeats the
@@ -78,7 +79,7 @@ make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `882` and `594`
+prints the real one-face blob sizes. Expected blob sizes are `880` and `591`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.

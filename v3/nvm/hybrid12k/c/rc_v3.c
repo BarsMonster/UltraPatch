@@ -42,7 +42,7 @@ extern void    flash_write(uint32_t addr, uint8_t val);
 extern uint32_t g_image_span;      /* max(from_size,to_size) — bounds every flash access */
 
 /* ===================================================================================== */
-/* byte FIFO + ucontext coroutine (the push / blocking-fetch core, SPEC §3.1)             */
+/* byte FIFO + ucontext coroutine (the push / blocking-fetch core)                        */
 /* ===================================================================================== */
 #ifndef FIFO_CAP
 #define FIFO_CAP 1u                         /* decoder_push() supplies one byte per resume */
@@ -139,7 +139,7 @@ static uint8_t next_byte(void){
     return b;
 }
 
-/* divide-free range decoder reading through the blocking FIFO (SPEC §4). */
+/* divide-free range decoder reading through the blocking FIFO. */
 typedef struct { uint32_t range, code; } SDec;
 static SDec RC;
 static void rc_init(void){
@@ -166,7 +166,7 @@ static int s_raw(void){
     while (RC.range<RC_KTOP){ RC.code=(RC.code<<8)|next_byte(); RC.range<<=8; }
     return b;
 }
-/* CRASH-HARDENING (SPEC §7, fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
+/* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail (the apply checks err -> clean reject, never crash / never silent-wrong). */
@@ -253,15 +253,13 @@ static uint32_t crc32_flash(uint32_t n){
 }
 
 /* ===================================================================================== */
-/* never-evict journal (SPEC §6) — PACKED 3-BYTE PAGED scheme (Path E refinement of Path D). */
-/* Each never-evict entry is (pos, byte). pos needs 18 bits (image span ~216 KB), byte 8 ->  */
-/* 26 bits, so a fixed slot is 4 B (Path D's sorted (pos<<8)|byte) = 903*4 = 3612 B. We do    */
-/* better: store only the LOW 16 bits of pos + the byte = exactly 3 B/slot, and amortise the  */
-/* HIGH pos bits across a tiny PAGE TABLE (slots are kept sorted by full pos, so each 64 KB    */
-/* page is one contiguous run). 903*3 = 2709 B + ~32 B page table vs 3612/4096 — saves ~1.39  */
-/* KB at ZERO size cost (decoder-only). NEVER-EVICT: first write to a pos wins; over-depth     */
-/* (would exceed JSLOTS) is REFUSED before any write (Path A's pre-write refusal, preserved).  */
-/* Lives in the apply phase ONLY (overlaid in ARENA front).                                    */
+/* never-evict journal — PACKED 3-BYTE PAGED scheme. Each entry is (pos, byte). Storing the    */
+/* full pos (needs 18 bits for an image span up to ~256 KB) + the byte would be a 4 B slot. We  */
+/* store only the LOW 16 bits of pos + the byte = exactly 3 B/slot, and amortise the HIGH pos   */
+/* bits across a tiny PAGE TABLE: slots are kept sorted by full pos, so each 64 KB page is one  */
+/* contiguous run and its slots share the same high bits. NEVER-EVICT: the first write to a pos */
+/* wins; over-depth (would exceed JSLOTS) is REFUSED before any write. Lives in the apply phase */
+/* ONLY (overlaid in ARENA front).                                                             */
 /* ===================================================================================== */
 /* DEREL dict cap (corpus distinct-value peak ~179 per substream + margin). The STREAMED-DELTA wire
  * (12 KiB build) holds NO resident per-detection store — only a small MOVE-TO-FRONT dict of the
@@ -441,11 +439,11 @@ static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
  * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
 #define LIT0_CTX 5
-/* tag0 context from the previous literal: keeps the prevlit>>6 quartile split for
- * the upper 3 quartiles, but subdivides the literal-dense bottom quartile (ARM low
- * registers / zero bytes) into two octiles (0x00-0x1F, 0x20-0x3F) for a 5th tree.
- * +1 BitTree (~514B) stays within the bss cap; better than a flat 4-way >>6. */
-#define LIT0_SEL(p) ( (p)<0x40 ? ((p)>>5) : 1+((p)>>6) )
+/* tag0 context from the previous literal: a 5-way split whose boundaries
+ * (0x20/0x3d/0x8e/0xf7) were derived by minimising the conditional entropy of the
+ * tag0-literal distribution over the firmware corpus. Affects compression ratio only,
+ * never correctness; all 5 trees seed from the same parity-0 histogram. */
+#define LIT0_SEL(p) ( (p)<0x20 ? 0 : (p)<0x3d ? 1 : (p)<0x8e ? 2 : (p)<0xf7 ? 3 : 4 )
 static BitTree M_lit0[LIT0_CTX], M_lit1;
 static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
@@ -514,54 +512,11 @@ static int32_t pull_delta(DRStream*d, UGGamma*gix){
 /* ===================================================================================== */
 #define SA_RING (1u<<SA_W)
 #define SA_MASK (SA_RING-1u)
-/* content-stream parity scanner (geometry-fed; mirrors rc_v3._ContentScanner). Tag is 0 except
- * for an EXTRA (new-code) byte, tagged by its true to-address parity (direction-independent).
- * Phase order: FWD = nl,[gap,litb]*,extra ; grow = nl,extra,[gap,litb]*. */
-enum { CPH_NL, CPH_GAP, CPH_LITB, CPH_EXTRA, CPH_DONE };
-typedef struct {
-    int32_t acc,nl,li,el,ei,dl,tp0;
-    uint8_t ph,first,shift,FWD;
-} CScan;
-static void cs_begin(CScan*s, int FWD, int32_t tp0, int32_t dl, int32_t el){
-    s->FWD=FWD; s->tp0=tp0; s->dl=dl; s->el=el; s->ph=CPH_NL; s->first=1; s->acc=0; s->shift=0;
-    s->nl=0; s->li=0; s->ei=0;
-}
-static int cs_tag(CScan*s){
-    if(s->ph==CPH_EXTRA){ int32_t exstart=s->tp0+s->dl;
-        int32_t off=s->FWD? s->ei : (s->el-1-s->ei); return (int)((exstart+off)&1); }
-    return 0;
-}
-static void cs_after_nl(CScan*s){
-    if(s->FWD){ s->ph = s->nl>0? CPH_GAP : (s->el>0? CPH_EXTRA : CPH_DONE); }
-    else      { s->ph = s->el>0? CPH_EXTRA : (s->nl>0? CPH_GAP : CPH_DONE); }
-    if(s->ph==CPH_EXTRA) s->ei=0;
-}
-static void cs_adv(CScan*s, uint8_t b){
-    int ph=s->ph;
-    if(ph==CPH_NL || ph==CPH_GAP){
-        if(s->first){ s->acc=b&0x7f; s->shift=7; s->first=0; }
-        else { if(s->shift>21){ g_rcerr=1; return; } s->acc|=(int32_t)(b&0x7f)<<s->shift; s->shift+=7; }
-        if(b&0x80) return;
-        s->first=1;
-        if(ph==CPH_NL){ s->nl=s->acc; s->li=0; cs_after_nl(s); }
-        else s->ph=CPH_LITB;
-    } else if(ph==CPH_LITB){
-        s->li++;
-        if(s->li<s->nl){ s->ph=CPH_GAP; s->first=1; s->acc=0; }
-        else if(s->FWD){ s->ph = s->el>0? CPH_EXTRA : CPH_DONE; if(s->ph==CPH_EXTRA) s->ei=0; }
-        else s->ph=CPH_DONE;
-    } else if(ph==CPH_EXTRA){
-        s->ei++;
-        if(s->ei>=s->el){ if(!s->FWD && s->nl>0) s->ph=CPH_GAP; else s->ph=CPH_DONE; }
-    }
-}
-
 typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
     /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
-    CScan sc;
     uint32_t from_size; int32_t to_size;
     int32_t tp, fp;                               /* running accumulators (apply order) */
     /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
@@ -621,11 +576,10 @@ static int is_ldr_grow(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
 }
 static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
-static uint8_t sa_next_content(SA*s){
+static uint8_t sa_next_content(SA*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
-            int tag=cs_tag(&s->sc);
             int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)]);
             g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
@@ -659,7 +613,7 @@ fail:
 static uint32_t sa_read_uleb(SA*s){
     uint32_t acc=0; int sh=0;
     for(;;){ if(s->err||g_rcerr) return 0;
-        uint8_t b=sa_next_content(s); cs_adv(&s->sc,b);
+        uint8_t b=sa_next_content(s,0);
         if(sh>28){ s->err=1; return 0; }            /* cap shift (uLEB <=32-bit) */
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
@@ -774,15 +728,14 @@ static void sa_apply_op(SA*s){
         tp0,fp0,dl,el,adj,DR_BL.K,DR_EX.K);
 #endif
     /* ---- CONTENT decode + streaming write with inline field detection ---- */
-    cs_begin(&s->sc, s->FWD, tp0, dl, el);
     int32_t nl=(int32_t)sa_read_uleb(s);
     if(nl<0||nl>dl){ s->err=1; return; }
     uint8_t packed[4];
     if(s->FWD){
         int32_t nextpos=-1, litb=0, li=0;
-        if(nl>0){ nextpos=(int32_t)sa_read_uleb(s); litb=sa_next_content(s); cs_adv(&s->sc,(uint8_t)litb); }
+        if(nl>0){ nextpos=(int32_t)sa_read_uleb(s); litb=sa_next_content(s,0); }
         #define TAKE_DB_F(K) ({ uint8_t _take_db=0; if((K)==nextpos){ _take_db=(uint8_t)litb; li++; \
-            if(li<nl){ nextpos+=(int32_t)sa_read_uleb(s); litb=sa_next_content(s); cs_adv(&s->sc,(uint8_t)litb);} else nextpos=-1; } _take_db; })
+            if(li<nl){ nextpos+=(int32_t)sa_read_uleb(s); litb=sa_next_content(s,0);} else nextpos=-1; } _take_db; })
         #define WR_COPY_F(K) do{ uint8_t _copy_db=TAKE_DB_F(K); \
             out_write((uint32_t)(tp0+(K)), (uint8_t)(_copy_db + hy_src(s,fp0+(K)) + corr_at(s,(K)))); }while(0)
         int32_t k=0;
@@ -796,20 +749,20 @@ static void sa_apply_op(SA*s){
             WR_COPY_F(k); k++;
         }
         for(int32_t e=0;e<el && !s->err && !g_rcerr;e++){
-            uint8_t eb=sa_next_content(s); cs_adv(&s->sc,eb);
+            uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
             out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
         }
         #undef TAKE_DB_F
         #undef WR_COPY_F
     } else {
         for(int32_t e=el-1;e>=0 && !s->err && !g_rcerr;e--){
-            uint8_t eb=sa_next_content(s); cs_adv(&s->sc,eb);
+            uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
             out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
         }
         int32_t nextpos=-1, litb=0, li=0;
-        if(nl>0){ int32_t gap=(int32_t)sa_read_uleb(s); nextpos=dl-gap; litb=sa_next_content(s); cs_adv(&s->sc,(uint8_t)litb); }
+        if(nl>0){ int32_t gap=(int32_t)sa_read_uleb(s); nextpos=dl-gap; litb=sa_next_content(s,0); }
         #define TAKE_DB_D(K) ({ uint8_t _take_db=0; if((K)==nextpos){ _take_db=(uint8_t)litb; li++; \
-            if(li<nl){ int32_t _g=(int32_t)sa_read_uleb(s); nextpos-=_g; litb=sa_next_content(s); cs_adv(&s->sc,(uint8_t)litb);} else nextpos=-1; } _take_db; })
+            if(li<nl){ int32_t _g=(int32_t)sa_read_uleb(s); nextpos-=_g; litb=sa_next_content(s,0);} else nextpos=-1; } _take_db; })
         #define WR_COPY_D(K) do{ uint8_t _copy_db=TAKE_DB_D(K); \
             out_write((uint32_t)(tp0+(K)), (uint8_t)(_copy_db + hy_src(s,fp0+(K)) + corr_at(s,(K)))); }while(0)
         int32_t k=dl-1;
@@ -851,7 +804,7 @@ static void decode_body(void){
     ugg_init(&M_pg); ugg_init(&M_cg); ugg_init(&M_pgn); ugg_init(&M_cgn);
     ugg_init(&M_pg2); ugg_init(&M_cg2);
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
-    ugg_seed_cont(&M_gdl,3); ugg_seed_cont(&M_gadj,2);
+    ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
     { SA*s=&SAst; memset(s,0,sizeof*s);
       s->from_size=g_from_size; s->to_size=(int32_t)g_to_size; s->FWD=g_FWD;
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
@@ -880,7 +833,7 @@ done:
 }
 
 /* ===================================================================================== */
-/* public push API (SPEC §3.1): decoder_push(byte) -> NEED_MORE / DONE / ERROR             */
+/* public push API: decoder_push(byte) -> NEED_MORE / DONE / ERROR                         */
 /* ===================================================================================== */
 enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
 
@@ -897,7 +850,7 @@ static int decoder_init(void){
     g_fhead=g_ftail=0; g_eof=0; g_dec_done=0; g_dec_err=0;
     /* literal bit-trees seeded from flash parity histograms (no transient image buffer).
      * hist0/hist1/w (4 KiB) borrow ARENA at init — this runs BEFORE the streaming apply reuses
-     * ARENA, keeping them off the main thread's peak stack (SPEC §6 / RAM budget). */
+     * ARENA, keeping them off the main thread's peak stack (RAM budget). */
     {   uint32_t *hist0=(uint32_t*)ARENA;            /* [0..256)   */
         uint32_t *hist1=hist0+256;                   /* [256..512) */
         uint32_t *w=hist1+256;                       /* [512..1024) -> 4 KiB total, fits ARENA */
