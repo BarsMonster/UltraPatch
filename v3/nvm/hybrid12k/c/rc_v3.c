@@ -445,11 +445,11 @@ static int32_t pull_delta(DRStream*d, UGolomb*gix){
         uint32_t j=s_ug(gix)+1u;                        /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
         v=d->dic[j];
-        if(j){ int32_t t=d->dic[j]; for(uint32_t i=j;i>0;i--) d->dic[i]=d->dic[i-1]; d->dic[0]=t; }
+        if(j){ int32_t t=d->dic[j]; memmove(&d->dic[1], &d->dic[0], (size_t)j * sizeof(d->dic[0])); d->dic[0]=t; }
     } else {
         v=s_bv(&M_dval);
         if(d->K>=d->cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
-        for(int i=d->K;i>0;i--) d->dic[i]=d->dic[i-1];
+        memmove(&d->dic[1], &d->dic[0], (size_t)d->K * sizeof(d->dic[0]));
         d->dic[0]=v; d->K++;
     }
     d->last=v; return v;
@@ -776,7 +776,7 @@ static void decode_body(void){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
+    bt_init_rate(&M_dval,4); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
     ug_init(&M_dibl,'g',0); ug_init(&M_diex,'g',0);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
@@ -814,6 +814,14 @@ done:
 /* ===================================================================================== */
 enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
 
+static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w,uint8_t rate){
+    for(int s=0;s<256;s++) w[256+s]=hist[s];
+    for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
+    t->rate=rate; t->p[0]=RC_PHALF;
+    for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
+        t->p[m]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
+}
+
 /* initialize the decoder coroutine; lit_tree seeds from flash. */
 static int decoder_init(void){
     g_fhead=g_ftail=0; g_eof=0; g_dec_done=0; g_dec_err=0;
@@ -825,16 +833,8 @@ static int decoder_init(void){
         uint32_t *w=hist1+256;                       /* [512..1024) -> 4 KiB total, fits ARENA */
         for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
         for(uint32_t i=0;i<g_from_size;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
-        for(int s=0;s<256;s++) w[256+s]=hist0[s];
-        for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-        M_lit0.rate=5; M_lit0.p[0]=RC_PHALF;
-        for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
-            M_lit0.p[m]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
-        for(int s=0;s<256;s++) w[256+s]=hist1[s];
-        for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-        M_lit1.rate=4; M_lit1.p[0]=RC_PHALF;
-        for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
-            M_lit1.p[m]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
+        lit_tree_from_hist(&M_lit0,hist0,w,5);
+        lit_tree_from_hist(&M_lit1,hist1,w,4);
     }
 #ifdef RC_V3_STACKMEAS
     memset(g_dec_stack,0xAA,sizeof g_dec_stack);   /* paint to measure coroutine high-water */

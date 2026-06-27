@@ -17,13 +17,14 @@ CFLAGS += $(CFLAGS_EXTRA)
 
 DIVSUF := libdivsufsort/divsufsort.c
 
-BASE_FULL_TOTAL ?= 4866160
-BASE_NONSELF_TOTAL ?= 4865476
-BASE_ONEFACE_GROW ?= 900
-BASE_ONEFACE_REVERT ?= 614
-BASE_ARM_TEXT ?= 5840
+BASE_FULL_TOTAL ?= 4848980
+BASE_NONSELF_TOTAL ?= 4848297
+BASE_ONEFACE_GROW ?= 899
+BASE_ONEFACE_REVERT ?= 613
+BASE_ARM_TEXT ?= 5716
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10000
+BASE_ARM_BSS ?= 9776
+BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-corpus
 
@@ -90,7 +91,7 @@ check-arm:
 	fi; \
 	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/rc_v3_arm.dump" || true); \
 	echo "soft_div_calls=$$soft"; \
-	test "$$soft" -eq 2
+	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 
 check-corpus: all
 	@set -e; \

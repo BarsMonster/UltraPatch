@@ -52,7 +52,8 @@ static inline uint32_t rd_raw_rice(RDec*r,int k){ uint32_t q=0; while(rd_raw(r)=
 
 /* ---- 256-symbol byte via 8-level bit-tree; probs[1..255]; rate = adaptation shift ---- */
 typedef struct { uint16_t p[256]; uint8_t rate; } BitTree;
-static inline void bt_init(BitTree*t){ for(int i=0;i<256;i++) t->p[i]=RC_PHALF; t->rate=5; }
+static inline void bt_init_rate(BitTree*t,int rate){ for(int i=0;i<256;i++) t->p[i]=RC_PHALF; t->rate=(uint8_t)rate; }
+static inline void bt_init(BitTree*t){ bt_init_rate(t,5); }
 static inline int bt_decode(RDec*r,BitTree*t){
     int m=1; for(int i=0;i<8;i++) m=(m<<1)|rd_bit_r(r,&t->p[m],t->rate); return m-256;
 }
@@ -69,10 +70,10 @@ static inline void lit_tree_seed(const uint8_t*frm,size_t n,int parity,BitTree*t
 }
 
 /* ---- seeded Golomb: adaptive unary prefix + adaptive mantissa (static==gamma/Rice) ----
- * UG_CTX = context clamp. A1 uses 7: m[] is the dominant model array at
+ * UG_CTX = context clamp. A1 uses 6: m[] is the dominant model array at
  * (UG_CTX+1)^2 u16 each. ENCODING-AFFECTING: hy_enc and hy_dec must use the
  * same value. */
-#define UG_CTX 7
+#define UG_CTX 6
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGolomb;
 static inline void ug_init(UGolomb*g,char code,int k){

@@ -1256,6 +1256,24 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
     return tv;
 }
 
+static void merge_adjacent_spans(TokenVec *tv) {
+    size_t w = 0;
+    for (size_t i = 0; i < tv->n; i++) {
+        Token t = tv->v[i];
+        if (w > 0 && t.type == 'S') {
+            Token *p = &tv->v[w - 1];
+            if (p->type == 'S' && p->start <= INT32_MAX - p->len &&
+                p->start + p->len == t.start &&
+                p->len <= INT32_MAX - t.len) {
+                p->len += t.len;
+                continue;
+            }
+        }
+        tv->v[w++] = t;
+    }
+    tv->n = w;
+}
+
 static int fixed_dist_bits(int32_t d, int k) { (void)d; return k; }
 static int rice_dist_bits(int32_t d, int k) { uint32_t v = (uint32_t)d - 1u; return (int)((v >> k) + 1u + (uint32_t)k); }
 
@@ -1312,6 +1330,7 @@ static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litb
         free(seq.v);
         seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
     }
+    merge_adjacent_spans(&seq);
     *k_out = k;
     free(cands); free(ncand);
     return seq;
@@ -1505,7 +1524,7 @@ static void w_dz(REnc *r, uint32_t x) {
     for (int i = n - 2; i >= 0; i--) re_raw(r, (int)((m >> i) & 1u));
 }
 
-static void bt_init_e(BTE *t) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; t->rate = 5; }
+static void bt_init_rate_e(BTE *t, int rate) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; t->rate = (uint8_t)rate; }
 
 static void bt_encode(BTE *t, REnc *r, uint8_t byte) {
     int m = 1;
@@ -1651,7 +1670,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     lit_tree_seed_e(frm, from_size, 0, &M.lit[0], 5);
     lit_tree_seed_e(frm, from_size, 1, &M.lit[1], 4);
     fl_init_e(&M.flag);
-    bt_init_e(&M.dval.t);
+    bt_init_rate_e(&M.dval.t, 4);
     ug_init_e(&M.tc, 'r', 11);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);

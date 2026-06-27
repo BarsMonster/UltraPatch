@@ -33,7 +33,7 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 Known-good ARM object size at `SA_W=10`:
 
 ```text
-text=5772 data=0 bss=11024
+text=5716 data=0 bss=9776
 ```
 
 Note: in this container, `sudo` is blocked by the no-new-privileges setting. Run

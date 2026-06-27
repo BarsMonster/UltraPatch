@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,840 B, data 0 B, bss 10,000 B |
-| ARM divide check | 0 hardware divide instructions; 2 soft-divide calls in init |
+| ARM object at `SA_W=10` | text 5,716 B, data 0 B, bss 9,776 B |
+| ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 504 B of 512 B |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,866,160 B**.
-- W=10 non-self corpus total: **4,865,476 B**.
+- W=10 full 16x16 corpus total: **4,848,980 B**.
+- W=10 non-self corpus total: **4,848,297 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **900 B**
-  - `v1_one_face -> v0_base`: **614 B**
+  - `v0_base -> v1_one_face`: **899 B**
+  - `v1_one_face -> v0_base`: **613 B**
 
 ## Architecture
 
@@ -61,7 +61,7 @@ make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `900` and `614`
+prints the real one-face blob sizes. Expected blob sizes are `899` and `613`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
