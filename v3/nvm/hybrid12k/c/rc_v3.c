@@ -437,14 +437,27 @@ static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz
                                   * (no model); their bit-length distributions are concentrated, so an
                                   * adaptive gamma UGolomb beats the fixed raw code. */
 static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
-/* tag0 (diff-literal/even-extra) literal trees split by previous-literal top-2 bits (4 contexts);
+/* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
  * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
-#define LIT0_CTX 4
+#define LIT0_CTX 5
+/* tag0 context from the previous literal: keeps the prevlit>>6 quartile split for
+ * the upper 3 quartiles, but subdivides the literal-dense bottom quartile (ARM low
+ * registers / zero bytes) into two octiles (0x00-0x1F, 0x20-0x3F) for a 5th tree.
+ * +1 BitTree (~514B) stays within the bss cap; better than a flat 4-way >>6. */
+#define LIT0_SEL(p) ( (p)<0x40 ? ((p)>>5) : 1+((p)>>6) )
 static BitTree M_lit0[LIT0_CTX], M_lit1;
 static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
+/* rep0: adaptive flag before a match distance. =1 reuses the immediately-previous match distance
+ * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT, P(reuse)~1/8)
+ * because exact distance reuse is the minority case: a low prior keeps the dominant =0 flag near-free
+ * on small patches while corpus-scale streams adapt up. g_lastdist holds the last match distance.
+ * Mirrors rc_v3_enc Models.rep0/last_dist (bit-exact wire). */
+#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))   /* 3584: P(rep0=1) prior ~ 1/8 */
+static uint16_t M_rep0;
+static uint32_t g_lastdist;
 static int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];   /* MTF dict arrays (separate caps) */
 static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (resident) */
 
@@ -492,7 +505,7 @@ static int32_t pull_delta(DRStream*d, UGGamma*gix){
 
 
 /* ===================================================================================== */
-/* Path F streaming [A] apply: NO split, NO per-op literal/extra buffer (SA_OPCAP gone).      */
+/* streaming [A] apply: NO split, NO per-op literal/extra buffer.                             */
 /* Per op the decoder reads DIRECT geometry+P+C (outside LZSS), journals preserves EAGERLY,    */
 /* then PULLS the op's CONTENT bytes from the cut whole-stream LZSS token stream and writes     */
 /* each output byte immediately (ascending FWD / descending grow). Literal patches are consumed */
@@ -613,7 +626,7 @@ static uint8_t sa_next_content(SA*s){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
             int tag=cs_tag(&s->sc);
-            int b=s_bt(tag?&M_lit1:&M_lit0[g_litprev>>6]);
+            int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)]);
             g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
             if(s->span_left==0) s->tok_mode=0;
@@ -629,8 +642,11 @@ static uint8_t sa_next_content(SA*s){
             uint32_t ln=s_ug_gamma(&M_gs)+1u;
             s->tok_mode=1; s->span_left=ln;
         } else {
-            uint32_t d=s_ug_rice(&M_gd)+1u, ln=s_ug_gamma(&M_gl)+1u;
-            if(d>s->ototal || d-1u>=SA_RING) goto fail;   /* reject before-start / ring-overrun */
+            uint32_t d;
+            if(s_bit(&M_rep0)){ d=g_lastdist; }            /* rep0: reuse last distance */
+            else { d=s_ug_rice(&M_gd)+1u; g_lastdist=d; }
+            uint32_t ln=s_ug_gamma(&M_gl)+1u;
+            if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
             s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln;
         }
         s->tok_left--;
@@ -705,7 +721,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     }
     return 0;
 }
-/* one Path F op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
+/* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
 static void sa_apply_op(SA*s){
     uint32_t dl_u=s_ug_gamma(&M_gdl), el_u=s_ug_gamma(&M_gel), adj_u=s_ug_gamma(&M_gadj);
@@ -843,6 +859,7 @@ static void decode_body(void){
       int kd=(int)s_raw_bits(4);
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
       fl_init(&M_flag);
+      M_rep0=RC_REP0_INIT; g_lastdist=0;
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_err=1; goto done; }
       s->tok_left=nseq; s->tok_mode=0;

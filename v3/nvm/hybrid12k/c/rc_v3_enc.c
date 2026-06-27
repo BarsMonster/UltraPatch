@@ -1983,9 +1983,13 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap) {
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
-/* tag0 literal tree split by previous-literal top-2 bits (LIT0_CTX contexts); tag1 single tree.
+/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
  * Mirrors rc_v3.c M_lit0[]/M_lit1 + g_litprev. */
-#define LIT0_CTX 4
+#define LIT0_CTX 5
+/* Mirrors rc_v3.c LIT0_SEL (5-context tag0 selector, splits the bottom quartile). */
+#define LIT0_SEL(p) ( (p)<0x40 ? ((p)>>5) : 1+((p)>>6) )
+/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/8), 3584. */
+#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))
 typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
@@ -1993,6 +1997,7 @@ typedef struct {
     UGE tc, gd, gl, gs, pg, cg, pgn, cgn, pg2, cg2, gdl, gel, gadj, dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
+    uint16_t rep0; int32_t last_dist;   /* rep0 flag + last match distance (mirror rc_v3.c M_rep0/g_lastdist) */
 } Models;
 
 static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
@@ -2089,6 +2094,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     ug_init_e(&M.diex, 'g', 0);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
+    M.rep0 = RC_REP0_INIT; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */
     REnc rc;
     re_init(&rc);
     ug_encode(&M.tc, &rc, (uint32_t)seq.n);
@@ -2103,7 +2109,10 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         if (tok_i >= seq.n) die("content token underrun"); \
         cur = seq.v[tok_i++]; \
         if (cur.type == 'S') { fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; } \
-        else { fl_encode(&M.flag, &rc, 1); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \
+        else { fl_encode(&M.flag, &rc, 1); \
+            if ((int32_t)cur.dist == M.last_dist) re_bit(&rc, &M.rep0, 1, RC_S_BIT_RATE); \
+            else { re_bit(&rc, &M.rep0, 0, RC_S_BIT_RATE); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \
+            ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \
     } while (0)
     #define EMIT_TO(ENDPOS) do { \
         size_t _end = (ENDPOS); \
@@ -2114,7 +2123,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             if (tok_mode == 'S') { \
                 for (size_t _em_i = 0; _em_i < n; _em_i++) { \
                     uint8_t byte = content.d[(size_t)cur.start + span_pos + _em_i]; \
-                    bt_encode(tags.d[pos] ? &M.lit1 : &M.lit0[prevlit >> 6], &rc, byte); \
+                    bt_encode(tags.d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte); \
                     prevlit = byte; pos++; \
                 } \
                 span_pos += n; \
