@@ -208,16 +208,32 @@ static int32_t s_bv(BitTree*t){
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
-static uint32_t s_ug(UGolomb*g){
-    if(g->code=='r'){
-        uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
-        uint32_t v=cl<<g->k;
-        for(int pos=0;pos<g->k;pos++) v|=(uint32_t)s_bit(&g->m[UG_C((int)cl)][UG_C(pos)])<<(g->k-1-pos);
-        return v;
-    }
+typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGRice;
+#if UG_CTX != 6
+#error "packed gamma UGolomb layout assumes UG_CTX=6"
+#endif
+#define UG_GAMMA_M (1 + ((UG_CTX-1)*UG_CTX)/2 + (UG_CTX+1))
+typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_M]; } UGGamma;
+static void ugr_init(UGRice*g,int k){
+    g->k=(uint8_t)k;
+    for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
+}
+static void ugg_init(UGGamma*g){
+    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
+    for(int i=0;i<UG_GAMMA_M;i++) g->m[i]=RC_PHALF;
+}
+static uint32_t s_ug_rice(UGRice*g){
+    uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
+    uint32_t v=cl<<g->k;
+    for(int pos=0;pos<g->k;pos++) v|=(uint32_t)s_bit(&g->m[UG_C((int)cl)][UG_C(pos)])<<(g->k-1-pos);
+    return v;
+}
+static uint32_t s_ug_gamma(UGGamma*g){
     int cl=0; while(s_bit(&g->u[UG_C(cl)])==1){ if(++cl>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     uint32_t mm=1u<<cl;
-    for(int pos=0;pos<cl;pos++) mm|=(uint32_t)s_bit(&g->m[UG_C(cl)][UG_C(pos)])<<(cl-1-pos);
+    static const uint8_t base[UG_CTX+1] = { 0, 1, 2, 4, 7, 11, 16 };
+    int mb=base[UG_C(cl)];
+    for(int pos=0;pos<cl;pos++) mm|=(uint32_t)s_bit(&g->m[mb+UG_C(pos)])<<(cl-1-pos);
     return mm-1;
 }
 /* ---- order-2 flag ---- */
@@ -385,7 +401,8 @@ static void out_write(uint32_t a, uint8_t v){
         for(uint32_t x=base;x<end;x++) g_orow_buf[x-base]=flash_read(x); /* preload (source not yet erased) */
         g_orow=row; g_orow_valid=1; g_orow_dirty=0;
     }
-    g_orow_buf[a-g_orow*OUTROW]=v; g_orow_dirty=1;
+    uint32_t off=a-g_orow*OUTROW;
+    if(g_orow_buf[off]!=v){ g_orow_buf[off]=v; g_orow_dirty=1; }
 }
 /* OUTPUT read (reads of already-produced output bytes, e.g. multi-write/correction overlay): serve
  * from the dirty buffer if resident, else physical flash. */
@@ -398,15 +415,10 @@ static uint8_t out_read(uint32_t a){
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
 /* pg/cg (preserve/correction) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval       */
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
-static UGolomb UG_POOL[7];   /* A1: M_gE/M_gS removed; one-shot M_tc reuses M_gd's slot. */
-#define M_tc   UG_POOL[0]   /* token_count only, dead before M_gd is initialized */
-#define M_gd   UG_POOL[0]   /* backref_dist */
-#define M_gl   UG_POOL[1]   /* backref_len_v3 (len-1, gamma) */
-#define M_gs   UG_POOL[2]   /* span_len */
-#define M_pg   UG_POOL[3]   /* preserve gaps (gP) */
-#define M_cg   UG_POOL[4]   /* correction gaps (gC) */
-#define M_dibl UG_POOL[5]   /* bl MTF dict-index (gamma) */
-#define M_diex UG_POOL[6]   /* ex MTF dict-index (gamma) */
+static UGRice  M_gd;             /* token_count first, then reinitialized as backref_dist */
+static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
+static UGGamma M_pg, M_cg;       /* preserve/correction gaps */
+static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
 static BitTree M_lit0, M_lit1;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
@@ -437,12 +449,12 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(DRStream*d, UGolomb*gix){
+static int32_t pull_delta(DRStream*d, UGGamma*gix){
     { int ri=d->rh | (d->last==0 ? 2 : 0);
       int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->last; }   /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
-        uint32_t j=s_ug(gix)+1u;                        /* cmp-1: dict idx 0 unreachable -> encode j-1 */
+        uint32_t j=s_ug_gamma(gix)+1u;                  /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
         v=d->dic[j];
         if(j){ int32_t t=d->dic[j]; memmove(&d->dic[1], &d->dic[0], (size_t)j * sizeof(d->dic[0])); d->dic[0]=t; }
@@ -585,9 +597,9 @@ static uint8_t sa_next_content(SA*s){
         }
         if(s->tok_left==0 || g_rcerr){ s->err=1; return 0; }   /* content underrun -> reject */
         if(s_flag(&M_flag)==0){
-            uint32_t ln=s_ug(&M_gs)+1; s->tok_mode=1; s->span_left=ln;
+            uint32_t ln=s_ug_gamma(&M_gs)+1; s->tok_mode=1; s->span_left=ln;
         } else {
-            uint32_t d=s_ug(&M_gd)+1, ln=s_ug(&M_gl)+1;
+            uint32_t d=s_ug_rice(&M_gd)+1, ln=s_ug_gamma(&M_gl)+1;
             if(d>s->ototal){ s->err=1; return 0; }       /* backref before start -> reject */
             s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln;
         }
@@ -680,25 +692,30 @@ static void sa_apply_op(SA*s){
         s->tp=(int32_t)ntp; s->fp=(int32_t)nfp; tp0=s->tp; fp0=s->fp;
     }
     /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
-    uint32_t np=s_ug(&M_pg);
+    uint32_t np=s_ug_gamma(&M_pg);
     if(np>(uint32_t)nw){ s->err=1; return; }
-    int32_t poff=0;
+    uint32_t poff=0, nwu=(uint32_t)nw;
     for(uint32_t i=0;i<np && !s->err && !g_rcerr;i++){
-        poff+=(int32_t)s_ug(&M_pg);
-        if(poff<0||poff>=(int32_t)nw){ s->err=1; return; }
-        sa_journal(s, tp0+poff);
+        uint32_t gap=s_ug_gamma(&M_pg);
+        if(gap>UINT32_MAX-poff){ s->err=1; return; }
+        poff+=gap;
+        if(poff>=nwu){ s->err=1; return; }
+        sa_journal(s, tp0+(int32_t)poff);
     }
     if(s->err||g_rcerr) return;
     /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
      * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
-    uint32_t nc=s_ug(&M_cg);
+    uint32_t nc=s_ug_gamma(&M_cg);
     if(nc>(uint32_t)OPC_CAP){ s->err=1; g_reject=REJ_RESOURCE; return; }
     if(nc>(uint32_t)nw){ s->err=1; return; }
-    s->op_nc=(int32_t)nc; { int32_t coff=0;
-        for(uint32_t i=0;i<nc && !g_rcerr;i++){ coff+=(int32_t)s_ug(&M_cg);
-            if(coff<0||coff>=(int32_t)nw){ s->err=1; return; }
+    s->op_nc=(int32_t)nc; { uint32_t coff=0;
+        for(uint32_t i=0;i<nc && !g_rcerr;i++){
+            uint32_t gap=s_ug_gamma(&M_cg);
+            if(gap>UINT32_MAX-coff){ s->err=1; return; }
+            coff+=gap;
+            if(coff>=nwu){ s->err=1; return; }
             int cbyte=s_bt(&M_dval);
-            s->op_corr[i]=((uint32_t)coff<<8)|(uint32_t)cbyte; } }
+            s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
     if(s->err||g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (is_ldr_*). */
@@ -777,18 +794,18 @@ static void decode_body(void){
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init_rate(&M_dval,4); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
-    ug_init(&M_dibl,'g',0); ug_init(&M_diex,'g',0);
+    ugg_init(&M_dibl); ugg_init(&M_diex);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
     jr_reset();
-    ug_init(&M_pg,'g',0); ug_init(&M_cg,'g',0);
+    ugg_init(&M_pg); ugg_init(&M_cg);
     { SA*s=&SAst; memset(s,0,sizeof*s);
       s->from_size=g_from_size; s->to_size=(int32_t)g_to_size; s->FWD=g_FWD;
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
-      ug_init(&M_tc,'r',11); uint32_t nseq=s_ug(&M_tc);
+      ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
       int kd=(int)s_raw_bits(4);
-      ug_init(&M_gd,'r',kd); ug_init(&M_gl,'g',0); ug_init(&M_gs,'g',0);
+      ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
       fl_init(&M_flag);
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_err=1; goto done; }

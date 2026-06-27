@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,716 B, data 0 B, bss 9,776 B |
+| ARM object at `SA_W=10` | text 5,831 B, data 0 B, bss 9,456 B |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 504 B of 512 B |
 
@@ -47,8 +47,10 @@ output frontier. Relocation field positions are derived instead of shipped:
 - Delta values are pulled inline from the single range stream using adaptive MTF
   dictionaries and repeat/hit models.
 
-Output is staged through a 256 B row write-back cache. The preserve journal keeps
-pristine source bytes that would otherwise be lost after an in-place overwrite.
+Output is staged through a 256 B row write-back cache. Rows whose final bytes
+match the existing flash row are not erased or programmed. The preserve journal
+keeps pristine source bytes that would otherwise be lost after an in-place
+overwrite.
 
 ## Build And Check
 

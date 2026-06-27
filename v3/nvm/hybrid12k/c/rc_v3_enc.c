@@ -388,7 +388,8 @@ static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which
     }
     SymVec syms = {0};
     for (uint16_t si = 0; si < shnum; si++) {
-        if (sh[si].type != 2 || sh[si].entsize < 16 || sh[si].off + sh[si].size > e.n) continue;
+        if (sh[si].type != 2 || sh[si].entsize < 16 ||
+            (uint64_t)sh[si].off + sh[si].size > e.n) continue;
         size_t n = sh[si].size / sh[si].entsize;
         for (size_t k = 0; k < n; k++) {
             const uint8_t *p = e.d + sh[si].off + k * sh[si].entsize;
@@ -1960,8 +1961,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out> <W>\n", argv[0]);
         return 2;
     }
-    int W = atoi(argv[4]);
-    if (W <= 0) W = PATHE_W;
+    char *end = NULL;
+    errno = 0;
+    long Wl = strtol(argv[4], &end, 10);
+    if (errno || end == argv[4] || *end || Wl <= 0 || Wl > 15)
+        die("W must be an integer in 1..15 and must match decoder SA_W");
+    int W = (int)Wl;
     encode_a1(argv[1], argv[2], argv[3], W);
     return 0;
 }
