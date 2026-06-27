@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,335 B, data 0 B, bss 12,000 B (<= 12 KiB cap, 288 B margin) |
+| ARM object at `SA_W=10` | text 5,343 B, data 0 B, bss 11,808 B (<= 12 KiB cap, 480 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 408 B of 576 B (168 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,681,556 B**.
-- W=10 non-self corpus total: **4,681,009 B**.
+- W=10 full 16x16 corpus total: **4,669,478 B**.
+- W=10 non-self corpus total: **4,668,931 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **878 B**
-  - `v1_one_face -> v0_base`: **590 B**
+  - `v0_base -> v1_one_face`: **875 B**
+  - `v1_one_face -> v0_base`: **588 B**
 
 ## Architecture
 
@@ -47,14 +47,18 @@ output frontier. Relocation field positions are derived instead of shipped:
 - Delta values are pulled inline from the single range stream using adaptive MTF
   dictionaries and repeat/hit models.
 
-Entropy coding: content literals use five bit-trees selected by the previous
-literal byte's range (`LIT0_SEL`: a five-way split on boundaries
-`0x20/0x3d/0x8e/0xf7` derived by minimising the conditional entropy of the
-literal distribution over the firmware corpus), each parity-seeded from the
-from-image histogram;
-per-op geometry (diff/extra length, source skip) and the preserve/correction
-counts and gaps use dedicated adaptive Golomb models rather than a fixed raw code.
-Match distances carry an adaptive `rep0` reuse flag: when a match repeats the
+Entropy coding: content literals use five bit-trees selected from the previous
+literal byte (`LIT0_SEL`: a five-way mapping derived by minimising the
+conditional entropy of the literal distribution over the firmware corpus; the
+buckets are non-contiguous, grouping the dominant zero-diff byte with the low
+range and isolating the most common high byte), each parity-seeded from the
+from-image histogram. Per-op geometry (diff/extra length, source skip) uses
+dedicated adaptive Golomb models rather than a fixed raw code; the preserve and
+correction counts/gaps share one set of Golomb models (their distributions
+coincide, which also frees decoder RAM). The relocation-delta MTF dictionary
+indices are Golomb-coded with priors seeded toward the most-recent entry.
+Match distances carry an adaptive `rep0` reuse flag, contexted order-1 on the
+previous reuse outcome (reuse runs cluster): when a match repeats the
 immediately-previous match distance the value is omitted and the decoder reuses
 the last distance (the flag's prior is biased toward "fresh" so it stays nearly
 free on small patches).
@@ -110,9 +114,11 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. `W=11` was measured at -7.7 KB on the corpus but grows the
-LZSS ring to 2,048 B, pushing `.bss` to 13,024 B and exceeding the 12 KiB SRAM
-cap by 736 B; no cap-compliant reclaim was found, so `W=10` is the production
-maximum.
+LZSS ring to 2,048 B, pushing `.bss` to 12,832 B and exceeding the 12 KiB SRAM
+cap by 544 B; the geometry-model sharing freed 192 B but not the ~832 B still
+needed, and the 1,024 B `ldr`-derive pristine ring is irreducible (it equals the
+ARM `ldr`-literal reach and must hold read-time-pristine bytes the preserve
+journal does not cover), so `W=10` remains the production maximum.
 
 ## Caps
 

@@ -180,10 +180,11 @@ enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
 static uint8_t g_reject;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|s_raw(); return v; }
-static uint32_t s_raw_gamma(void){
-    int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 1; } }
-    uint32_t v=1; for(int i=0;i<n;i++) v=(v<<1)|s_raw(); return v; }
-static uint32_t s_raw_gz(void){ return s_raw_gamma()-1; }
+/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. The only raw-gamma site
+ * is the header op count, so the gamma reader and its -1 wrapper are merged into one function. */
+static uint32_t s_raw_gz(void){
+    int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
+    uint32_t v=1; for(int i=0;i<n;i++) v=(v<<1)|s_raw(); return v-1u; }
 /* ---- bit-tree byte ---- */
 static int s_bt(BitTree*t){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],t->rate); return m-256; }
 /* ---- ByteVarint (pack_size) ---- */
@@ -241,6 +242,12 @@ static void ugg_init(UGGamma*g){
  * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
 static void ugg_seed_cont(UGGamma*g,int depth){
     for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
+}
+/* seed every unary-prefix prior toward STOP (bit 0): makes the smallest gamma values cheap from the
+ * first symbol. Used by the MTF dict-index gammas (dibl/diex), where the just-promoted index 1
+ * (encoded value 0) dominates. P high == bit0(stop) cheap; RC_PBIT-RC_PBIT/4 was the corpus optimum. */
+static void ugg_seed_stop(UGGamma*g){
+    for(int i=0;i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT-RC_PBIT/4);
 }
 static uint32_t s_ug_rice(UGRice*g){
     uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
@@ -333,36 +340,37 @@ static uint16_t Jcount, Jpeak;
  * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). */
 static uint16_t g_jpage[JPAGE_MAX+1];
 static uint8_t g_npage;                         /* number of active pages = (span>>16)+1, capped */
-static uint32_t jslot_lo(int i){ const uint8_t*s=Jbuf+(uint32_t)i*3u; return (uint32_t)s[1]|((uint32_t)s[2]<<8); }
 static void jr_reset(void){ Jcount=Jpeak=0;
     uint32_t pg=(g_image_span>>16)+1u; if(pg>(uint32_t)JPAGE_MAX) pg=JPAGE_MAX; g_npage=(int)pg;
     for(int p=0;p<=JPAGE_MAX;p++) g_jpage[p]=0; }
-/* binary search within page (pos>>16) by the 16-bit low key; on hit *ins=index & return 1,
- * else *ins=lower-bound insertion index (page-clamped) & return 0. */
-static int jr_find(uint32_t pos, int*ins){
-    uint32_t pg=pos>>16; if(pg>=(uint32_t)g_npage){ if(ins)*ins=Jcount; return 0; }
+/* Binary search for `pos` within its page (pos>>16), comparing the 16-bit low key. Returns the
+ * slot index in *at: on a hit *at is the matching slot and the return is 1; on a miss *at is the
+ * sorted insertion index (page-clamped) and the return is 0. `pos` is always inside the paged span
+ * (callers gate on pg<g_npage), so no out-of-range branch is needed here. */
+static int jr_find(uint32_t pos, int*at){
     uint32_t key=pos&0xFFFFu;
-    int lo=g_jpage[pg], hi=g_jpage[pg+1]-1;
-    while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1); uint32_t k=jslot_lo(mid);
-        if(k==key){ if(ins)*ins=mid; return 1; } if(k<key) lo=mid+1; else hi=mid-1; }
-    if(ins)*ins=lo;
+    int lo=g_jpage[pos>>16], hi=g_jpage[(pos>>16)+1]-1;
+    while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1);
+        const uint8_t*s=Jbuf+(uint32_t)mid*3u; uint32_t k=(uint32_t)s[1]|((uint32_t)s[2]<<8);
+        if(k==key){ *at=mid; return 1; } if(k<key) lo=mid+1; else hi=mid-1; }
+    *at=lo;
     return 0;
 }
 static int jr_put(uint32_t pos, uint8_t b){
-    if(pos>=0xFFFFFFu) return -1;
-    uint32_t pg=pos>>16; if(pg>=(uint32_t)g_npage) return -1;     /* outside paged span */
-    int ins;
-    if(jr_find(pos,&ins)) return 0;                  /* never-evict: keep the first write */
+    uint32_t pg=pos>>16; if(pg>=(uint32_t)g_npage) return -1;     /* outside paged span (also bounds pos) */
+    int at;
+    if(jr_find(pos,&at)) return 0;                   /* never-evict: keep the first write */
     if((uint32_t)Jcount>=JSLOTS) return -1;          /* over-depth: refuse BEFORE any write */
-    if(ins<Jcount) memmove(Jbuf+(uint32_t)(ins+1)*3u, Jbuf+(uint32_t)ins*3u, (size_t)(Jcount-ins)*3u);
-    uint8_t*s=Jbuf+(uint32_t)ins*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
+    if(at<Jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(Jcount-at)*3u);
+    uint8_t*s=Jbuf+(uint32_t)at*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
     for(uint32_t p=pg+1u;p<=(uint32_t)g_npage;p++) g_jpage[p]++;   /* shift higher page boundaries */
     if(++Jcount>Jpeak) Jpeak=Jcount;
     return 0;
 }
 static int jr_get(uint32_t pos, uint8_t*out){
-    int ins;
-    if(jr_find(pos,&ins)){ *out=Jbuf[(uint32_t)ins*3u]; return 1; }
+    if(pos>>16>=(uint32_t)g_npage) return 0;         /* outside paged span */
+    int at;
+    if(jr_find(pos,&at)){ *out=Jbuf[(uint32_t)at*3u]; return 1; }
     return 0;
 }
 
@@ -436,17 +444,18 @@ static uint8_t out_read(uint32_t a){
 
 /* ===================================================================================== */
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
-/* pg/cg (preserve/correction) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval       */
+/* pg/pgn/pg2 (preserve+correction, SHARED) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval */
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
 static UGRice  M_gd;             /* token_count first, then reinitialized as backref_dist */
 static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
-static UGGamma M_pg, M_cg;       /* preserve/correction gaps */
-static UGGamma M_pgn, M_cgn;     /* preserve/correction COUNTS (np/nc) — separated from gaps so the
-                                  * dominant count=0 case and the dominant gap=1 case stop fighting
+static UGGamma M_pg;             /* preserve/correction FIRST gaps, SHARED (corr gaps are the same
+                                  * op-relative offset distribution; one model adapts on both). */
+static UGGamma M_pgn;            /* preserve/correction COUNTS (np/nc), SHARED — separated from gaps so
+                                  * the dominant count=0 case and the dominant gap=1 case stop fighting
                                   * over the shared adaptive unary/mantissa probabilities. */
-static UGGamma M_pg2, M_cg2;     /* preserve/correction REST gaps (2nd..Nth). The first gap is an
-                                  * op-relative offset (broad), but later gaps are ~98%/77% value=1
-                                  * (consecutive run); a dedicated model converges hard on that. */
+static UGGamma M_pg2;            /* preserve/correction REST gaps (2nd..Nth), SHARED. The first gap is
+                                  * an op-relative offset (broad), but later gaps are ~98%/77% value=1
+                                  * (consecutive run); a single shared model converges hard on that. */
 static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz(adj). Were raw dz
                                   * (no model); their bit-length distributions are concentrated, so an
                                   * adaptive gamma UGolomb beats the fixed raw code. */
@@ -455,11 +464,14 @@ static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
  * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
 #define LIT0_CTX 5
-/* tag0 context from the previous literal: a 5-way split whose boundaries
- * (0x20/0x3d/0x8e/0xf7) were derived by minimising the conditional entropy of the
- * tag0-literal distribution over the firmware corpus. Affects compression ratio only,
- * never correctness; all 5 trees seed from the same parity-0 histogram. */
-#define LIT0_SEL(p) ( (p)<0x20 ? 0 : (p)<0x3d ? 1 : (p)<0x8e ? 2 : (p)<0xf7 ? 3 : 4 )
+/* tag0 context from the previous literal: 7 contiguous prevlit regions folded onto
+ * 5 trees (a non-monotone region->tree map; one tree is shared by two disjoint ranges).
+ * The region cuts and the fold were derived by minimising the conditional entropy of the
+ * tag0-literal distribution over the firmware corpus (DP over cuts + optimal tree merge).
+ * prevlit==0x00 (zero-runs, ~8% of literals) and ==0xf7 (high-byte/0xff region) are their
+ * own contexts; the rest fold so the high range reuses tree 1. Affects compression ratio
+ * only, never correctness; all 5 trees seed from the same parity-0 histogram. */
+#define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
 static BitTree M_lit0[LIT0_CTX], M_lit1;
 static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
@@ -470,7 +482,8 @@ static Flag1   M_flag;
  * on small patches while corpus-scale streams adapt up. g_lastdist holds the last match distance.
  * Mirrors rc_v3_enc Models.rep0/last_dist (bit-exact wire). */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))   /* 3584: P(rep0=1) prior ~ 1/8 */
-static uint16_t M_rep0;
+static uint16_t M_rep0[2];   /* order-1 on previous rep0 outcome: rep0 runs cluster */
+static int g_rep0h;          /* last rep0 bit (context) */
 static uint32_t g_lastdist;
 static int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];   /* MTF dict arrays (separate caps) */
 static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (resident) */
@@ -584,8 +597,6 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     }
     return 0;
 }
-static inline int is_ldr_fwd(int32_t fp0, int32_t dl, uint32_t fpk){ return ldr_targets(NULL,fp0,dl,fpk); }
-static inline int is_ldr_grow(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){ return ldr_targets(s,fp0,dl,fpk); }
 static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
 static uint8_t sa_next_content(SA*s, int tag){
@@ -609,7 +620,8 @@ static uint8_t sa_next_content(SA*s, int tag){
             s->tok_mode=1; s->span_left=ln;
         } else {
             uint32_t d;
-            if(s_bit(&M_rep0)){ d=g_lastdist; }            /* rep0: reuse last distance */
+            int rb=s_bit(&M_rep0[g_rep0h]); g_rep0h=rb;
+            if(rb){ d=g_lastdist; }                         /* rep0: reuse last distance */
             else { d=s_ug_rice(&M_gd)+1u; g_lastdist=d; }
             uint32_t ln=s_ug_gamma(&M_gl)+1u;
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
@@ -678,8 +690,8 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
      * mirrors the encoder's pure(k) + _op_ldr_set; positions are no longer shipped. */
-    if(pure && (fpk&3u)==0 && fp0+ks+4<=(int32_t)s->from_size &&
-       (s->FWD ? is_ldr_fwd(fp0,dl,fpk) : is_ldr_grow(s,fp0,dl,fpk))){
+    if(pure && (fpk&3u)==0 &&                               /* fpk+4<=from_size already guaranteed above */
+       ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
         int32_t delta=pull_delta(&DR_EX, &M_diex);         /* INLINE pull from the single stream */
         uint32_t val=hy_src32(s,fpk);
         pack_s32_buf((val-(uint32_t)delta)&0xffffffffu, packed);
@@ -720,12 +732,12 @@ static void sa_apply_op(SA*s){
     if(s->err||g_rcerr) return;
     /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
      * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
-    uint32_t nc=s_ug_gamma(&M_cgn);
+    uint32_t nc=s_ug_gamma(&M_pgn);
     if(nc>(uint32_t)OPC_CAP){ s->err=1; g_reject=REJ_RESOURCE; return; }
     if(nc>(uint32_t)nw){ s->err=1; return; }
     s->op_nc=(int32_t)nc; { uint32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){
-            uint32_t gap=s_ug_gamma(i?&M_cg2:&M_cg);
+            uint32_t gap=s_ug_gamma(i?&M_pg2:&M_pg);
             if(gap>UINT32_MAX-coff){ s->err=1; return; }
             coff+=gap;
             if(coff>=nwu){ s->err=1; return; }
@@ -733,8 +745,7 @@ static void sa_apply_op(SA*s){
             s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
     if(s->err||g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
-     * are derived per op (is_ldr_*). */
-    if(s->err||g_rcerr) return;
+     * are derived per op (ldr_targets). */
 #ifdef HY_DBG
     fprintf(stderr,"OP tp0=%d fp0=%d dl=%d el=%d adj=%d blK=%d exK=%d\n",
         tp0,fp0,dl,el,adj,DR_BL.K,DR_EX.K);
@@ -801,12 +812,13 @@ static void decode_body(void){
      * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init_rate(&M_dval,4); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
     ugg_init(&M_dibl); ugg_init(&M_diex);
+    ugg_seed_stop(&M_dibl); ugg_seed_stop(&M_diex);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
     jr_reset();
-    ugg_init(&M_pg); ugg_init(&M_cg); ugg_init(&M_pgn); ugg_init(&M_cgn);
-    ugg_init(&M_pg2); ugg_init(&M_cg2);
+    ugg_init(&M_pg); ugg_init(&M_pgn);
+    ugg_init(&M_pg2);
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
     { SA*s=&SAst; memset(s,0,sizeof*s);
@@ -816,7 +828,7 @@ static void decode_body(void){
       int kd=(int)s_raw_bits(4);
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
       fl_init(&M_flag);
-      M_rep0=RC_REP0_INIT; g_lastdist=0;
+      M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_err=1; goto done; }
       s->tok_left=nseq; s->tok_mode=0;
