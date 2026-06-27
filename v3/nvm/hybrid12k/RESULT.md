@@ -29,8 +29,8 @@ secondary reference implementation in this tree.
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,848,129 B**.
-- W=10 non-self corpus total: **4,847,446 B**.
+- W=10 full 16x16 corpus total: **4,847,268 B**.
+- W=10 non-self corpus total: **4,846,585 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **899 B**
   - `v1_one_face -> v0_base`: **613 B**

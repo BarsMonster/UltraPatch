@@ -977,7 +977,7 @@ typedef struct { int32_t begin, end; } Run;
 
 static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 
-enum { SPLIT_GAIN_MARGIN_BITS = 64 };
+enum { SPLIT_GAIN_MARGIN_BITS = 32 };
 
 /* Dense diff runs can be represented either as literal diff bytes or as an
  * extra span plus an equal source skip. Choose the subset analytically per op:
