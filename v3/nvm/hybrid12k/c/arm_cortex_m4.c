@@ -155,7 +155,9 @@ static void disassemble(const uint8_t *f, size_t fsize,
                 if ((size_t)addr + 2 > fsize) continue;
                 uint16_t lo = rd16(f + addr); addr += 2;
                 if ((lo & 0xd000) == 0xd000) map_push(&d->bl, ins, unpack_bl(up, lo));
-                else if (emit_bw && (lo & 0xc000) == 0x8000) map_push(&d->bw, ins, unpack_bw(up, lo));
+                else if (emit_bw && (lo & 0xc000) == 0x8000 &&
+                         ((lo & 0x1000) || ((up >> 6) & 0xf) < 0xe))
+                    map_push(&d->bw, ins, unpack_bw(up, lo));
                 /* bw is never used for in-scan membership, so gating the push here is exact */
             } else if ((up & 0xf800) == 0x4800) {     /* ldr (literal) */
                 ldr_common(f, fsize, ins, 4 * (up & 0xff) + 4, &d->ldr, &d->lit);

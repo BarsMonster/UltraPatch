@@ -307,7 +307,7 @@ typedef struct {
  * the old 8,080 B generator stores. Seed phase (hist0/hist1/w = 4096 B) overlays ARENA front. */
 /* SA apply state = ring(2^W) + fixed correction arrays. A1 derives ldr positions per op and infers
  * suppressed BL from `!pure`, so no ex/sbl offset buffers are resident. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 96u)  /* slack covers SA non-buffer fields + align */
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 80u)  /* slack covers SA non-buffer fields + align */
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
@@ -358,12 +358,12 @@ static int32_t unpack_bl(uint16_t up, uint16_t lo){
     int32_t j1=(lo>>13)&1, j2=(lo>>11)&1, i1=1-(j1^s), i2=1-(j2^s);
     int32_t v=(s<<23)|(i1<<22)|(i2<<21)|(imm10<<11)|imm11; if(s) v-=(1<<24); return v;
 }
-/* pack a bl into 4 bytes in a buffer (de-relocation override; no flash write) */
-static void pack_bl_buf(int32_t imm32, uint8_t out[4]){
-    if(imm32<0) imm32+=(1<<24);
-    int32_t s=(imm32>>23)&1,i1=(imm32>>22)&1,i2=(imm32>>21)&1,j1=1-(i1^s),j2=1-(i2^s);
-    int32_t imm10=(imm32>>11)&0x3ff, imm11=imm32&0x7ff;
-    uint16_t up=(uint16_t)(0xF000|(s<<10)|imm10), lo=(uint16_t)(0xD000|(j1<<13)|(j2<<11)|imm11);
+/* pack a 24-bit BL immediate into 4 bytes (de-relocation override; no flash write) */
+static void pack_bl_buf(uint32_t imm24, uint8_t out[4]){
+    imm24 &= 0x00ffffffu;
+    uint32_t s=(imm24>>23)&1u,i1=(imm24>>22)&1u,i2=(imm24>>21)&1u;
+    uint32_t j1=1u-(i1^s),j2=1u-(i2^s),imm10=(imm24>>11)&0x3ffu,imm11=imm24&0x7ffu;
+    uint16_t up=(uint16_t)(0xF000u|(s<<10)|imm10), lo=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|imm11);
     out[0]=up&0xff; out[1]=(up>>8)&0xff; out[2]=lo&0xff; out[3]=(lo>>8)&0xff;
 }
 
@@ -375,7 +375,13 @@ static void pack_bl_buf(int32_t imm32, uint8_t out[4]){
 /* nvm_rows_amplified=0); reads of the dirty buffered row are served from RAM. Source reads of */
 /* not-yet-overwritten flash go straight to physical flash (free). 256 B SRAM.                */
 /* ===================================================================================== */
+#ifndef OUTROW
+#ifdef NVM_ROW
+#define OUTROW NVM_ROW
+#else
 #define OUTROW 256u
+#endif
+#endif
 static uint8_t  g_orow_buf[OUTROW];
 static uint32_t g_orow;        /* current resident output row index */
 static uint8_t  g_orow_valid, g_orow_dirty;
@@ -482,7 +488,10 @@ static int32_t pull_delta(DRStream*d, UGGamma*gix){
  * for an EXTRA (new-code) byte, tagged by its true to-address parity (direction-independent).
  * Phase order: FWD = nl,[gap,litb]*,extra ; grow = nl,extra,[gap,litb]*. */
 enum { CPH_NL, CPH_GAP, CPH_LITB, CPH_EXTRA, CPH_DONE };
-typedef struct { int ph,first,shift,FWD; int32_t acc,nl,li,el,ei,dl,tp0; } CScan;
+typedef struct {
+    int32_t acc,nl,li,el,ei,dl,tp0;
+    uint8_t ph,first,shift,FWD;
+} CScan;
 static void cs_begin(CScan*s, int FWD, int32_t tp0, int32_t dl, int32_t el){
     s->FWD=FWD; s->tp0=tp0; s->dl=dl; s->el=el; s->ph=CPH_NL; s->first=1; s->acc=0; s->shift=0;
     s->nl=0; s->li=0; s->ei=0;
@@ -521,15 +530,15 @@ typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
     /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
-    int tok_mode;                                 /* 0=idle, 1=span, 2=backref */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
     CScan sc;
-    int FWD, err;
     uint32_t from_size; int32_t to_size;
     int32_t tp, fp;                               /* running accumulators (apply order) */
     /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
      * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;
+    uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
+    uint8_t FWD, err;
 } SA;
 /* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase). */
 #define SAst (*(SA*)(ARENA + JREGION))
@@ -584,6 +593,7 @@ static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ot
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
 static uint8_t sa_next_content(SA*s){
     for(;;){
+        if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
             int tag=cs_tag(&s->sc); int b=s_bt(tag?&M_lit1:&M_lit0);
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
@@ -595,16 +605,20 @@ static uint8_t sa_next_content(SA*s){
             if(s->br_left==0) s->tok_mode=0;
             return b;
         }
-        if(s->tok_left==0 || g_rcerr){ s->err=1; return 0; }   /* content underrun -> reject */
+        if(s->tok_left==0) goto fail;   /* content underrun -> reject */
         if(s_flag(&M_flag)==0){
-            uint32_t ln=s_ug_gamma(&M_gs)+1; s->tok_mode=1; s->span_left=ln;
+            uint32_t ln=s_ug_gamma(&M_gs)+1u;
+            s->tok_mode=1; s->span_left=ln;
         } else {
-            uint32_t d=s_ug_rice(&M_gd)+1, ln=s_ug_gamma(&M_gl)+1;
-            if(d>s->ototal){ s->err=1; return 0; }       /* backref before start -> reject */
+            uint32_t d=s_ug_rice(&M_gd)+1u, ln=s_ug_gamma(&M_gl)+1u;
+            if(d>s->ototal || d-1u>=SA_RING) goto fail;   /* reject before-start / ring-overrun */
             s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln;
         }
         s->tok_left--;
     }
+fail:
+    s->err=1;
+    return 0;
 }
 /* read a uLEB from the content stream (advancing the content-scanner per byte). */
 static uint32_t sa_read_uleb(SA*s){
@@ -657,7 +671,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t delta=pull_delta(&DR_BL, &M_dibl);         /* INLINE pull from the single stream */
         uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
-        pack_bl_buf(unpack_bl(up,lo)-delta, packed);
+        pack_bl_buf(((uint32_t)unpack_bl(up,lo)-(uint32_t)delta)&0x00ffffffu, packed);
         hy_note_src4(s,fpk);
         return 1;
     }

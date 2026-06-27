@@ -21,9 +21,9 @@ BASE_FULL_TOTAL ?= 4847268
 BASE_NONSELF_TOTAL ?= 4846585
 BASE_ONEFACE_GROW ?= 899
 BASE_ONEFACE_REVERT ?= 613
-BASE_ARM_TEXT ?= 5831
+BASE_ARM_TEXT ?= 5843
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 9456
+BASE_ARM_BSS ?= 9440
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-corpus
@@ -110,8 +110,9 @@ check-corpus: all
 			ok=$$((ok + 1)); \
 			j=$$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$$log"); \
 			vals=$$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$$log"); \
-			set -- $$vals; amp=$${1:-0}; row=$${2:-0}; inv=$${3:-0}; \
-			if [ "$${j:-0}" -gt "$$max_j" ]; then max_j=$$j; fi; \
+			if [ -z "$$j" ] || [ -z "$$vals" ]; then echo "failed to parse decoder metrics for $$from -> $$to"; cat "$$log"; exit 1; fi; \
+			set -- $$vals; amp=$$1; row=$$2; inv=$$3; \
+			if [ "$$j" -gt "$$max_j" ]; then max_j=$$j; fi; \
 			if [ "$$amp" -gt "$$max_amp" ]; then max_amp=$$amp; fi; \
 			if [ "$$row" -gt "$$max_row" ]; then max_row=$$row; fi; \
 			if [ "$$inv" -gt "$$max_inv" ]; then max_inv=$$inv; fi; \
