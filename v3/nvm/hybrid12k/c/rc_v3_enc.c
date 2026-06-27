@@ -236,7 +236,8 @@ static void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *va
 
 static int cmp_fd(const void *a, const void *b) {
     const FieldDelta *x = (const FieldDelta *)a, *y = (const FieldDelta *)b;
-    return (x->addr > y->addr) - (x->addr < y->addr);
+    if (x->addr != y->addr) return (x->addr > y->addr) - (x->addr < y->addr);
+    return (x->kind > y->kind) - (x->kind < y->kind);
 }
 
 static void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
@@ -255,20 +256,24 @@ static void fd_finalize(FieldDeltaVec *v) {
     qsort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
     size_t w = 0;
     for (size_t i = 0; i < v->n; i++) {
-        if (w && v->v[w - 1].addr == v->v[i].addr) v->v[w - 1] = v->v[i];
+        if (w && v->v[w - 1].addr == v->v[i].addr && v->v[w - 1].kind == v->v[i].kind) v->v[w - 1] = v->v[i];
         else v->v[w++] = v->v[i];
     }
     v->n = w;
 }
 
-static const FieldDelta *fd_find(const FieldDeltaVec *v, uint32_t addr) {
+static const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind) {
     size_t lo = 0, hi = v->n;
     while (lo < hi) {
         size_t m = (lo + hi) >> 1;
         if (v->v[m].addr < addr) lo = m + 1;
         else hi = m;
     }
-    return (lo < v->n && v->v[lo].addr == addr) ? &v->v[lo] : NULL;
+    while (lo < v->n && v->v[lo].addr == addr) {
+        if (v->v[lo].kind == kind) return &v->v[lo];
+        lo++;
+    }
+    return NULL;
 }
 
 /* ------------------------------------------------------------------------------------- */
@@ -739,9 +744,16 @@ static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
 
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
     if (fpk & 1u) return 0;
-    if (fpk + 4u > from_size) return 0;
+    if (fpk > from_size || from_size - fpk < 4u) return 0;
     uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
     return ((up & 0xf800u) == 0xf000u) && ((lo & 0xd000u) == 0xd000u);
+}
+
+static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out) {
+    int64_t a = (int64_t)fp0 + k;
+    if (a < 0 || a + 4 > (int64_t)from_size) return 0;
+    *out = (uint32_t)a;
+    return 1;
 }
 
 static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
@@ -780,30 +792,32 @@ typedef struct { int type; int64_t delta; } Event;
 
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
                             const IVec *ldr, const Op *o, int32_t fp0, int32_t k) {
-    uint32_t fpk = (uint32_t)(fp0 + k);
+    uint32_t fpk;
+    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
     int pure = o->diff[k] == 0 && o->diff[k + 1] == 0 && o->diff[k + 2] == 0 && o->diff[k + 3] == 0;
     if (is_local_bl(frm, from_size, fpk)) {
         if (!pure) return (Event){ EV_SBL, 0 };
-        const FieldDelta *r = fd_find(fd, fpk);
-        return (Event){ EV_BL, (r && r->kind == STREAM_BL) ? r->delta : 0 };
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
+        return (Event){ EV_BL, r ? r->delta : 0 };
     }
-    if (fpk + 4 <= from_size && pure && ivec_has(ldr, (int32_t)fpk)) {
-        const FieldDelta *r = fd_find(fd, fpk);
-        return (Event){ EV_EX, (r && r->kind == STREAM_LDR) ? r->delta : 0 };
+    if (pure && ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
+        return (Event){ EV_EX, r ? r->delta : 0 };
     }
     return (Event){ EV_NONE, 0 };
 }
 
 static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
                                         const IVec *ldr, int32_t fp0, int32_t k) {
-    uint32_t fpk = (uint32_t)(fp0 + k);
+    uint32_t fpk;
+    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
     if (is_local_bl(frm, from_size, fpk)) {
-        const FieldDelta *r = fd_find(fd, fpk);
-        return (Event){ EV_BL, (r && r->kind == STREAM_BL) ? r->delta : 0 };
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
+        return (Event){ EV_BL, r ? r->delta : 0 };
     }
-    if (fpk + 4 <= from_size && ivec_has(ldr, (int32_t)fpk)) {
-        const FieldDelta *r = fd_find(fd, fpk);
-        return (Event){ EV_EX, (r && r->kind == STREAM_LDR) ? r->delta : 0 };
+    if (ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
+        return (Event){ EV_EX, r ? r->delta : 0 };
     }
     return (Event){ EV_NONE, 0 };
 }
@@ -842,10 +856,13 @@ static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_
             for (int32_t k = 0; k < o->diff_len;) {
                 if (k + 4 <= o->diff_len) {
                     Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
-                    uint32_t fpk = (uint32_t)(fp0 + k);
-                    const FieldDelta *real = fd_find(fd, fpk);
-                    int ok = (ev.type == EV_BL && real && real->kind == STREAM_BL) ||
-                             (ev.type == EV_EX && real && real->kind == STREAM_LDR);
+                    uint32_t fpk = 0;
+                    const FieldDelta *real = NULL;
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        (void)field_addr(fp0, k, from_size, &fpk);
+                        real = fd_find_kind(fd, fpk, ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
+                    }
+                    int ok = real != NULL;
                     if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
                         memset(o->diff + k, 0, 4);
                     }
@@ -858,10 +875,13 @@ static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_
                 int32_t k = top - 3;
                 if (k >= 0) {
                     Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
-                    uint32_t fpk = (uint32_t)(fp0 + k);
-                    const FieldDelta *real = fd_find(fd, fpk);
-                    int ok = (ev.type == EV_BL && real && real->kind == STREAM_BL) ||
-                             (ev.type == EV_EX && real && real->kind == STREAM_LDR);
+                    uint32_t fpk = 0;
+                    const FieldDelta *real = NULL;
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        (void)field_addr(fp0, k, from_size, &fpk);
+                        real = fd_find_kind(fd, fpk, ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
+                    }
+                    int ok = real != NULL;
                     if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
                         memset(o->diff + k, 0, 4);
                     }
@@ -1071,8 +1091,8 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
                 if (presset[wi]) ivec_push(&pc->pres, k);
                 if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
             }
-            qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
-            qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+            if (pc->pres.n > 1) qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            if (pc->corr.n > 1) qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
     free(m);

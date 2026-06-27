@@ -949,8 +949,11 @@ int main(int argc,char**argv){
     else decoder_finish();   /* still free resources */
     if(byte_mode){
         /* a genuinely streaming decoder suspends roughly once per consumed byte */
-        if(suspends < (long)((body_end-body_start)/2)){ fprintf(stderr,"streaming check FAILED: only %ld suspends for %zu bytes\n",suspends,body_end-body_start); }
-        else fprintf(stderr,"streaming OK: %ld suspends over %zu body bytes\n",suspends,body_end-body_start);
+        if(suspends < (long)((body_end-body_start)/2)){
+            fprintf(stderr,"streaming check FAILED: only %ld suspends for %zu bytes\n",suspends,body_end-body_start);
+            fclose(mf); free(g_flash); free(blob); return 1;
+        }
+        fprintf(stderr,"streaming OK: %ld suspends over %zu body bytes\n",suspends,body_end-body_start);
     }
     if(rc==DEC_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
         fprintf(stderr,"decode error — rejected (reason=%u: %s)\n", rj,
