@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,343 B, data 0 B, bss 11,808 B (<= 12 KiB cap, 480 B margin) |
+| ARM object at `SA_W=10` | text 5,255 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
-| Coroutine stack high-water | 408 B of 576 B (168 B cushion; canary-guarded) |
+| Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,669,478 B**.
-- W=10 non-self corpus total: **4,668,931 B**.
+- W=10 full 16x16 corpus total: **4,658,994 B**.
+- W=10 non-self corpus total: **4,658,447 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **875 B**
-  - `v1_one_face -> v0_base`: **588 B**
+  - `v0_base -> v1_one_face`: **874 B**
+  - `v1_one_face -> v0_base`: **586 B**
 
 ## Architecture
 
@@ -62,10 +62,22 @@ previous reuse outcome (reuse runs cluster): when a match repeats the
 immediately-previous match distance the value is omitted and the decoder reuses
 the last distance (the flag's prior is biased toward "fresh" so it stays nearly
 free on small patches).
+Match lengths carry a structural prior: the LZ minimum match length is 3, so the
+length-1 value is always >= 2 and the first unary-prefix bit of the match-length
+Golomb is always "continue"; seeding it cheap makes that bit near-free from the
+first symbol (a format invariant, not a corpus fit).
+
 The host encoder's LZ parse runs a price-feedback loop: it re-parses against bit
-prices measured from the real adaptive models and keeps the result only when its
-exact modeled cost drops, and the parse is `rep0`-aware so it deliberately prices
-and exploits last-distance reuse. The wire also omits the always-zero leading
+prices measured from the real adaptive models and keeps the result only when the
+shipped patch actually shrinks. Two refinements make the parse select on the real
+wire: (1) it prices tag0 literals under the SAME order-1 previous-byte context the
+wire codes them with (carrying the prevlit through the forward DP), instead of an
+order-0 average; (2) the acceptance gate is the EXACT full-body flushed byte count
+(the real geometry/preserve/delta streams emitted interleaved with the LZ tokens
+and finalized with the same optimal flush), not a token-stream-only modeled cost.
+The parse is `rep0`-aware so it deliberately prices and exploits last-distance
+reuse. The relocation-field detector also admits slightly smaller delta-bearing
+blocks (it pays off across the corpus). The wire omits the always-zero leading
 range-coder cache byte (a structural LZMA invariant), saving one byte per patch.
 These are encoder/decoder-symmetric or encoder-only and leave the no-bake apply,
 NVM write discipline, and divide-free property unchanged.
@@ -86,7 +98,7 @@ make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `878` and `590`
+prints the real one-face blob sizes. Expected blob sizes are `874` and `586`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
@@ -114,11 +126,13 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. `W=11` was measured at -7.7 KB on the corpus but grows the
-LZSS ring to 2,048 B, pushing `.bss` to 12,832 B and exceeding the 12 KiB SRAM
-cap by 544 B; the geometry-model sharing freed 192 B but not the ~832 B still
-needed, and the 1,024 B `ldr`-derive pristine ring is irreducible (it equals the
-ARM `ldr`-literal reach and must hold read-time-pristine bytes the preserve
-journal does not cover), so `W=10` remains the production maximum.
+LZSS ring to 2,048 B, pushing `.bss` to 12,800 B and exceeding the 12 KiB SRAM
+cap by 512 B; the geometry-model sharing and the SA-arena slack reclaim together
+freed 224 B but not the ~736 B still needed, and the 1,024 B `ldr`-derive pristine
+ring is irreducible (it equals the ARM `ldr`-literal reach and must hold read-time-
+pristine bytes the preserve journal does not cover), and `g_psrc` provably cannot
+overlay the journal region because the FWD direction uses both simultaneously, so
+`W=10` remains the production maximum.
 
 ## Caps
 

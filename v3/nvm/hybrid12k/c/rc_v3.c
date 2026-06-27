@@ -56,8 +56,8 @@ static uint32_t g_fhead, g_ftail;          /* ring indices */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
 
 #ifndef DEC_STACK_BYTES
-#define DEC_STACK_BYTES 576                /* coroutine stack; measured high-water 408 B (data-independent
-                                            * call depth) leaves a 168 B cushion for out-of-corpus call
+#define DEC_STACK_BYTES 576                /* coroutine stack; measured high-water 456 B (data-independent
+                                            * call depth) leaves a 120 B cushion for out-of-corpus call
                                             * paths. The deepest 8 B are a 0xC5 canary checked at decode
                                             * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
@@ -148,11 +148,19 @@ static void rc_init(void){
      * 4 code bytes are read directly (no skip). */
     for (int i=0;i<4;i++) RC.code = (RC.code<<8) | next_byte();
 }
-static int s_bit_r(uint16_t*prob,int rate){
-    uint32_t p=*prob, bound=(RC.range>>12)*p; int b;
-    if (RC.code<bound){ RC.range=bound; *prob=(uint16_t)(p+((RC_PBIT-p)>>rate)); b=0; }
-    else { RC.code-=bound; RC.range-=bound; *prob=(uint16_t)(p-(p>>rate)); b=1; }
+/* range-coder DECODE core shared by both the adaptive bit and the raw (equiprobable) bit: split at
+ * `bound`, pick the sub-interval the code lands in, return the bit, then renorm (refill from the FIFO
+ * until range climbs back above KTOP). The readers differ ONLY in `bound` + probability adaptation. */
+static int rc_decode(uint32_t bound){
+    int b;
+    if (RC.code<bound){ RC.range=bound; b=0; } else { RC.code-=bound; RC.range-=bound; b=1; }
     while (RC.range<RC_KTOP){ RC.code=(RC.code<<8)|next_byte(); RC.range<<=8; }
+    return b;
+}
+static int s_bit_r(uint16_t*prob,int rate){
+    uint32_t p=*prob;
+    int b=rc_decode((RC.range>>12)*p);
+    *prob=(uint16_t)(b? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
     return b;
 }
 /* Default adaptive-bit rate for the Golomb (unary+mantissa), order-2 flag, and MTF
@@ -161,12 +169,7 @@ static int s_bit_r(uint16_t*prob,int rate){
  * per-tree rate via s_bit_r. Must match RC_S_BIT_RATE in rc_v3_enc.c (bit-exact wire). */
 #define RC_S_BIT_RATE 4
 static int s_bit(uint16_t*prob){ return s_bit_r(prob,RC_S_BIT_RATE); }
-static int s_raw(void){
-    uint32_t bound=RC.range>>1; int b;
-    if (RC.code<bound){ RC.range=bound; b=0; } else { RC.code-=bound; RC.range-=bound; b=1; }
-    while (RC.range<RC_KTOP){ RC.code=(RC.code<<8)|next_byte(); RC.range<<=8; }
-    return b;
-}
+static int s_raw(void){ return rc_decode(RC.range>>1); }
 /* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
@@ -232,22 +235,22 @@ static void ugr_init(UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
-static void ugg_init(UGGamma*g){
-    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
+/* init a gamma model, seeding EVERY unary-prefix prior to `useed` (the mantissa priors are always
+ * RC_PHALF). useed==RC_PHALF is the neutral init; useed==RC_PBIT-RC_PBIT/4 biases toward STOP (bit 0)
+ * so the smallest gamma values are cheap from the first symbol — used by the MTF dict-index gammas
+ * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 was the
+ * corpus optimum). Folding the u[] seed into the init avoids a second pass over u[]. */
+static void ugg_init_u(UGGamma*g,uint16_t useed){
+    for(int i=0;i<=UG_CTX;i++) g->u[i]=useed;
     for(int i=0;i<UG_GAMMA_M;i++) g->m[i]=RC_PHALF;
 }
+static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
  * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
  * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
  * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
 static void ugg_seed_cont(UGGamma*g,int depth){
     for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
-}
-/* seed every unary-prefix prior toward STOP (bit 0): makes the smallest gamma values cheap from the
- * first symbol. Used by the MTF dict-index gammas (dibl/diex), where the just-promoted index 1
- * (encoded value 0) dominates. P high == bit0(stop) cheap; RC_PBIT-RC_PBIT/4 was the corpus optimum. */
-static void ugg_seed_stop(UGGamma*g){
-    for(int i=0;i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT-RC_PBIT/4);
 }
 static uint32_t s_ug_rice(UGRice*g){
     uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
@@ -329,24 +332,30 @@ typedef struct {
  * holds NO resident per-detection store; the small MTF-dict streams (DR_BL/DR_EX), the M_dval
  * escape-value bit-tree, and the two index UGolombs are SEPARATE statics (~2.4 KB) — far smaller than
  * the old 8,080 B generator stores. Seed phase (hist0/hist1/w = 4096 B) overlays ARENA front. */
-/* SA apply state = ring(2^W) + fixed correction arrays. A1 derives ldr positions per op and infers
- * suppressed BL from `!pure`, so no ex/sbl offset buffers are resident. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 80u)  /* slack covers SA non-buffer fields + align */
+/* SA apply state = ring(2^W) + fixed correction arrays + the SA scalar/control fields. A1 derives
+ * ldr positions per op and infers suppressed BL from `!pure`, so no ex/sbl offset buffers are
+ * resident. The reservation is the two buffer caps (ring 2^W, op_corr 4*OPC_CAP) plus the non-buffer
+ * fields: 10 u32 (ototal/tok_left/span_left/br_left/br_src/from_size/to_size/tp/fp/op_nc = 40 B) +
+ * 3 u8 (tok_mode/FWD/err) struct-padded to 44 B, rounded to 48 to keep ARENA_BYTES 8-aligned. The
+ * _Static_assert(sizeof(SA) <= SA_ARENA) below is the hard guard if a field is ever added. */
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
 static uint16_t Jcount, Jpeak;
 /* page[p] = index of the first slot whose (pos>>16) >= p, for p in [0..JPAGE_MAX].  Since slots
- * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). */
+ * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). Every journalled
+ * pos is < g_image_span, so a pos with pos>>16 >= JPAGE_MAX exists only for out-of-corpus firmware
+ * whose span overflows the page table — that page is unrepresentable and refused. No separate active-
+ * page count is kept: pages above the live span never receive an insert, so their boundaries trail
+ * the final sentinel and search empty. */
 static uint16_t g_jpage[JPAGE_MAX+1];
-static uint8_t g_npage;                         /* number of active pages = (span>>16)+1, capped */
 static void jr_reset(void){ Jcount=Jpeak=0;
-    uint32_t pg=(g_image_span>>16)+1u; if(pg>(uint32_t)JPAGE_MAX) pg=JPAGE_MAX; g_npage=(int)pg;
     for(int p=0;p<=JPAGE_MAX;p++) g_jpage[p]=0; }
 /* Binary search for `pos` within its page (pos>>16), comparing the 16-bit low key. Returns the
  * slot index in *at: on a hit *at is the matching slot and the return is 1; on a miss *at is the
  * sorted insertion index (page-clamped) and the return is 0. `pos` is always inside the paged span
- * (callers gate on pg<g_npage), so no out-of-range branch is needed here. */
+ * (callers gate on pg<JPAGE_MAX), so no out-of-range branch is needed here. */
 static int jr_find(uint32_t pos, int*at){
     uint32_t key=pos&0xFFFFu;
     int lo=g_jpage[pos>>16], hi=g_jpage[(pos>>16)+1]-1;
@@ -357,18 +366,18 @@ static int jr_find(uint32_t pos, int*at){
     return 0;
 }
 static int jr_put(uint32_t pos, uint8_t b){
-    uint32_t pg=pos>>16; if(pg>=(uint32_t)g_npage) return -1;     /* outside paged span (also bounds pos) */
+    uint32_t pg=pos>>16; if(pg>=(uint32_t)JPAGE_MAX) return -1;   /* outside paged span (also bounds pos) */
     int at;
     if(jr_find(pos,&at)) return 0;                   /* never-evict: keep the first write */
     if((uint32_t)Jcount>=JSLOTS) return -1;          /* over-depth: refuse BEFORE any write */
     if(at<Jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(Jcount-at)*3u);
     uint8_t*s=Jbuf+(uint32_t)at*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
-    for(uint32_t p=pg+1u;p<=(uint32_t)g_npage;p++) g_jpage[p]++;   /* shift higher page boundaries */
+    for(uint32_t p=pg+1u;p<=(uint32_t)JPAGE_MAX;p++) g_jpage[p]++;  /* shift higher page boundaries */
     if(++Jcount>Jpeak) Jpeak=Jcount;
     return 0;
 }
 static int jr_get(uint32_t pos, uint8_t*out){
-    if(pos>>16>=(uint32_t)g_npage) return 0;         /* outside paged span */
+    if(pos>>16>=(uint32_t)JPAGE_MAX) return 0;       /* outside paged span */
     int at;
     if(jr_find(pos,&at)){ *out=Jbuf[(uint32_t)at*3u]; return 1; }
     return 0;
@@ -588,6 +597,10 @@ static uint8_t hy_src(SA*s, int32_t fp);   /* fwd decl: journal-aware pristine s
  * read. Kept static-inline so the per-direction branch folds away at each call site (no indirect
  * call / no text bloat on Cortex-M0+). No resident target store. */
 static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
+    /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
+     * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
+     * skips any pristine read/record for an impossible target). */
+    if(fpk&3u) return 0;
     int32_t hi=fp0+dl; if((int32_t)fpk+4>hi) return 0;
     int32_t lo=(int32_t)fpk-1024; if(lo<fp0) lo=fp0; if(lo&1) lo++;
     for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
@@ -659,45 +672,72 @@ static uint8_t hy_src(SA*s, int32_t fp){
     if(fp>=0 && (uint32_t)fp<s->from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
     return v;
 }
-static void hy_note_src4(SA*s, uint32_t a){
-    for(uint32_t i=0;i<4;i++) g_psrc[(a+i)&PSRC_MASK]=hy_src_peek(s,(int32_t)(a+i));
-}
-/* journal-aware pristine source halfword/word: the
- * from-image flash may already be overwritten by the monotonic output frontier, so reads MUST be
- * journal-aware (preserves hold the original bytes) — a raw flash read would return clobbered output. */
+/* journal-aware pristine source word (little-endian), recording all 4 bytes into the psrc ring (used
+ * by the FWD ldr back-scan). The from-image flash may already be overwritten by the monotonic output
+ * frontier, so reads MUST be journal-aware (preserves hold the original bytes) — a raw flash read
+ * would return clobbered output. Callers that only need the ring record discard the return value. */
 static uint32_t hy_src32(SA*s, uint32_t a){ return (uint32_t)hy_src(s,(int32_t)a)|((uint32_t)hy_src(s,(int32_t)a+1)<<8)|((uint32_t)hy_src(s,(int32_t)a+2)<<16)|((uint32_t)hy_src(s,(int32_t)a+3)<<24); }
 static uint16_t hy_src16_peek(SA*s, uint32_t a){ return (uint16_t)(hy_src_peek(s,(int32_t)a)|(hy_src_peek(s,(int32_t)a+1)<<8)); }
-/* journal-aware local-bl predicate (pristine source). */
-static int hy_is_local_bl(SA*s, uint32_t fpk){
-    if(fpk&1u) return 0;
-    if(fpk>s->from_size || s->from_size-fpk<4u) return 0;
-    uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
-    return ((up&0xf800)==0xf000) && ((lo&0xd000)==0xd000);
-}
 /* de-reloc field at op-local field-start ks. Returns: 0=no field; 1=bl/ex (packed4 filled,
- * a value consumed from the generator); 2=suppressed-bl (write the 4 bytes as NORMAL copies). */
+ * a value consumed from the generator); 2=suppressed-bl (write the 4 bytes as NORMAL copies).
+ *
+ * The field window [fpk,fpk+4) is fully in-range (the entry guard pins fpk+4<=from_size), so the
+ * BL detect reuses the ONE pristine halfword pair it reads for both the pattern test and the pack.
+ * Field kinds are mutually exclusive and tried in encoder order: local-BL first (Thumb F000/D000
+ * pattern, 2-aligned), else a same-op LDR-literal target. Both consume a stream delta ONLY on a
+ * real BL/EX hit (suppressed-BL and "no field" never touch the stream). */
 static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     int64_t fpk64=(int64_t)fp0+ks;
     if(fpk64<0 || fpk64+4>(int64_t)s->from_size) return 0;
     uint32_t fpk=(uint32_t)fpk64;
-    if(hy_is_local_bl(s, fpk)){
+    /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
+    uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
+    if(!(fpk&1u) && (up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
-        int32_t delta=pull_delta(&DR_BL, &M_dibl);         /* INLINE pull from the single stream */
-        uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
+        int32_t delta=pull_delta(&DR_BL, &M_dibl);          /* INLINE pull from the single stream */
         pack_bl_buf(((uint32_t)unpack_bl(up,lo)-(uint32_t)delta)&0x00ffffffu, packed);
-        hy_note_src4(s,fpk);
+        (void)hy_src32(s,fpk);                              /* record the 4 BL bytes into the psrc ring */
         return 1;
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
-     * mirrors the encoder's pure(k) + _op_ldr_set; positions are no longer shipped. */
-    if(pure && (fpk&3u)==0 &&                               /* fpk+4<=from_size already guaranteed above */
-       ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
-        int32_t delta=pull_delta(&DR_EX, &M_diex);         /* INLINE pull from the single stream */
+     * mirrors the encoder's pure(k) + op_ldr_set; positions are no longer shipped. ldr_targets
+     * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
+    if(pure && ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
+        int32_t delta=pull_delta(&DR_EX, &M_diex);          /* INLINE pull from the single stream */
         uint32_t val=hy_src32(s,fpk);
         pack_s32_buf((val-(uint32_t)delta)&0xffffffffu, packed);
         return 1;
     }
     return 0;
+}
+/* Literal cursor over the op's content stream + the per-byte write helpers. `fwd` is loop-invariant,
+ * so these inline to the same straight-line code the former LITCUR_/WR_ macros produced (the per-
+ * direction branch folds away) — but with named typed parameters and no hidden mutation of enclosing
+ * locals. The cursor advances in wire order regardless of write direction. */
+typedef struct { int32_t nextpos, litb, li; } LitCur;
+__attribute__((always_inline)) static inline void litcur_init(SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
+    lc->nextpos=-1; lc->litb=0; lc->li=0;
+    if(nl>0){ int32_t g0=(int32_t)sa_read_uleb(s);
+        lc->nextpos = fwd ? g0 : (dl-g0); lc->litb=sa_next_content(s,0); }
+}
+__attribute__((always_inline)) static inline void litcur_next(SA*s, LitCur*lc, int fwd, int32_t nl){
+    if(lc->li<nl){ int32_t g=(int32_t)sa_read_uleb(s);
+        lc->nextpos += fwd ? g : -g; lc->litb=sa_next_content(s,0); }
+    else lc->nextpos=-1;
+}
+/* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
+__attribute__((always_inline)) static inline void wr_extras(SA*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
+    for(int32_t i=0;i<el && !s->err && !g_rcerr;i++){
+        int32_t e = fwd ? i : (el-1-i);
+        uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
+        out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
+    }
+}
+/* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
+__attribute__((always_inline)) static inline void wr_copy(SA*s, LitCur*lc, int fwd, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+    uint8_t db=0;
+    if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(s,lc,fwd,nl); }
+    out_write((uint32_t)(tp0+K), (uint8_t)(db + hy_src(s,fp0+K) + corr_at(s,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
@@ -760,40 +800,21 @@ static void sa_apply_op(SA*s){
     if(nl<0||nl>dl){ s->err=1; return; }
     uint8_t packed[4];
     int fwd=s->FWD; int32_t step=fwd?1:-1;
-    /* literal cursor over the content stream (advances in wire order regardless of write direction) */
-    int32_t nextpos=-1, litb=0, li=0;
-    #define LITCUR_INIT() do{ if(nl>0){ int32_t _g0=(int32_t)sa_read_uleb(s); \
-            nextpos=fwd?_g0:(dl-_g0); litb=sa_next_content(s,0); } }while(0)
-    #define LITCUR_NEXT() do{ if(li<nl){ int32_t _g=(int32_t)sa_read_uleb(s); \
-            nextpos+=fwd?_g:-_g; litb=sa_next_content(s,0);} else nextpos=-1; }while(0)
-    /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-    #define WR_EXTRAS() do{ for(int32_t _i=0;_i<el && !s->err && !g_rcerr;_i++){ \
-            int32_t _e=fwd?_i:(el-1-_i); \
-            uint8_t _eb=sa_next_content(s,(int)((tp0+dl+_e)&1)); \
-            out_write((uint32_t)(tp0+dl+_e), (uint8_t)(_eb + corr_at(s,dl+_e))); } }while(0)
-    /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-    #define WR_COPY(K) do{ int32_t _K=(K); uint8_t _db=0; \
-            if(_K==nextpos){ _db=(uint8_t)litb; li++; LITCUR_NEXT(); } \
-            out_write((uint32_t)(tp0+_K), (uint8_t)(_db + hy_src(s,fp0+_K) + corr_at(s,_K))); }while(0)
-
-    if(!fwd) WR_EXTRAS();
-    LITCUR_INIT();
+    LitCur lc;
+    if(!fwd) wr_extras(s, fwd, tp0, dl, el);
+    litcur_init(s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
     while(k>=0 && k<dl && !s->err && !g_rcerr){
         int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
         if(a0>=0 && a0+4<=dl){
-            int pure=(nextpos<0 || nextpos<a0 || nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
+            int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
             int fa=field_at(s, fp0, a0, packed, pure, dl);
-            if(fa==2){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) WR_COPY(a0+b); k+=4*step; continue; }
+            if(fa==2){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) wr_copy(s, &lc, fwd, tp0, fp0, nl, a0+b); k+=4*step; continue; }
             if(fa==1){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) out_write((uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_at(s,a0+b))); k+=4*step; continue; }
         }
-        WR_COPY(k); k+=step;
+        wr_copy(s, &lc, fwd, tp0, fp0, nl, k); k+=step;
     }
-    if(fwd) WR_EXTRAS();
-    #undef LITCUR_INIT
-    #undef LITCUR_NEXT
-    #undef WR_EXTRAS
-    #undef WR_COPY
+    if(fwd) wr_extras(s, fwd, tp0, dl, el);
 }
 
 /* ===================================================================================== */
@@ -811,8 +832,7 @@ static void decode_body(void){
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init_rate(&M_dval,4); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
-    ugg_init(&M_dibl); ugg_init(&M_diex);
-    ugg_seed_stop(&M_dibl); ugg_seed_stop(&M_diex);
+    ugg_init_u(&M_dibl, RC_PBIT-RC_PBIT/4); ugg_init_u(&M_diex, RC_PBIT-RC_PBIT/4);  /* seed toward STOP */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -827,6 +847,8 @@ static void decode_body(void){
       ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
       int kd=(int)s_raw_bits(4);
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
+      ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
+                                 * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
       fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();

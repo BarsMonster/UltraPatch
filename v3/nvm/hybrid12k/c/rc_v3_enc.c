@@ -584,7 +584,7 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     MatchVec m = sequence_matching_blocks(ao, la, bo, lb);
     for (size_t mi = 0; mi + 1 < m.n; mi++) {
         int32_t fo = m.v[mi].a, to = m.v[mi].b, sz = m.v[mi].size;
-        if (sz < 8) continue;
+        if (sz < 6) continue;
         sz += 1;
             int64_t *vals = (int64_t *)xmalloc((size_t)sz * sizeof(int64_t));
             int nz = 0;
@@ -592,7 +592,7 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
             vals[k] = (int64_t)from_s->a[fo + k].val - (int64_t)to_s->a[to + k].val;
             if (vals[k] != 0) nz++;
         }
-        if (nz < 8) { free(vals); continue; }
+        if (nz < 5) { free(vals); continue; }
         blockvec_push(out, fo, (int32_t)to_s->a[to].addr, vals, sz);
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
@@ -1560,10 +1560,19 @@ static uint32_t bit_price(uint32_t p, int bit) {
     return intbits - fracbits;                 /* (12 - log2(pr)) * PR_SCALE */
 }
 
+/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
+ * Mirrors rc_v3.c M_lit0[]/M_lit1 + g_litprev. Defined here (ahead of the DP parse) so the
+ * price-feedback DP can price tag0 literals under the SAME order-1 prev-byte context the wire
+ * uses, instead of an order-0 average. Encoder-only; the wire is unchanged. */
+#define LIT0_CTX 5
+/* Mirrors rc_v3.c LIT0_SEL: 7 prevlit regions folded onto 5 trees (non-monotone map). */
+#define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
+
 typedef struct {
     uint32_t flag_span, flag_match;          /* avg measured flag price, per chosen token kind */
     uint32_t rep0_yes, rep0_no;              /* avg measured rep0-flag price (reuse vs fresh distance) */
-    uint32_t lit[2][256];                    /* per-parity per-byte literal price */
+    uint32_t lit0[LIT0_CTX][256];            /* tag0 per-prevbyte-context per-byte literal price */
+    uint32_t lit1[256];                      /* tag1 per-byte literal price */
     UGE gs, gl, gd;                          /* snapshot of length/dist models for value pricing */
     int dk;
     int valid;
@@ -1604,20 +1613,22 @@ static uint32_t bt_price(const BTE *t, uint8_t byte) {
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
 static void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                            const uint8_t *frm, size_t from_size, int dk, PriceTab *pt) {
-    BTE lit[2];
+    BTE lit0[LIT0_CTX], lit1;            /* mirror the wire's order-1 tag0 trees + single tag1 tree */
     FLE flag;
     UGE gs, gl, gd;
-    lit_tree_seed_e(frm, from_size, 0, &lit[0], 5);
-    lit_tree_seed_e(frm, from_size, 1, &lit[1], 4);
+    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c], 5);
+    lit_tree_seed_e(frm, from_size, 1, &lit1, 4);
     fl_init_e(&flag);
     ug_init_e(&gd, 'r', dk);
     ug_init_e(&gl, 'g', 0);
+    ug_seed_cont_e(&gl, 1);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
     uint64_t fs_cost = 0, fm_cost = 0; uint32_t fs_n = 0, fm_n = 0;
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
+    uint8_t prevlit = 0;                 /* last literal byte (any tag), seeds the tag0 context */
     for (size_t i = 0; i < seq->n; i++) {
         Token t = seq->v[i];
         if (t.type == 'S') {
@@ -1626,7 +1637,9 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
             ug_encode(&gs, &r, (uint32_t)t.len - 1u);
             for (int32_t j = 0; j < t.len; j++) {
                 size_t cp = (size_t)t.start + (size_t)j;
-                bt_encode(&lit[tags[cp]], &r, content[cp]);
+                uint8_t byte = content[cp];
+                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte);
+                prevlit = byte;
             }
         } else {
             fm_cost += bit_price(flag.m[flag.h], 1); fm_n++;
@@ -1649,8 +1662,9 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
     pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
     pt->rep0_no  = r0n_n ? (uint32_t)(r0n_cost / r0n_n) : bit_price(RC_REP0_INIT, 0);
-    for (int par = 0; par < 2; par++)
-        for (int b = 0; b < 256; b++) pt->lit[par][b] = bt_price(&lit[par], (uint8_t)b);
+    for (int c = 0; c < LIT0_CTX; c++)
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&lit0[c], (uint8_t)b);
+    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price(&lit1, (uint8_t)b);
     pt->gs = gs; pt->gl = gl; pt->gd = gd; pt->dk = dk;
     pt->valid = 1;
 }
@@ -1700,8 +1714,8 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
  * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
  * there. One state per position (cheapest arrival wins) keeps it linear; the chosen parse is
- * only ever ACCEPTED by the exact seq_real_cost gate in lz_optimal_c, so any approximation
- * here can never corrupt the wire -- it only changes which legal parse is tried.
+ * only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation here
+ * can never corrupt the wire -- it only changes which legal parse is tried.
  * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, const PriceTab *pt,
@@ -1723,28 +1737,39 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     const uint64_t INF = UINT64_MAX / 4;
     uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
     int32_t  *rep  = (int32_t *)xmalloc((n + 1) * sizeof(int32_t)); /* rep distance arriving at pos */
+    uint8_t  *pl   = (uint8_t *)xmalloc((n + 1) * sizeof(uint8_t)); /* prevlit byte arriving at pos */
     Token *via = (Token *)xcalloc(n + 1, sizeof(Token));            /* token that arrives at pos */
-    for (size_t i = 0; i <= n; i++) { cost[i] = INF; rep[i] = 0; }
-    cost[0] = 0; rep[0] = 0; /* wire seeds last_dist = 0 (never equals a real distance >= 1) */
+    for (size_t i = 0; i <= n; i++) { cost[i] = INF; rep[i] = 0; pl[i] = 0; }
+    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* wire seeds last_dist = 0 and prevlit = 0 */
     for (size_t i = 0; i < n; i++) {
         if (cost[i] >= INF) continue;            /* unreachable along any cheap path */
         uint64_t ci = cost[i]; int32_t ri = rep[i];
-        /* spans: rep distance unchanged */
+        /* spans: rep distance unchanged. tag0 literals are priced under the wire's order-1
+         * prev-byte context (LIT0_SEL of the preceding byte). The prevlit carried into the run
+         * is the last literal byte on the cheapest path here (matches do NOT update prevlit on
+         * the wire), tracked exactly in pl[]; cheapest-arrival-wins makes this an approximation
+         * only when a costlier path would carry a different prevlit -- the chosen parse is always
+         * re-checked by the exact full-body byte gate in encode_body, so it can never corrupt the
+         * wire (it only changes which legal parse is tried). */
         uint64_t runbits = 0;
         size_t lim = n < i + maxrun ? n : i + maxrun;
+        uint8_t prevb = pl[i];
         for (size_t j = i + 1; j <= lim; j++) {
-            runbits += pt->lit[tags[j - 1]][content[j - 1]];
+            uint8_t byte = content[j - 1];
+            runbits += tags[j - 1] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(prevb)][byte];
+            prevb = byte;
             uint64_t c = ci + (uint64_t)slen[j - i] + runbits;
-            if (c < cost[j]) { cost[j] = c; rep[j] = ri; via[j] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
+            if (c < cost[j]) { cost[j] = c; rep[j] = ri; pl[j] = byte; via[j] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
         }
-        /* matches: rep0 reuse when the candidate distance equals the incoming rep distance */
+        /* matches: rep0 reuse when the candidate distance equals the incoming rep distance.
+         * A match does not emit a literal, so the prevlit (pl) is carried through unchanged. */
         for (int cix = 0; cix < ncand[i]; cix++) {
             int32_t bd = cands[i][cix].dist, bl = cands[i][cix].len;
             uint64_t dext = (bd == ri) ? reuse_extra : (fresh_extra + dpr[bd]);
             for (int32_t l = 3; l <= bl; l++) {
                 size_t j = i + (size_t)l;
                 uint64_t c = ci + dext + mlen[l];
-                if (c < cost[j]) { cost[j] = c; rep[j] = bd; via[j] = (Token){ 'R', (int32_t)i, l, bd }; }
+                if (c < cost[j]) { cost[j] = c; rep[j] = bd; pl[j] = pl[i]; via[j] = (Token){ 'R', (int32_t)i, l, bd }; }
             }
         }
     }
@@ -1753,7 +1778,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     size_t pos = n;
     while (pos > 0) { tok_push(&tv, via[pos]); pos = (size_t)via[pos].start; }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(via); free(slen); free(mlen); free(dpr);
+    free(cost); free(rep); free(pl); free(via); free(slen); free(mlen); free(dpr);
     return tv;
 }
 
@@ -1792,47 +1817,12 @@ static int fit_k_tokens(const TokenVec *tv) {
     return best;
 }
 
-/* exact body bit-cost of a token sequence under the real adaptive content models, in
- * 1/64-bit units; used only to validate that a price-feedback re-parse is a real win.
- * Adaptation is driven by the real encode functions on a throwaway range coder; each symbol
- * is priced against the model state captured just before it is encoded. */
-static uint64_t seq_real_cost(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
-                              const uint8_t *frm, size_t from_size, int dk) {
-    BTE lit[2]; FLE flag; UGE gs, gl, gd;
-    lit_tree_seed_e(frm, from_size, 0, &lit[0], 5);
-    lit_tree_seed_e(frm, from_size, 1, &lit[1], 4);
-    fl_init_e(&flag); ug_init_e(&gd, 'r', dk); ug_init_e(&gl, 'g', 0); ug_init_e(&gs, 'g', 0);
-    uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;   /* mirror the wire's rep0 reuse */
-    REnc r; re_init(&r);
-    uint64_t cost = 0;
-    for (size_t i = 0; i < seq->n; i++) {
-        Token t = seq->v[i];
-        if (t.type == 'S') {
-            cost += bit_price(flag.m[flag.h], 0); fl_encode(&flag, &r, 0);
-            cost += ug_price(&gs, (uint32_t)t.len - 1u); ug_encode(&gs, &r, (uint32_t)t.len - 1u);
-            for (int32_t j = 0; j < t.len; j++) {
-                size_t cp = (size_t)t.start + (size_t)j;
-                cost += bt_price(&lit[tags[cp]], content[cp]); bt_encode(&lit[tags[cp]], &r, content[cp]);
-            }
-        } else {
-            cost += bit_price(flag.m[flag.h], 1); fl_encode(&flag, &r, 1);
-            if (t.dist == last_dist) {
-                cost += bit_price(rep0[rep0h], 1); re_bit(&r, &rep0[rep0h], 1, RC_S_BIT_RATE); rep0h = 1;
-            } else {
-                cost += bit_price(rep0[rep0h], 0); re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
-                cost += ug_price(&gd, (uint32_t)t.dist - 1u); ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
-                last_dist = t.dist;
-            }
-            cost += ug_price(&gl, (uint32_t)t.len - 1u); ug_encode(&gl, &r, (uint32_t)t.len - 1u);
-        }
-    }
-    buf_free(&r.out);
-    return cost;
-}
-
-static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litbits,
-                             const uint8_t *tags, const uint8_t *frm, size_t from_size,
-                             int W, int *k_out) {
+/* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
+ * and an initial rice-DP parse. The caller owns *cands_out / *ncand_out and frees them after the
+ * price-feedback loop (which it runs with its own, full-body acceptance gate). */
+static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
+                                int W, int *k_out,
+                                Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
     int32_t win = 1 << W, maxm = 2048;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
@@ -1871,27 +1861,9 @@ static TokenVec lz_optimal_c(const uint8_t *data, size_t n, const uint16_t *litb
         free(seq.v);
         seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
     }
-    /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and
-     * keep the result only if its exact modeled cost is strictly lower. Iterate to a fixpoint. */
-    if (n) {
-        uint64_t cur_cost = seq_real_cost(&seq, data, tags, frm, from_size, k);
-        for (int pass = 0; pass < 4; pass++) {
-            PriceTab pt;
-            measure_prices(&seq, data, tags, frm, from_size, k, &pt);
-            TokenVec cand_seq = lz_parse_priced(n, data, tags, cands, ncand, &pt, W);
-            int nk = fit_k_tokens(&cand_seq);
-            uint64_t cand_cost = seq_real_cost(&cand_seq, data, tags, frm, from_size, nk);
-            if (cand_cost + 1 < cur_cost) {     /* require a real, non-noise improvement */
-                free(seq.v); seq = cand_seq; cur_cost = cand_cost; k = nk;
-            } else {
-                free(cand_seq.v);
-                break;
-            }
-        }
-    }
-    merge_adjacent_spans(&seq);
     *k_out = k;
-    free(cands); free(ncand);
+    *cands_out = cands;
+    *ncand_out = ncand;
     return seq;
 }
 
@@ -2023,11 +1995,7 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap) {
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
-/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
- * Mirrors rc_v3.c M_lit0[]/M_lit1 + g_litprev. */
-#define LIT0_CTX 5
-/* Mirrors rc_v3.c LIT0_SEL: 7 prevlit regions folded onto 5 trees (non-monotone map). */
-#define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
+/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX); see definitions above. */
 typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
@@ -2085,28 +2053,14 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     }
 }
 
-static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc, int W) {
-    int FWD = to_size <= from_size;
-    Buf content = {0}, tags = {0};
-    size_t *ends = NULL;
-    build_content(ops, from_size, to_size, &content, &tags, &ends);
-    uint8_t L0[256], L1[256];
-    from_huff_lengths(frm, from_size, L0, L1);
-    uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
-    for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
-    int kd = 0;
-    TokenVec seq = lz_optimal_c(content.d, content.n, litbits, tags.d, frm, from_size, W, &kd);
-    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
-    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    int32_t fp = 0;
-    for (size_t i = 0; i < ops->n; i++) { fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj; }
-    for (size_t step = 0; step < ops->n; step++) {
-        size_t oi = FWD ? step : ops->n - 1 - step;
-        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
-        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr);
-        free(ldr.v);
-    }
+/* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)
+ * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
+ * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
+ * both measures a candidate parse's true shipped size and produces the final output. */
+static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
+                     const uint8_t *frm, uint32_t from_size,
+                     const OpPC *pc, const Buf *content, const Buf *tags,
+                     const size_t *ends, const InjVec *inj) {
     Models M;
     memset(&M, 0, sizeof(M));
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c], 5);
@@ -2116,6 +2070,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     ug_init_e(&M.tc, 'r', 11);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
+    ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror rc_v3.c decoder */
     ug_init_e(&M.gs, 'g', 0);
     ug_init_e(&M.pg, 'g', 0);
     ug_init_e(&M.pgn, 'g', 0);
@@ -2134,7 +2089,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */
     REnc rc;
     re_init(&rc);
-    ug_encode(&M.tc, &rc, (uint32_t)seq.n);
+    ug_encode(&M.tc, &rc, (uint32_t)seq->n);
     put_raw_bits(&rc, (uint32_t)kd, 4);
     w_gz(&rc, (uint32_t)ops->n);
     size_t tok_i = 0, pos = 0, span_pos = 0;
@@ -2143,8 +2098,8 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     uint8_t prevlit = 0;   /* last literal byte emitted (any tag); seeds tag0 context. */
     Token cur = {0};
     #define START_TOKEN() do { \
-        if (tok_i >= seq.n) die("content token underrun"); \
-        cur = seq.v[tok_i++]; \
+        if (tok_i >= seq->n) die("content token underrun"); \
+        cur = seq->v[tok_i++]; \
         if (cur.type == 'S') { fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; } \
         else { fl_encode(&M.flag, &rc, 1); \
             if ((int32_t)cur.dist == M.last_dist) { re_bit(&rc, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1; } \
@@ -2153,19 +2108,19 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     } while (0)
     #define EMIT_TO(ENDPOS) do { \
         size_t _end = (ENDPOS); \
-        if (_end < pos || _end > content.n) die("invalid content cursor"); \
+        if (_end < pos || _end > content->n) die("invalid content cursor"); \
         while (pos < _end) { \
             if (!tok_mode) START_TOKEN(); \
-            size_t n = (size_t)tok_left < (_end - pos) ? (size_t)tok_left : (_end - pos); \
+            size_t nn = (size_t)tok_left < (_end - pos) ? (size_t)tok_left : (_end - pos); \
             if (tok_mode == 'S') { \
-                for (size_t _em_i = 0; _em_i < n; _em_i++) { \
-                    uint8_t byte = content.d[(size_t)cur.start + span_pos + _em_i]; \
-                    bt_encode(tags.d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte); \
+                for (size_t _em_i = 0; _em_i < nn; _em_i++) { \
+                    uint8_t byte = content->d[(size_t)cur.start + span_pos + _em_i]; \
+                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte); \
                     prevlit = byte; pos++; \
                 } \
-                span_pos += n; \
-            } else pos += n; \
-            tok_left -= (int32_t)n; \
+                span_pos += nn; \
+            } else pos += nn; \
+            tok_left -= (int32_t)nn; \
             if (tok_left == 0) tok_mode = 0; \
         } \
     } while (0)
@@ -2179,10 +2134,62 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         }
         EMIT_TO(op_end);
     }
-    if (pos != content.n || tok_i != seq.n || tok_mode) die("content token cursor out of sync");
+    if (pos != content->n || tok_i != seq->n || tok_mode) die("content token cursor out of sync");
     #undef START_TOKEN
     #undef EMIT_TO
-    Buf body = re_flush_opt(&rc);
+    return re_flush_opt(&rc);
+}
+
+static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size, uint32_t to_size,
+                       const FieldDeltaVec *fd, const OpPC *pc, int W) {
+    int FWD = to_size <= from_size;
+    Buf content = {0}, tags = {0};
+    size_t *ends = NULL;
+    build_content(ops, from_size, to_size, &content, &tags, &ends);
+    uint8_t L0[256], L1[256];
+    from_huff_lengths(frm, from_size, L0, L1);
+    uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
+    for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
+    int kd = 0;
+    Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
+    TokenVec seq = lz_candidates_c(content.d, content.n, litbits, W, &kd, &cands, &ncand);
+    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
+    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    int32_t fp = 0;
+    for (size_t i = 0; i < ops->n; i++) { fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj; }
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
+        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr);
+        free(ldr.v);
+    }
+    /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
+     * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
+     * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
+     * gates token selection on the quantity we actually pay, so an order-1-cheaper parse that the
+     * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
+    merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
+    if (content.n) {
+        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+        size_t cur_bytes = cur_body.n; buf_free(&cur_body);
+        for (int pass = 0; pass < 4; pass++) {
+            PriceTab pt;
+            measure_prices(&seq, content.d, tags.d, frm, from_size, kd, &pt);
+            TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, &pt, W);
+            int nk = fit_k_tokens(&cand_seq);
+            merge_adjacent_spans(&cand_seq);
+            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+            size_t cand_bytes = cand_body.n; buf_free(&cand_body);
+            if (cand_bytes < cur_bytes) {
+                free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk;
+            } else {
+                free(cand_seq.v);
+                break;
+            }
+        }
+    }
+    free(cands); free(ncand);
+    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
