@@ -895,6 +895,184 @@ static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_
     }
 }
 
+static Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj) {
+    Op o;
+    o.diff_len = diff_len;
+    o.diff = (uint8_t *)xmalloc((size_t)diff_len);
+    if (diff_len) memcpy(o.diff, diff, (size_t)diff_len);
+    o.extra_len = extra_len;
+    o.extra = (uint8_t *)xmalloc((size_t)extra_len);
+    if (extra_len) memcpy(o.extra, extra, (size_t)extra_len);
+    o.adj = adj;
+    return o;
+}
+
+static uint64_t dz_bits_u32(uint32_t x) {
+    uint32_t m = x + 1u;
+    int n = bitlen32(m);
+    return (uint64_t)(2 * bitlen32((uint32_t)n) - 1 + n - 1);
+}
+
+static uint64_t uleb_proxy_bits(uint32_t v, const uint8_t L0[256]) {
+    uint64_t bits = 0;
+    for (;;) {
+        uint8_t x = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        bits += L0[v ? (uint8_t)(x | 0x80u) : x];
+        if (!v) return bits;
+    }
+}
+
+static uint64_t diff_proxy_bits(const Op *o, int32_t begin, int32_t end,
+                                int FWD, const uint8_t L0[256]) {
+    int32_t dl = end - begin;
+    uint32_t nlit = 0;
+    uint64_t bits = 0;
+    for (int32_t k = begin; k < end; k++) nlit += o->diff[k] != 0;
+    bits += uleb_proxy_bits(nlit, L0);
+    if (FWD) {
+        int32_t prev = 0;
+        for (int32_t k = begin; k < end; k++) if (o->diff[k]) {
+            int32_t loc = k - begin;
+            bits += uleb_proxy_bits((uint32_t)(loc - prev), L0);
+            bits += L0[o->diff[k]];
+            prev = loc;
+        }
+    } else {
+        int32_t prev = dl;
+        for (int32_t k = end; k-- > begin;) if (o->diff[k]) {
+            int32_t loc = k - begin;
+            bits += uleb_proxy_bits((uint32_t)(prev - loc), L0);
+            bits += L0[o->diff[k]];
+            prev = loc;
+        }
+    }
+    return bits;
+}
+
+static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
+                                 const uint8_t L0[256], const uint8_t L1[256]) {
+    uint64_t bits = 0;
+    for (int32_t i = 0; i < len; i++) {
+        const uint8_t *L = ((abs_begin + i) & 1) ? L1 : L0;
+        bits += L[to->d[(size_t)abs_begin + (size_t)i]];
+    }
+    return bits;
+}
+
+static uint64_t op_proxy_bits(const Op *o, const Buf *to, int32_t tp0,
+                              int32_t begin, int32_t end, int32_t extra_begin,
+                              int32_t extra_len, int32_t adj, int FWD,
+                              const uint8_t L0[256], const uint8_t L1[256]) {
+    uint64_t bits = dz_bits_u32((uint32_t)(end - begin)) +
+                    dz_bits_u32((uint32_t)extra_len) +
+                    dz_bits_u32(zz32(adj));
+    bits += 2; /* zero preserve-count and correction-count symbols. */
+    bits += diff_proxy_bits(o, begin, end, FWD, L0);
+    bits += extra_proxy_bits(to, tp0 + extra_begin, extra_len, L0, L1);
+    return bits;
+}
+
+typedef struct { int32_t begin, end; } Run;
+
+static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
+
+enum { SPLIT_GAIN_MARGIN_BITS = 64 };
+
+/* Dense diff runs can be represented either as literal diff bytes or as an
+ * extra span plus an equal source skip. Choose the subset analytically per op:
+ * dynamic programming minimizes the modeled cost of the resulting op sequence
+ * using the same seeded literal bit-length proxy used by LZ planning, plus the
+ * exact raw geometry code lengths. */
+static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
+    uint8_t L0[256], L1[256];
+    from_huff_lengths(from->d, from->n, L0, L1);
+    OpVec out = {0};
+    int32_t tp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        Op *o = &ops->v[oi];
+        Run *runs = NULL;
+        size_t nr = 0, rcap = 0;
+        for (int32_t scan = 0; scan < o->diff_len;) {
+            while (scan < o->diff_len && o->diff[scan] == 0) scan++;
+            if (scan >= o->diff_len) break;
+            int32_t begin = scan++;
+            while (scan < o->diff_len && o->diff[scan] != 0) scan++;
+            if (nr == rcap) {
+                rcap = rcap ? rcap * 2 : 16;
+                runs = (Run *)xrealloc(runs, rcap * sizeof(runs[0]));
+            }
+            runs[nr++] = (Run){ begin, scan };
+        }
+        if (!nr) {
+            opvec_push(&out, *o);
+            tp += o->diff_len + o->extra_len;
+            free(runs);
+            continue;
+        }
+        size_t states = (nr + 1) * (nr + 1);
+        uint64_t *dp = (uint64_t *)xmalloc(states * sizeof(dp[0]));
+        uint8_t *take = (uint8_t *)xcalloc(states, 1);
+#define DP(I, P) dp[(I) * (nr + 1) + (P)]
+#define TAKE(I, P) take[(I) * (nr + 1) + (P)]
+        for (size_t p = 0; p <= nr; p++) {
+            int32_t seg = p ? runs[p - 1].end : 0;
+            DP(nr, p) = op_proxy_bits(o, to, tp, seg, o->diff_len,
+                                      o->diff_len, o->extra_len, o->adj,
+                                      to->n <= from->n, L0, L1);
+        }
+        for (size_t ri = nr; ri-- > 0;) {
+            for (size_t p = 0; p <= ri; p++) {
+                int32_t seg = p ? runs[p - 1].end : 0;
+                int32_t len = runs[ri].end - runs[ri].begin;
+                uint64_t skip = DP(ri + 1, p);
+                uint64_t split = op_proxy_bits(o, to, tp, seg, runs[ri].begin,
+                                               runs[ri].begin, len, len,
+                                               to->n <= from->n, L0, L1) +
+                                 DP(ri + 1, ri + 1);
+                if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
+                    DP(ri, p) = split;
+                    TAKE(ri, p) = 1;
+                } else {
+                    DP(ri, p) = skip;
+                }
+            }
+        }
+        size_t ri = 0, p = 0;
+        int32_t seg = 0;
+        int split_any = 0;
+        while (ri < nr) {
+            if (TAKE(ri, p)) {
+                int32_t len = runs[ri].end - runs[ri].begin;
+                int32_t pre = runs[ri].begin - seg;
+                opvec_push(&out, op_copy(pre, o->diff + seg, len,
+                                         to->d + (size_t)tp + (size_t)runs[ri].begin, len));
+                seg = runs[ri].end;
+                p = ri + 1;
+                split_any = 1;
+            }
+            ri++;
+        }
+        if (split_any) {
+            int32_t tail = o->diff_len - seg;
+            if (tail || o->extra_len || o->adj)
+                opvec_push(&out, op_copy(tail, o->diff + seg, o->extra_len, o->extra, o->adj));
+            free(o->diff);
+            free(o->extra);
+        } else {
+            opvec_push(&out, *o);
+        }
+        free(dp);
+        free(take);
+        free(runs);
+#undef DP
+#undef TAKE
+        tp += o->diff_len + o->extra_len;
+    }
+    free(ops->v);
+    *ops = out;
+}
+
 static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t to_size) {
     int FWD = to_size <= from_size;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
@@ -1744,9 +1922,10 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     OpVec ops = bsdiff_ops(&from_df, &to_df);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     FieldDeltaVec fd = build_field_deltas(&from, &fr, blocks);
+    split_nonzero_diff_runs(&ops, &from_df, &to_df);
+    coerce_reloc_literals(&ops, from.d, from_size, to_size, &fd);
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
-    coerce_reloc_literals(&ops, from.d, from_size, to_size, &fd);
     uint8_t *presset = preserve_indices(&ops, from_size, to_size);
     uint8_t *corr = corrections_hybrid(&ops, from.d, to.d, &fd, from_size, to_size, presset);
     OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
