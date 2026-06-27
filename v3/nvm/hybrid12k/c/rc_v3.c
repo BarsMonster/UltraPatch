@@ -56,9 +56,10 @@ static uint32_t g_fhead, g_ftail;          /* ring indices */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
 
 #ifndef DEC_STACK_BYTES
-#define DEC_STACK_BYTES 512                /* coroutine stack; measured high-water 504 B (data-independent
-                                            * call depth). The deepest 8 B are a 0xC5 canary checked at
-                                            * decode end -> stack overflow REJECTS, never silent-corrupts. */
+#define DEC_STACK_BYTES 576                /* coroutine stack; measured high-water 504 B (data-independent
+                                            * call depth) leaves a 72 B cushion for out-of-corpus call
+                                            * paths. The deepest 8 B are a 0xC5 canary checked at decode
+                                            * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
 static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t  g_dec_done, g_dec_err;     /* set when the decode coroutine returns */
@@ -153,7 +154,12 @@ static int s_bit_r(uint16_t*prob,int rate){
     while (RC.range<RC_KTOP){ RC.code=(RC.code<<8)|next_byte(); RC.range<<=8; }
     return b;
 }
-static int s_bit(uint16_t*prob){ return s_bit_r(prob,5); }
+/* Default adaptive-bit rate for the Golomb (unary+mantissa), order-2 flag, and MTF
+ * rep/hit streams. Tuned to 4 (1/16) — these low-cardinality, fast-drifting contexts
+ * track better at 4 than the LZMA-classic 5; literal/dval bit-trees keep their own
+ * per-tree rate via s_bit_r. Must match RC_S_BIT_RATE in rc_v3_enc.c (bit-exact wire). */
+#define RC_S_BIT_RATE 4
+static int s_bit(uint16_t*prob){ return s_bit_r(prob,RC_S_BIT_RATE); }
 static int s_raw(void){
     uint32_t bound=RC.range>>1; int b;
     if (RC.code<bound){ RC.range=bound; b=0; } else { RC.code-=bound; RC.range-=bound; b=1; }
@@ -177,16 +183,6 @@ static uint32_t s_raw_gamma(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 1; } }
     uint32_t v=1; for(int i=0;i<n;i++) v=(v<<1)|s_raw(); return v; }
 static uint32_t s_raw_gz(void){ return s_raw_gamma()-1; }
-static uint32_t s_raw_dz(void){
-    uint32_t n=s_raw_gamma(), m=1;
-    if(g_rcerr || n>32u){ g_rcerr=1; return 0; }
-    for(uint32_t i=0;i+1<n;i++) m=(m<<1)|s_raw();
-    return m-1;
-}
-static uint32_t __attribute__((unused)) s_raw_rice(int k){
-    uint32_t q=0; while(s_raw()==1){ if(++q>(1u<<20)){ g_rcerr=1; return 0; } }
-    uint32_t m=0; for(int i=0;i<k;i++) m=(m<<1)|s_raw(); return (q<<k)|m; }
-
 /* ---- bit-tree byte ---- */
 static int s_bt(BitTree*t){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],t->rate); return m-256; }
 /* ---- ByteVarint (pack_size) ---- */
@@ -221,6 +217,13 @@ static void ugr_init(UGRice*g,int k){
 static void ugg_init(UGGamma*g){
     for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
     for(int i=0;i<UG_GAMMA_M;i++) g->m[i]=RC_PHALF;
+}
+/* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
+ * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
+ * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
+ * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
+static void ugg_seed_cont(UGGamma*g,int depth){
+    for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
 }
 static uint32_t s_ug_rice(UGRice*g){
     uint32_t cl=0; while(s_bit(&g->u[UG_C((int)cl)])==1){ if(++cl>RC_RICE_UNARY_MAX){ g_rcerr=1; return 0; } }
@@ -424,8 +427,22 @@ static uint8_t out_read(uint32_t a){
 static UGRice  M_gd;             /* token_count first, then reinitialized as backref_dist */
 static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
 static UGGamma M_pg, M_cg;       /* preserve/correction gaps */
+static UGGamma M_pgn, M_cgn;     /* preserve/correction COUNTS (np/nc) — separated from gaps so the
+                                  * dominant count=0 case and the dominant gap=1 case stop fighting
+                                  * over the shared adaptive unary/mantissa probabilities. */
+static UGGamma M_pg2, M_cg2;     /* preserve/correction REST gaps (2nd..Nth). The first gap is an
+                                  * op-relative offset (broad), but later gaps are ~98%/77% value=1
+                                  * (consecutive run); a dedicated model converges hard on that. */
+static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz(adj). Were raw dz
+                                  * (no model); their bit-length distributions are concentrated, so an
+                                  * adaptive gamma UGolomb beats the fixed raw code. */
 static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
-static BitTree M_lit0, M_lit1;
+/* tag0 (diff-literal/even-extra) literal trees split by previous-literal top-2 bits (4 contexts);
+ * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
+ * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
+#define LIT0_CTX 4
+static BitTree M_lit0[LIT0_CTX], M_lit1;
+static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
 static int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];   /* MTF dict arrays (separate caps) */
@@ -595,7 +612,9 @@ static uint8_t sa_next_content(SA*s){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
-            int tag=cs_tag(&s->sc); int b=s_bt(tag?&M_lit1:&M_lit0);
+            int tag=cs_tag(&s->sc);
+            int b=s_bt(tag?&M_lit1:&M_lit0[g_litprev>>6]);
+            g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
             if(s->span_left==0) s->tok_mode=0;
             return (uint8_t)b;
@@ -689,7 +708,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
 /* one Path F op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
 static void sa_apply_op(SA*s){
-    uint32_t dl_u=s_raw_dz(), el_u=s_raw_dz(), adj_u=s_raw_dz();
+    uint32_t dl_u=s_ug_gamma(&M_gdl), el_u=s_ug_gamma(&M_gel), adj_u=s_ug_gamma(&M_gadj);
     int32_t adj=bb_unzz(adj_u);
     if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ s->err=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
@@ -706,11 +725,11 @@ static void sa_apply_op(SA*s){
         s->tp=(int32_t)ntp; s->fp=(int32_t)nfp; tp0=s->tp; fp0=s->fp;
     }
     /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
-    uint32_t np=s_ug_gamma(&M_pg);
+    uint32_t np=s_ug_gamma(&M_pgn);
     if(np>(uint32_t)nw){ s->err=1; return; }
     uint32_t poff=0, nwu=(uint32_t)nw;
     for(uint32_t i=0;i<np && !s->err && !g_rcerr;i++){
-        uint32_t gap=s_ug_gamma(&M_pg);
+        uint32_t gap=s_ug_gamma(i?&M_pg2:&M_pg);
         if(gap>UINT32_MAX-poff){ s->err=1; return; }
         poff+=gap;
         if(poff>=nwu){ s->err=1; return; }
@@ -719,12 +738,12 @@ static void sa_apply_op(SA*s){
     if(s->err||g_rcerr) return;
     /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
      * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
-    uint32_t nc=s_ug_gamma(&M_cg);
+    uint32_t nc=s_ug_gamma(&M_cgn);
     if(nc>(uint32_t)OPC_CAP){ s->err=1; g_reject=REJ_RESOURCE; return; }
     if(nc>(uint32_t)nw){ s->err=1; return; }
     s->op_nc=(int32_t)nc; { uint32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){
-            uint32_t gap=s_ug_gamma(&M_cg);
+            uint32_t gap=s_ug_gamma(i?&M_cg2:&M_cg);
             if(gap>UINT32_MAX-coff){ s->err=1; return; }
             coff+=gap;
             if(coff>=nwu){ s->err=1; return; }
@@ -813,7 +832,10 @@ static void decode_body(void){
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
     jr_reset();
-    ugg_init(&M_pg); ugg_init(&M_cg);
+    ugg_init(&M_pg); ugg_init(&M_cg); ugg_init(&M_pgn); ugg_init(&M_cgn);
+    ugg_init(&M_pg2); ugg_init(&M_cg2);
+    ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
+    ugg_seed_cont(&M_gdl,3); ugg_seed_cont(&M_gadj,2);
     { SA*s=&SAst; memset(s,0,sizeof*s);
       s->from_size=g_from_size; s->to_size=(int32_t)g_to_size; s->FWD=g_FWD;
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
@@ -857,16 +879,17 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
 static int decoder_init(void){
     g_fhead=g_ftail=0; g_eof=0; g_dec_done=0; g_dec_err=0;
     /* literal bit-trees seeded from flash parity histograms (no transient image buffer).
-     * hist0/hist1/w (4 KiB) borrow ARENA at init — this runs BEFORE the bake phase uses ARENA,
-     * keeping them off the main thread's peak stack (SPEC §6 / RAM budget). */
+     * hist0/hist1/w (4 KiB) borrow ARENA at init — this runs BEFORE the streaming apply reuses
+     * ARENA, keeping them off the main thread's peak stack (SPEC §6 / RAM budget). */
     {   uint32_t *hist0=(uint32_t*)ARENA;            /* [0..256)   */
         uint32_t *hist1=hist0+256;                   /* [256..512) */
         uint32_t *w=hist1+256;                       /* [512..1024) -> 4 KiB total, fits ARENA */
         for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
         for(uint32_t i=0;i<g_from_size;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
-        lit_tree_from_hist(&M_lit0,hist0,w,5);
+        for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w,5);
         lit_tree_from_hist(&M_lit1,hist1,w,4);
     }
+    g_litprev=0;
 #ifdef RC_V3_STACKMEAS
     memset(g_dec_stack,0xAA,sizeof g_dec_stack);   /* paint to measure coroutine high-water */
 #else

@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,843 B, data 0 B, bss 9,440 B |
+| ARM object at `SA_W=10` | text 5,971 B, data 0 B, bss 11,472 B (<= 12 KiB cap, 816 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
-| Coroutine stack high-water | 488 B of 512 B |
+| Coroutine stack high-water | 504 B of 576 B (72 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,847,268 B**.
-- W=10 non-self corpus total: **4,846,585 B**.
+- W=10 full 16x16 corpus total: **4,721,868 B**.
+- W=10 non-self corpus total: **4,721,296 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **899 B**
-  - `v1_one_face -> v0_base`: **613 B**
+  - `v0_base -> v1_one_face`: **882 B**
+  - `v1_one_face -> v0_base`: **593 B**
 
 ## Architecture
 
@@ -46,6 +46,15 @@ output frontier. Relocation field positions are derived instead of shipped:
   only when an `ldr` literal instruction in the same op's copy range targets it.
 - Delta values are pulled inline from the single range stream using adaptive MTF
   dictionaries and repeat/hit models.
+
+Entropy coding: content literals use four bit-trees selected by the previous
+literal byte's top two bits (each parity-seeded from the from-image histogram);
+per-op geometry (diff/extra length, source skip) and the preserve/correction
+counts and gaps use dedicated adaptive Golomb models rather than a fixed raw code.
+The host encoder's LZ parse runs a price-feedback loop: it re-parses against bit
+prices measured from the real adaptive models and keeps the result only when its
+exact modeled cost drops. These are encoder/decoder-symmetric or encoder-only and
+leave the no-bake apply, NVM write discipline, and divide-free property unchanged.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
