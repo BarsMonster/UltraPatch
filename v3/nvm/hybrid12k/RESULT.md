@@ -30,7 +30,6 @@ secondary reference implementation in this tree.
 Patch-size metrics:
 
 - W=10 full 16x16 corpus total: **4,595,908 B**.
-- W=10 non-self corpus total: **4,595,377 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **873 B**
   - `v1_one_face -> v0_base`: **582 B**
@@ -138,15 +137,15 @@ make gate          # builds + runs all three gates below, one consolidated summa
 
 `make gate` is the single full-gate command: it builds and runs `check`,
 `check-arm`, and `check-corpus`, then prints one consolidated summary of every
-tracked metric (ARM `.text`/`.data`/`.bss` + divide policy, corpus full/nonself
-totals, the real one-face grow/revert, matrix round-trips, NVM write-safety, and
+tracked metric (ARM `.text`/`.data`/`.bss` + divide policy, corpus full total,
+the real one-face grow/revert, matrix round-trips, NVM write-safety, and
 journal peak). It exits nonzero if any gate fails and dumps the raw blocks so the
 offending metric is visible. The three gates can still be run individually:
 
 ```sh
 make check         # one-face smoke both directions + corrupt/truncated/CRC fuzz
 make check-arm     # Cortex-M0+ object resource gate + divide policy
-make check-corpus  # 16x16 image matrix (parallel) + corpus totals + one-face
+make check-corpus  # 16x16 image matrix (parallel) + corpus total + one-face
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
@@ -155,7 +154,7 @@ bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
 `make check-corpus` runs the local 16x16 image matrix (parallelized across cores
-via `check_corpus.sh`; override with `JOBS=N`) and prints corpus totals plus the
+via `check_corpus.sh`; override with `JOBS=N`) and prints the corpus total plus the
 real one-face update/revert sizes.
 
 Set `A1_ENC_STATS=1` when running `hy_enc` to print one encoder study line with

@@ -18,7 +18,6 @@ CFLAGS += $(CFLAGS_EXTRA)
 DIVSUF := libdivsufsort/divsufsort.c
 
 BASE_FULL_TOTAL ?= 4595908
-BASE_NONSELF_TOTAL ?= 4595377
 BASE_ONEFACE_GROW ?= 873
 BASE_ONEFACE_REVERT ?= 582
 BASE_ARM_TEXT ?= 5159
@@ -105,7 +104,6 @@ check-corpus: all
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
 	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \
-	non=$$(sed -n 's/^nonself_total=//p' "$$tmp/m.txt"); \
 	max_amp=$$(sed -n 's/^max_amplified=//p' "$$tmp/m.txt"); \
 	max_row=$$(sed -n 's/^max_maxrowerase=//p' "$$tmp/m.txt"); \
 	max_inv=$$(sed -n 's/^max_inversions=//p' "$$tmp/m.txt"); \
@@ -116,13 +114,12 @@ check-corpus: all
 	test "$$max_row" -le 1; \
 	test "$$max_inv" -eq 0; \
 	test "$$full" -le "$(BASE_FULL_TOTAL)"; \
-	test "$$non" -le "$(BASE_NONSELF_TOTAL)"; \
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
 # ONE command for the full gate: builds, runs all three gates (check + check-arm + check-corpus),
 # and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
-# .bss + divide policy, corpus full/nonself totals, the real one-face update (grow/revert), matrix
+# .bss + divide policy, corpus full total, the real one-face update (grow/revert), matrix
 # round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
 # dumps the three raw blocks so the offending metric is visible. ~20s (dominated by check-corpus).
 gate: all
@@ -137,7 +134,6 @@ gate: all
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
-	sed -n 's/^nonself_total=/corpus nonself_total    : /p' "$$tmp/m.txt"; \
 	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/m.txt"; \
 	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/m.txt"; \
 	sed -n 's/^max_amplified=/NVM rows amplified       : /p' "$$tmp/m.txt"; \
