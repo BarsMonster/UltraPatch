@@ -460,7 +460,7 @@ static void out_write(uint32_t a, uint8_t v){
         orow_commit();
         uint32_t end=base+OUTROW; if(end>g_image_span) end=g_image_span;
         for(uint32_t x=base;x<end;x++) g_orow_buf[x-base]=flash_read(x); /* preload (source not yet erased) */
-        g_orow_base=base; g_orow_dirty=0;
+        g_orow_base=base;   /* orow_commit() above already cleared g_orow_dirty */
     }
     uint32_t off=a-g_orow_base;
     if(g_orow_buf[off]!=v){ g_orow_buf[off]=v; g_orow_dirty=1; }
