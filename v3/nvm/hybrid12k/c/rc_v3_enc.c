@@ -2323,13 +2323,16 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);
-    put_uleb(&blob, to_size);
+    /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
+     * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
+     * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB. The
+     * decoder reconstructs the absolutes (and thence the direction) before reading anything else. */
+    put_uleb(&blob, zz32((int32_t)to_size - (int32_t)from_size));
     /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
-     * grow (!FWD) direction. The decoder learns the direction from sizes (FWD == to_size<=from_size).
-     * For FWD it computes s->fp incrementally from 0, so fp_end is only a redundant end-check there
-     * (CRC32(to) already validates) — omit it. For grow it is load-bearing (the start seed), so we
-     * still emit it. Saves the fp_end uLEB on every FWD/shrink/equal patch (e.g. one-face revert). */
-    if (to_size > from_size) put_uleb(&blob, (uint32_t)fp_end_s);
+     * grow (!FWD) direction. For FWD the decoder computes s->fp incrementally from 0, so fp_end is
+     * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
+     * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
+    if (to_size > from_size) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
      * information; the decoder used to skip it in rc_init. Drop it on the wire (-1 B/patch).

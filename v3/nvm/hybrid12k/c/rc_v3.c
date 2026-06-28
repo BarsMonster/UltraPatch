@@ -1024,14 +1024,20 @@ int main(int argc,char**argv){
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
     uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
-    /* parse plaintext header: CRC32(from)[4] | from_size | to_size | [fp_end iff to_size>from_size] */
+    /* parse plaintext header: CRC32(from)[4] | from_size | zz(to_size-from_size)
+     *                          | [zz(fp_end-from_size) iff to_size>from_size]. to_size and fp_end are
+     * zigzag-delta-coded against from_size (mirror of rc_v3_enc.c encode_a1). */
     uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
     size_t p=4; int err=0;
     uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
         do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
-    { uint32_t v=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); to_size=v; }
+    { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
+      int64_t ts=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
+      if(ts<0 || ts>(int64_t)(64u<<20)){ err=1; ts=0; } to_size=(uint32_t)ts; }
     /* fp_end is the grow (!FWD) start seed; FWD/shrink/equal patches omit it (computed inline). */
-    if(to_size>from_size){ uint32_t v=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); fp_end=v; }
+    if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
+      int64_t fe=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
+      if(fe<0 || fe>(int64_t)(64u<<20)){ err=1; fe=0; } fp_end=(uint32_t)fe; }
     if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
     /* host-harness sanity (fuzz-hardening): an implausibly large size field would make nvm_init malloc
      * a huge span. Real images are <1 MiB; reject >64 MiB up front. (Device has no malloc; host-only.) */
