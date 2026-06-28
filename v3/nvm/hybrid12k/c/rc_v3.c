@@ -254,8 +254,12 @@ static void ugg_seed_cont(UGGamma*g,int depth){
  * zero-fill stream can't spin forever / shift by >=32 (RC_UNARY_MAX for gamma, RC_RICE_UNARY_MAX for
  * rice); on overflow it sets g_rcerr and returns 0 so the mantissa loop is a no-op and the apply
  * cleanly rejects (same effect as the old per-function early return). Bit-exact for valid streams. */
-static uint32_t s_ug_unary(uint16_t*u,uint32_t cap){
-    uint32_t cl=0; while(s_bit(&u[UG_C((int)cl)])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
+/* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
+ * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
+ * corrupt run-on. clampmax==UG_CTX(=6) reproduces UG_C over the 7-entry Golomb u[]; clampmax==IDX_CTX-1
+ * (=4) reproduces the index code's min(pos,4) over the 5-entry u[]. Bit-exact for both call families. */
+static uint32_t s_unary(uint16_t*u,uint32_t clampmax,uint32_t cap){
+    uint32_t cl=0; while(s_bit(&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
     return cl;
 }
 /* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
@@ -266,11 +270,11 @@ static uint32_t s_ug_mant(uint16_t*row,int cnt){
     return v;
 }
 static uint32_t s_ug_rice(UGRice*g){
-    uint32_t cl=s_ug_unary(g->u,RC_RICE_UNARY_MAX);
+    uint32_t cl=s_unary(g->u,UG_CTX,RC_RICE_UNARY_MAX);
     return (cl<<g->k) | s_ug_mant(g->m[UG_C((int)cl)],g->k);
 }
 static uint32_t s_ug_gamma(UGGamma*g){
-    int cl=(int)s_ug_unary(g->u,RC_UNARY_MAX);
+    int cl=(int)s_unary(g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant(&g->m[UG_GAMMA_BASE(UG_C(cl))],cl)) - 1u;
 }
 /* MTF dict-index model: a lean adaptive UNARY code (replaces the per-stream UGGamma, ~60B each).
@@ -282,10 +286,6 @@ static uint32_t s_ug_gamma(UGGamma*g){
 #define IDX_CTX 5
 typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
 static void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
-static uint32_t s_idx(IdxUnary*g,uint32_t cap){
-    uint32_t v=0; while(s_bit(&g->u[v<IDX_CTX?v:IDX_CTX-1])==1){ if(++v>cap){ g_rcerr=1; return 0; } }
-    return v;
-}
 /* ---- order-2 flag ---- */
 static int s_flag(Flag1*f){ int b=s_bit(&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
 
@@ -544,7 +544,7 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
       int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
-        uint32_t j=s_idx(gix,cap)+1u;                   /* cmp-1: dict idx 0 unreachable -> encode j-1 */
+        uint32_t j=s_unary(gix->u,IDX_CTX-1,cap)+1u;    /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
         v=dic[j];
         if(j){ int32_t t=dic[j]; memmove(&dic[1], &dic[0], (size_t)j * sizeof(dic[0])); dic[0]=t; }
