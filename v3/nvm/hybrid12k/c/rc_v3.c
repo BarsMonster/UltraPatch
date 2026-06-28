@@ -603,7 +603,7 @@ static int32_t corr_at(SA*s, int32_t off){
  * because lower instruction-window bytes may be clobbered. */
 #define PSRC_HW_MASK 511u
 static uint8_t g_psrc_imm[512], g_psrc_ldr[64];
-static uint8_t hy_src(SA*s, int32_t fp);   /* fwd decl: journal-aware pristine source read */
+static uint8_t hy_src(int32_t fp);   /* fwd decl: journal-aware pristine source read */
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
@@ -623,7 +623,7 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
         int32_t imm;
         if(s){
-            uint16_t up=(uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8));
+            uint16_t up=(uint16_t)(hy_src(a) | (hy_src(a+1)<<8));
             if((up&0xf800)!=0x4800) continue;
             imm=(int32_t)(up&0xff);
         } else {
@@ -685,8 +685,7 @@ static void sa_journal(SA*s, int32_t tp){
     if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, flash_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
     }
 }
-static uint8_t hy_src_peek(SA*s, int32_t fp){
-    (void)s;
+static uint8_t hy_src_peek(int32_t fp){
     if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
     return 0;
 }
@@ -699,8 +698,7 @@ static void hy_half_rec(uint32_t a, uint8_t lo, uint8_t hi){
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
-static void hy_src_rec(SA*s, int32_t fp, uint8_t v){
-    (void)s;
+static void hy_src_rec(int32_t fp, uint8_t v){
     if(fp>=0 && (uint32_t)fp<g_from_size){
         uint32_t a=(uint32_t)fp, i=(a>>1)&PSRC_HW_MASK;
         if(a&1u) hy_half_rec(a-1u, g_psrc_imm[i], v);
@@ -710,17 +708,17 @@ static void hy_src_rec(SA*s, int32_t fp, uint8_t v){
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
  * pristine read into the packed FWD ldr metadata. */
-static uint8_t hy_src(SA*s, int32_t fp){
-    uint8_t v=hy_src_peek(s,fp);
-    hy_src_rec(s,fp,v);
+static uint8_t hy_src(int32_t fp){
+    uint8_t v=hy_src_peek(fp);
+    hy_src_rec(fp,v);
     return v;
 }
 /* journal-aware pristine 4-byte field word (little-endian) at fpk, peeked WITHOUT touching the psrc
  * ring (suppressed-bl / no-field must record nothing). On a real BL/EX hit the caller replays this
  * word into the ring via hy_word4_rec — the ascending byte/order match the old read+record path. */
-static uint32_t hy_word4_peek(SA*s, uint32_t fpk){
-    return  (uint32_t)hy_src_peek(s,(int32_t)fpk)    | ((uint32_t)hy_src_peek(s,(int32_t)fpk+1)<<8)
-          | ((uint32_t)hy_src_peek(s,(int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek(s,(int32_t)fpk+3)<<24);
+static uint32_t hy_word4_peek(uint32_t fpk){
+    return  (uint32_t)hy_src_peek((int32_t)fpk)    | ((uint32_t)hy_src_peek((int32_t)fpk+1)<<8)
+          | ((uint32_t)hy_src_peek((int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek((int32_t)fpk+3)<<24);
 }
 /* record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
  * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
@@ -745,7 +743,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     uint32_t fpk=(uint32_t)fpk64;
     if(fpk&1u) return 0;                                  /* BL is 2-aligned; LDR targets are 4-aligned */
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
-    uint32_t w=hy_word4_peek(s,fpk);
+    uint32_t w=hy_word4_peek(fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
     if((up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
@@ -800,7 +798,7 @@ __attribute__((always_inline)) static inline void wr_extras(SA*s, int fwd, int32
 __attribute__((always_inline)) static inline void wr_copy(SA*s, LitCur*lc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(s,lc,nl); }
-    out_write((uint32_t)(tp0+K), (uint8_t)(db + hy_src(s,fp0+K) + corr_at(s,K)));
+    out_write((uint32_t)(tp0+K), (uint8_t)(db + hy_src(fp0+K) + corr_at(s,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */

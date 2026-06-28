@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,988 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
+| ARM object at `SA_W=10` | text 4,980 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
@@ -124,7 +124,8 @@ dispatch collapses its two unrolled 4-byte loops into one. Further decoder-only,
 bit-exact cleanup keeps the push FIFO as the single-byte mailbox it really is,
 uses the journal page-table sentinel as the journal count, stores the resident
 output row by base address plus a sentinel, reuses the relocation MTF front entry
-as the repeat-last value, and stores byte-tree probabilities as 12-bit packed
+as the repeat-last value, drops dead apply-state parameters from the pristine
+source helper chain, and stores byte-tree probabilities as 12-bit packed
 logical `p[1..255]` nodes. The apply state no longer duplicates the global
 from/to sizes or direction flag, and the journal peak is reported from the
 monotonic page-table sentinel instead of a second counter. Additional bit-exact
@@ -194,7 +195,7 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,988 B, data 0 B, bss 11,296 B (992 B
+now fits the 12 KiB SRAM cap at text 4,980 B, data 0 B, bss 11,296 B (992 B
 margin) and improves the corpus total to 4,580,558 B with the real one-face
 update unchanged at 873/582 B. The 256-pair patch-size split for W=11 vs W=10 is
 136 better / 15 worse / 105 equal. Production stays at W=10 to keep the larger

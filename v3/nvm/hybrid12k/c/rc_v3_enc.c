@@ -1732,8 +1732,9 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * arrival-variants at base index jb = (j*4 + h')*2. Variant 0 holds the cheapest arrival; variant 1
  * holds the cheapest arrival carrying a rep distinct from variant 0's. This keeps a second, possibly
  * costlier path alive when it carries a rep distance a downstream rep0 reuse can exploit. */
-static void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via, uint8_t *vh,
-                   size_t jb, uint64_t c, int32_t rr, uint8_t b, Token v, uint8_t hr) {
+__attribute__((always_inline))
+static inline void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via, uint8_t *vh,
+                          size_t jb, uint64_t c, int32_t rr, uint8_t b, Token v, uint8_t hr) {
     if (c < cost[jb]) {
         /* new cheapest. push old variant 0 down into variant 1 if it had a distinct rep. */
         if (cost[jb] < cost[jb + 1] && rep[jb] != rr) {
