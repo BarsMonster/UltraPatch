@@ -1338,8 +1338,8 @@ static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu;
  * streams. MUST equal RC_S_BIT_RATE in rc_v3.c (decoder) — the wire is bit-exact. */
 #define RC_S_BIT_RATE 4
 
-/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/8), 3584. */
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))
+/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/4), 3072. */
+#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
 
 static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
     uint32_t p = *prob, bound = (r->range >> 12) * p;
@@ -2234,6 +2234,18 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             } else {
                 free(cand_seq.v);
                 break;
+            }
+        }
+        /* anneal-k probe: fit_k_tokens minimizes the rice codelen of the raw distances, but the
+         * shipped cost is the ADAPTIVE ug_encode of M_gd seeded at k; the two optima can differ by
+         * one. Walk kd outward in each direction under the EXACT full-body byte gate and stop as soon
+         * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
+        for (int dir = -1; dir <= 1; dir += 2) {
+            for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
+                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+                size_t bb = b.n; buf_free(&b);
+                if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
+                else break;
             }
         }
     }

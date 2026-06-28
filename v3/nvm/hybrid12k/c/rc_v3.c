@@ -71,10 +71,44 @@ static uint8_t  g_dec_done, g_dec_err;     /* set when the decode coroutine retu
 /* not exist on the device, so we use a MINIMAL fiber on x86-64 (the test arch) — the host  */
 /* SRAM number then reflects the true device cost. The ARM device build also uses the fiber */
 /* (no ucontext.h on bare metal). RC_V3_USE_UCONTEXT forces the glibc path if ever needed.  */
+/*                                                                                         */
+/* Two implementations share one interface (CO_SWAP_TO_MAIN / CO_SWAP_TO_DEC + fiber_setup):*/
+/*   - SP-fiber  (x86-64 host AND RC_V3_ARM device): a context is one saved stack pointer.  */
+/*     Common to both is the Fiber type, the two SP slots, decode_body, and the trampoline; */
+/*     they differ only in the swap mechanism (real naked asm on x86 vs the device's PendSV,*/
+/*     stubbed here for static sizing) and the initial frame fiber_setup lays down.         */
+/*   - ucontext  (host fallback if RC_V3_USE_UCONTEXT): glibc swapcontext, host-only.        */
 /* ===================================================================================== */
-#if defined(__x86_64__) && !defined(RC_V3_USE_UCONTEXT)
-typedef void* Fiber;                       /* saved stack pointer */
+/* Pick the SP-fiber core for the ARM device build and for the x86-64 host (unless the host is
+ * explicitly forced onto glibc ucontext). Everything else falls back to ucontext. */
+#if defined(RC_V3_ARM) || (defined(__x86_64__) && !defined(RC_V3_USE_UCONTEXT))
+#define RC_V3_SP_FIBER 1
+#else
+#define RC_V3_SP_FIBER 0
+#endif
+
+static void decode_body(void);
+
+#if RC_V3_SP_FIBER
+/* --- shared SP-fiber core (x86 host + ARM device) --- */
+typedef void* Fiber;                       /* a context is just a saved stack pointer */
 static Fiber g_main_sp, g_dec_sp;
+static void pd_trampoline(void){ decode_body(); for(;;); }  /* never returns (final swap inside) */
+
+#ifdef RC_V3_ARM
+/* RC_V3_ARM device-static measurement build: the real device coroutine is a PendSV/SP swap;
+ * a context is two saved SP words (~16 B static). We retain the FULL decoder graph + the
+ * coroutine-stack reservation so arm-none-eabi-size reports the true device .bss+.data: the
+ * trampoline references decode_body, fiber_setup references g_dec_stack. The asm swap is the
+ * device's PendSV; here a minimal volatile stub keeps the symbols (size is graph-complete). */
+static volatile void* g_arm_anchor;
+static void fiber_setup(void){
+    void**sp=(void**)(g_dec_stack+DEC_STACK_BYTES);   /* reserve & reference the coroutine stack */
+    *--sp=(void*)pd_trampoline; g_dec_sp=(Fiber)sp; g_arm_anchor=(void*)&g_dec_stack[0];
+}
+#define CO_SWAP_TO_MAIN()  do{ g_main_sp=g_dec_sp; }while(0)   /* device PendSV; stubbed for sizing */
+#define CO_SWAP_TO_DEC()   do{ g_dec_sp=g_main_sp; }while(0)
+#else /* x86-64 host: real SP swap via naked asm */
 __attribute__((noinline,naked)) static void pd_swap(Fiber*from __attribute__((unused)),
                                                     Fiber*to __attribute__((unused))){
     __asm__ volatile(
@@ -84,8 +118,6 @@ __attribute__((noinline,naked)) static void pd_swap(Fiber*from __attribute__((un
         "popq %%r15\n\t popq %%r14\n\t popq %%r13\n\t popq %%r12\n\t popq %%rbx\n\t popq %%rbp\n\t"
         "ret\n\t" : : : "memory");
 }
-static void decode_body(void);
-static void pd_trampoline(void){ decode_body(); for(;;); }  /* never returns (final swap inside) */
 static void fiber_setup(void){
     uintptr_t top=(uintptr_t)(g_dec_stack+DEC_STACK_BYTES);
     top &= ~(uintptr_t)15;                 /* 16-align */
@@ -98,10 +130,11 @@ static void fiber_setup(void){
 }
 #define CO_SWAP_TO_MAIN()  pd_swap(&g_dec_sp,&g_main_sp)
 #define CO_SWAP_TO_DEC()   pd_swap(&g_main_sp,&g_dec_sp)
-#elif !defined(RC_V3_ARM)
+#endif
+
+#else /* ucontext host fallback (RC_V3_USE_UCONTEXT, no SP-fiber arch) */
 #include <ucontext.h>
 static ucontext_t g_main_ctx, g_dec_ctx;
-static void decode_body(void);
 static void fiber_setup(void){
     getcontext(&g_dec_ctx);
     g_dec_ctx.uc_stack.ss_sp=g_dec_stack; g_dec_ctx.uc_stack.ss_size=sizeof g_dec_stack;
@@ -109,23 +142,6 @@ static void fiber_setup(void){
 }
 #define CO_SWAP_TO_MAIN()  swapcontext(&g_dec_ctx,&g_main_ctx)
 #define CO_SWAP_TO_DEC()   swapcontext(&g_main_ctx,&g_dec_ctx)
-#else
-/* RC_V3_ARM device-static measurement build: the real device coroutine is a PendSV/SP swap;
- * a context is two saved SP words (~16 B static). We retain the FULL decoder graph + the
- * coroutine-stack reservation so arm-none-eabi-size reports the true device .bss+.data: the
- * trampoline references decode_body, fiber_setup references g_dec_stack. The asm swap is the
- * device's PendSV; here a minimal volatile stub keeps the symbols (size is graph-complete). */
-typedef void* Fiber;
-static Fiber g_main_sp, g_dec_sp;
-static void decode_body(void);
-static void pd_trampoline(void){ decode_body(); for(;;); }
-static volatile void* g_arm_anchor;
-static void fiber_setup(void){
-    void**sp=(void**)(g_dec_stack+DEC_STACK_BYTES);   /* reserve & reference the coroutine stack */
-    *--sp=(void*)pd_trampoline; g_dec_sp=(Fiber)sp; g_arm_anchor=(void*)&g_dec_stack[0];
-}
-#define CO_SWAP_TO_MAIN()  do{ g_main_sp=g_dec_sp; }while(0)
-#define CO_SWAP_TO_DEC()   do{ g_dec_sp=g_main_sp; }while(0)
 #endif
 
 /* next_byte(): pull one byte; if the FIFO is empty, suspend back to the producer (block). */
@@ -496,11 +512,16 @@ static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
 /* rep0: adaptive flag before a match distance. =1 reuses the immediately-previous match distance
- * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT, P(reuse)~1/8)
+ * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT, P(reuse)~1/4)
  * because exact distance reuse is the minority case: a low prior keeps the dominant =0 flag near-free
  * on small patches while corpus-scale streams adapt up. g_lastdist holds the last match distance.
  * Mirrors rc_v3_enc Models.rep0/last_dist (bit-exact wire). */
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>3))   /* 3584: P(rep0=1) prior ~ 1/8 */
+#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))   /* 3072: P(rep0=1) prior ~ 1/4. rep0=1 reuses the
+                                                   * previous match distance; corpus tuning (paired
+                                                   * min-over-N sweep) puts the optimum that does NOT
+                                                   * regress the one-face product patch at ~1/4 (1/8
+                                                   * was the old value; 3/8 helps corpus more but
+                                                   * regresses the real one-face update by +1/+1). */
 static uint16_t M_rep0[2];   /* order-1 on previous rep0 outcome: rep0 runs cluster */
 static int g_rep0h;          /* last rep0 bit (context) */
 static uint32_t g_lastdist;
@@ -674,39 +695,56 @@ static uint8_t hy_src_peek(SA*s, int32_t fp){
     if(fp>=0 && (uint32_t)fp<s->from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp); }
     return 0;
 }
+/* record one pristine source byte at fp into the psrc ring (used by the FWD ldr back-scan).
+ * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
+static void hy_src_rec(SA*s, int32_t fp, uint8_t v){
+    if(fp>=0 && (uint32_t)fp<s->from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
+}
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
  * pristine read into the psrc ring (used by the FWD ldr back-scan). */
 static uint8_t hy_src(SA*s, int32_t fp){
     uint8_t v=hy_src_peek(s,fp);
-    if(fp>=0 && (uint32_t)fp<s->from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
+    hy_src_rec(s,fp,v);
     return v;
 }
-/* journal-aware pristine source word (little-endian), recording all 4 bytes into the psrc ring (used
- * by the FWD ldr back-scan). The from-image flash may already be overwritten by the monotonic output
- * frontier, so reads MUST be journal-aware (preserves hold the original bytes) — a raw flash read
- * would return clobbered output. Callers that only need the ring record discard the return value. */
-static uint32_t hy_src32(SA*s, uint32_t a){ return (uint32_t)hy_src(s,(int32_t)a)|((uint32_t)hy_src(s,(int32_t)a+1)<<8)|((uint32_t)hy_src(s,(int32_t)a+2)<<16)|((uint32_t)hy_src(s,(int32_t)a+3)<<24); }
-static uint16_t hy_src16_peek(SA*s, uint32_t a){ return (uint16_t)(hy_src_peek(s,(int32_t)a)|(hy_src_peek(s,(int32_t)a+1)<<8)); }
+/* journal-aware pristine 4-byte field word (little-endian) at fpk, peeked WITHOUT touching the psrc
+ * ring (suppressed-bl / no-field must record nothing). On a real BL/EX hit the caller replays this
+ * word into the ring via hy_word4_rec — the ascending byte/order match the old read+record path. */
+static uint32_t hy_word4_peek(SA*s, uint32_t fpk){
+    return  (uint32_t)hy_src_peek(s,(int32_t)fpk)    | ((uint32_t)hy_src_peek(s,(int32_t)fpk+1)<<8)
+          | ((uint32_t)hy_src_peek(s,(int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek(s,(int32_t)fpk+3)<<24);
+}
+/* record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
+ * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
+ * gate would always pass — record straight into the 4 ring slots (the window cannot self-alias). */
+static void hy_word4_rec(SA*s, uint32_t fpk, uint32_t w){ (void)s;
+    g_psrc[ fpk     & PSRC_MASK]=(uint8_t)w;       g_psrc[(fpk+1u)&PSRC_MASK]=(uint8_t)(w>>8);
+    g_psrc[(fpk+2u)&PSRC_MASK]=(uint8_t)(w>>16);   g_psrc[(fpk+3u)&PSRC_MASK]=(uint8_t)(w>>24);
+}
 /* de-reloc field at op-local field-start ks. Returns: 0=no field; 1=bl/ex (packed4 filled,
  * a value consumed from the generator); 2=suppressed-bl (write the 4 bytes as NORMAL copies).
  *
- * The field window [fpk,fpk+4) is fully in-range (the entry guard pins fpk+4<=from_size), so the
- * BL detect reuses the ONE pristine halfword pair it reads for both the pattern test and the pack.
- * Field kinds are mutually exclusive and tried in encoder order: local-BL first (Thumb F000/D000
- * pattern, 2-aligned), else a same-op LDR-literal target. Both consume a stream delta ONLY on a
- * real BL/EX hit (suppressed-BL and "no field" never touch the stream). */
+ * The field window [fpk,fpk+4) is fully in-range (the entry guard pins fpk+4<=from_size). The 4
+ * pristine field bytes are PEEKED ONCE into w up front; both the BL pattern test and the BL/EX pack
+ * reuse w (no re-read), and the ring record on a real BL/EX hit replays w directly (hy_word4_rec)
+ * rather than reading the source again. Field kinds are mutually exclusive and tried in encoder
+ * order: local-BL first (Thumb F000/D000 pattern, 2-aligned), else a same-op LDR-literal target.
+ * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
+ * stream, and — matching the original readers — record nothing into the ring). */
 static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     int64_t fpk64=(int64_t)fp0+ks;
     if(fpk64<0 || fpk64+4>(int64_t)s->from_size) return 0;
     uint32_t fpk=(uint32_t)fpk64;
+    /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
+    uint32_t w=hy_word4_peek(s,fpk);
+    uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
-    uint16_t up=hy_src16_peek(s,fpk), lo=hy_src16_peek(s,fpk+2);
     if(!(fpk&1u) && (up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t delta=pull_delta(&DR_BL, &M_dibl);          /* INLINE pull from the single stream */
         bl_dereloc(up, lo, (uint32_t)delta, packed);
-        (void)hy_src32(s,fpk);                              /* record the 4 BL bytes into the psrc ring */
+        hy_word4_rec(s,fpk,w);                              /* record the 4 BL bytes into the ring */
         return 1;
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
@@ -714,8 +752,8 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
         int32_t delta=pull_delta(&DR_EX, &M_diex);          /* INLINE pull from the single stream */
-        uint32_t val=hy_src32(s,fpk);
-        pack_s32_buf((val-(uint32_t)delta)&0xffffffffu, packed);
+        hy_word4_rec(s,fpk,w);                              /* record the 4 EX bytes into the ring */
+        pack_s32_buf((w-(uint32_t)delta)&0xffffffffu, packed);
         return 1;
     }
     return 0;

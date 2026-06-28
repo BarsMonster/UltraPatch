@@ -23,14 +23,14 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,239 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
+| ARM object at `SA_W=10` | text 5,227 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,645,014 B**.
-- W=10 non-self corpus total: **4,644,467 B**.
+- W=10 full 16x16 corpus total: **4,644,694 B**.
+- W=10 non-self corpus total: **4,644,147 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **874 B**
   - `v1_one_face -> v0_base`: **586 B**
@@ -90,6 +90,21 @@ NVM write discipline, and divide-free property are untouched. On the decoder sid
 the Rice and Gamma readers now share one adaptive unary-prefix and one mantissa
 helper (emitted once instead of duplicated), and the Thumb-BL de-relocation
 collapses into a single fused round-trip; both are bit-exact and shrink the object.
+The per-op de-relocation field reader peeks the four field bytes once (reused for
+the Thumb-BL pattern test, the BL/EX pack, and the ldr-derive ring record) instead
+of re-reading them two or three times, and the coroutine layer is expressed as one
+shared saved-stack-pointer fiber core (host x86 and the ARM device differ only in
+the swap primitive) with a ucontext host fallback rather than three near-duplicate
+`#if` branches; both are bit-exact decoder simplifications (the ARM object is
+byte-identical apart from the field-reader's 12 B text saving). The `rep0`
+last-distance reuse prior is seeded at 1/4 (was 1/8): a paired min-over-pairs corpus
+sweep places the optimum that does not regress the real one-face product patch at
+1/4 (3/8 helps the corpus aggregate more but costs the one-face update +1/+1 B).
+The host parse adds a `kd` (rice-parameter) anneal probe: `fit_k_tokens` minimises
+the rice codelength of the raw distances, but the shipped cost is the adaptive
+`M_gd` encode seeded at `k`, so the encoder probes `kd` outward in each direction
+under the exact full-body byte gate and keeps any strict improvement (encoder-only;
+the wire is unchanged).
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
