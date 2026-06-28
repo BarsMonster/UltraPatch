@@ -1757,11 +1757,21 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     uint32_t *slen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
+    uint64_t *span_lit = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
     for (size_t L = 1; L <= maxlen; L++) {
         slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
     }
     for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
+    /* For a span, only the first literal's tag0 context depends on the incoming prevlit.
+     * Every later literal's previous byte is content[p-1], so this prefix table gives the
+     * fixed tail cost for any span length without re-walking the literal contexts per state. */
+    span_lit[0] = 0;
+    for (size_t p = 0; p < n; p++) {
+        uint8_t byte = content[p];
+        uint32_t c = tags[p] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(p ? content[p - 1] : 0)][byte];
+        span_lit[p + 1] = span_lit[p] + c;
+    }
     /* per-context match-flag extras: match flag + fresh-distance flag + value, vs reuse flag (rep0). */
     uint64_t fresh_extra[4], reuse_extra[4];
     for (int h = 0; h < 4; h++) {
@@ -1800,16 +1810,14 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
              * the chosen parse is always re-checked by the exact full-body byte gate in encode_body. */
             int hs = (h << 1) & 3;               /* history after a span flag (bit 0) */
             uint64_t span_base = ci + pt->fspan_c[h];
-            uint64_t runbits = 0;
             size_t lim = n < i + maxrun ? n : i + maxrun;
-            uint8_t prevb = pl[si];
+            uint8_t first = content[i];
+            uint64_t firstbits = tags[i] ? pt->lit1[first] : pt->lit0[LIT0_SEL(pl[si])][first];
             for (size_t j = i + 1; j <= lim; j++) {
-                uint8_t byte = content[j - 1];
-                runbits += tags[j - 1] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(prevb)][byte];
-                prevb = byte;
+                uint64_t runbits = firstbits + span_lit[j] - span_lit[i + 1];
                 uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
                 size_t jb = (j * 4 + (size_t)hs) * 2;
-                relax2(cost, rep, pl, via, vh, jb, c, ri, byte,
+                relax2(cost, rep, pl, via, vh, jb, c, ri, content[j - 1],
                        (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
             }
             /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
@@ -1862,7 +1870,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(dpr);
+    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(dpr); free(span_lit);
     return tv;
 }
 
