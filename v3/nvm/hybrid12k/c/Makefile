@@ -93,43 +93,24 @@ check-arm:
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 
+# The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
+# check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
+# It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
+# asserted here. Override parallelism with JOBS=N (defaults to nproc).
 check-corpus: all
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	full=0; non=0; ok=0; max_j=0; max_amp=0; max_row=0; max_inv=0; \
-	for from in ../images/img_*; do \
-		for to in ../images/img_*; do \
-			blob="$$tmp/patch.blob"; mem="$$tmp/mem.bin"; log="$$tmp/dec.log"; \
-			./hy_enc "$$from" "$$to" "$$blob" 10 >/dev/null; \
-			sz=$$(wc -c < "$$blob"); full=$$((full + sz)); \
-			if [ "$$from" != "$$to" ]; then non=$$((non + sz)); fi; \
-			cp "$$from/watch.bin" "$$mem"; \
-			./hy_dec "$$mem" "$$blob" 1 >/dev/null 2>"$$log"; \
-			cmp -s "$$mem" "$$to/watch.bin"; \
-			ok=$$((ok + 1)); \
-			j=$$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$$log"); \
-			vals=$$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$$log"); \
-			if [ -z "$$j" ] || [ -z "$$vals" ]; then echo "failed to parse decoder metrics for $$from -> $$to"; cat "$$log"; exit 1; fi; \
-			set -- $$vals; amp=$$1; row=$$2; inv=$$3; \
-			if [ "$$j" -gt "$$max_j" ]; then max_j=$$j; fi; \
-			if [ "$$amp" -gt "$$max_amp" ]; then max_amp=$$amp; fi; \
-			if [ "$$row" -gt "$$max_row" ]; then max_row=$$row; fi; \
-			if [ "$$inv" -gt "$$max_inv" ]; then max_inv=$$inv; fi; \
-		done; \
-	done; \
-	./hy_enc ../fixtures/v0_base ../fixtures/v1_one_face "$$tmp/grow.blob" 10 >/dev/null; \
-	./hy_enc ../fixtures/v1_one_face ../fixtures/v0_base "$$tmp/revert.blob" 10 >/dev/null; \
-	one_g=$$(wc -c < "$$tmp/grow.blob"); one_r=$$(wc -c < "$$tmp/revert.blob"); \
-	echo "matrix_ok=$$ok/256"; \
-	echo "full_total=$$full"; \
-	echo "nonself_total=$$non"; \
-	echo "max_journal=$$max_j"; \
-	echo "max_amplified=$$max_amp"; \
-	echo "max_maxrowerase=$$max_row"; \
-	echo "max_inversions=$$max_inv"; \
-	echo "oneface_grow=$$one_g"; \
-	echo "oneface_revert=$$one_r"; \
+	./check_corpus.sh 10 $(JOBS) > "$$tmp/m.txt"; \
+	cat "$$tmp/m.txt"; \
+	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
+	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \
+	non=$$(sed -n 's/^nonself_total=//p' "$$tmp/m.txt"); \
+	max_amp=$$(sed -n 's/^max_amplified=//p' "$$tmp/m.txt"); \
+	max_row=$$(sed -n 's/^max_maxrowerase=//p' "$$tmp/m.txt"); \
+	max_inv=$$(sed -n 's/^max_inversions=//p' "$$tmp/m.txt"); \
+	one_g=$$(sed -n 's/^oneface_grow=//p' "$$tmp/m.txt"); \
+	one_r=$$(sed -n 's/^oneface_revert=//p' "$$tmp/m.txt"); \
 	test "$$ok" -eq 256; \
 	test "$$max_amp" -eq 0; \
 	test "$$max_row" -le 1; \
