@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,147 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
+| ARM object at `SA_W=10` | text 5,083 B, data 0 B, bss 11,632 B (<= 12 KiB cap, 656 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
@@ -120,7 +120,12 @@ bit-exact simplifications shrink the object: the per-op correction lookup is a
 linear scan over the count-bounded array (the offsets are unique, so it returns the
 same value the binary search did), the literal-patch cursor folds its FWD/grow
 first-read and advance onto one `base`/`step` helper, and the de-relocation field
-dispatch collapses its two unrolled 4-byte loops into one.
+dispatch collapses its two unrolled 4-byte loops into one. Further decoder-only,
+bit-exact cleanup keeps the push FIFO as the single-byte mailbox it really is,
+uses the journal page-table sentinel as the journal count, stores the resident
+output row by base address plus a sentinel, reuses the relocation MTF front entry
+as the repeat-last value, and packs byte-tree probabilities as the logical
+`p[1..255]` nodes only.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -194,7 +199,7 @@ Current production caps and measured peaks:
 - Per-op correction entries: `OPC_CAP=80`, measured peak 68.
 - BL delta dictionary: `DR_KCAP_BL=208`, measured peak 180.
 - EX/LDR delta dictionary: `DR_KCAP_EX=128`, measured peak 106.
-- Preserve journal: `JSLOTS=904`, measured peak 605.
+- Preserve journal: `JSLOTS=904`, measured peak 625.
 
 Raising caps is a wire-compatible decoder resource change only when the encoder
 uses the same build-time limits.

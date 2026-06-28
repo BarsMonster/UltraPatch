@@ -13,11 +13,12 @@
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
 
-/* ---- 256-symbol byte via 8-level bit-tree; probs[1..255]. The adaptation-shift rate is NOT
- * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5,
- * lit1=4, dval=4) — kept identical in rc_v3.c (decode) and rc_v3_enc.c (encode) for wire-exactness. */
-typedef struct { uint16_t p[256]; } BitTree;
-static inline void bt_init(BitTree*t){ for(int i=0;i<256;i++) t->p[i]=RC_PHALF; }
+/* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as p[0..254].
+ * The adaptation-shift rate is NOT stored per-tree (saves SRAM): every call site passes its constant
+ * rate explicitly (lit0=5, lit1=4, dval=4) — kept identical in rc_v3.c (decode) and rc_v3_enc.c
+ * (encode) for wire-exactness. */
+typedef struct { uint16_t p[255]; } BitTree;
+static inline void bt_init(BitTree*t){ for(int i=0;i<255;i++) t->p[i]=RC_PHALF; }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.

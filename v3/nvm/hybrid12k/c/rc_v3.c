@@ -44,15 +44,7 @@ extern uint32_t g_image_span;      /* max(from_size,to_size) — bounds every fl
 /* ===================================================================================== */
 /* byte FIFO + ucontext coroutine (the push / blocking-fetch core)                        */
 /* ===================================================================================== */
-#ifndef FIFO_CAP
-#define FIFO_CAP 1u                         /* decoder_push() supplies one byte per resume */
-#endif
-#if (FIFO_CAP == 0u) || ((FIFO_CAP & (FIFO_CAP - 1u)) != 0u)
-#error "FIFO_CAP must be a nonzero power of two"
-#endif
-#define FIFO_MASK (FIFO_CAP-1u)
-static uint8_t  g_fifo[FIFO_CAP];
-static uint32_t g_fhead, g_ftail;          /* ring indices */
+static uint8_t  g_fifo_byte, g_fifo_full;  /* decoder_push() supplies one byte per resume */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
 
 #ifndef DEC_STACK_BYTES
@@ -123,12 +115,12 @@ static void fiber_setup(void){
 
 /* next_byte(): pull one byte; if the FIFO is empty, suspend back to the producer (block). */
 static uint8_t next_byte(void){
-    while (g_fhead == g_ftail){
+    while (!g_fifo_full){
         if (g_eof) return 0;               /* zero-fill past EOF (optimal-flush rule) */
         CO_SWAP_TO_MAIN();                 /* SUSPEND: yield to producer for more bytes */
     }
-    uint8_t b = g_fifo[g_fhead & FIFO_MASK];
-    g_fhead++;
+    g_fifo_full=0;
+    uint8_t b = g_fifo_byte;
     return b;
 }
 
@@ -182,7 +174,7 @@ static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits (was a duplicate bit loop) */
 /* ---- bit-tree byte ---- */
-static int s_bt(BitTree*t,int rate){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],rate); return m-256; }
+static int s_bt(BitTree*t,int rate){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m-1],rate); return m-256; }
 /* ---- ByteVarint (pack_size) ---- */
 static int32_t s_bv(BitTree*t,int rate){
     int b0=s_bt(t,rate); int sgn=b0&0x40; uint32_t val=b0&0x3f; int off=6;
@@ -328,7 +320,6 @@ static uint32_t crc32_flash(uint32_t n){
  * (distinct-value peaks: bl 180, ex 106). */
 typedef struct {
     int32_t *dic; uint16_t cap, K;    /* MTF dict (index 0 = most-recently-used) + its capacity */
-    int32_t  last;                    /* repeat-last fast path */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
 #define DR_HIT_INIT 576u              /* zero-seeded MTF dict makes hit-bit==1 likely; 576 is the
@@ -336,7 +327,7 @@ typedef struct {
                                        * (higher seeds nick it to 583). Must match rc_v3_enc.c. */
 
 #ifndef JSLOTS
-#define JSLOTS 904u                          /* packed journal capacity; corpus peak is 605, and the cap
+#define JSLOTS 904u                          /* packed journal capacity; corpus peak is 625, and the cap
                                               * is kept well above it (the 8-byte-aligned journal region
                                               * holds 904 slots) for out-of-corpus headroom. Refuse above. */
 #endif
@@ -361,7 +352,7 @@ typedef struct {
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
-static uint16_t Jcount, Jpeak;
+static uint16_t Jpeak;
 /* page[p] = index of the first slot whose (pos>>16) >= p, for p in [0..JPAGE_MAX].  Since slots
  * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). Every journalled
  * pos is < g_image_span, so a pos with pos>>16 >= JPAGE_MAX exists only for out-of-corpus firmware
@@ -369,7 +360,7 @@ static uint16_t Jcount, Jpeak;
  * page count is kept: pages above the live span never receive an insert, so their boundaries trail
  * the final sentinel and search empty. */
 static uint16_t g_jpage[JPAGE_MAX+1];
-static void jr_reset(void){ Jcount=Jpeak=0;
+static void jr_reset(void){ Jpeak=0;
     for(int p=0;p<=JPAGE_MAX;p++) g_jpage[p]=0; }
 /* Binary search for `pos` within its page (pos>>16), comparing the 16-bit low key. Returns the
  * slot index in *at: on a hit *at is the matching slot and the return is 1; on a miss *at is the
@@ -388,11 +379,13 @@ static int jr_put(uint32_t pos, uint8_t b){
     uint32_t pg=pos>>16; if(pg>=(uint32_t)JPAGE_MAX) return -1;   /* outside paged span (also bounds pos) */
     int at;
     if(jr_find(pos,&at)) return 0;                   /* never-evict: keep the first write */
-    if((uint32_t)Jcount>=JSLOTS) return -1;          /* over-depth: refuse BEFORE any write */
-    if(at<Jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(Jcount-at)*3u);
+    uint16_t jcount=g_jpage[JPAGE_MAX];
+    if((uint32_t)jcount>=JSLOTS) return -1;          /* over-depth: refuse BEFORE any write */
+    if(at<jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(jcount-at)*3u);
     uint8_t*s=Jbuf+(uint32_t)at*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
     for(uint32_t p=pg+1u;p<=(uint32_t)JPAGE_MAX;p++) g_jpage[p]++;  /* shift higher page boundaries */
-    if(++Jcount>Jpeak) Jpeak=Jcount;
+    jcount++;
+    if(jcount>Jpeak) Jpeak=jcount;
     return 0;
 }
 static int jr_get(uint32_t pos, uint8_t*out){
@@ -435,37 +428,38 @@ static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4])
 #endif
 #endif
 static uint8_t  g_orow_buf[OUTROW];
-static uint32_t g_orow;        /* current resident output row index */
-static uint8_t  g_orow_valid, g_orow_dirty;
+#define OROW_NONE UINT32_MAX
+static uint32_t g_orow_base;   /* current resident output row base, or OROW_NONE */
+static uint8_t  g_orow_dirty;
 static void orow_commit(void){
-    if(g_orow_valid && g_orow_dirty){
-        uint32_t base=g_orow*OUTROW, end=base+OUTROW; if(end>g_image_span) end=g_image_span;
+    if(g_orow_base!=OROW_NONE && g_orow_dirty){
+        uint32_t base=g_orow_base, end=base+OUTROW; if(end>g_image_span) end=g_image_span;
         /* force the (at most one) row erase up front, then program from the RAM buffer so every
          * byte is a pure 1->0 program (no further erase). All bytes of the row were produced by the
          * monotonic output, so the buffer holds the exact final content. */
         for(uint32_t a=base;a<end;a++){ if(flash_read(a)!=0xFFu){ flash_write(a,0xFFu); break; } }
         for(uint32_t a=base;a<end;a++) flash_write(a, g_orow_buf[a-base]);
     }
-    g_orow_dirty=0; g_orow_valid=0;
+    g_orow_dirty=0; g_orow_base=OROW_NONE;
 }
-static void orow_reset(void){ g_orow_valid=0; g_orow_dirty=0; g_orow=0; }
+static void orow_reset(void){ g_orow_base=OROW_NONE; g_orow_dirty=0; }
 /* OUTPUT write: buffer in the resident row, committing the previous row on a row change. */
 static void out_write(uint32_t a, uint8_t v){
     if(a>=g_image_span) return;
-    uint32_t row=a/OUTROW;
-    if(!g_orow_valid || row!=g_orow){
+    uint32_t base=(a/OUTROW)*OUTROW;
+    if(base!=g_orow_base){
         orow_commit();
-        uint32_t base=row*OUTROW, end=base+OUTROW; if(end>g_image_span) end=g_image_span;
+        uint32_t end=base+OUTROW; if(end>g_image_span) end=g_image_span;
         for(uint32_t x=base;x<end;x++) g_orow_buf[x-base]=flash_read(x); /* preload (source not yet erased) */
-        g_orow=row; g_orow_valid=1; g_orow_dirty=0;
+        g_orow_base=base; g_orow_dirty=0;
     }
-    uint32_t off=a-g_orow*OUTROW;
+    uint32_t off=a-g_orow_base;
     if(g_orow_buf[off]!=v){ g_orow_buf[off]=v; g_orow_dirty=1; }
 }
 /* OUTPUT read (reads of already-produced output bytes, e.g. multi-write/correction overlay): serve
  * from the dirty buffer if resident, else physical flash. */
 static uint8_t out_read(uint32_t a){
-    if(g_orow_valid && a/OUTROW==g_orow && a<g_image_span) return g_orow_buf[a-g_orow*OUTROW];
+    if(a>=g_orow_base && a<g_orow_base+OUTROW && a<g_image_span) return g_orow_buf[a-g_orow_base];
     return flash_read(a);
 }
 
@@ -535,7 +529,6 @@ static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>
 
 static void dr_init(DRStream*d, int32_t*dic, int cap){
     d->dic=dic; d->cap=cap; d->K=1; d->dic[0]=0;
-    d->last=0;
     for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
     d->rh=0; d->hit=DR_HIT_INIT;
 }
@@ -545,8 +538,8 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
  *   then last=v. */
 static int32_t pull_delta(DRStream*d, IdxUnary*gix){
-    { int ri=d->rh | (d->last==0 ? 2 : 0);
-      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->last; }   /* repeat-last, order-1 + zero ctx */
+    { int ri=d->rh | (d->dic[0]==0 ? 2 : 0);
+      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
         uint32_t j=s_idx(gix,d->cap)+1u;                /* cmp-1: dict idx 0 unreachable -> encode j-1 */
@@ -559,7 +552,7 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix){
         memmove(&d->dic[1], &d->dic[0], (size_t)d->K * sizeof(d->dic[0]));
         d->dic[0]=v; d->K++;
     }
-    d->last=v; return v;
+    return v;
 }
 
 
@@ -709,7 +702,7 @@ static uint32_t hy_word4_peek(SA*s, uint32_t fpk){
 /* record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
  * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
  * gate would always pass — record straight into the 4 ring slots (the window cannot self-alias). */
-static void hy_word4_rec(SA*s, uint32_t fpk, uint32_t w){ (void)s;
+static void hy_word4_rec(uint32_t fpk, uint32_t w){
     g_psrc[ fpk     & PSRC_MASK]=(uint8_t)w;       g_psrc[(fpk+1u)&PSRC_MASK]=(uint8_t)(w>>8);
     g_psrc[(fpk+2u)&PSRC_MASK]=(uint8_t)(w>>16);   g_psrc[(fpk+3u)&PSRC_MASK]=(uint8_t)(w>>24);
 }
@@ -735,7 +728,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t delta=pull_delta(&DR_BL, &M_dibl);          /* INLINE pull from the single stream */
         bl_dereloc(up, lo, (uint32_t)delta, packed);
-        hy_word4_rec(s,fpk,w);                              /* record the 4 BL bytes into the ring */
+        hy_word4_rec(fpk,w);                                /* record the 4 BL bytes into the ring */
         return 1;
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
@@ -743,7 +736,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
         int32_t delta=pull_delta(&DR_EX, &M_diex);          /* INLINE pull from the single stream */
-        hy_word4_rec(s,fpk,w);                              /* record the 4 EX bytes into the ring */
+        hy_word4_rec(fpk,w);                                /* record the 4 EX bytes into the ring */
         pack_s32_buf((w-(uint32_t)delta)&0xffffffffu, packed);
         return 1;
     }
@@ -755,17 +748,17 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
  * locals. The cursor advances in wire order regardless of write direction. */
 /* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
- * back from dl (first = dl - gap, then -= gap). `base` (0 for FWD, dl for grow) and `step` (+1/-1)
- * make the first patch and every later patch share one advance path; nextpos=-1 marks "no more". */
-typedef struct { int32_t nextpos, litb, li, base, step; } LitCur;
+ * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
+ * advance path; nextpos=-1 marks "no more". */
+typedef struct { int32_t nextpos, litb, li, step; } LitCur;
 __attribute__((always_inline)) static inline void litcur_step(SA*s, LitCur*lc, int32_t nl){
     if(lc->li<nl){ int32_t g=(int32_t)sa_read_uleb(s);
         lc->nextpos += lc->step*g; lc->litb=sa_next_content(s,0); }
     else lc->nextpos=-1;
 }
 __attribute__((always_inline)) static inline void litcur_init(SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
-    lc->base = fwd ? 0 : dl; lc->step = fwd ? 1 : -1;
-    lc->nextpos = lc->base; lc->litb=0; lc->li=0;
+    lc->step = fwd ? 1 : -1;
+    lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
 __attribute__((always_inline)) static inline void litcur_next(SA*s, LitCur*lc, int32_t nl){
@@ -933,14 +926,13 @@ enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
 static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    t->p[0]=RC_PHALF;
     for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
-        t->p[m]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
+        t->p[m-1]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
 }
 
 /* initialize the decoder coroutine; lit_tree seeds from flash. */
 static int decoder_init(void){
-    g_fhead=g_ftail=0; g_eof=0; g_dec_done=0; g_dec_err=0;
+    g_fifo_full=0; g_eof=0; g_dec_done=0; g_dec_err=0;
     /* literal bit-trees seeded from flash parity histograms (no transient image buffer).
      * hist0/hist1/w (4 KiB) borrow ARENA at init — this runs BEFORE the streaming apply reuses
      * ARENA, keeping them off the main thread's peak stack (RAM budget). */
@@ -966,9 +958,9 @@ static int decoder_init(void){
 
 static int decoder_push(uint8_t byte){
     if(g_dec_done) return g_dec_err?DEC_ERROR:DEC_DONE;
-    /* enqueue; FIFO should never overflow because the decoder drains as fast as we push */
-    if((g_ftail - g_fhead) >= FIFO_CAP){ return DEC_ERROR; }
-    g_fifo[g_ftail & FIFO_MASK]=byte; g_ftail++;
+    /* enqueue; the decoder should drain the single byte before returning */
+    if(g_fifo_full){ return DEC_ERROR; }
+    g_fifo_byte=byte; g_fifo_full=1;
     /* resume decoder; it will consume from the FIFO and suspend again when empty */
     CO_SWAP_TO_DEC();
     return g_dec_err?DEC_ERROR:(g_dec_done?DEC_DONE:DEC_NEED_MORE);
