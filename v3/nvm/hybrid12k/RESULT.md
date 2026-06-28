@@ -23,13 +23,13 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,159 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
+| ARM object at `SA_W=10` | text 5,147 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,595,908 B**.
+- W=10 full 16x16 corpus total: **4,595,773 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **873 B**
   - `v1_one_face -> v0_base`: **582 B**

@@ -25,7 +25,7 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #ifndef DR_KCAP_EX
 #define DR_KCAP_EX 128
 #endif
-#define DR_HIT_INIT 512u
+#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match rc_v3.c (bit-exact wire) */
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
 
@@ -2164,8 +2164,8 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, (uint16_t)(RC_PBIT - RC_PBIT / 4));
-    idx_init_e(&M.diex, (uint16_t)(RC_PBIT - RC_PBIT / 4));
+    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum (was RC_PBIT-RC_PBIT/4); match rc_v3.c */
+    idx_init_e(&M.diex, (uint16_t)2816u);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */

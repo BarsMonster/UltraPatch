@@ -180,7 +180,7 @@ static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)
  * is the header op count, so the gamma reader and its -1 wrapper are merged into one function. */
 static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
-    uint32_t v=1; for(int i=0;i<n;i++) v=(v<<1)|s_raw(); return v-1u; }
+    return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits (was a duplicate bit loop) */
 /* ---- bit-tree byte ---- */
 static int s_bt(BitTree*t,int rate){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],rate); return m-256; }
 /* ---- ByteVarint (pack_size) ---- */
@@ -331,7 +331,9 @@ typedef struct {
     int32_t  last;                    /* repeat-last fast path */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
-#define DR_HIT_INIT 512u              /* zero-seeded MTF dict makes hit-bit==1 likely */
+#define DR_HIT_INIT 576u              /* zero-seeded MTF dict makes hit-bit==1 likely; 576 is the
+                                       * corpus optimum that still holds the one-face revert at 582
+                                       * (higher seeds nick it to 583). Must match rc_v3_enc.c. */
 
 #ifndef JSLOTS
 #define JSLOTS 904u                          /* packed journal capacity; corpus peak is 605, and the cap
@@ -881,7 +883,9 @@ static void decode_body(void){
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
-    idx_init(&M_dibl, RC_PBIT-RC_PBIT/4); idx_init(&M_diex, RC_PBIT-RC_PBIT/4);  /* seed toward STOP (idx 0) */
+    idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); 2816 is the
+                                                          * corpus optimum holding one-face 582 (was
+                                                          * RC_PBIT-RC_PBIT/4=3072). Mirror in rc_v3_enc.c. */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
