@@ -57,7 +57,8 @@ static uint8_t  g_eof;                     /* producer signalled end-of-stream *
                                             * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
 static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
-static uint8_t  g_dec_done, g_dec_err;     /* set when the decode coroutine returns */
+enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
+static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
 
 /* ===================================================================================== */
 /* Coroutine: a context is just a saved stack pointer (+ callee-saved regs spilled onto    */
@@ -140,9 +141,11 @@ static void rc_init(void){
  * `bound`, pick the sub-interval the code lands in, return the bit, then renorm (refill from the FIFO
  * until range climbs back above KTOP). The readers differ ONLY in `bound` + probability adaptation. */
 static int rc_decode(uint32_t bound){
+    uint32_t code=RC.code, range=RC.range;
     int b;
-    if (RC.code<bound){ RC.range=bound; b=0; } else { RC.code-=bound; RC.range-=bound; b=1; }
-    while (RC.range<RC_KTOP){ RC.code=(RC.code<<8)|next_byte(); RC.range<<=8; }
+    if (code<bound){ range=bound; b=0; } else { code-=bound; range-=bound; b=1; }
+    while (range<RC_KTOP){ code=(code<<8)|next_byte(); range<<=8; }
+    RC.code=code; RC.range=range;
     return b;
 }
 static int s_bit_r(uint16_t*prob,int rate){
@@ -221,10 +224,7 @@ typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]
 #define UG_GAMMA_BASE(c) ((c)==0 ? 0 : 1 + ((c)*((c)-1))/2)
 #define UG_GAMMA_M (UG_GAMMA_BASE(UG_CTX) + (UG_CTX+1))
 typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_M]; } UGGamma;
-/* The packed-gamma row-offset table used in s_ug_gamma(); pinned to the UG_GAMMA_BASE formula by
- * the asserts below so it can never silently disagree with UG_GAMMA_M (no #if/#error guard needed). */
-static const uint8_t ugg_base[UG_CTX+1] = { 0, 1, 2, 4, 7, 11, 16 };
-_Static_assert(sizeof(ugg_base)/sizeof(ugg_base[0]) == UG_CTX+1, "ugg_base must have UG_CTX+1 rows");
+/* Compile-time guard for the default packed gamma layout. */
 _Static_assert(UG_GAMMA_BASE(0)==0 && UG_GAMMA_BASE(1)==1 && UG_GAMMA_BASE(2)==2 &&
                UG_GAMMA_BASE(3)==4 && UG_GAMMA_BASE(4)==7 && UG_GAMMA_BASE(5)==11 &&
                UG_GAMMA_BASE(6)==16, "UG_GAMMA_BASE formula drifted from the packed gamma layout");
@@ -259,7 +259,7 @@ static uint32_t s_ug_unary(uint16_t*u,uint32_t cap){
     return cl;
 }
 /* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
- * row already selected by caller (rice: m[UG_C(cl)] full square row; gamma: m[ugg_base[UG_C(cl)]]
+ * row already selected by caller (rice: m[UG_C(cl)] full square row; gamma: m[UG_GAMMA_BASE(UG_C(cl))]
  * packed-triangle row). Bit-exact identical to the inlined per-function loops. */
 static uint32_t s_ug_mant(uint16_t*row,int cnt){
     uint32_t v=0; for(int pos=0;pos<cnt;pos++) v|=(uint32_t)s_bit(&row[UG_C(pos)])<<(cnt-1-pos);
@@ -271,7 +271,7 @@ static uint32_t s_ug_rice(UGRice*g){
 }
 static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_ug_unary(g->u,RC_UNARY_MAX);
-    return ((1u<<cl) | s_ug_mant(&g->m[ugg_base[UG_C(cl)]],cl)) - 1u;
+    return ((1u<<cl) | s_ug_mant(&g->m[UG_GAMMA_BASE(UG_C(cl))],cl)) - 1u;
 }
 /* MTF dict-index model: a lean adaptive UNARY code (replaces the per-stream UGGamma, ~60B each).
  * The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one, ~10% two, with a thin tail
@@ -331,7 +331,7 @@ static uint32_t crc32_flash(uint32_t n){
  * inserted at front). The dict array is outside the struct so bl/ex get separate caps
  * (distinct-value peaks: bl 180, ex 106). */
 typedef struct {
-    int32_t *dic; uint16_t cap, K;    /* MTF dict (index 0 = most-recently-used) + its capacity */
+    uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
 #define DR_HIT_INIT 576u              /* zero-seeded MTF dict makes hit-bit==1 likely; 576 is the
@@ -465,13 +465,6 @@ static void out_write(uint32_t a, uint8_t v){
     uint32_t off=a-g_orow_base;
     if(g_orow_buf[off]!=v){ g_orow_buf[off]=v; g_orow_dirty=1; }
 }
-/* OUTPUT read (reads of already-produced output bytes, e.g. multi-write/correction overlay): serve
- * from the dirty buffer if resident, else physical flash. */
-static uint8_t out_read(uint32_t a){
-    if(a>=g_orow_base && a<g_orow_base+OUTROW && a<g_image_span) return g_orow_buf[a-g_orow_base];
-    return flash_read(a);
-}
-
 /* ===================================================================================== */
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
 /* pg/pgn/pg2 (preserve+correction, SHARED) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval */
@@ -536,8 +529,8 @@ static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (residen
 /* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
 static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>8)&0xff; out[2]=(v>>16)&0xff; out[3]=(v>>24)&0xff; }
 
-static void dr_init(DRStream*d, int32_t*dic, int cap){
-    d->dic=dic; d->cap=cap; d->K=1; d->dic[0]=0;
+static void dr_init(DRStream*d, int32_t*dic){
+    d->K=1; dic[0]=0;
     for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
     d->rh=0; d->hit=DR_HIT_INIT;
 }
@@ -546,20 +539,20 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(DRStream*d, IdxUnary*gix){
-    { int ri=d->rh | (d->dic[0]==0 ? 2 : 0);
-      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->dic[0]; }  /* repeat-last, order-1 + zero ctx */
+static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
+    { int ri=d->rh | (dic[0]==0 ? 2 : 0);
+      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
-        uint32_t j=s_idx(gix,d->cap)+1u;                /* cmp-1: dict idx 0 unreachable -> encode j-1 */
+        uint32_t j=s_idx(gix,cap)+1u;                   /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
-        v=d->dic[j];
-        if(j){ int32_t t=d->dic[j]; memmove(&d->dic[1], &d->dic[0], (size_t)j * sizeof(d->dic[0])); d->dic[0]=t; }
+        v=dic[j];
+        if(j){ int32_t t=dic[j]; memmove(&dic[1], &dic[0], (size_t)j * sizeof(dic[0])); dic[0]=t; }
     } else {
         v=s_bv(&M_dval, 4);
-        if(d->K>=d->cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
-        memmove(&d->dic[1], &d->dic[0], (size_t)d->K * sizeof(d->dic[0]));
-        d->dic[0]=v; d->K++;
+        if((uint32_t)d->K>=cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
+        memmove(&dic[1], &dic[0], (size_t)d->K * sizeof(dic[0]));
+        dic[0]=v; d->K++;
     }
     return v;
 }
@@ -680,12 +673,12 @@ static uint32_t sa_read_uleb(SA*s){
 }
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
 static void sa_journal(SA*s, int32_t tp){
-    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, out_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
+    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, flash_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
     }
 }
 static uint8_t hy_src_peek(SA*s, int32_t fp){
     (void)s;
-    if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp); }
+    if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
     return 0;
 }
 /* record one pristine source byte at fp into the psrc ring (used by the FWD ldr back-scan).
@@ -730,13 +723,14 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     int64_t fpk64=(int64_t)fp0+ks;
     if(fpk64<0 || fpk64+4>(int64_t)g_from_size) return 0;
     uint32_t fpk=(uint32_t)fpk64;
+    if(fpk&1u) return 0;                                  /* BL is 2-aligned; LDR targets are 4-aligned */
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(s,fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
-    if(!(fpk&1u) && (up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
+    if((up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
-        int32_t delta=pull_delta(&DR_BL, &M_dibl);          /* INLINE pull from the single stream */
+        int32_t delta=pull_delta(&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* INLINE pull from the single stream */
         bl_dereloc(up, lo, (uint32_t)delta, packed);
         hy_word4_rec(fpk,w);                                /* record the 4 BL bytes into the ring */
         return 1;
@@ -745,7 +739,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
      * mirrors the encoder's pure(k) + op_ldr_set; positions are no longer shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(g_FWD?NULL:s, fp0, dl, fpk)){
-        int32_t delta=pull_delta(&DR_EX, &M_diex);          /* INLINE pull from the single stream */
+        int32_t delta=pull_delta(&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* INLINE pull from the single stream */
         hy_word4_rec(fpk,w);                                /* record the 4 EX bytes into the ring */
         pack_s32_buf((w-(uint32_t)delta)&0xffffffffu, packed);
         return 1;
@@ -882,7 +876,7 @@ static void decode_body(void){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
+    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL); dr_init(&DR_EX, DR_DIC_EX);
     idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); 2816 is the
                                                           * corpus optimum holding one-face 582 (was
                                                           * RC_PBIT-RC_PBIT/4=3072). Mirror in rc_v3_enc.c. */
@@ -904,31 +898,29 @@ static void decode_body(void){
       fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
-      if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_err=1; goto done; }
+      if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_status=DEC_ERROR; goto done; }
       s->tok_left=nseq; s->tok_mode=0;
       for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
       /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
        * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
       if(!s->err && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
-      if(s->err||g_rcerr){ g_dec_err=1; goto done; }
+      if(s->err||g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
       orow_commit();                       /* flush the last resident output row */
     }
 done:
 #ifndef RC_V3_STACKMEAS
     /* stack-overflow canary: the deepest 8 B were painted 0xC5; if the coroutine overran them the
      * decode is untrustworthy -> reject (CRC would catch corruption too, but this is direct). */
-    for(int i=0;i<8;i++) if((unsigned char)g_dec_stack[i]!=0xC5u){ g_dec_err=1; break; }
+    for(int i=0;i<8;i++) if((unsigned char)g_dec_stack[i]!=0xC5u){ g_dec_status=DEC_ERROR; break; }
 #endif
-    g_dec_done=1;
+    if(g_dec_status!=DEC_ERROR) g_dec_status=DEC_DONE;
     CO_SWAP_TO_MAIN();                      /* final yield: never returns here */
 }
 
 /* ===================================================================================== */
 /* public push API: decoder_push(byte) -> NEED_MORE / DONE / ERROR                         */
 /* ===================================================================================== */
-enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
-
 static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
@@ -938,7 +930,7 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
 
 /* initialize the decoder coroutine; lit_tree seeds from flash. */
 static int decoder_init(void){
-    g_fifo_full=0; g_eof=0; g_dec_done=0; g_dec_err=0;
+    g_fifo_full=0; g_eof=0; g_dec_status=DEC_NEED_MORE;
     /* literal bit-trees seeded from flash parity histograms (no transient image buffer).
      * hist0/hist1/w (4 KiB) borrow ARENA at init — this runs BEFORE the streaming apply reuses
      * ARENA, keeping them off the main thread's peak stack (RAM budget). */
@@ -959,23 +951,23 @@ static int decoder_init(void){
     fiber_setup();
     /* first resume: runs until the decoder first blocks for a byte (FIFO empty) */
     CO_SWAP_TO_DEC();
-    return g_dec_err?DEC_ERROR:(g_dec_done?DEC_DONE:DEC_NEED_MORE);
+    return g_dec_status;
 }
 
 static int decoder_push(uint8_t byte){
-    if(g_dec_done) return g_dec_err?DEC_ERROR:DEC_DONE;
+    if(g_dec_status!=DEC_NEED_MORE) return g_dec_status;
     /* enqueue; the decoder should drain the single byte before returning */
     if(g_fifo_full){ return DEC_ERROR; }
     g_fifo_byte=byte; g_fifo_full=1;
     /* resume decoder; it will consume from the FIFO and suspend again when empty */
     CO_SWAP_TO_DEC();
-    return g_dec_err?DEC_ERROR:(g_dec_done?DEC_DONE:DEC_NEED_MORE);
+    return g_dec_status;
 }
 static int decoder_finish(void){
     /* signal EOF so next_byte() zero-fills; drain until the coroutine completes */
     g_eof=1;
-    while(!g_dec_done){ CO_SWAP_TO_DEC(); }
-    return g_dec_err?DEC_ERROR:DEC_DONE;
+    while(g_dec_status==DEC_NEED_MORE){ CO_SWAP_TO_DEC(); }
+    return g_dec_status;
 }
 
 /* ===================================================================================== */
