@@ -26,7 +26,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 11664
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-corpus
+.PHONY: all clean check check-arm check-corpus gate
 
 all: hy_enc hy_dec
 
@@ -119,6 +119,42 @@ check-corpus: all
 	test "$$non" -le "$(BASE_NONSELF_TOTAL)"; \
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
+
+# ONE command for the full gate: builds, runs all three gates (check + check-arm + check-corpus),
+# and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
+# .bss + divide policy, corpus full/nonself totals, the real one-face update (grow/revert), matrix
+# round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
+# dumps the three raw blocks so the offending metric is visible. ~20s (dominated by check-corpus).
+gate: all
+	@set -e; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
+	echo "running full gate: check + check-arm + check-corpus (~20s)..."; \
+	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
+	echo "==================== A1 FULL GATE ===================="; \
+	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
+	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
+	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
+	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
+	sed -n 's/^nonself_total=/corpus nonself_total    : /p' "$$tmp/m.txt"; \
+	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/m.txt"; \
+	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/m.txt"; \
+	sed -n 's/^max_amplified=/NVM rows amplified       : /p' "$$tmp/m.txt"; \
+	sed -n 's/^max_maxrowerase=/NVM max erases-per-row   : /p' "$$tmp/m.txt"; \
+	sed -n 's/^max_inversions=/NVM frontier inversions  : /p' "$$tmp/m.txt"; \
+	sed -n 's/^max_journal=/journal peak slots      : /p' "$$tmp/m.txt"; \
+	if [ $$rc = 0 ]; then \
+		echo "correctness fuzz         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"; \
+		echo "RESULT                   : ALL GATES PASS"; \
+	else \
+		echo "RESULT                   : *** GATE FAILED (rc=$$rc) ***"; \
+		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
+		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
+		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
+	fi; \
+	echo "====================================================="; \
+	exit $$rc
 
 clean:
 	rm -f hy_enc hy_dec
