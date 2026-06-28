@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,900 B, data 0 B, bss 10,720 B (<= 12 KiB cap, 1,568 B margin) |
+| ARM object at `SA_W=10` | text 4,988 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
@@ -133,7 +133,10 @@ keeps the range-coder core values in local temporaries across renorm, indexes th
 packed gamma rows directly from the layout formula, removes redundant resident
 delta-dictionary pointer/cap fields, bypasses the output-row overlay for pristine
 source reads, and rejects impossible odd relocation field anchors before peeking
-their four source bytes.
+their four source bytes. The FWD ldr-derive window stores only the classified
+even-halfword metadata the target scan needs (`is ldr literal` + imm8), cutting
+the former 1024 B pristine byte ring to 576 B of packed state; this is bit-exact
+and leaves patch sizes unchanged, trading a small ARM `.text` increase for SRAM.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -191,11 +194,11 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,900 B, data 0 B, bss 11,744 B (544 B
+now fits the 12 KiB SRAM cap at text 4,988 B, data 0 B, bss 11,296 B (992 B
 margin) and improves the corpus total to 4,580,558 B with the real one-face
 update unchanged at 873/582 B. The 256-pair patch-size split for W=11 vs W=10 is
 136 better / 15 worse / 105 equal. Production stays at W=10 to keep the larger
-1,568 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
+2,016 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
 
 ## Caps
 

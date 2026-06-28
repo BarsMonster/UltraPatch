@@ -22,7 +22,7 @@
  * once (no write amplification).
  *
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
- * + the 1024 B ldr-derive pristine ring; the image lives ONLY in flash (0 image bytes in RAM).
+ * + the packed 576 B ldr-derive pristine metadata; the image lives ONLY in flash (0 image bytes in RAM).
  *
  * Embedded target: NO 64-bit integers in the hot path; all positions/sizes are 32-bit.
  */
@@ -596,22 +596,23 @@ static int32_t corr_at(SA*s, int32_t off){
     }
     return 0;
 }
-/* A1 ldr-derive: a 1024-byte ring of recently-read PRISTINE source bytes (psrc[a&1023] = pristine
- * byte at addr a). FWD reads source ascending; field probes PEEK at the current 4-byte field before
- * the ldr back-scan, then record it only after the scan no longer needs the alias at fpk-1024. Grow
- * reads via the journal-aware source path because lower instruction-window bytes may be clobbered. */
-#define PSRC_MASK 1023u
-static uint8_t g_psrc[1024];
+/* A1 ldr-derive: for FWD, a 1024-byte pristine window is represented as 512 even-halfword slots:
+ * imm8 byte + one "is Thumb LDR literal" bit. The ldr back-scan never needs the full instruction
+ * halfword after classification. Field probes PEEK at the current 4-byte field before recording it,
+ * preserving the old fpk/fpk-1024 ring alias timing. Grow reads via the journal-aware source path
+ * because lower instruction-window bytes may be clobbered. */
+#define PSRC_HW_MASK 511u
+static uint8_t g_psrc_imm[512], g_psrc_ldr[64];
 static uint8_t hy_src(SA*s, int32_t fp);   /* fwd decl: journal-aware pristine source read */
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
  * fpk+4<=fp0+dl. Reads PRISTINE source: the FWD and grow apply directions share ONE back-scan and
- * differ ONLY in the halfword source — FWD reads the g_psrc ring (pristine bytes recorded at
- * read-time), grow reads via hy_src() (journal-aware: instr-window bytes the output frontier already
- * clobbered are preserved copy source, so raw flash would be wrong). s==NULL selects the FWD ring
- * read. Kept static-inline so the per-direction branch folds away at each call site (no indirect
- * call / no text bloat on Cortex-M0+). No resident target store. */
+ * differ ONLY in the halfword source — FWD reads the packed LDR metadata recorded at read-time, grow
+ * reads via hy_src() (journal-aware: instr-window bytes the output frontier already clobbered are
+ * preserved copy source, so raw flash would be wrong). s==NULL selects the FWD metadata path. Kept
+ * static-inline so the per-direction branch folds away at each call site (no indirect call / no text
+ * bloat on Cortex-M0+). No resident target store. */
 static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
      * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
@@ -620,9 +621,17 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     int32_t hi=fp0+dl; if((int32_t)fpk+4>hi) return 0;
     int32_t lo=(int32_t)fpk-1024; if(lo<fp0) lo=fp0; if(lo&1) lo++;
     for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
-        uint16_t up = s ? (uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8))
-                        : (uint16_t)(g_psrc[(uint32_t)a&PSRC_MASK] | (g_psrc[((uint32_t)a+1u)&PSRC_MASK]<<8));
-        if((up&0xf800)==0x4800 && (a&~3)+4*(int32_t)(up&0xff)+4==(int32_t)fpk) return 1;
+        int32_t imm;
+        if(s){
+            uint16_t up=(uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8));
+            if((up&0xf800)!=0x4800) continue;
+            imm=(int32_t)(up&0xff);
+        } else {
+            uint32_t i=((uint32_t)a>>1)&PSRC_HW_MASK;
+            if(!(g_psrc_ldr[i>>3]&(uint8_t)(1u<<(i&7u)))) continue;
+            imm=(int32_t)g_psrc_imm[i];
+        }
+        if((a&~3)+4*imm+4==(int32_t)fpk) return 1;
     }
     return 0;
 }
@@ -681,15 +690,26 @@ static uint8_t hy_src_peek(SA*s, int32_t fp){
     if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
     return 0;
 }
-/* record one pristine source byte at fp into the psrc ring (used by the FWD ldr back-scan).
+static void hy_half_rec(uint32_t a, uint8_t lo, uint8_t hi){
+    uint32_t i=(a>>1)&PSRC_HW_MASK;
+    uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
+    g_psrc_imm[i]=lo;
+    if((up&0xf800)==0x4800) g_psrc_ldr[i>>3]|=(uint8_t)(1u<<(i&7u));
+    else g_psrc_ldr[i>>3]&=(uint8_t)~(1u<<(i&7u));
+}
+/* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
 static void hy_src_rec(SA*s, int32_t fp, uint8_t v){
     (void)s;
-    if(fp>=0 && (uint32_t)fp<g_from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
+    if(fp>=0 && (uint32_t)fp<g_from_size){
+        uint32_t a=(uint32_t)fp, i=(a>>1)&PSRC_HW_MASK;
+        if(a&1u) hy_half_rec(a-1u, g_psrc_imm[i], v);
+        else { g_psrc_imm[i]=v; g_psrc_ldr[i>>3]&=(uint8_t)~(1u<<(i&7u)); }
+    }
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
- * pristine read into the psrc ring (used by the FWD ldr back-scan). */
+ * pristine read into the packed FWD ldr metadata. */
 static uint8_t hy_src(SA*s, int32_t fp){
     uint8_t v=hy_src_peek(s,fp);
     hy_src_rec(s,fp,v);
@@ -706,8 +726,8 @@ static uint32_t hy_word4_peek(SA*s, uint32_t fpk){
  * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
  * gate would always pass — record straight into the 4 ring slots (the window cannot self-alias). */
 static void hy_word4_rec(uint32_t fpk, uint32_t w){
-    g_psrc[ fpk     & PSRC_MASK]=(uint8_t)w;       g_psrc[(fpk+1u)&PSRC_MASK]=(uint8_t)(w>>8);
-    g_psrc[(fpk+2u)&PSRC_MASK]=(uint8_t)(w>>16);   g_psrc[(fpk+3u)&PSRC_MASK]=(uint8_t)(w>>24);
+    hy_half_rec(fpk,     (uint8_t)w,       (uint8_t)(w>>8));
+    hy_half_rec(fpk+2u,  (uint8_t)(w>>16), (uint8_t)(w>>24));
 }
 /* de-reloc field at op-local field-start ks. Returns: 0=no field; 1=bl/ex (packed4 filled,
  * a value consumed from the generator); 2=suppressed-bl (write the 4 bytes as NORMAL copies).

@@ -20,9 +20,9 @@ DIVSUF := libdivsufsort/divsufsort.c
 BASE_FULL_TOTAL ?= 4595773
 BASE_ONEFACE_GROW ?= 873
 BASE_ONEFACE_REVERT ?= 582
-BASE_ARM_TEXT ?= 4900
+BASE_ARM_TEXT ?= 4988
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10720
+BASE_ARM_BSS ?= 10272
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-corpus gate
