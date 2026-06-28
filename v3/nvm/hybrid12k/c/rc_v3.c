@@ -67,29 +67,18 @@ static uint8_t  g_dec_done, g_dec_err;     /* set when the decode coroutine retu
 /* ===================================================================================== */
 /* Coroutine: a context is just a saved stack pointer (+ callee-saved regs spilled onto    */
 /* its own stack at the swap point) — a few words on a real Cortex-M0+ (PendSV-style swap, */
-/* ~16 B static for the two SP slots). glibc ucontext_t is 968 B of HOST bloat that does    */
-/* not exist on the device, so we use a MINIMAL fiber on x86-64 (the test arch) — the host  */
-/* SRAM number then reflects the true device cost. The ARM device build also uses the fiber */
-/* (no ucontext.h on bare metal). RC_V3_USE_UCONTEXT forces the glibc path if ever needed.  */
+/* ~16 B static for the two SP slots). The x86-64 host (the test arch) uses the same        */
+/* MINIMAL SP-fiber so the host SRAM number reflects the true device cost; the ARM device   */
+/* build also uses the fiber (no ucontext.h on bare metal).                                 */
 /*                                                                                         */
-/* Two implementations share one interface (CO_SWAP_TO_MAIN / CO_SWAP_TO_DEC + fiber_setup):*/
-/*   - SP-fiber  (x86-64 host AND RC_V3_ARM device): a context is one saved stack pointer.  */
-/*     Common to both is the Fiber type, the two SP slots, decode_body, and the trampoline; */
-/*     they differ only in the swap mechanism (real naked asm on x86 vs the device's PendSV,*/
-/*     stubbed here for static sizing) and the initial frame fiber_setup lays down.         */
-/*   - ucontext  (host fallback if RC_V3_USE_UCONTEXT): glibc swapcontext, host-only.        */
+/* The two arches share one interface (CO_SWAP_TO_MAIN / CO_SWAP_TO_DEC + fiber_setup): a   */
+/* context is one saved stack pointer. Common to both is the Fiber type, the two SP slots,  */
+/* decode_body, and the trampoline; they differ only in the swap mechanism (real naked asm  */
+/* on x86 vs the device's PendSV, stubbed here for static sizing) and the initial frame      */
+/* fiber_setup lays down.                                                                   */
 /* ===================================================================================== */
-/* Pick the SP-fiber core for the ARM device build and for the x86-64 host (unless the host is
- * explicitly forced onto glibc ucontext). Everything else falls back to ucontext. */
-#if defined(RC_V3_ARM) || (defined(__x86_64__) && !defined(RC_V3_USE_UCONTEXT))
-#define RC_V3_SP_FIBER 1
-#else
-#define RC_V3_SP_FIBER 0
-#endif
-
 static void decode_body(void);
 
-#if RC_V3_SP_FIBER
 /* --- shared SP-fiber core (x86 host + ARM device) --- */
 typedef void* Fiber;                       /* a context is just a saved stack pointer */
 static Fiber g_main_sp, g_dec_sp;
@@ -130,18 +119,6 @@ static void fiber_setup(void){
 }
 #define CO_SWAP_TO_MAIN()  pd_swap(&g_dec_sp,&g_main_sp)
 #define CO_SWAP_TO_DEC()   pd_swap(&g_main_sp,&g_dec_sp)
-#endif
-
-#else /* ucontext host fallback (RC_V3_USE_UCONTEXT, no SP-fiber arch) */
-#include <ucontext.h>
-static ucontext_t g_main_ctx, g_dec_ctx;
-static void fiber_setup(void){
-    getcontext(&g_dec_ctx);
-    g_dec_ctx.uc_stack.ss_sp=g_dec_stack; g_dec_ctx.uc_stack.ss_size=sizeof g_dec_stack;
-    g_dec_ctx.uc_link=&g_main_ctx; makecontext(&g_dec_ctx, decode_body, 0);
-}
-#define CO_SWAP_TO_MAIN()  swapcontext(&g_dec_ctx,&g_main_ctx)
-#define CO_SWAP_TO_DEC()   swapcontext(&g_main_ctx,&g_dec_ctx)
 #endif
 
 /* next_byte(): pull one byte; if the FIFO is empty, suspend back to the producer (block). */
@@ -205,13 +182,13 @@ static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     uint32_t v=1; for(int i=0;i<n;i++) v=(v<<1)|s_raw(); return v-1u; }
 /* ---- bit-tree byte ---- */
-static int s_bt(BitTree*t){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],t->rate); return m-256; }
+static int s_bt(BitTree*t,int rate){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m],rate); return m-256; }
 /* ---- ByteVarint (pack_size) ---- */
-static int32_t s_bv(BitTree*t){
-    int b0=s_bt(t); int sgn=b0&0x40; uint32_t val=b0&0x3f; int off=6;
+static int32_t s_bv(BitTree*t,int rate){
+    int b0=s_bt(t,rate); int sgn=b0&0x40; uint32_t val=b0&0x3f; int off=6;
     while(b0&0x80){
         if(off>28){ g_rcerr=1; return 0; }
-        b0=s_bt(t);
+        b0=s_bt(t,rate);
         uint32_t chunk=(uint32_t)(b0&0x7f);
         if(off>=32 || chunk>=(1u<<(32-off))){ g_rcerr=1; return 0; }
         val|=chunk<<off; off+=7;
@@ -291,6 +268,19 @@ static uint32_t s_ug_rice(UGRice*g){
 static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_ug_unary(g->u,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant(&g->m[ugg_base[UG_C(cl)]],cl)) - 1u;
+}
+/* MTF dict-index model: a lean adaptive UNARY code (replaces the per-stream UGGamma, ~60B each).
+ * The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one, ~10% two, with a thin tail
+ * to ~140 worst case. Unary fits this concentration: emit v continue-bits then a stop-bit, each on
+ * the per-position prior idx[min(pos,IDX_CTX-1)]; tail positions share the last prior so the model
+ * stays tiny. IDX_CTX=5 is the corpus optimum (4/6/8/16 all code worse: too few distinct head priors
+ * or too-sparse tail priors). `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
+#define IDX_CTX 5
+typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
+static void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+static uint32_t s_idx(IdxUnary*g,uint32_t cap){
+    uint32_t v=0; while(s_bit(&g->u[v<IDX_CTX?v:IDX_CTX-1])==1){ if(++v>cap){ g_rcerr=1; return 0; } }
+    return v;
 }
 /* ---- order-2 flag ---- */
 static int s_flag(Flag1*f){ int b=s_bit(&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
@@ -494,7 +484,7 @@ static UGGamma M_pg2;            /* preserve/correction REST gaps (2nd..Nth), SH
 static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz(adj). Were raw dz
                                   * (no model); their bit-length distributions are concentrated, so an
                                   * adaptive gamma UGolomb beats the fixed raw code. */
-static UGGamma M_dibl, M_diex;   /* BL/EX MTF dict indices */
+static IdxUnary M_dibl, M_diex;  /* BL/EX MTF dict indices (lean unary code) */
 /* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
  * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
@@ -552,17 +542,17 @@ static void dr_init(DRStream*d, int32_t*dic, int cap){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value via M_dval; insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(DRStream*d, UGGamma*gix){
+static int32_t pull_delta(DRStream*d, IdxUnary*gix){
     { int ri=d->rh | (d->last==0 ? 2 : 0);
       int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return d->last; }   /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
-        uint32_t j=s_ug_gamma(gix)+1u;                  /* cmp-1: dict idx 0 unreachable -> encode j-1 */
+        uint32_t j=s_idx(gix,d->cap)+1u;                /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
         v=d->dic[j];
         if(j){ int32_t t=d->dic[j]; memmove(&d->dic[1], &d->dic[0], (size_t)j * sizeof(d->dic[0])); d->dic[0]=t; }
     } else {
-        v=s_bv(&M_dval);
+        v=s_bv(&M_dval, 4);
         if(d->K>=d->cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
         memmove(&d->dic[1], &d->dic[0], (size_t)d->K * sizeof(d->dic[0]));
         d->dic[0]=v; d->K++;
@@ -647,7 +637,7 @@ static uint8_t sa_next_content(SA*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
-            int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)]);
+            int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?4:5);
             g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
             if(s->span_left==0) s->tok_mode=0;
@@ -829,7 +819,7 @@ static void sa_apply_op(SA*s){
             if(gap>UINT32_MAX-coff){ s->err=1; return; }
             coff+=gap;
             if(coff>=nwu){ s->err=1; return; }
-            int cbyte=s_bt(&M_dval);
+            int cbyte=s_bt(&M_dval, 4);
             s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
     if(s->err||g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
@@ -879,8 +869,8 @@ static void decode_body(void){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init_rate(&M_dval,4); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
-    ugg_init_u(&M_dibl, RC_PBIT-RC_PBIT/4); ugg_init_u(&M_diex, RC_PBIT-RC_PBIT/4);  /* seed toward STOP */
+    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_KCAP_BL); dr_init(&DR_EX, DR_DIC_EX, DR_KCAP_EX);
+    idx_init(&M_dibl, RC_PBIT-RC_PBIT/4); idx_init(&M_diex, RC_PBIT-RC_PBIT/4);  /* seed toward STOP (idx 0) */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -903,7 +893,9 @@ static void decode_body(void){
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_err=1; goto done; }
       s->tok_left=nseq; s->tok_mode=0;
       for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
-      if(!s->err && (s->tp!=(s->FWD?(int32_t)g_to_size:0) || s->fp!=(s->FWD?(int32_t)g_fp_end:0))) s->err=1;
+      /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
+       * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
+      if(!s->err && (s->tp!=(s->FWD?(int32_t)g_to_size:0) || (!s->FWD && s->fp!=0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
       if(s->err||g_rcerr){ g_dec_err=1; goto done; }
       orow_commit();                       /* flush the last resident output row */
@@ -923,10 +915,10 @@ done:
 /* ===================================================================================== */
 enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
 
-static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w,uint8_t rate){
+static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    t->rate=rate; t->p[0]=RC_PHALF;
+    t->p[0]=RC_PHALF;
     for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
         t->p[m]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
 }
@@ -942,8 +934,8 @@ static int decoder_init(void){
         uint32_t *w=hist1+256;                       /* [512..1024) -> 4 KiB total, fits ARENA */
         for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
         for(uint32_t i=0;i<g_from_size;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
-        for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w,5);
-        lit_tree_from_hist(&M_lit1,hist1,w,4);
+        for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
+        lit_tree_from_hist(&M_lit1,hist1,w);
     }
     g_litprev=0;
 #ifdef RC_V3_STACKMEAS
@@ -1013,13 +1005,14 @@ int main(int argc,char**argv){
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
     uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
-    /* parse plaintext header: CRC32(from)[4] | from_size | to_size | fp_end */
+    /* parse plaintext header: CRC32(from)[4] | from_size | to_size | [fp_end iff to_size>from_size] */
     uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
     size_t p=4; int err=0;
     uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
         do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
     { uint32_t v=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); to_size=v; }
-    { uint32_t v=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); fp_end=v; }
+    /* fp_end is the grow (!FWD) start seed; FWD/shrink/equal patches omit it (computed inline). */
+    if(to_size>from_size){ uint32_t v=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); fp_end=v; }
     if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
     /* host-harness sanity (fuzz-hardening): an implausibly large size field would make nvm_init malloc
      * a huge span. Real images are <1 MiB; reject >64 MiB up front. (Device has no malloc; host-only.) */

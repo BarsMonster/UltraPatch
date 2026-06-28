@@ -1312,7 +1312,7 @@ static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t fro
 /* ------------------------------------------------------------------------------------- */
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
-typedef struct { uint16_t p[256]; uint8_t rate; } BTE;
+typedef struct { uint16_t p[256]; } BTE;   /* rate is NOT stored per-tree; passed per call (see rc_models.h) */
 typedef struct { uint16_t m[4]; int h; } FLE;
 typedef struct { BTE t; } BVE;
 typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
@@ -1379,24 +1379,24 @@ static void w_gamma(REnc *r, uint32_t m) {
 
 static void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
 
-static void bt_init_rate_e(BTE *t, int rate) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; t->rate = (uint8_t)rate; }
+static void bt_init_e(BTE *t) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; }
 
-static void bt_encode(BTE *t, REnc *r, uint8_t byte) {
+static void bt_encode(BTE *t, REnc *r, uint8_t byte, int rate) {
     int m = 1;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        re_bit(r, &t->p[m], bit, t->rate);
+        re_bit(r, &t->p[m], bit, rate);
         m = (m << 1) | bit;
     }
 }
 
-static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t, int rate) {
+static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t) {
     uint32_t hist[256], w[512];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
     for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
     for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
-    t->p[0] = RC_PHALF; t->rate = (uint8_t)rate;
+    t->p[0] = RC_PHALF;
     for (int m = 1; m < 256; m++) {
         uint32_t num = w[2*m], den = w[m];
         uint32_t pr = den ? (2u * RC_PBIT * num + den) / (2u * den) : RC_PHALF;
@@ -1416,11 +1416,6 @@ static void ug_seed_cont_e(UGE *g, int depth) {
     for (int i = 0; i < depth && i <= UG_CTX; i++) g->u[i] = (uint16_t)(RC_PBIT / 16);
 }
 
-/* mirror of decoder ugg_seed_stop: bias every unary position toward stop (bit 0). */
-static void ug_seed_stop_e(UGE *g) {
-    for (int i = 0; i <= UG_CTX; i++) g->u[i] = (uint16_t)(RC_PBIT - RC_PBIT / 4);
-}
-
 static void ug_encode(UGE *g, REnc *r, uint32_t v) {
     uint32_t cl;
     if (g->code == 'r') {
@@ -1435,6 +1430,16 @@ static void ug_encode(UGE *g, REnc *r, uint32_t v) {
         re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
         for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
     }
+}
+
+/* MTF dict-index model (mirror of decoder IdxUnary/s_idx): a lean adaptive UNARY code. The encoded
+ * index value v is ~54% zero; unary fits that concentration and drops the per-stream UGGamma. */
+#define IDX_CTX 5
+typedef struct { uint16_t u[IDX_CTX]; } IDXE;
+static void idx_init_e(IDXE *g, uint16_t seed) { for (int i = 0; i < IDX_CTX; i++) g->u[i] = seed; }
+static void idx_encode(IDXE *g, REnc *r, uint32_t v) {
+    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
+    re_bit(r, &g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
 }
 
 static void fl_init_e(FLE *f) { for (int i = 0; i < 4; i++) f->m[i] = RC_PHALF; f->h = 0; }
@@ -1616,8 +1621,8 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     BTE lit0[LIT0_CTX], lit1;            /* mirror the wire's order-1 tag0 trees + single tag1 tree */
     FLE flag;
     UGE gs, gl, gd;
-    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c], 5);
-    lit_tree_seed_e(frm, from_size, 1, &lit1, 4);
+    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
+    lit_tree_seed_e(frm, from_size, 1, &lit1);
     fl_init_e(&flag);
     ug_init_e(&gd, 'r', dk);
     ug_init_e(&gl, 'g', 0);
@@ -1636,7 +1641,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
             for (int32_t j = 0; j < t.len; j++) {
                 size_t cp = (size_t)t.start + (size_t)j;
                 uint8_t byte = content[cp];
-                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte);
+                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte, tags[cp] ? 4 : 5);
                 prevlit = byte;
             }
         } else {
@@ -2035,7 +2040,7 @@ static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uin
 static void bv_encode(BVE *v, REnc *r, int64_t x) {
     Buf tmp = {0};
     put_pack_size(&tmp, x);
-    for (size_t i = 0; i < tmp.n; i++) bt_encode(&v->t, r, tmp.d[i]);
+    for (size_t i = 0; i < tmp.n; i++) bt_encode(&v->t, r, tmp.d[i], 4);
     buf_free(&tmp);
 }
 
@@ -2049,7 +2054,8 @@ typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
     BVE dval;
-    UGE tc, gd, gl, gs, pg, pgn, pg2, gdl, gel, gadj, dibl, diex;
+    UGE tc, gd, gl, gs, pg, pgn, pg2, gdl, gel, gadj;
+    IDXE dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
     uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror rc_v3.c M_rep0/g_lastdist) */
@@ -2057,7 +2063,7 @@ typedef struct {
 
 static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
-    UGE *gix = kind == EV_BL ? &M->dibl : &M->diex;
+    IDXE *gix = kind == EV_BL ? &M->dibl : &M->diex;
     int ri = D->rh | (D->last == 0 ? 2 : 0);
     if (delta == D->last) {
         re_bit(r, &D->rep[ri], 1, RC_S_BIT_RATE);
@@ -2072,7 +2078,7 @@ static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
     if (j >= 0) {
         if (j == 0) die("unexpected delta dict index 0");
         re_bit(r, &D->hit, 1, RC_S_BIT_RATE);
-        ug_encode(gix, r, (uint32_t)(j - 1));
+        idx_encode(gix, r, (uint32_t)(j - 1));
         int64_t t = D->dic[j];
         for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
         D->dic[0] = t;
@@ -2098,7 +2104,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     for (size_t i = 0; i < pc->corr.n; i++) {
         ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
         prev = pc->corr.v[i].off;
-        bt_encode(&M->dval.t, r, pc->corr.v[i].byte);
+        bt_encode(&M->dval.t, r, pc->corr.v[i].byte, 4);
     }
 }
 
@@ -2112,10 +2118,10 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
                      const size_t *ends, const InjVec *inj) {
     Models M;
     memset(&M, 0, sizeof(M));
-    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c], 5);
-    lit_tree_seed_e(frm, from_size, 1, &M.lit1, 4);
+    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
+    lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init_e(&M.flag);
-    bt_init_rate_e(&M.dval.t, 4);
+    bt_init_e(&M.dval.t);
     ug_init_e(&M.tc, 'r', 11);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
@@ -2129,10 +2135,8 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    ug_init_e(&M.dibl, 'g', 0);
-    ug_init_e(&M.diex, 'g', 0);
-    ug_seed_stop_e(&M.dibl);
-    ug_seed_stop_e(&M.diex);
+    idx_init_e(&M.dibl, (uint16_t)(RC_PBIT - RC_PBIT / 4));
+    idx_init_e(&M.diex, (uint16_t)(RC_PBIT - RC_PBIT / 4));
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */
@@ -2164,7 +2168,7 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
             if (tok_mode == 'S') { \
                 for (size_t _em_i = 0; _em_i < nn; _em_i++) { \
                     uint8_t byte = content->d[(size_t)cur.start + span_pos + _em_i]; \
-                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte); \
+                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte, tags->d[pos] ? 4 : 5); \
                     prevlit = byte; pos++; \
                 } \
                 span_pos += nn; \
@@ -2282,7 +2286,12 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);
     put_uleb(&blob, to_size);
-    put_uleb(&blob, (uint32_t)fp_end_s);
+    /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
+     * grow (!FWD) direction. The decoder learns the direction from sizes (FWD == to_size<=from_size).
+     * For FWD it computes s->fp incrementally from 0, so fp_end is only a redundant end-check there
+     * (CRC32(to) already validates) — omit it. For grow it is load-bearing (the start seed), so we
+     * still emit it. Saves the fp_end uLEB on every FWD/shrink/equal patch (e.g. one-face revert). */
+    if (to_size > from_size) put_uleb(&blob, (uint32_t)fp_end_s);
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
      * information; the decoder used to skip it in rc_init. Drop it on the wire (-1 B/patch).

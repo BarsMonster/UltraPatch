@@ -23,17 +23,17 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,227 B, data 0 B, bss 11,776 B (<= 12 KiB cap, 512 B margin) |
+| ARM object at `SA_W=10` | text 5,203 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,644,694 B**.
-- W=10 non-self corpus total: **4,644,147 B**.
+- W=10 full 16x16 corpus total: **4,644,313 B**.
+- W=10 non-self corpus total: **4,643,782 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **874 B**
-  - `v1_one_face -> v0_base`: **586 B**
+  - `v0_base -> v1_one_face`: **873 B**
+  - `v1_one_face -> v0_base`: **582 B**
 
 ## Architecture
 
@@ -56,7 +56,9 @@ from-image histogram. Per-op geometry (diff/extra length, source skip) uses
 dedicated adaptive Golomb models rather than a fixed raw code; the preserve and
 correction counts/gaps share one set of Golomb models (their distributions
 coincide, which also frees decoder RAM). The relocation-delta MTF dictionary
-indices are Golomb-coded with priors seeded toward the most-recent entry.
+indices are coded with a lean adaptive UNARY model (`IdxUnary`, five per-position
+priors seeded toward the most-recent entry): the index is ~54% zero, so unary
+beats the former Golomb here while dropping the per-stream gamma model state.
 Match distances carry an adaptive `rep0` reuse flag, contexted order-1 on the
 previous reuse outcome (reuse runs cluster): when a match repeats the
 immediately-previous match distance the value is omitted and the decoder reuses
@@ -94,9 +96,13 @@ The per-op de-relocation field reader peeks the four field bytes once (reused fo
 the Thumb-BL pattern test, the BL/EX pack, and the ldr-derive ring record) instead
 of re-reading them two or three times, and the coroutine layer is expressed as one
 shared saved-stack-pointer fiber core (host x86 and the ARM device differ only in
-the swap primitive) with a ucontext host fallback rather than three near-duplicate
-`#if` branches; both are bit-exact decoder simplifications (the ARM object is
-byte-identical apart from the field-reader's 12 B text saving). The `rep0`
+the swap primitive — the dead ucontext host fallback was removed since the only two
+real targets are the x86-64 host and the ARM device); both are bit-exact decoder
+simplifications. The bit-tree adaptation `rate` (lit0=5, lit1=4, dval=4) is a
+compile-time constant per call site, so it is no longer stored per-tree (the
+`BitTree`/`BTE` struct drops its `rate` byte, −16 B `.bss`); and the plaintext
+header omits the `fp_end` seed on FWD/shrink/equal patches where it is redundant
+with `CRC32(to)` (load-bearing only for the grow direction). The `rep0`
 last-distance reuse prior is seeded at 1/4 (was 1/8): a paired min-over-pairs corpus
 sweep places the optimum that does not regress the real one-face product patch at
 1/4 (3/8 helps the corpus aggregate more but costs the one-face update +1/+1 B).
