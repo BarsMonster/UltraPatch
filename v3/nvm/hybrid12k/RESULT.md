@@ -23,14 +23,14 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,203 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
+| ARM object at `SA_W=10` | text 5,159 B, data 0 B, bss 11,664 B (<= 12 KiB cap, 624 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,644,313 B**.
-- W=10 non-self corpus total: **4,643,782 B**.
+- W=10 full 16x16 corpus total: **4,595,908 B**.
+- W=10 non-self corpus total: **4,595,377 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **873 B**
   - `v1_one_face -> v0_base`: **582 B**
@@ -110,7 +110,18 @@ The host parse adds a `kd` (rice-parameter) anneal probe: `fit_k_tokens` minimis
 the rice codelength of the raw distances, but the shipped cost is the adaptive
 `M_gd` encode seeded at `k`, so the encoder probes `kd` outward in each direction
 under the exact full-body byte gate and keeps any strict improvement (encoder-only;
-the wire is unchanged).
+the wire is unchanged). The bsdiff seed pass weights matched bytes 3:1 (was 2:1)
+when growing each op's diff region over the following literal `extra` run, so cheap
+near-zero diff bytes are preferred to fresh literals and the downstream split feeds
+on better material; and the priced LZ DP carries two arrival variants per state (the
+cheapest arrival plus the cheapest arrival holding a *different* rep distance) so a
+later `rep0` reuse can be exploited — both encoder-only, the wire unchanged, and
+together they cut the corpus total by ~1.0%. On the decoder side three further
+bit-exact simplifications shrink the object: the per-op correction lookup is a
+linear scan over the count-bounded array (the offsets are unique, so it returns the
+same value the binary search did), the literal-patch cursor folds its FWD/grow
+first-read and advance onto one `base`/`step` helper, and the de-relocation field
+dispatch collapses its two unrolled 4-byte loops into one.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -128,7 +139,7 @@ make check-corpus
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `874` and `586`
+prints the real one-face blob sizes. Expected blob sizes are `873` and `582`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.

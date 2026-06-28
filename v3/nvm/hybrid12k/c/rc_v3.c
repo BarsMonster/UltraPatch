@@ -593,12 +593,11 @@ static int32_t bb_unzz(uint32_t u){
     if(u==0xffffffffu){ g_rcerr=1; return 0; }
     return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
 }
-/* correction lookup by op-local write-offset (sorted small array; binary search) */
+/* correction lookup by op-local write-offset (small array; unique offsets => linear scan) */
 static int32_t corr_at(SA*s, int32_t off){
-    int32_t lo=0,hi=s->op_nc-1;
-    while(lo<=hi){ int32_t m=(int32_t)(((unsigned)lo+(unsigned)hi)>>1); int32_t o=(int32_t)(s->op_corr[m]>>8);
-        if(o==off) return (int32_t)(s->op_corr[m]&0xffu);
-        if(o<off) lo=m+1; else hi=m-1; }
+    for(int32_t i=0;i<s->op_nc;i++){
+        if((int32_t)(s->op_corr[i]>>8)==off) return (int32_t)(s->op_corr[i]&0xffu);
+    }
     return 0;
 }
 /* A1 ldr-derive: a 1024-byte ring of recently-read PRISTINE source bytes (psrc[a&1023] = pristine
@@ -627,7 +626,7 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
         uint16_t up = s ? (uint16_t)(hy_src(s,a) | (hy_src(s,a+1)<<8))
                         : (uint16_t)(g_psrc[(uint32_t)a&PSRC_MASK] | (g_psrc[((uint32_t)a+1u)&PSRC_MASK]<<8));
-        if((up&0xf800)==0x4800){ int32_t t=(a&~3)+4*(int32_t)(up&0xff)+4; if(t==(int32_t)fpk) return 1; }
+        if((up&0xf800)==0x4800 && (a&~3)+4*(int32_t)(up&0xff)+4==(int32_t)fpk) return 1;
     }
     return 0;
 }
@@ -752,16 +751,23 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
  * so these inline to the same straight-line code the former LITCUR_/WR_ macros produced (the per-
  * direction branch folds away) — but with named typed parameters and no hidden mutation of enclosing
  * locals. The cursor advances in wire order regardless of write direction. */
-typedef struct { int32_t nextpos, litb, li; } LitCur;
-__attribute__((always_inline)) static inline void litcur_init(SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
-    lc->nextpos=-1; lc->litb=0; lc->li=0;
-    if(nl>0){ int32_t g0=(int32_t)sa_read_uleb(s);
-        lc->nextpos = fwd ? g0 : (dl-g0); lc->litb=sa_next_content(s,0); }
-}
-__attribute__((always_inline)) static inline void litcur_next(SA*s, LitCur*lc, int fwd, int32_t nl){
+/* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
+ * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
+ * back from dl (first = dl - gap, then -= gap). `base` (0 for FWD, dl for grow) and `step` (+1/-1)
+ * make the first patch and every later patch share one advance path; nextpos=-1 marks "no more". */
+typedef struct { int32_t nextpos, litb, li, base, step; } LitCur;
+__attribute__((always_inline)) static inline void litcur_step(SA*s, LitCur*lc, int32_t nl){
     if(lc->li<nl){ int32_t g=(int32_t)sa_read_uleb(s);
-        lc->nextpos += fwd ? g : -g; lc->litb=sa_next_content(s,0); }
+        lc->nextpos += lc->step*g; lc->litb=sa_next_content(s,0); }
     else lc->nextpos=-1;
+}
+__attribute__((always_inline)) static inline void litcur_init(SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
+    lc->base = fwd ? 0 : dl; lc->step = fwd ? 1 : -1;
+    lc->nextpos = lc->base; lc->litb=0; lc->li=0;
+    litcur_step(s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
+}
+__attribute__((always_inline)) static inline void litcur_next(SA*s, LitCur*lc, int32_t nl){
+    litcur_step(s, lc, nl);
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
 __attribute__((always_inline)) static inline void wr_extras(SA*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
@@ -772,9 +778,9 @@ __attribute__((always_inline)) static inline void wr_extras(SA*s, int fwd, int32
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-__attribute__((always_inline)) static inline void wr_copy(SA*s, LitCur*lc, int fwd, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+__attribute__((always_inline)) static inline void wr_copy(SA*s, LitCur*lc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
-    if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(s,lc,fwd,nl); }
+    if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(s,lc,nl); }
     out_write((uint32_t)(tp0+K), (uint8_t)(db + hy_src(s,fp0+K) + corr_at(s,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
@@ -847,10 +853,15 @@ static void sa_apply_op(SA*s){
         if(a0>=0 && a0+4<=dl){
             int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
             int fa=field_at(s, fp0, a0, packed, pure, dl);
-            if(fa==2){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) wr_copy(s, &lc, fwd, tp0, fp0, nl, a0+b); k+=4*step; continue; }
-            if(fa==1){ for(int b=fwd?0:3; b>=0 && b<4; b+=step) out_write((uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_at(s,a0+b))); k+=4*step; continue; }
+            if(fa){
+                for(int b=fwd?0:3; b>=0 && b<4; b+=step){
+                    if(fa==2) wr_copy(s, &lc, tp0, fp0, nl, a0+b);
+                    else out_write((uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_at(s,a0+b)));
+                }
+                k+=4*step; continue;
+            }
         }
-        wr_copy(s, &lc, fwd, tp0, fp0, nl, k); k+=step;
+        wr_copy(s, &lc, tp0, fp0, nl, k); k+=step;
     }
     if(fwd) wr_extras(s, fwd, tp0, dl, el);
 }

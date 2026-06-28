@@ -657,7 +657,7 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
     for (int32_t i = 0; (last_scan + i < scan) && (last_pos + i < from_size);) {
         if (from[last_pos + i] == to[last_scan + i]) s++;
         i++;
-        if (s * 2 - i > sf * 2 - diff_size) { sf = s; diff_size = i; }
+        if (s * 3 - i > sf * 3 - diff_size) { sf = s; diff_size = i; }
     }
     int32_t lenb = 0;
     if (scan < to_size) {
@@ -1728,6 +1728,24 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * parse is only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation
  * here can never corrupt the wire -- it only changes which legal parse is tried.
  * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
+/* Relax candidate arrival (cost c, rep rr, prevlit b, token v, predecessor hr) into the two
+ * arrival-variants at base index jb = (j*4 + h')*2. Variant 0 holds the cheapest arrival; variant 1
+ * holds the cheapest arrival carrying a rep distinct from variant 0's. This keeps a second, possibly
+ * costlier path alive when it carries a rep distance a downstream rep0 reuse can exploit. */
+static void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via, uint8_t *vh,
+                   size_t jb, uint64_t c, int32_t rr, uint8_t b, Token v, uint8_t hr) {
+    if (c < cost[jb]) {
+        /* new cheapest. push old variant 0 down into variant 1 if it had a distinct rep. */
+        if (cost[jb] < cost[jb + 1] && rep[jb] != rr) {
+            cost[jb + 1] = cost[jb]; rep[jb + 1] = rep[jb]; pl[jb + 1] = pl[jb];
+            via[jb + 1] = via[jb]; vh[jb + 1] = vh[jb];
+        }
+        cost[jb] = c; rep[jb] = rr; pl[jb] = b; via[jb] = v; vh[jb] = hr;
+    } else if (rr != rep[jb] && c < cost[jb + 1]) {
+        cost[jb + 1] = c; rep[jb + 1] = rr; pl[jb + 1] = b; via[jb + 1] = v; vh[jb + 1] = hr;
+    }
+}
+
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, const PriceTab *pt,
                                 int W) {
@@ -1750,18 +1768,26 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         reuse_extra[h] = (uint64_t)pt->fmatch_c[h] + pt->rep0_yes;
     }
     const uint64_t INF = UINT64_MAX / 4;
-    /* one state per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1. */
-    size_t ns = (n + 1) * 4;
+    /* Two arrival-variants per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1.
+     * Variant r=0 is the absolute cheapest arrival; r=1 is the cheapest arrival that carries a
+     * DIFFERENT rep distance than r=0. The wire's rep0 reuse makes a match at distance == the
+     * incoming rep cheap (reuse flag, no fresh-distance value), so a slightly-costlier path that
+     * arrives with the rep a downstream match wants can beat the cheapest-cost path that does not.
+     * Keeping the two cheapest distinct-rep arrivals lets the forward DP exploit that. State index
+     * s = (i*4 + h)*2 + r. Encoder-only; the chosen parse is re-checked by the exact byte gate. */
+    size_t nh = (n + 1) * 4;
+    size_t ns = nh * 2;
     uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
     int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
     uint8_t  *pl   = (uint8_t *)xmalloc(ns * sizeof(uint8_t)); /* prevlit byte arriving at state */
     Token *via = (Token *)xcalloc(ns, sizeof(Token));         /* token that arrives at state */
-    uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor h for backtrack */
+    uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor (h<<1|r) for backtrack */
     for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; pl[s] = 0; }
-    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
+    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0, r=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
     for (size_t i = 0; i < n; i++) {
-        for (int h = 0; h < 4; h++) {
-            size_t si = i * 4 + (size_t)h;
+        for (int hr = 0; hr < 8; hr++) {
+            int h = hr >> 1;
+            size_t si = (i * 4 + (size_t)h) * 2 + (size_t)(hr & 1);
             if (cost[si] >= INF) continue;       /* unreachable along any cheap path */
             uint64_t ci = cost[si]; int32_t ri = rep[si];
             /* spans: emit one span flag (kind 0) under context h, then the gamma length and the
@@ -1781,9 +1807,9 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 runbits += tags[j - 1] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(prevb)][byte];
                 prevb = byte;
                 uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
-                size_t sj = j * 4 + (size_t)hs;
-                if (c < cost[sj]) { cost[sj] = c; rep[sj] = ri; pl[sj] = byte; vh[sj] = (uint8_t)h;
-                                    via[sj] = (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }; }
+                size_t jb = (j * 4 + (size_t)hs) * 2;
+                relax2(cost, rep, pl, via, vh, jb, c, ri, byte,
+                       (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
             }
             /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
              * distance equals the incoming rep distance. A match does not emit a literal, so prevlit
@@ -1796,9 +1822,9 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 for (int32_t l = 3; l <= bl; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = mbase + mlen[l];
-                    size_t sj = j * 4 + (size_t)hm;
-                    if (c < cost[sj]) { cost[sj] = c; rep[sj] = bd; pl[sj] = pl[si]; vh[sj] = (uint8_t)h;
-                                        via[sj] = (Token){ 'R', (int32_t)i, l, bd }; }
+                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    relax2(cost, rep, pl, via, vh, jb, c, bd, pl[si],
+                           (Token){ 'R', (int32_t)i, l, bd }, (uint8_t)hr);
                 }
             }
             /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
@@ -1813,23 +1839,26 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 for (size_t l = 3; l <= rl; l++) {
                     size_t j = i + l;
                     uint64_t c = ci + reuse_extra[h] + mlen[l];
-                    size_t sj = j * 4 + (size_t)hm;
-                    if (c < cost[sj]) { cost[sj] = c; rep[sj] = ri; pl[sj] = pl[si]; vh[sj] = (uint8_t)h;
-                                        via[sj] = (Token){ 'R', (int32_t)i, (int32_t)l, ri }; }
+                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    relax2(cost, rep, pl, via, vh, jb, c, ri, pl[si],
+                           (Token){ 'R', (int32_t)i, (int32_t)l, ri }, (uint8_t)hr);
                 }
             }
         }
     }
-    /* reconstruct backward from the cheapest terminal state at position n. */
-    int hbest = 0; uint64_t cbest = INF;
-    for (int h = 0; h < 4; h++) if (cost[n * 4 + (size_t)h] < cbest) { cbest = cost[n * 4 + (size_t)h]; hbest = h; }
+    /* reconstruct backward from the cheapest terminal (h,r) state at position n. */
+    int hrbest = 0; uint64_t cbest = INF;
+    for (int hr = 0; hr < 8; hr++) {
+        size_t s = (n * 4 + (size_t)(hr >> 1)) * 2 + (size_t)(hr & 1);
+        if (cost[s] < cbest) { cbest = cost[s]; hrbest = hr; }
+    }
     TokenVec tv = {0};
-    size_t pos = n; int h = hbest;
+    size_t pos = n; int hr = hrbest;
     while (pos > 0) {
-        size_t s = pos * 4 + (size_t)h;
+        size_t s = (pos * 4 + (size_t)(hr >> 1)) * 2 + (size_t)(hr & 1);
         tok_push(&tv, via[s]);
         pos = (size_t)via[s].start;
-        h = vh[s];
+        hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
     free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(dpr);
