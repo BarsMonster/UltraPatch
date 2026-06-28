@@ -166,7 +166,7 @@ static int s_raw(void){ return rc_decode(RC.range>>1); }
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail (the apply checks err -> clean reject, never crash / never silent-wrong). */
 static uint8_t g_rcerr;
-/* rob-1: distinguishable reject reason (read by the host main / rcv3_reject after a reject). 1 =
+/* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
  * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
  * is bigger than the build was sized for, raise the cap (costs SRAM). 2 = CORRUPT: malformed/truncated
  * stream (bounds, underrun, range-coder overflow). 0 = none. Pure diagnostic; never affects decoding. */
@@ -999,10 +999,6 @@ int  rcv3_init(void){ return decoder_init(); }
 int  rcv3_push(uint8_t b){ return decoder_push(b); }
 int  rcv3_finish(void){ return decoder_finish(); }
 void rcv3_set(uint32_t fs,uint32_t ts,uint32_t fpe,int fwd){ g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_FWD=fwd; }
-uint32_t rcv3_jpeak(void){ return (uint32_t)g_jpage[JPAGE_MAX]; }
-/* rob-1: after a DEC_ERROR, the reject reason — REJ_RESOURCE(1)=cap too small for this firmware
- * (raise a cap, costs SRAM) vs REJ_CORRUPT(2)=malformed stream. See the REJ_* enum. */
-uint8_t rcv3_reject(void){ return g_reject?g_reject:REJ_CORRUPT; }
 #endif
 
 /* ===================================================================================== */
