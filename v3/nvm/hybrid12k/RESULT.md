@@ -23,16 +23,16 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,904 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
+| ARM object at `SA_W=10` | text 4,852 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,595,773 B**.
+- W=10 full 16x16 corpus total: **4,595,597 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **873 B**
-  - `v1_one_face -> v0_base`: **582 B**
+  - `v0_base -> v1_one_face`: **871 B**
+  - `v1_one_face -> v0_base`: **581 B**
 
 ## Architecture
 
@@ -88,8 +88,10 @@ omits the always-zero leading range-coder cache byte (a structural LZMA invarian
 saving one byte per patch. These parse refinements are encoder-only (the wire
 format is unchanged; they only choose a cheaper legal parse), so the no-bake apply,
 NVM write discipline, and divide-free property are untouched. On the decoder side
-the Rice and Gamma readers now share one adaptive unary-prefix and one mantissa
-helper (emitted once instead of duplicated), and the Thumb-BL de-relocation
+the Rice and Gamma readers AND the MTF dict-index reader now share one adaptive
+unary-prefix helper (`s_unary`, parameterised by the prior-array clamp) and the
+Rice/Gamma readers share one mantissa helper (each emitted once instead of
+duplicated), and the Thumb-BL de-relocation
 collapses into a single fused round-trip; both are bit-exact and shrink the object.
 The per-op de-relocation field reader peeks the four field bytes once (reused for
 the Thumb-BL pattern test, the BL/EX pack, and the ldr-derive ring record) instead
@@ -101,7 +103,10 @@ simplifications. The bit-tree adaptation `rate` (lit0=5, lit1=4, dval=4) is a
 compile-time constant per call site, so it is no longer stored per-tree (the
 `BitTree`/`BTE` struct drops its `rate` byte, −16 B `.bss`); and the plaintext
 header omits the `fp_end` seed on FWD/shrink/equal patches where it is redundant
-with `CRC32(to)` (load-bearing only for the grow direction). The `rep0`
+with `CRC32(to)` (load-bearing only for the grow direction), and zigzag-delta-codes the
+surviving `to_size` and `fp_end` against `from_size` (the deltas are tiny — exactly 0 for an
+equal-size update — so they cost far fewer header bytes than absolute uLEBs; `CRC32(from)`/
+`CRC32(to)` stay full-width, so corruption rejection is unchanged). The `rep0`
 last-distance reuse prior is seeded at 1/4 (was 1/8): a paired min-over-pairs corpus
 sweep places the optimum that does not regress the real one-face product patch at
 1/4 (3/8 helps the corpus aggregate more but costs the one-face update +1/+1 B).
@@ -168,7 +173,7 @@ make check-corpus  # 16x16 image matrix (parallel) + corpus total + one-face
 ```
 
 `make check` performs a C-only real-fixture smoke test in both directions and
-prints the real one-face blob sizes. Expected blob sizes are `873` and `582`
+prints the real one-face blob sizes. Expected blob sizes are `871` and `581`
 bytes.
 
 `make check-arm` verifies the Cortex-M0+ object resource gate and divide policy.
@@ -197,9 +202,9 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,904 B, data 0 B, bss 11,296 B (992 B
-margin) and improves the corpus total to 4,580,558 B with the real one-face
-update unchanged at 873/582 B. The 256-pair patch-size split for W=11 vs W=10 is
+now fits the 12 KiB SRAM cap at text 4,852 B, data 0 B, bss 11,296 B (992 B
+margin) and improves the corpus total to 4,580,382 B with the real one-face
+update at 871/581 B. The 256-pair patch-size split for W=11 vs W=10 is
 136 better / 15 worse / 105 equal. Production stays at W=10 to keep the larger
 2,016 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
 
