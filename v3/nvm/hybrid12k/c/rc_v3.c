@@ -41,6 +41,9 @@ extern uint8_t flash_read(uint32_t addr);
 extern void    flash_write(uint32_t addr, uint8_t val);
 extern uint32_t g_image_span;      /* max(from_size,to_size) — bounds every flash access */
 
+static uint32_t g_from_size, g_to_size, g_fp_end;
+static int      g_FWD;
+
 /* ===================================================================================== */
 /* byte FIFO + ucontext coroutine (the push / blocking-fetch core)                        */
 /* ===================================================================================== */
@@ -159,7 +162,7 @@ static int s_raw(void){ return rc_decode(RC.range>>1); }
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail (the apply checks err -> clean reject, never crash / never silent-wrong). */
-static int g_rcerr;
+static uint8_t g_rcerr;
 /* rob-1: distinguishable reject reason (read by the host main / rcv3_reject after a reject). 1 =
  * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
  * is bigger than the build was sized for, raise the cap (costs SRAM). 2 = CORRUPT: malformed/truncated
@@ -174,7 +177,16 @@ static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits (was a duplicate bit loop) */
 /* ---- bit-tree byte ---- */
-static int s_bt(BitTree*t,int rate){ int m=1; for(int i=0;i<8;i++) m=(m<<1)|s_bit_r(&t->p[m-1],rate); return m-256; }
+static int s_bt(BitTree*t,int rate){
+    int m=1;
+    for(int i=0;i<8;i++){
+        uint16_t p=bt_get(t,m-1);
+        int b=s_bit_r(&p,rate);
+        bt_set(t,m-1,p);
+        m=(m<<1)|b;
+    }
+    return m-256;
+}
 /* ---- ByteVarint (pack_size) ---- */
 static int32_t s_bv(BitTree*t,int rate){
     int b0=s_bt(t,rate); int sgn=b0&0x40; uint32_t val=b0&0x3f; int off=6;
@@ -345,14 +357,13 @@ typedef struct {
 /* SA apply state = ring(2^W) + fixed correction arrays + the SA scalar/control fields. A1 derives
  * ldr positions per op and infers suppressed BL from `!pure`, so no ex/sbl offset buffers are
  * resident. The reservation is the two buffer caps (ring 2^W, op_corr 4*OPC_CAP) plus the non-buffer
- * fields: 10 u32 (ototal/tok_left/span_left/br_left/br_src/from_size/to_size/tp/fp/op_nc = 40 B) +
- * 3 u8 (tok_mode/FWD/err) struct-padded to 44 B, rounded to 48 to keep ARENA_BYTES 8-aligned. The
+ * fields: 8 u32 (ototal/tok_left/span_left/br_left/br_src/tp/fp/op_nc = 32 B) +
+ * 2 u8 (tok_mode/err) struct-padded and rounded to 40 B to keep ARENA_BYTES 8-aligned. The
  * _Static_assert(sizeof(SA) <= SA_ARENA) below is the hard guard if a field is ever added. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 40u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
-static uint16_t Jpeak;
 /* page[p] = index of the first slot whose (pos>>16) >= p, for p in [0..JPAGE_MAX].  Since slots
  * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). Every journalled
  * pos is < g_image_span, so a pos with pos>>16 >= JPAGE_MAX exists only for out-of-corpus firmware
@@ -360,7 +371,7 @@ static uint16_t Jpeak;
  * page count is kept: pages above the live span never receive an insert, so their boundaries trail
  * the final sentinel and search empty. */
 static uint16_t g_jpage[JPAGE_MAX+1];
-static void jr_reset(void){ Jpeak=0;
+static void jr_reset(void){
     for(int p=0;p<=JPAGE_MAX;p++) g_jpage[p]=0; }
 /* Binary search for `pos` within its page (pos>>16), comparing the 16-bit low key. Returns the
  * slot index in *at: on a hit *at is the matching slot and the return is 1; on a miss *at is the
@@ -384,8 +395,6 @@ static int jr_put(uint32_t pos, uint8_t b){
     if(at<jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(jcount-at)*3u);
     uint8_t*s=Jbuf+(uint32_t)at*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
     for(uint32_t p=pg+1u;p<=(uint32_t)JPAGE_MAX;p++) g_jpage[p]++;  /* shift higher page boundaries */
-    jcount++;
-    if(jcount>Jpeak) Jpeak=jcount;
     return 0;
 }
 static int jr_get(uint32_t pos, uint8_t*out){
@@ -571,13 +580,12 @@ typedef struct {
     /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
-    uint32_t from_size; int32_t to_size;
     int32_t tp, fp;                               /* running accumulators (apply order) */
     /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
      * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
-    uint8_t FWD, err;
+    uint8_t err;
 } SA;
 /* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase). */
 #define SAst (*(SA*)(ARENA + JREGION))
@@ -672,17 +680,19 @@ static uint32_t sa_read_uleb(SA*s){
 }
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
 static void sa_journal(SA*s, int32_t tp){
-    if(tp>=0 && tp<(int32_t)s->from_size){ if(jr_put((uint32_t)tp, out_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
+    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, out_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
     }
 }
 static uint8_t hy_src_peek(SA*s, int32_t fp){
-    if(fp>=0 && (uint32_t)fp<s->from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp); }
+    (void)s;
+    if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get((uint32_t)fp,&jb)?jb:out_read((uint32_t)fp); }
     return 0;
 }
 /* record one pristine source byte at fp into the psrc ring (used by the FWD ldr back-scan).
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
 static void hy_src_rec(SA*s, int32_t fp, uint8_t v){
-    if(fp>=0 && (uint32_t)fp<s->from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
+    (void)s;
+    if(fp>=0 && (uint32_t)fp<g_from_size) g_psrc[(uint32_t)fp & PSRC_MASK]=v;
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
  * preserves the original byte where the output frontier later overwrote source flash. Records every
@@ -718,7 +728,7 @@ static void hy_word4_rec(uint32_t fpk, uint32_t w){
  * stream, and — matching the original readers — record nothing into the ring). */
 static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     int64_t fpk64=(int64_t)fp0+ks;
-    if(fpk64<0 || fpk64+4>(int64_t)s->from_size) return 0;
+    if(fpk64<0 || fpk64+4>(int64_t)g_from_size) return 0;
     uint32_t fpk=(uint32_t)fpk64;
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(s,fpk);
@@ -734,7 +744,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
      * mirrors the encoder's pure(k) + op_ldr_set; positions are no longer shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
-    if(pure && ldr_targets(s->FWD?NULL:s, fp0, dl, fpk)){
+    if(pure && ldr_targets(g_FWD?NULL:s, fp0, dl, fpk)){
         int32_t delta=pull_delta(&DR_EX, &M_diex);          /* INLINE pull from the single stream */
         hy_word4_rec(fpk,w);                                /* record the 4 EX bytes into the ring */
         pack_s32_buf((w-(uint32_t)delta)&0xffffffffu, packed);
@@ -788,9 +798,9 @@ static void sa_apply_op(SA*s){
     int64_t nw=(int64_t)dl+el;
     if(nw<0 || nw>(int64_t)g_image_span){ s->err=1; return; }
     int32_t tp0,fp0;
-    if(s->FWD){
+    if(g_FWD){
         int64_t ntp=(int64_t)s->tp+nw, nfp=(int64_t)s->fp+dl+adj;
-        if(ntp>(int64_t)s->to_size || nfp<INT32_MIN || nfp>INT32_MAX){ s->err=1; return; }
+        if(ntp>(int64_t)g_to_size || nfp<INT32_MIN || nfp>INT32_MAX){ s->err=1; return; }
         tp0=s->tp; fp0=s->fp; s->tp=(int32_t)ntp; s->fp=(int32_t)nfp;
     } else {
         int64_t ntp=(int64_t)s->tp-nw, nfp=(int64_t)s->fp-dl-adj;
@@ -838,7 +848,7 @@ static void sa_apply_op(SA*s){
     int32_t nl=(int32_t)sa_read_uleb(s);
     if(nl<0||nl>dl){ s->err=1; return; }
     uint8_t packed[4];
-    int fwd=s->FWD; int32_t step=fwd?1:-1;
+    int fwd=g_FWD; int32_t step=fwd?1:-1;
     LitCur lc;
     if(!fwd) wr_extras(s, fwd, tp0, dl, el);
     litcur_init(s, &lc, fwd, nl, dl);
@@ -865,9 +875,6 @@ static void sa_apply_op(SA*s){
 /* the decode coroutine entry: runs the whole single-stream decode start-to-finish.        */
 /* Shared state passed via globals (set by decoder_run before swapcontext).                 */
 /* ===================================================================================== */
-static uint32_t g_from_size, g_to_size, g_fp_end;
-static int      g_FWD;
-
 static void decode_body(void){
     g_rcerr=0; g_reject=REJ_NONE;
     rc_init();
@@ -888,7 +895,6 @@ static void decode_body(void){
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
     { SA*s=&SAst; memset(s,0,sizeof*s);
-      s->from_size=g_from_size; s->to_size=(int32_t)g_to_size; s->FWD=g_FWD;
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
       ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
       int kd=(int)s_raw_bits(4);
@@ -903,7 +909,7 @@ static void decode_body(void){
       for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
       /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
        * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
-      if(!s->err && (s->tp!=(s->FWD?(int32_t)g_to_size:0) || (!s->FWD && s->fp!=0))) s->err=1;
+      if(!s->err && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
       if(s->err||g_rcerr){ g_dec_err=1; goto done; }
       orow_commit();                       /* flush the last resident output row */
@@ -927,7 +933,7 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
     for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
-        t->p[m-1]=(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr)); }
+        bt_set(t,m-1,(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr))); }
 }
 
 /* initialize the decoder coroutine; lit_tree seeds from flash. */
@@ -983,7 +989,7 @@ int  rcv3_init(void){ return decoder_init(); }
 int  rcv3_push(uint8_t b){ return decoder_push(b); }
 int  rcv3_finish(void){ return decoder_finish(); }
 void rcv3_set(uint32_t fs,uint32_t ts,uint32_t fpe,int fwd){ g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_FWD=fwd; }
-uint32_t rcv3_jpeak(void){ return (uint32_t)Jpeak; }
+uint32_t rcv3_jpeak(void){ return (uint32_t)g_jpage[JPAGE_MAX]; }
 /* rob-1: after a DEC_ERROR, the reject reason — REJ_RESOURCE(1)=cap too small for this firmware
  * (raise a cap, costs SRAM) vs REJ_CORRUPT(2)=malformed stream. See the REJ_* enum. */
 uint8_t rcv3_reject(void){ return g_reject?g_reject:REJ_CORRUPT; }
@@ -1091,7 +1097,7 @@ int main(int argc,char**argv){
     if(fwrite(g_flash,1,to_size,mf)!=to_size){ fclose(mf); free(g_flash); free(blob); return 1; }
     fflush(mf);
     if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
-    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%d slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",Jpeak,(unsigned)JSLOTS);
+    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",(unsigned)g_jpage[JPAGE_MAX],(unsigned)JSLOTS);
 #ifdef RC_V3_NVM
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
             nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_image_span,(g_image_span+255)/256);

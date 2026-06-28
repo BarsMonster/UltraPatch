@@ -13,12 +13,26 @@
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
 
-/* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as p[0..254].
- * The adaptation-shift rate is NOT stored per-tree (saves SRAM): every call site passes its constant
- * rate explicitly (lit0=5, lit1=4, dval=4) — kept identical in rc_v3.c (decode) and rc_v3_enc.c
- * (encode) for wire-exactness. */
-typedef struct { uint16_t p[255]; } BitTree;
-static inline void bt_init(BitTree*t){ for(int i=0;i<255;i++) t->p[i]=RC_PHALF; }
+/* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
+ * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so the decoder
+ * packs them instead of spending a full uint16_t per node. The adaptation-shift rate is NOT stored
+ * per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5, lit1=4,
+ * dval=4) — kept identical in rc_v3.c (decode) and rc_v3_enc.c (encode) for wire-exactness. */
+#define BT_PROBS 255u
+#define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
+typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;  /* +1 lets accessors read/write 3 bytes */
+static inline uint16_t bt_get(const BitTree*t,int idx){
+    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
+    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
+    return (uint16_t)((v>>sh)&0xfffu);
+}
+static inline void bt_set(BitTree*t,int idx,uint16_t prob){
+    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
+    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
+    v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
+    t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8); t->p[off+2u]=(uint8_t)(v>>16);
+}
+static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) bt_set(t,i,RC_PHALF); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.

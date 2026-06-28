@@ -23,7 +23,7 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 5,083 B, data 0 B, bss 11,632 B (<= 12 KiB cap, 656 B margin) |
+| ARM object at `SA_W=10` | text 5,003 B, data 0 B, bss 10,736 B (<= 12 KiB cap, 1,552 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
@@ -124,8 +124,10 @@ dispatch collapses its two unrolled 4-byte loops into one. Further decoder-only,
 bit-exact cleanup keeps the push FIFO as the single-byte mailbox it really is,
 uses the journal page-table sentinel as the journal count, stores the resident
 output row by base address plus a sentinel, reuses the relocation MTF front entry
-as the repeat-last value, and packs byte-tree probabilities as the logical
-`p[1..255]` nodes only.
+as the repeat-last value, and stores byte-tree probabilities as 12-bit packed
+logical `p[1..255]` nodes. The apply state no longer duplicates the global
+from/to sizes or direction flag, and the journal peak is reported from the
+monotonic page-table sentinel instead of a second counter.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -182,14 +184,12 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 ```
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
-`W=10` / `SA_W=10`. `W=11` was measured at -7.7 KB on the corpus but grows the
-LZSS ring to 2,048 B, pushing `.bss` to 12,800 B and exceeding the 12 KiB SRAM
-cap by 512 B; the geometry-model sharing and the SA-arena slack reclaim together
-freed 224 B but not the ~736 B still needed, and the 1,024 B `ldr`-derive pristine
-ring is irreducible (it equals the ARM `ldr`-literal reach and must hold read-time-
-pristine bytes the preserve journal does not cover), and `g_psrc` provably cannot
-overlay the journal region because the FWD direction uses both simultaneously, so
-`W=10` remains the production maximum.
+`W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
+now fits the 12 KiB SRAM cap at text 5,003 B, data 0 B, bss 11,760 B (528 B
+margin) and improves the corpus total to 4,580,558 B with the real one-face
+update unchanged at 873/582 B. The 256-pair patch-size split for W=11 vs W=10 is
+136 better / 15 worse / 105 equal. Production stays at W=10 to keep the larger
+1,552 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
 
 ## Caps
 
