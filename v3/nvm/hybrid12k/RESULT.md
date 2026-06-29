@@ -176,7 +176,8 @@ overwrite.
 ```sh
 cd /ai_sw/v3/nvm/hybrid12k/c
 make
-make gate          # builds + runs all three gates below, one consolidated summary (~20s)
+make gate          # builds + runs all three gates below, one consolidated summary
+                   # (~8s on a 32-core host; the 256-pair matrix is xargs -P nproc, so it scales with cores)
 ```
 
 `make gate` is the single full-gate command: it builds and runs `check`,

@@ -121,11 +121,12 @@ check-corpus: all
 # and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
 # .bss + divide policy, corpus full total, the real one-face update (grow/revert), matrix
 # round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
-# dumps the three raw blocks so the offending metric is visible. ~20s (dominated by check-corpus).
+# dumps the three raw blocks so the offending metric is visible. Dominated by check-corpus, which is
+# xargs -P nproc, so wall-clock scales with core count (~8s on a 32-core host).
 gate: all
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running full gate: check + check-arm + check-corpus (~20s)..."; \
+	echo "running full gate: check + check-arm + check-corpus (parallel; ~8s on 32 cores)..."; \
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
