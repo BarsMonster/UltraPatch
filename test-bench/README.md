@@ -4,7 +4,9 @@ External firmware worktrees used for benchmarking live here.
 
 `Sensor-Watch/` is ignored by the ultrapatcher repository so local firmware edits and upstream history stay separate from the patcher code.
 
-`images/` and `fixtures/` are local binary corpora used by the A1 verification checks. They are ignored to keep the repository small; the root `Makefile` reads them directly by default.
+`images/` and `fixtures/` are tracked binary corpora used by the A1 verification
+checks. The gate uses 16 matrix images plus the `v0_base` and `v1_one_face`
+fixtures; the root `Makefile` reads them directly by default.
 
 `corpus.sha256` is tracked and pins every `watch.bin` and `watch.elf` required by
 the release gate. Run this after restoring or regenerating the binary corpus:
@@ -13,7 +15,7 @@ the release gate. Run this after restoring or regenerating the binary corpus:
 make check-assets
 ```
 
-Create a deterministic ignored bundle for CI/cache seeding with:
+Create a deterministic standalone bundle, if needed, with:
 
 ```sh
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz

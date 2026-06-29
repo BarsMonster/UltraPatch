@@ -1,8 +1,6 @@
 # External worktrees and toolchains.
 /detools-dev/
 /test-bench/Sensor-Watch/
-/test-bench/images/
-/test-bench/fixtures/
 /arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/
 /armgcc.tar.xz
 /venv/
@@ -33,3 +31,13 @@
 *.uf2
 *.zst
 *.xz
+
+# The release gate corpus is tracked even though firmware binaries are ignored globally.
+!/test-bench/images/
+!/test-bench/images/**/
+!/test-bench/images/**/*.bin
+!/test-bench/images/**/*.elf
+!/test-bench/fixtures/
+!/test-bench/fixtures/**/
+!/test-bench/fixtures/**/*.bin
+!/test-bench/fixtures/**/*.elf

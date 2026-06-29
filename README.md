@@ -26,10 +26,11 @@ make gate
 
 For release notes and artifact provenance, use `docs/release-checklist.md`.
 
-The local binary corpora live outside Git under `test-bench/images` and
-`test-bench/fixtures`. The root `Makefile` uses those paths by default; override
-them with `IMAGES=...`, `FIXTURES=...`, and a matching `CORPUS_MANIFEST=...`
-when running checks elsewhere.
+The binary corpora used by the release gate are tracked under `test-bench/images`
+and `test-bench/fixtures`: 16 matrix images plus the two one-face fixtures. The
+root `Makefile` uses those paths by default; override them with `IMAGES=...`,
+`FIXTURES=...`, and a matching `CORPUS_MANIFEST=...` when running checks
+elsewhere.
 The expected corpus contents are pinned by `test-bench/corpus.sha256`; `make gate`
 runs `make check-assets` before the matrix so a stale or partial corpus fails
 early.
@@ -37,15 +38,14 @@ early.
 suite for malformed envelopes, truncations, appended garbage, and wrong-base
 application.
 
-Create a deterministic corpus bundle from a verified local corpus with:
+Create a deterministic standalone corpus bundle, if needed, with:
 
 ```sh
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
 
-CI restores `test-bench/images` and `test-bench/fixtures` from a cache keyed by
-`test-bench/corpus.sha256`; `make check-assets` rejects a missing or mismatched
-cache before the same `make gate` command runs.
+CI verifies the tracked corpus with `make check-assets` before the same
+`make gate` command runs.
 
 Device integration contract:
 

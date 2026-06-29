@@ -9,7 +9,7 @@ hardware flash validation are external integration work.
 
 - Release commit on `main`.
 - Clean working tree.
-- Pinned corpus assets restored under `test-bench/images` and
+- Pinned corpus assets committed under `test-bench/images` and
   `test-bench/fixtures`.
 - `test-bench/corpus.sha256` committed with the release.
 - ARM GCC/binutils available as documented in `install.md`.
@@ -40,7 +40,7 @@ thresholds.
 
 ## Corpus Bundle
 
-To seed CI or preserve the exact binary gate assets:
+To publish a standalone copy of the exact binary gate assets:
 
 ```sh
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
