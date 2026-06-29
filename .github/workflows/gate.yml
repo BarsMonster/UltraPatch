@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+# Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+# SPDX-License-Identifier: MIT
+
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi \
+            make
+
+      - name: Restore pinned corpus assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            test-bench/images
+            test-bench/fixtures
+          key: a1-corpus-${{ hashFiles('test-bench/corpus.sha256') }}
+
+      - name: Verify corpus assets
+        run: make check-assets
+
+      - name: Run release gate
+        run: make gate

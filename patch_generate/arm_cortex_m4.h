@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef A1_ARM_CORTEX_M4_H
 #define A1_ARM_CORTEX_M4_H
 

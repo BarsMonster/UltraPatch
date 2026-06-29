@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+# Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+# SPDX-License-Identifier: MIT
+
 CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
@@ -26,6 +30,7 @@ DEC_SRCS := patch_apply/demo_patch.c
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
+CORPUS_MANIFEST ?= test-bench/corpus.sha256
 
 BASE_FULL_TOTAL ?= 4595273
 BASE_ONEFACE_GROW ?= 871
@@ -35,7 +40,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10272
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-corpus gate
+.PHONY: all clean check check-arm check-assets check-corpus gate
 
 all: hy_enc hy_dec
 
@@ -102,11 +107,14 @@ check-arm:
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 
+check-assets:
+	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
+
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
 # It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
 # asserted here. Override parallelism with JOBS=N (defaults to nproc).
-check-corpus: all
+check-corpus: all check-assets
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -127,20 +135,23 @@ check-corpus: all
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
-# ONE command for the full gate: builds, runs all three gates (check + check-arm + check-corpus),
+# ONE command for the full gate: builds, verifies corpus assets, and runs the three gates
+# (check + check-arm + check-corpus),
 # and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
 # .bss + divide policy, corpus full total, the real one-face update (grow/revert), matrix
 # round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
-# dumps the three raw blocks so the offending metric is visible. Dominated by check-corpus, which is
+# dumps the raw blocks so the offending metric is visible. Dominated by check-corpus, which is
 # xargs -P nproc, so wall-clock scales with core count (~8s on a 32-core host).
 gate: all
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running full gate: check + check-arm + check-corpus (parallel; ~8s on 32 cores)..."; \
+	echo "running full gate: check-assets + check + check-arm + check-corpus (parallel; ~8s on 32 cores)..."; \
+	$(MAKE) --no-print-directory check-assets >"$$tmp/assets.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
 	echo "==================== A1 FULL GATE ===================="; \
+	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
@@ -156,6 +167,7 @@ gate: all
 		echo "RESULT                   : ALL GATES PASS"; \
 	else \
 		echo "RESULT                   : *** GATE FAILED (rc=$$rc) ***"; \
+		echo "------------------ check-assets ------------------"; cat "$$tmp/assets.txt"; \
 		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \

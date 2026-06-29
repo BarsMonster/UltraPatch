@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
 /* ARM Cortex-M relocation field scanner and packers for the final A1 encoder. */
 #include <stdint.h>
 #include <stdlib.h>

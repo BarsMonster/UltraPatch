@@ -1,4 +1,10 @@
 /*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * A1 host encoder (C) for the patch_apply decoder wire.
  *
  * This is intentionally a host-side encoder: compression-side memory/CPU are

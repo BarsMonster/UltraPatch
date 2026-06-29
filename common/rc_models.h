@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
 /* A1 divide-free range-coder model definitions (shared by decoder + host encoder).
  * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
  * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both

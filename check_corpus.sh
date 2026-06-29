@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+# Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+# SPDX-License-Identifier: MIT
+
 # Fast parallel 16x16 corpus-matrix metrics for the A1 gate.
 #
 # Run from the repository root; needs ./hy_enc and ./hy_dec already built. Prints the eight gate

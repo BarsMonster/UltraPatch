@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
 /* Host demo/gate wrapper for the header-only patch_apply decoder.
  * The reusable device artifact is patch_apply.h; this file owns only file I/O,
  * plaintext patch header/trailer parsing, and the host NVM safety checks. */

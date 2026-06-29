@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ */
+
 #ifndef PATCH_APPLY_H
 #define PATCH_APPLY_H
 /*
