@@ -1,0 +1,133 @@
+/* Host demo/gate wrapper for the header-only patch_apply decoder.
+ * The reusable device artifact is patch_apply.h; this file owns only file I/O,
+ * plaintext patch header/trailer parsing, and the host NVM safety checks. */
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/* SAML22-shaped NVM emulator for the host demo/gate. The reusable decoder only
+ * needs flash_read(), flash_write(), and g_image_span; all emulation and safety
+ * counters live here, outside the production header artifact. */
+#ifndef NVM_PAGE
+#define NVM_PAGE 64u
+#endif
+#ifndef NVM_ROW
+#define NVM_ROW 256u
+#endif
+static uint8_t *g_flash, *g_erasecnt;
+static uint32_t g_flash_n, g_nrows;
+uint32_t g_image_span;
+static long g_erases, g_programs, g_finv;
+static uint32_t g_last_erow;
+static int g_edir, g_ecount;
+
+static void nvm_init(const uint8_t *from, uint32_t from_size, uint32_t span){
+    g_image_span = span; g_flash_n = span;
+    free(g_flash); g_flash = (uint8_t*)malloc(span?span:1);
+    memcpy(g_flash, from, from_size);
+    if(span>from_size) memset(g_flash+from_size, 0xFF, span-from_size);
+    g_erases = g_programs = 0; g_nrows = (span+NVM_ROW-1)/NVM_ROW;
+    g_finv = 0; g_last_erow = 0; g_edir = 0; g_ecount = 0;
+    free(g_erasecnt); g_erasecnt = (uint8_t*)calloc(g_nrows?g_nrows:1, 1);
+}
+uint8_t flash_read(uint32_t a){ return a<g_flash_n ? g_flash[a] : 0xFF; }
+void flash_write(uint32_t a, uint8_t v){
+    if(a>=g_flash_n) return;
+    uint8_t cur = g_flash[a];
+    if(cur == v) return;
+    if((uint8_t)(cur & v) != v){
+        uint32_t row = (a/NVM_ROW)*NVM_ROW, end = row+NVM_ROW; if(end>g_flash_n) end=g_flash_n;
+        memset(g_flash+row, 0xFF, end-row);
+        g_erases++; if(g_erasecnt[a/NVM_ROW]<255) g_erasecnt[a/NVM_ROW]++;
+        uint32_t er = a/NVM_ROW;
+        if(g_ecount){ int d = (er>g_last_erow) ? 1 : (er<g_last_erow ? -1 : 0);
+            if(d){ if(g_edir==0) g_edir=d; else if(d!=g_edir) g_finv++; } }
+        g_last_erow = er; g_ecount++;
+    }
+    g_flash[a] = v; g_programs++;
+}
+static long nvm_erases(void){ return g_erases; }
+static long nvm_programs(void){ return g_programs; }
+static uint32_t nvm_rows(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>0); return n; }
+static uint32_t nvm_rows_amplified(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>1); return n; }
+static uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<g_nrows;i++) if(g_erasecnt[i]>m) m=g_erasecnt[i]; return m; }
+static long nvm_frontier_inversions(void){ return g_finv; }
+
+#include "patch_apply.h"
+
+int main(int argc,char**argv){
+    if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
+    int byte_mode = (argc==4);   /* arg3 present -> push 1 byte at a time (suspend/resume proof) */
+    FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
+    fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
+    if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
+    uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
+    /* CRC32(from)[4] | from_size | zz(to_size-from_size)
+     * | [zz(fp_end-from_size) iff to_size>from_size] | range body | CRC32(to)[4]. */
+    uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
+    size_t p=4; int err=0;
+    uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
+        do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
+    { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
+      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else to_size=from_size-m; }
+      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else to_size=from_size+d; } }
+    if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
+      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else fp_end=from_size-m; }
+      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else fp_end=from_size+d; } }
+    if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
+    if(from_size>(64u<<20) || to_size>(64u<<20)){ fprintf(stderr,"implausible size - rejected\n"); free(blob); return 1; }
+    size_t body_start=p; size_t body_end=bsz-4;
+    uint32_t want_to_crc = blob[bsz-4]|(blob[bsz-3]<<8)|(blob[bsz-2]<<16)|((uint32_t)blob[bsz-1]<<24);
+
+    FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
+    fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
+    if((uint32_t)fsz!=from_size){ fprintf(stderr,"from_size mismatch (%ld vs %u)\n",fsz,from_size); fclose(mf); free(blob); return 1; }
+    g_image_span = from_size>to_size? from_size:to_size;
+    { uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);
+      if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
+      nvm_init(tmp,from_size,g_image_span); free(tmp); }
+
+    patch_apply_set(from_size,to_size,fp_end,to_size<=from_size);
+    if(crc32_flash(from_size)!=want_from_crc){ fprintf(stderr,"crc(from) mismatch - refusing\n"); fclose(mf); free(g_flash); free(blob); return 1; }
+
+    int rc=patch_apply_init();
+    size_t bi=body_start; long suspends=0;
+    while(bi<body_end && rc==PATCH_APPLY_NEED_MORE){ rc=patch_apply_push(blob[bi++]); if(rc==PATCH_APPLY_NEED_MORE) suspends++; }
+    if(rc==PATCH_APPLY_NEED_MORE) rc=patch_apply_finish();
+    else patch_apply_finish();
+    if(byte_mode){
+        if(suspends < (long)((body_end-body_start)/2)){
+            fprintf(stderr,"streaming check FAILED: only %ld suspends for %zu bytes\n",suspends,body_end-body_start);
+            fclose(mf); free(g_flash); free(blob); return 1;
+        }
+        fprintf(stderr,"streaming OK: %ld suspends over %zu body bytes\n",suspends,body_end-body_start);
+    }
+    if(rc==PATCH_APPLY_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
+        fprintf(stderr,"decode error - rejected (reason=%u: %s)\n", rj,
+                rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
+        fclose(mf); free(g_flash); free(blob); return 1; }
+#ifdef RC_V3_STACKMEAS
+    { unsigned hw=0; for(unsigned k=0;k<sizeof g_dec_stack;k++) if((unsigned char)g_dec_stack[k]!=0xAA){ hw=(unsigned)sizeof g_dec_stack-k; break; }
+      fprintf(stderr,"STACKMEAS coroutine high-water = %u B (reserved %u)\n",hw,(unsigned)sizeof g_dec_stack); }
+#endif
+#ifdef RC_V3_BAKEDUMP
+    { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(g_flash,1,to_size,f); fclose(f); } }
+#endif
+    if(crc32_flash(to_size)!=want_to_crc){ fprintf(stderr,"crc(to) mismatch - corrupt patch rejected\n"); fclose(mf); free(g_flash); free(blob); return 1; }
+    if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
+        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
+                nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
+        fclose(mf); free(g_flash); free(blob); return 1;
+    }
+    fseek(mf,0,SEEK_SET);
+    if(fwrite(g_flash,1,to_size,mf)!=to_size){ fclose(mf); free(g_flash); free(blob); return 1; }
+    fflush(mf);
+    if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
+    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",(unsigned)g_jpage[JPAGE_MAX],(unsigned)JSLOTS);
+    fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
+            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_image_span,(g_image_span+255)/256);
+    fclose(mf); free(blob);
+    return 0;
+}

@@ -26,14 +26,14 @@ Verification commands:
 cd /ai_sw/v3/nvm/hybrid12k/c
 make
 make check
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -c rc_v3.c -o /tmp/rc_v3_arm.o
-arm-none-eabi-size /tmp/rc_v3_arm.o
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
+arm-none-eabi-size /tmp/patch_apply_arm.o
 ```
 
 Known-good ARM object size at `SA_W=10`:
 
 ```text
-text=5971 data=0 bss=11472
+text=4748 data=0 bss=10272
 ```
 
 Note: in this container, `sudo` is blocked by the no-new-privileges setting. Run

@@ -2,9 +2,11 @@
 
 Final implementation: C encoder and C decoder only.
 
-- Encoder: `c/rc_v3_enc.c` (`c/hy_enc`)
-- Decoder: `c/rc_v3.c` (`c/hy_dec` host harness, `RC_V3_ARM` device build)
-- NVM emulator for host verification: `c/flash_nvm.c`
+- Encoder: `c/patch_generate/patch_generate.c` (`c/hy_enc`)
+- Decoder artifact: `c/patch_apply/patch_apply.h` (header-only device build)
+- Host demo/gate wrapper: `c/patch_apply/demo_patch.c` (`c/hy_dec`), including
+  the NVM emulator used for host verification
+- Shared wire-model definitions: `c/common/rc_models.h`
 
 The patch stream is a single range-coded A1 blob. There is no side table and no
 secondary reference implementation in this tree.
@@ -223,8 +225,8 @@ cmp /tmp/mem.bin ../fixtures/v1_one_face/watch.bin
 ARM object check:
 
 ```sh
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -c c/rc_v3.c -o /tmp/rc_v3_arm.o
-arm-none-eabi-size /tmp/rc_v3_arm.o
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -I c/common -x c -c c/patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
+arm-none-eabi-size /tmp/patch_apply_arm.o
 ```
 
 The encoder `W` argument must match decoder `SA_W`. The production default is

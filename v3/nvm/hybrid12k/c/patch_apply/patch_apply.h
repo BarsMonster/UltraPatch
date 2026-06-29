@@ -1,6 +1,8 @@
+#ifndef PATCH_APPLY_H
+#define PATCH_APPLY_H
 /*
  * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
- * Production solution; full design and measured gates are in ../RESULT.md.
+ * Production solution; full design and measured gates are in ../../RESULT.md.
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. A single divide-free binary range coder (LZMA
  * bound; no division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols
@@ -29,10 +31,11 @@
  * the ARM object emits no libgcc 64-bit (or float) helpers, only one 32-bit divide at init.
  */
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
+#ifdef HY_DBG
 #include <stdio.h>
-#include "rc_models.h"
+#endif
+#include "../common/rc_models.h"
 
 /* ===================================================================================== */
 /* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */
@@ -59,7 +62,10 @@ static uint8_t  g_eof;                     /* producer signalled end-of-stream *
                                             * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
 static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
-enum { DEC_NEED_MORE=0, DEC_DONE=1, DEC_ERROR=2 };
+enum {
+    PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
+    DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR
+};
 static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
 
 /* ===================================================================================== */
@@ -159,7 +165,7 @@ static int s_bit_r(uint16_t*prob,int rate){
 /* Default adaptive-bit rate for the Golomb (unary+mantissa), order-2 flag, and MTF
  * rep/hit streams. Tuned to 4 (1/16) — these low-cardinality, fast-drifting contexts
  * track better at 4 than the LZMA-classic 5; literal/dval bit-trees keep their own
- * per-tree rate via s_bit_r. Must match RC_S_BIT_RATE in rc_v3_enc.c (bit-exact wire). */
+ * per-tree rate via s_bit_r. Must match RC_S_BIT_RATE in patch_generate (bit-exact wire). */
 #define RC_S_BIT_RATE 4
 static int s_bit(uint16_t*prob){ return s_bit_r(prob,RC_S_BIT_RATE); }
 static int s_raw(void){ return rc_decode(RC.range>>1); }
@@ -335,7 +341,7 @@ typedef struct {
 } DRStream;
 #define DR_HIT_INIT 576u              /* zero-seeded MTF dict makes hit-bit==1 likely; 576 is the
                                        * corpus optimum that still holds the one-face revert at 582
-                                       * (higher seeds nick it to 583). Must match rc_v3_enc.c. */
+                                       * (higher seeds nick it to 583). Must match patch_generate. */
 
 #ifndef JSLOTS
 #define JSLOTS 904u                          /* packed journal capacity; corpus peak is 625, and the cap
@@ -484,7 +490,7 @@ static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz
 static IdxUnary M_dibl, M_diex;  /* BL/EX MTF dict indices (lean unary code) */
 /* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
- * reset to 0 per blob; mirrors rc_v3_enc encode_body prevlit. */
+ * reset to 0 per blob; mirrors patch_generate encode_body prevlit. */
 #define LIT0_CTX 5
 /* tag0 context from the previous literal: 7 contiguous prevlit regions folded onto
  * 5 trees (a non-monotone region->tree map; one tree is shared by two disjoint ranges).
@@ -502,7 +508,7 @@ static Flag1   M_flag;
  * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT, P(reuse)~1/4)
  * because exact distance reuse is the minority case: a low prior keeps the dominant =0 flag near-free
  * on small patches while corpus-scale streams adapt up. g_lastdist holds the last match distance.
- * Mirrors rc_v3_enc Models.rep0/last_dist (bit-exact wire). */
+ * Mirrors patch_generate Models.rep0/last_dist (bit-exact wire). */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))   /* 3072: P(rep0=1) prior ~ 1/4. rep0=1 reuses the
                                                    * previous match distance; corpus tuning (paired
                                                    * min-over-N sweep) puts the optimum that does NOT
@@ -909,7 +915,7 @@ static void decode_body(void){
     bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL); dr_init(&DR_EX, DR_DIC_EX);
     idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); 2816 is the
                                                           * corpus optimum holding one-face 582.
-                                                          * Mirror in rc_v3_enc.c. */
+                                                          * Mirror in patch_generate. */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -918,7 +924,7 @@ static void decode_body(void){
     ugg_init(&M_pg2);
     ugg_seed_cont(&M_pg2,1);  /* rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1
                                * => M_pg2's first unary-prefix bit is ALWAYS continue (a format invariant,
-                               * like M_gl): seed it cheap from symbol 1. Mirror ug_seed_cont_e in rc_v3_enc.c. */
+                               * like M_gl): seed it cheap from symbol 1. Mirror ug_seed_cont_e in patch_generate. */
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
     { SA*s=&SAst; memset(s,0,sizeof*s);
@@ -1003,6 +1009,13 @@ static int decoder_finish(void){
     return g_dec_status;
 }
 
+static void patch_apply_set(uint32_t from_size,uint32_t to_size,uint32_t fp_end,int fwd){
+    g_from_size=from_size; g_to_size=to_size; g_fp_end=fp_end; g_FWD=fwd;
+}
+static int patch_apply_init(void){ return decoder_init(); }
+static int patch_apply_push(uint8_t byte){ return decoder_push(byte); }
+static int patch_apply_finish(void){ return decoder_finish(); }
+
 /* ===================================================================================== */
 /* DEVICE static measurement: exported entry points so arm-none-eabi-size sees the real     */
 /* .bss+.data (all decoder static + stack reservation). The push API is the device's actual  */
@@ -1010,129 +1023,10 @@ static int decoder_finish(void){
 /* On the device flash_read/flash_write/g_image_span are the real flash primitives (extern).  */
 /* ===================================================================================== */
 #ifdef RC_V3_ARM
-int  rcv3_init(void){ return decoder_init(); }
-int  rcv3_push(uint8_t b){ return decoder_push(b); }
-int  rcv3_finish(void){ return decoder_finish(); }
-void rcv3_set(uint32_t fs,uint32_t ts,uint32_t fpe,int fwd){ g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_FWD=fwd; }
+int  rcv3_init(void){ return patch_apply_init(); }
+int  rcv3_push(uint8_t b){ return patch_apply_push(b); }
+int  rcv3_finish(void){ return patch_apply_finish(); }
+void rcv3_set(uint32_t fs,uint32_t ts,uint32_t fpe,int fwd){ patch_apply_set(fs,ts,fpe,fwd); }
 #endif
 
-/* ===================================================================================== */
-/* host test driver: flash modelled as a file mapped to a RAM buffer OUTSIDE the budget.   */
-/* The decoder only touches it through flash_read/flash_write (0 image bytes in decoder).  */
-/* ===================================================================================== */
-#ifdef RC_V3_MAIN
-#include <unistd.h>
-#ifdef RC_V3_NVM
-#include "flash_nvm.h"   /* shared NVM emulator owns g_flash/flash_read/flash_write + wear counters */
-#else
-static uint8_t *g_flash; static uint32_t g_flash_n;
-uint32_t g_image_span;
-uint8_t flash_read(uint32_t a){ return a<g_flash_n? g_flash[a]:0; }
-void flash_write(uint32_t a, uint8_t v){ if(a<g_flash_n) g_flash[a]=v; }
-#endif
-
-int main(int argc,char**argv){
-    if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
-    int byte_mode = (argc==4);   /* arg3 present -> push 1 byte at a time (suspend/resume proof) */
-    /* load blob fully (this is the patch bytes; we push them through the FIFO) */
-    FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
-    fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
-    if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
-    uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
-    /* parse plaintext header: CRC32(from)[4] | from_size | zz(to_size-from_size)
-     *                          | [zz(fp_end-from_size) iff to_size>from_size]. to_size and fp_end are
-     * zigzag-delta-coded against from_size (mirror of rc_v3_enc.c encode_a1). */
-    uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
-    size_t p=4; int err=0;
-    uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
-        do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
-    /* to_size = from_size + zigzag-decoded delta, reconstructed and bounds-checked in pure 32-bit (no
-     * 64-bit intermediate): odd z is a negative delta of magnitude (z>>1)+1, even z a non-negative delta
-     * of z>>1; each branch validates to_size stays within [0, 64 MiB] using only 32-bit headroom tests. */
-    { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else to_size=from_size-m; }
-      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else to_size=from_size+d; } }
-    /* fp_end is the grow (!FWD) start seed; FWD/shrink/equal patches omit it (computed inline). */
-    if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else fp_end=from_size-m; }
-      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else fp_end=from_size+d; } }
-    if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
-    /* host-harness sanity (fuzz-hardening): an implausibly large size field would make nvm_init malloc
-     * a huge span. Real images are <1 MiB; reject >64 MiB up front. (Device has no malloc; host-only.) */
-    if(from_size>(64u<<20) || to_size>(64u<<20)){ fprintf(stderr,"implausible size — rejected\n"); free(blob); return 1; }
-    size_t body_start=p; size_t body_end=bsz-4;   /* trailer CRC32(to) is the last 4 bytes */
-    uint32_t want_to_crc = blob[bsz-4]|(blob[bsz-3]<<8)|(blob[bsz-2]<<16)|((uint32_t)blob[bsz-1]<<24);
-
-    /* open the flash file (the image; sized to span = max(from,to)) */
-    FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
-    fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
-    if((uint32_t)fsz!=from_size){ fprintf(stderr,"from_size mismatch (%ld vs %u)\n",fsz,from_size); fclose(mf); free(blob); return 1; }
-    g_image_span = from_size>to_size? from_size:to_size;
-#ifdef RC_V3_NVM
-    { uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);
-      if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
-      nvm_init(tmp,from_size,g_image_span); free(tmp); }   /* erased tail = 0xFF (real flash) */
-#else
-    g_flash_n=g_image_span; g_flash=malloc(g_image_span?g_image_span:1);
-    if(fread(g_flash,1,from_size,mf)!=from_size){ fclose(mf); free(g_flash); free(blob); return 2; }
-    if(g_image_span>from_size) memset(g_flash+from_size,0,g_image_span-from_size);
-#endif
-
-    g_from_size=from_size; g_to_size=to_size; g_fp_end=fp_end; g_FWD=(to_size<=from_size);
-
-    /* pre-write gate: CRC32(from) over flash */
-    if(crc32_flash(from_size)!=want_from_crc){ fprintf(stderr,"crc(from) mismatch — refusing\n"); fclose(mf); free(g_flash); free(blob); return 1; }
-
-    /* run the streaming decode by pushing patch body bytes through the FIFO. In both modes we
-     * push 1 byte per decoder_push() — the difference is byte_mode AUDITS the suspend/resume:
-     * it counts how often decoder_push returned NEED_MORE (i.e. the coroutine suspended waiting
-     * for more bytes) and asserts the decoder genuinely streamed (suspended many times), proving
-     * it never buffered the whole patch. */
-    int rc=decoder_init();
-    size_t bi=body_start; long suspends=0;
-    while(bi<body_end && rc==DEC_NEED_MORE){ rc=decoder_push(blob[bi++]); if(rc==DEC_NEED_MORE) suspends++; }
-    if(rc==DEC_NEED_MORE) rc=decoder_finish();
-    else decoder_finish();   /* still free resources */
-    if(byte_mode){
-        /* a genuinely streaming decoder suspends roughly once per consumed byte */
-        if(suspends < (long)((body_end-body_start)/2)){
-            fprintf(stderr,"streaming check FAILED: only %ld suspends for %zu bytes\n",suspends,body_end-body_start);
-            fclose(mf); free(g_flash); free(blob); return 1;
-        }
-        fprintf(stderr,"streaming OK: %ld suspends over %zu body bytes\n",suspends,body_end-body_start);
-    }
-    if(rc==DEC_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
-        fprintf(stderr,"decode error — rejected (reason=%u: %s)\n", rj,
-                rj==REJ_RESOURCE?"resource cap exceeded — firmware larger than build sizing":"corrupt/truncated patch");
-        fclose(mf); free(g_flash); free(blob); return 1; }
-#ifdef RC_V3_STACKMEAS
-    { unsigned hw=0; for(unsigned k=0;k<sizeof g_dec_stack;k++) if((unsigned char)g_dec_stack[k]!=0xAA){ hw=(unsigned)sizeof g_dec_stack-k; break; }
-      fprintf(stderr,"STACKMEAS coroutine high-water = %u B (reserved %u)\n",hw,(unsigned)sizeof g_dec_stack); }
-#endif
-
-#ifdef RC_V3_BAKEDUMP
-    { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(g_flash,1,to_size,f); fclose(f); } }
-#endif
-    /* post-write gate: CRC32(to) over the reconstructed flash, BEFORE committing */
-    if(crc32_flash(to_size)!=want_to_crc){ fprintf(stderr,"crc(to) mismatch — corrupt patch rejected\n"); fclose(mf); free(g_flash); free(blob); return 1; }
-#ifdef RC_V3_NVM
-    if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
-        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
-                nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
-        fclose(mf); free(g_flash); free(blob); return 1;
-    }
-#endif
-    /* commit to the memfile */
-    fseek(mf,0,SEEK_SET);
-    if(fwrite(g_flash,1,to_size,mf)!=to_size){ fclose(mf); free(g_flash); free(blob); return 1; }
-    fflush(mf);
-    if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
-    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",(unsigned)g_jpage[JPAGE_MAX],(unsigned)JSLOTS);
-#ifdef RC_V3_NVM
-    fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
-            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_image_span,(g_image_span+255)/256);
-#endif
-    fclose(mf); free(blob);
-    return 0;
-}
-#endif
+#endif /* PATCH_APPLY_H */

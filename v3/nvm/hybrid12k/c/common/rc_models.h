@@ -1,13 +1,13 @@
 /* A1 divide-free range-coder model definitions (shared by decoder + host encoder).
  * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
- * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both rc_v3.c (device
- * decoder) and rc_v3_enc.c (host encoder) carry their own range-coder bit I/O and only share
- * the model struct/constants below, so the wire stays bit-exact between the two. */
+ * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both
+ * patch_apply/patch_apply.h (device decoder) and patch_generate/patch_generate.c
+ * (host encoder) carry their own range-coder bit I/O and only share the model
+ * struct/constants below, so the wire stays bit-exact between the two. */
 #ifndef RC_MODELS_H
 #define RC_MODELS_H
 #include <stdint.h>
 #include <string.h>
-#include <stdlib.h>
 
 #define RC_KTOP (1u<<24)
 #define RC_PBIT 4096u
@@ -17,7 +17,7 @@
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so the decoder
  * packs them instead of spending a full uint16_t per node. The adaptation-shift rate is NOT stored
  * per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5, lit1=4,
- * dval=4) — kept identical in rc_v3.c (decode) and rc_v3_enc.c (encode) for wire-exactness. */
+ * dval=4) — kept identical in patch_apply and patch_generate for wire-exactness. */
 #define BT_PROBS 255u
 #define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
 typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;  /* +1 lets accessors read/write 3 bytes */
@@ -36,7 +36,7 @@ static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.
- * ENCODING-AFFECTING: rc_v3.c (hy_dec) and rc_v3_enc.c (hy_enc) must use the same value. */
+ * ENCODING-AFFECTING: patch_apply and patch_generate must use the same value. */
 #define UG_CTX 6
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
 

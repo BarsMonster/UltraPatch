@@ -4,10 +4,12 @@ Final A1 firmware patcher for the Sensor Watch target.
 
 Production code lives in `v3/nvm/hybrid12k/c`:
 
-- `rc_v3_enc.c`: host-side C encoder.
-- `rc_v3.c`: streaming in-place C decoder.
-- `flash_nvm.c`: host NVM emulator used by `hy_dec`.
-- `libdivsufsort/`: vendored C suffix sorter used by the host encoder.
+- `patch_apply/patch_apply.h`: reusable header-only streaming in-place decoder.
+- `patch_apply/demo_patch.c`: host demo/gate wrapper used by `hy_dec`, including
+  the host NVM emulator.
+- `patch_generate/patch_generate.c`: host-side C encoder.
+- `patch_generate/libdivsufsort/`: vendored C suffix sorter used by the encoder.
+- `common/rc_models.h`: shared wire-model constants and packed model helpers.
 
 Build and smoke-test:
 

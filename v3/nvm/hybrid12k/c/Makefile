@@ -12,10 +12,17 @@ CFLAGS += -Werror
 CFLAGS += -std=c99
 CFLAGS += $(OPT)
 CFLAGS += -I.
-CFLAGS += -Ilibdivsufsort
+CFLAGS += -Icommon
+CFLAGS += -Ipatch_apply
+CFLAGS += -Ipatch_generate
+CFLAGS += -Ipatch_generate/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
 
-DIVSUF := libdivsufsort/divsufsort.c
+DIVSUF := patch_generate/libdivsufsort/divsufsort.c
+APPLY_HDR := patch_apply/patch_apply.h common/rc_models.h
+GEN_HDR := common/rc_models.h patch_generate/arm_cortex_m4.h
+ENC_SRCS := patch_generate/patch_generate.c patch_generate/arm_cortex_m4.c $(DIVSUF)
+DEC_SRCS := patch_apply/demo_patch.c
 
 BASE_FULL_TOTAL ?= 4595273
 BASE_ONEFACE_GROW ?= 871
@@ -29,11 +36,11 @@ BASE_ARM_SOFT_DIV ?= 1
 
 all: hy_enc hy_dec
 
-hy_enc: rc_v3_enc.c arm_cortex_m4.c $(DIVSUF)
-	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $^ -o $@
+hy_enc: $(ENC_SRCS) $(GEN_HDR)
+	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
-hy_dec: rc_v3.c flash_nvm.c
-	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L -DRC_V3_MAIN -DRC_V3_NVM $^ -o $@
+hy_dec: $(DEC_SRCS) $(APPLY_HDR)
+	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
 
 check: all
 	@set -e; \
@@ -77,18 +84,18 @@ check-arm:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -c rc_v3.c -o "$$tmp/rc_v3_arm.o"; \
-	size_out=$$(arm-none-eabi-size "$$tmp/rc_v3_arm.o"); \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
+	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
 	test "$$1" -le "$(BASE_ARM_TEXT)"; \
 	test "$$2" -le "$(BASE_ARM_DATA)"; \
 	test "$$3" -le "$(BASE_ARM_BSS)"; \
-	arm-none-eabi-objdump -d "$$tmp/rc_v3_arm.o" > "$$tmp/rc_v3_arm.dump"; \
-	if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/rc_v3_arm.dump"; then \
+	arm-none-eabi-objdump -d "$$tmp/patch_apply_arm.o" > "$$tmp/patch_apply_arm.dump"; \
+	if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm.dump"; then \
 		echo "hardware divide instruction found"; exit 1; \
 	fi; \
-	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/rc_v3_arm.dump" || true); \
+	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm.dump" || true); \
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 

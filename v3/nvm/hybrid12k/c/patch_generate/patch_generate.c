@@ -1,8 +1,8 @@
 /*
- * A1 host encoder (C) for the rc_v3 decoder wire.
+ * A1 host encoder (C) for the patch_apply decoder wire.
  *
  * This is intentionally a host-side encoder: compression-side memory/CPU are
- * allowed to be large. It emits the final A1 blob consumed by rc_v3.c.
+ * allowed to be large. It emits the final A1 blob consumed by patch_apply.h.
  */
 #include <errno.h>
 #include <limits.h>
@@ -25,7 +25,7 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #ifndef DR_KCAP_EX
 #define DR_KCAP_EX 128
 #endif
-#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match rc_v3.c (bit-exact wire) */
+#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
 
@@ -47,7 +47,7 @@ typedef struct {
 } EncStats;
 
 static void die(const char *msg) {
-    fprintf(stderr, "rc_v3_enc: %s\n", msg);
+    fprintf(stderr, "patch_generate: %s\n", msg);
     exit(2);
 }
 
@@ -366,7 +366,7 @@ static uint32_t find_data_offset_in_bin(const Buf *elf, const Shdr *sh, const Bu
     for (size_t i = 0; i + nlen <= bin->n; i++)
         if (memcmp(bin->d + i, needle, nlen) == 0)
             return (uint32_t)i;
-    fprintf(stderr, "rc_v3_enc: data segment for %s not found in bin\n", which);
+    fprintf(stderr, "patch_generate: data segment for %s not found in bin\n", which);
     exit(2);
 }
 
@@ -1335,10 +1335,10 @@ static void re_shift_low(REnc *r) {
 static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz = 1; }
 
 /* Default adaptive-bit rate for Golomb (unary+mantissa), order-2 flag, and MTF rep/hit
- * streams. MUST equal RC_S_BIT_RATE in rc_v3.c (decoder) — the wire is bit-exact. */
+ * streams. MUST equal RC_S_BIT_RATE in patch_apply — the wire is bit-exact. */
 #define RC_S_BIT_RATE 4
 
-/* Mirrors rc_v3.c RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/4), 3072. */
+/* Mirrors patch_apply RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/4), 3072. */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
 
 static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
@@ -1566,11 +1566,11 @@ static uint32_t bit_price(uint32_t p, int bit) {
 }
 
 /* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
- * Mirrors rc_v3.c M_lit0[]/M_lit1 + g_litprev. Defined here (ahead of the DP parse) so the
+ * Mirrors patch_apply M_lit0[]/M_lit1 + g_litprev. Defined here (ahead of the DP parse) so the
  * price-feedback DP can price tag0 literals under the SAME order-1 prev-byte context the wire
  * uses, instead of an order-0 average. Encoder-only; the wire is unchanged. */
 #define LIT0_CTX 5
-/* Mirrors rc_v3.c LIT0_SEL: 7 prevlit regions folded onto 5 trees (non-monotone map). */
+/* Mirrors patch_apply LIT0_SEL: 7 prevlit regions folded onto 5 trees (non-monotone map). */
 #define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
 
 typedef struct {
@@ -2098,7 +2098,7 @@ typedef struct {
     IDXE dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
-    uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror rc_v3.c M_rep0/g_lastdist) */
+    uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror patch_apply M_rep0/g_lastdist) */
 } Models;
 
 static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
@@ -2164,23 +2164,23 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     bt_init_e(&M.dval.t);
     ug_init_e(&M.gd, 'r', 11);
     ug_init_e(&M.gl, 'g', 0);
-    ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror rc_v3.c decoder */
+    ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror patch_apply */
     ug_init_e(&M.gs, 'g', 0);
     ug_init_e(&M.pg, 'g', 0);
     ug_init_e(&M.pgn, 'g', 0);
     ug_init_e(&M.pg2, 'g', 0);
     ug_seed_cont_e(&M.pg2, 1);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct offsets) =>
-                                  * M_pg2 first unary bit always continue; seed cheap. Mirror rc_v3.c decoder. */
+                                  * M_pg2 first unary bit always continue; seed cheap. Mirror patch_apply. */
     ug_init_e(&M.gdl, 'g', 0);
     ug_init_e(&M.gel, 'g', 0);
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match rc_v3.c */
+    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match patch_apply */
     idx_init_e(&M.diex, (uint16_t)2816u);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
-    M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */
+    M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
     REnc rc;
     re_init(&rc);
     ug_encode(&M.gd, &rc, (uint32_t)seq->n);
