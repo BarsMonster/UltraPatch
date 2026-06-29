@@ -2265,7 +2265,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     if (content.n) {
         Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
         size_t cur_bytes = cur_body.n; buf_free(&cur_body);
-        for (int pass = 0; pass < 4; pass++) {
+        for (int pass = 0; pass < 16; pass++) {
             PriceTab pt;
             measure_prices(&seq, content.d, tags.d, frm, from_size, kd, &pt);
             TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, &pt, W);

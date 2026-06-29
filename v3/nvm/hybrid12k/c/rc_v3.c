@@ -701,7 +701,10 @@ static void hy_src_rec(int32_t fp, uint8_t v){
     if(fp>=0 && (uint32_t)fp<g_from_size){
         uint32_t a=(uint32_t)fp, i=(a>>1)&PSRC_HW_MASK;
         if(a&1u) hy_half_rec(a-1u, g_psrc_imm[i], v);
-        else { g_psrc_imm[i]=v; g_psrc_ldr[i>>3]&=(uint8_t)~(1u<<(i&7u)); }
+        /* even fp: the low byte of the halfword. hy_half_rec(a,v,0) stores imm=v and, since the high
+         * byte 0 makes up=v<256 never match the 0xf800==0x4800 ldr pattern, clears the ldr bit —
+         * identical to the inlined store+clear, and lets the two record paths share one body. */
+        else hy_half_rec(a, v, 0);
     }
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal

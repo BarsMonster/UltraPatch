@@ -23,13 +23,13 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,776 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
+| ARM object at `SA_W=10` | text 4,764 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,595,280 B**.
+- W=10 full 16x16 corpus total: **4,595,275 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **871 B**
   - `v1_one_face -> v0_base`: **581 B**
@@ -157,7 +157,14 @@ headroom comparisons plus `__builtin_add_overflow`/`__builtin_sub_overflow`), an
 the host header's zigzag-delta size reconstruction is likewise 32-bit. The change
 is bit-exact (corpus and one-face unchanged) and the Cortex-M0+ object emits no
 libgcc 64-bit (or float) helpers — only the single 32-bit divide at init — while
-ARM `.text` drops 88 B.
+ARM `.text` drops 88 B. The FWD pristine-source recorder's even-`fp` path now reuses
+the shared `hy_half_rec` halfword recorder (a zero-high-byte never matches the Thumb
+`ldr`-literal pattern, so it stores the `imm8` and clears the `ldr` bit identically to
+the former inline store) — bit-exact and another 12 B off `.text`. On the host encoder
+the price-feedback re-parse loop now iterates to its true fixpoint (its acceptance test
+already keeps a candidate parse only when the exact flushed body shrinks, so the extra
+passes are strictly no-worse per pair); a few corpus pairs needed more than four passes
+to converge, trimming the corpus total a further 5 B with the protected one-face held.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -215,8 +222,8 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,776 B, data 0 B, bss 11,296 B (992 B
-margin) and improves the corpus total to 4,580,068 B with the real one-face
+now fits the 12 KiB SRAM cap at text 4,764 B, data 0 B, bss 11,296 B (992 B
+margin) and improves the corpus total to <= 4,580,068 B with the real one-face
 update at 871/581 B. The 256-pair patch-size split for W=11 vs W=10 is
 138 better / 14 worse / 104 equal. Production stays at W=10 to keep the larger
 2,016 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
