@@ -904,6 +904,9 @@ static void decode_body(void){
     jr_reset();
     ugg_init(&M_pg); ugg_init(&M_pgn);
     ugg_init(&M_pg2);
+    ugg_seed_cont(&M_pg2,1);  /* rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1
+                               * => M_pg2's first unary-prefix bit is ALWAYS continue (a format invariant,
+                               * like M_gl): seed it cheap from symbol 1. Mirror ug_seed_cont_e in rc_v3_enc.c. */
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
     { SA*s=&SAst; memset(s,0,sizeof*s);
@@ -1024,13 +1027,18 @@ int main(int argc,char**argv){
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
     uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
-    /* parse plaintext header: CRC32(from)[4] | from_size | zz(to_size-from_size)
+    /* parse plaintext header: CRC32(from)[4] | zz(to_size-from_size)
      *                          | [zz(fp_end-from_size) iff to_size>from_size]. to_size and fp_end are
-     * zigzag-delta-coded against from_size (mirror of rc_v3_enc.c encode_a1). */
+     * zigzag-delta-coded against from_size (mirror of rc_v3_enc.c encode_a1). from_size itself is NOT
+     * shipped — it is redundant: the device knows it via rcv3_set, and here we read it from the in-place
+     * flash file size (opened up front so the to_size/fp_end deltas can be reconstructed against it). */
     uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
     size_t p=4; int err=0;
-    uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
-        do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
+    /* open the flash file (the in-place image) and take from_size from its size. */
+    FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
+    fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
+    if(fsz<0){ fprintf(stderr,"bad mem file\n"); fclose(mf); free(blob); return 1; }
+    uint32_t from_size=(uint32_t)fsz,to_size=0,fp_end=0;
     { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
       int64_t ts=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
       if(ts<0 || ts>(int64_t)(64u<<20)){ err=1; ts=0; } to_size=(uint32_t)ts; }
@@ -1038,17 +1046,12 @@ int main(int argc,char**argv){
     if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
       int64_t fe=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
       if(fe<0 || fe>(int64_t)(64u<<20)){ err=1; fe=0; } fp_end=(uint32_t)fe; }
-    if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
+    if(err){ fprintf(stderr,"bad header\n"); fclose(mf); free(blob); return 1; }
     /* host-harness sanity (fuzz-hardening): an implausibly large size field would make nvm_init malloc
      * a huge span. Real images are <1 MiB; reject >64 MiB up front. (Device has no malloc; host-only.) */
-    if(from_size>(64u<<20) || to_size>(64u<<20)){ fprintf(stderr,"implausible size — rejected\n"); free(blob); return 1; }
+    if(from_size>(64u<<20) || to_size>(64u<<20)){ fprintf(stderr,"implausible size — rejected\n"); fclose(mf); free(blob); return 1; }
     size_t body_start=p; size_t body_end=bsz-4;   /* trailer CRC32(to) is the last 4 bytes */
     uint32_t want_to_crc = blob[bsz-4]|(blob[bsz-3]<<8)|(blob[bsz-2]<<16)|((uint32_t)blob[bsz-1]<<24);
-
-    /* open the flash file (the image; sized to span = max(from,to)) */
-    FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
-    fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
-    if((uint32_t)fsz!=from_size){ fprintf(stderr,"from_size mismatch (%ld vs %u)\n",fsz,from_size); fclose(mf); free(blob); return 1; }
     g_image_span = from_size>to_size? from_size:to_size;
 #ifdef RC_V3_NVM
     { uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);

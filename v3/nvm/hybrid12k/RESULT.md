@@ -23,16 +23,16 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,852 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
+| ARM object at `SA_W=10` | text 4,864 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,595,597 B**.
+- W=10 full 16x16 corpus total: **4,594,512 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **871 B**
-  - `v1_one_face -> v0_base`: **581 B**
+  - `v0_base -> v1_one_face`: **868 B**
+  - `v1_one_face -> v0_base`: **578 B**
 
 ## Architecture
 
@@ -66,7 +66,13 @@ free on small patches).
 Match lengths carry a structural prior: the LZ minimum match length is 3, so the
 length-1 value is always >= 2 and the first unary-prefix bit of the match-length
 Golomb is always "continue"; seeding it cheap makes that bit near-free from the
-first symbol (a format invariant, not a corpus fit).
+first symbol (a format invariant, not a corpus fit). The same structural prior is
+applied to the shared 2nd-and-later preserve/correction gap model (`M_pg2`): those
+gaps are deltas between strictly-increasing distinct op-local offsets, so every
+gap is >= 1 and `M_pg2`'s first unary-prefix bit is always "continue" — seeding it
+cheap is again a format invariant (not a corpus fit), and it holds the real
+one-face revert unchanged while shrinking the corpus (228 better / 2 worse / 26
+equal across the 256 pairs).
 
 The host encoder's LZ parse runs a price-feedback loop: it re-parses against bit
 prices measured from the real adaptive models and keeps the result only when the
@@ -106,7 +112,13 @@ header omits the `fp_end` seed on FWD/shrink/equal patches where it is redundant
 with `CRC32(to)` (load-bearing only for the grow direction), and zigzag-delta-codes the
 surviving `to_size` and `fp_end` against `from_size` (the deltas are tiny — exactly 0 for an
 equal-size update — so they cost far fewer header bytes than absolute uLEBs; `CRC32(from)`/
-`CRC32(to)` stay full-width, so corruption rejection is unchanged). The `rep0`
+`CRC32(to)` stay full-width, so corruption rejection is unchanged). The header also
+omits `from_size` entirely: it is redundant, since the device already knows the
+installed image size out of band (it is passed to the decoder via `rcv3_set`) and
+the host harness reads it from the in-place flash file size, so the shipped
+`to_size`/`fp_end` deltas are reconstructed against that known `from_size`. Dropping
+the `from_size` uLEB saves ~3 B/patch uniformly (one-face 871/581 -> 868/578) with
+`CRC32(from)` still binding the from-image identity (corruption rejection unchanged). The `rep0`
 last-distance reuse prior is seeded at 1/4 (was 1/8): a paired min-over-pairs corpus
 sweep places the optimum that does not regress the real one-face product patch at
 1/4 (3/8 helps the corpus aggregate more but costs the one-face update +1/+1 B).
@@ -202,10 +214,10 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,852 B, data 0 B, bss 11,296 B (992 B
-margin) and improves the corpus total to 4,580,382 B with the real one-face
-update at 871/581 B. The 256-pair patch-size split for W=11 vs W=10 is
-136 better / 15 worse / 105 equal. Production stays at W=10 to keep the larger
+now fits the 12 KiB SRAM cap at text 4,864 B, data 0 B, bss 11,296 B (992 B
+margin) and improves the corpus total to 4,579,300 B with the real one-face
+update at 868/578 B. The 256-pair patch-size split for W=11 vs W=10 is
+138 better / 14 worse / 104 equal. Production stays at W=10 to keep the larger
 2,016 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
 
 ## Caps
