@@ -18,3 +18,7 @@ Create a deterministic ignored bundle for CI/cache seeding with:
 ```sh
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
+
+`make check-malformed` uses the pinned one-face fixture to verify deterministic
+rejection of malformed patch envelopes and truncated blobs without requiring
+extra corpus assets.

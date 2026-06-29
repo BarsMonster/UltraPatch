@@ -40,7 +40,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10272
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-corpus gate
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus gate
 
 all: hy_enc hy_dec
 
@@ -110,6 +110,9 @@ check-arm:
 check-assets:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 
+check-malformed: all
+	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh 10
+
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
 # It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
@@ -135,8 +138,8 @@ check-corpus: all check-assets
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
-# ONE command for the full gate: builds, verifies corpus assets, and runs the three gates
-# (check + check-arm + check-corpus),
+# ONE command for the full gate: builds, verifies corpus assets, and runs the host, malformed,
+# ARM, and corpus gates,
 # and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
 # .bss + divide policy, corpus full total, the real one-face update (grow/revert), matrix
 # round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
@@ -145,13 +148,15 @@ check-corpus: all check-assets
 gate: all
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running full gate: check-assets + check + check-arm + check-corpus (parallel; ~8s on 32 cores)..."; \
+	echo "running full gate: check-assets + check + check-malformed + check-arm + check-corpus (parallel; ~8s on 32 cores)..."; \
 	$(MAKE) --no-print-directory check-assets >"$$tmp/assets.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
 	echo "==================== A1 FULL GATE ===================="; \
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
+	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
@@ -169,6 +174,7 @@ gate: all
 		echo "RESULT                   : *** GATE FAILED (rc=$$rc) ***"; \
 		echo "------------------ check-assets ------------------"; cat "$$tmp/assets.txt"; \
 		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
+		echo "------------------ check-malformed ------------------"; cat "$$tmp/malformed.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
 	fi; \

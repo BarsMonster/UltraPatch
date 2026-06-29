@@ -24,6 +24,8 @@ Full release gate:
 make gate
 ```
 
+For release notes and artifact provenance, use `docs/release-checklist.md`.
+
 The local binary corpora live outside Git under `test-bench/images` and
 `test-bench/fixtures`. The root `Makefile` uses those paths by default; override
 them with `IMAGES=...`, `FIXTURES=...`, and a matching `CORPUS_MANIFEST=...`
@@ -31,6 +33,9 @@ when running checks elsewhere.
 The expected corpus contents are pinned by `test-bench/corpus.sha256`; `make gate`
 runs `make check-assets` before the matrix so a stale or partial corpus fails
 early.
+`make gate` also runs `make check-malformed`, a deterministic reject-regression
+suite for malformed envelopes, truncations, appended garbage, and wrong-base
+application.
 
 Create a deterministic corpus bundle from a verified local corpus with:
 
