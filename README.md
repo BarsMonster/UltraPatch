@@ -8,7 +8,7 @@ Production code lives at the repository root:
 - `patch_apply/demo_patch.c`: host demo/gate wrapper used by `hy_dec`, including
   the host NVM emulator.
 - `patch_generate/patch_generate.c`: host-side C encoder.
-- `patch_generate/libdivsufsort/`: vendored C suffix sorter used by the encoder.
+- `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
 - `common/rc_models.h`: shared wire-model constants and packed model helpers.
 
 Build and smoke-test:
@@ -64,5 +64,5 @@ Ultrapatcher is MIT licensed.
 
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.
 
-Vendored files under `patch_generate/libdivsufsort/` keep their upstream
+Vendored files under `vendor/libdivsufsort/` keep their upstream
 license notices. See `THIRD_PARTY_NOTICES.md`.

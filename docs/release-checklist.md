@@ -55,7 +55,7 @@ is deterministic for a fixed `test-bench/corpus.sha256` manifest.
 The release source artifact is the Git commit. The device decoder artifact is
 `patch_apply/patch_apply.h` plus `common/rc_models.h`; the host encoder is built
 from `patch_generate/patch_generate.c`, `patch_generate/arm_cortex_m4.c`, and the
-vendored `patch_generate/libdivsufsort/` sources.
+vendored `vendor/libdivsufsort/` sources.
 
 For traceability, release notes should include:
 

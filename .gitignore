@@ -13,10 +13,6 @@
 /artifacts/*
 !/artifacts/*.md
 
-# Generated simulator outputs.
-/v3/nvm/hybrid12k/sim/artifacts/*.patch
-/v3/nvm/hybrid12k/sim/ultrapatch/__pycache__/
-
 # Python/cache noise.
 **/__pycache__/
 *.py[cod]

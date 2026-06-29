@@ -19,10 +19,10 @@ CFLAGS += -I.
 CFLAGS += -Icommon
 CFLAGS += -Ipatch_apply
 CFLAGS += -Ipatch_generate
-CFLAGS += -Ipatch_generate/libdivsufsort
+CFLAGS += -Ivendor/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
 
-DIVSUF := patch_generate/libdivsufsort/divsufsort.c
+DIVSUF := vendor/libdivsufsort/divsufsort.c
 APPLY_HDR := patch_apply/patch_apply.h common/rc_models.h
 GEN_HDR := common/rc_models.h patch_generate/arm_cortex_m4.h
 ENC_SRCS := patch_generate/patch_generate.c patch_generate/arm_cortex_m4.c $(DIVSUF)
