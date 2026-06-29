@@ -29,10 +29,10 @@ secondary reference implementation in this tree.
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,594,512 B**.
+- W=10 full 16x16 corpus total: **4,595,280 B**.
 - Real one-face 360-byte firmware update:
-  - `v0_base -> v1_one_face`: **868 B**
-  - `v1_one_face -> v0_base`: **578 B**
+  - `v0_base -> v1_one_face`: **871 B**
+  - `v1_one_face -> v0_base`: **581 B**
 
 ## Architecture
 
@@ -112,13 +112,7 @@ header omits the `fp_end` seed on FWD/shrink/equal patches where it is redundant
 with `CRC32(to)` (load-bearing only for the grow direction), and zigzag-delta-codes the
 surviving `to_size` and `fp_end` against `from_size` (the deltas are tiny — exactly 0 for an
 equal-size update — so they cost far fewer header bytes than absolute uLEBs; `CRC32(from)`/
-`CRC32(to)` stay full-width, so corruption rejection is unchanged). The header also
-omits `from_size` entirely: it is redundant, since the device already knows the
-installed image size out of band (it is passed to the decoder via `rcv3_set`) and
-the host harness reads it from the in-place flash file size, so the shipped
-`to_size`/`fp_end` deltas are reconstructed against that known `from_size`. Dropping
-the `from_size` uLEB saves ~3 B/patch uniformly (one-face 871/581 -> 868/578) with
-`CRC32(from)` still binding the from-image identity (corruption rejection unchanged). The `rep0`
+`CRC32(to)` stay full-width, so corruption rejection is unchanged). The `rep0`
 last-distance reuse prior is seeded at 1/4 (was 1/8): a paired min-over-pairs corpus
 sweep places the optimum that does not regress the real one-face product patch at
 1/4 (3/8 helps the corpus aggregate more but costs the one-face update +1/+1 B).
@@ -215,8 +209,8 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
 now fits the 12 KiB SRAM cap at text 4,864 B, data 0 B, bss 11,296 B (992 B
-margin) and improves the corpus total to 4,579,300 B with the real one-face
-update at 868/578 B. The 256-pair patch-size split for W=11 vs W=10 is
+margin) and improves the corpus total to 4,580,068 B with the real one-face
+update at 871/581 B. The 256-pair patch-size split for W=11 vs W=10 is
 138 better / 14 worse / 104 equal. Production stays at W=10 to keep the larger
 2,016 B SRAM margin; W=11 is a product tradeoff, not a correctness requirement.
 

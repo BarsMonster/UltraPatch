@@ -2324,11 +2324,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     Buf body = encode_body(&ops, from.d, from_size, to_size, &fd, pc, W);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
-    /* from_size is NOT shipped: it is redundant — the device knows the installed image size out of band
-     * (passed to the decoder via rcv3_set), and the host harness reads it from the in-place flash file
-     * size. CRC32(from) still binds the from-image identity, so corruption rejection is unchanged. This
-     * saves the from_size uLEB (~3 B/patch) and the to_size/fp_end deltas below code against this known
-     * from_size exactly as before. */
+    put_uleb(&blob, from_size);
     /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
      * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
      * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB. The
