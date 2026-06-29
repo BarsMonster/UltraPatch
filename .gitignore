@@ -23,9 +23,9 @@
 *$py.class
 
 # Native and firmware build products.
-/v3/nvm/hybrid12k/c/detools
-/v3/nvm/hybrid12k/c/hy_dec
-/v3/nvm/hybrid12k/c/hy_enc
+/detools
+/hy_dec
+/hy_enc
 *.o
 *.a
 *.so

@@ -24,6 +24,9 @@ GEN_HDR := common/rc_models.h patch_generate/arm_cortex_m4.h
 ENC_SRCS := patch_generate/patch_generate.c patch_generate/arm_cortex_m4.c $(DIVSUF)
 DEC_SRCS := patch_apply/demo_patch.c
 
+FIXTURES ?= test-bench/fixtures
+IMAGES ?= test-bench/images
+
 BASE_FULL_TOTAL ?= 4595273
 BASE_ONEFACE_GROW ?= 871
 BASE_ONEFACE_REVERT ?= 581
@@ -46,14 +49,14 @@ check: all
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	cp ../fixtures/v0_base/watch.bin "$$tmp/mem.bin"; \
-	./hy_enc ../fixtures/v0_base ../fixtures/v1_one_face "$$tmp/grow.blob" 10; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10; \
 	./hy_dec "$$tmp/mem.bin" "$$tmp/grow.blob" 1 >/dev/null; \
-	cmp "$$tmp/mem.bin" ../fixtures/v1_one_face/watch.bin; \
-	cp ../fixtures/v1_one_face/watch.bin "$$tmp/mem.bin"; \
-	./hy_enc ../fixtures/v1_one_face ../fixtures/v0_base "$$tmp/revert.blob" 10; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
+	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
+	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10; \
 	./hy_dec "$$tmp/mem.bin" "$$tmp/revert.blob" 1 >/dev/null; \
-	cmp "$$tmp/mem.bin" ../fixtures/v0_base/watch.bin; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
 	revert_sz=$$(wc -c < "$$tmp/revert.blob"); \
 	wc -c "$$tmp/grow.blob" "$$tmp/revert.blob"; \
@@ -61,24 +64,24 @@ check: all
 	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
 	printf '\377' | dd of="$$tmp/bad.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1; \
-	cp ../fixtures/v0_base/watch.bin "$$tmp/mem.bin"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad.blob" 1 >/dev/null 2>/dev/null; then echo "corrupt body accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" ../fixtures/v0_base/watch.bin; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	head -c -1 "$$tmp/grow.blob" > "$$tmp/trunc.blob"; \
-	cp ../fixtures/v0_base/watch.bin "$$tmp/mem.bin"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/trunc.blob" 1 >/dev/null 2>/dev/null; then echo "truncated blob accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" ../fixtures/v0_base/watch.bin; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad_from.blob"; \
 	printf '\000' | dd of="$$tmp/bad_from.blob" bs=1 seek=0 count=1 conv=notrunc >/dev/null 2>&1; \
-	cp ../fixtures/v0_base/watch.bin "$$tmp/mem.bin"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad_from.blob" 1 >/dev/null 2>/dev/null; then echo "bad from CRC accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" ../fixtures/v0_base/watch.bin; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad_to.blob"; \
 	last=$$((grow_sz - 1)); \
 	printf '\000' | dd of="$$tmp/bad_to.blob" bs=1 seek="$$last" count=1 conv=notrunc >/dev/null 2>&1; \
-	cp ../fixtures/v0_base/watch.bin "$$tmp/mem.bin"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad_to.blob" 1 >/dev/null 2>/dev/null; then echo "bad to CRC accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" ../fixtures/v0_base/watch.bin
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"
 
 check-arm:
 	@set -e; \
@@ -107,7 +110,7 @@ check-corpus: all
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	./check_corpus.sh 10 $(JOBS) > "$$tmp/m.txt"; \
+	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" ./check_corpus.sh 10 $(JOBS) > "$$tmp/m.txt"; \
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
 	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \

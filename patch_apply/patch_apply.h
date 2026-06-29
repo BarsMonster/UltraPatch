@@ -2,7 +2,7 @@
 #define PATCH_APPLY_H
 /*
  * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
- * Production solution; full design and measured gates are in ../../RESULT.md.
+ * Production solution; historical design and measured gates are in v3/nvm/hybrid12k/RESULT.md.
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. A single divide-free binary range coder (LZMA
  * bound; no division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols
@@ -318,7 +318,7 @@ static uint32_t crc32_flash(uint32_t n){
  * distinct delta values (the frequently-repeated relocation offsets keep tiny MTF indices). */
 /* Caps are corpus-peak + margin; over-cap input is REJECTED (CRC-gated, never silent-wrong), not
  * applied. All -D overridable (#ifndef) so a deployment with a known firmware family can re-tune
- * them; raising a cap costs SRAM (see ../RESULT.md "Known limitations" for per-cap thresholds). */
+ * them; raising a cap costs SRAM (see v3/nvm/hybrid12k/RESULT.md "Known limitations" for per-cap thresholds). */
 #ifndef DR_KCAP_BL
 #define DR_KCAP_BL  208        /* max distinct bl delta values (corpus peak 180; +28 margin) */
 #endif

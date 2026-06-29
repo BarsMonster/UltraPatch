@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast parallel 16x16 corpus-matrix metrics for the A1 gate.
 #
-# Run from the c/ build dir; needs ./hy_enc and ./hy_dec already built. Prints the eight gate
+# Run from the repository root; needs ./hy_enc and ./hy_dec already built. Prints the eight gate
 # metric lines so the Makefile (or a measurement run) can parse them. The 256 (from,to) pairs
 # are independent, so they run in
 # parallel across all cores; each worker uses its OWN mktemp dir (no shared blob/mem path), which
@@ -12,8 +12,8 @@
 set -u
 W="${1:-10}"
 JOBS="${2:-$(nproc 2>/dev/null || echo 4)}"
-IMG=../images
-FIX=../fixtures
+IMG="${IMAGES:-test-bench/images}"
+FIX="${FIXTURES:-test-bench/fixtures}"
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
 #   "<blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions>"

@@ -1,12 +1,13 @@
 # A1 Production Result
 
-Final implementation: C encoder and C decoder only.
+Final implementation: C encoder and C decoder only. Production source is at the
+repository root; this document remains the historical A1 measurement record.
 
-- Encoder: `c/patch_generate/patch_generate.c` (`c/hy_enc`)
-- Decoder artifact: `c/patch_apply/patch_apply.h` (header-only device build)
-- Host demo/gate wrapper: `c/patch_apply/demo_patch.c` (`c/hy_dec`), including
+- Encoder: `patch_generate/patch_generate.c` (`hy_enc`)
+- Decoder artifact: `patch_apply/patch_apply.h` (header-only device build)
+- Host demo/gate wrapper: `patch_apply/demo_patch.c` (`hy_dec`), including
   the NVM emulator used for host verification
-- Shared wire-model definitions: `c/common/rc_models.h`
+- Shared wire-model definitions: `common/rc_models.h`
 
 The patch stream is a single range-coded A1 blob. There is no side table and no
 secondary reference implementation in this tree.
@@ -182,7 +183,7 @@ overwrite.
 ## Build And Check
 
 ```sh
-cd /ai_sw/v3/nvm/hybrid12k/c
+cd /ai_sw
 make
 make gate          # builds + runs all three gates below, one consolidated summary
                    # (~8s on a 32-core host; the 256-pair matrix is xargs -P nproc, so it scales with cores)
@@ -216,16 +217,16 @@ op, literal, correction, preserve, and derived-field counts for that patch.
 Manual one-direction check:
 
 ```sh
-./hy_enc ../fixtures/v0_base ../fixtures/v1_one_face /tmp/grow.blob 10
-cp ../fixtures/v0_base/watch.bin /tmp/mem.bin
+./hy_enc test-bench/fixtures/v0_base test-bench/fixtures/v1_one_face /tmp/grow.blob 10
+cp test-bench/fixtures/v0_base/watch.bin /tmp/mem.bin
 ./hy_dec /tmp/mem.bin /tmp/grow.blob 1
-cmp /tmp/mem.bin ../fixtures/v1_one_face/watch.bin
+cmp /tmp/mem.bin test-bench/fixtures/v1_one_face/watch.bin
 ```
 
 ARM object check:
 
 ```sh
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I c -I c/common -x c -c c/patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
 arm-none-eabi-size /tmp/patch_apply_arm.o
 ```
 

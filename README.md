@@ -2,7 +2,7 @@
 
 Final A1 firmware patcher for the Sensor Watch target.
 
-Production code lives in `v3/nvm/hybrid12k/c`:
+Production code lives at the repository root:
 
 - `patch_apply/patch_apply.h`: reusable header-only streaming in-place decoder.
 - `patch_apply/demo_patch.c`: host demo/gate wrapper used by `hy_dec`, including
@@ -14,11 +14,10 @@ Production code lives in `v3/nvm/hybrid12k/c`:
 Build and smoke-test:
 
 ```sh
-cd v3/nvm/hybrid12k/c
 make
 make check
 ```
 
 The local binary corpora live outside Git under `test-bench/images` and
-`test-bench/fixtures`; `v3/nvm/hybrid12k` keeps lightweight symlinks to those
-directories for verification runs.
+`test-bench/fixtures`. The root `Makefile` uses those paths by default; override
+them with `IMAGES=...` and `FIXTURES=...` when running checks elsewhere.

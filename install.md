@@ -23,7 +23,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 Verification commands:
 
 ```sh
-cd /ai_sw/v3/nvm/hybrid12k/c
+cd /ai_sw
 make
 make check
 arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
