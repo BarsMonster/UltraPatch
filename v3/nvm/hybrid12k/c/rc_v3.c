@@ -468,7 +468,7 @@ static void out_write(uint32_t a, uint8_t v){
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
 /* pg/pgn/pg2 (preserve+correction, SHARED) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval */
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
-static UGRice  M_gd;             /* token_count first, then reinitialized as backref_dist */
+static UGRice  M_gd;             /* token_count first, then k-switched for backref_dist */
 static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
 static UGGamma M_pg;             /* preserve/correction FIRST gaps, SHARED (corr gaps are the same
                                   * op-relative offset distribution; one model adapts on both). */
@@ -925,7 +925,7 @@ static void decode_body(void){
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
       ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
       int kd=(int)s_raw_bits(4);
-      ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
+      M_gd.k=(uint8_t)kd; ugg_init(&M_gl); ugg_init(&M_gs);
       ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
                                  * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
       fl_init(&M_flag);

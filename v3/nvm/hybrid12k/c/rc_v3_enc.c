@@ -1624,11 +1624,13 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &lit1);
     fl_init_e(&flag);
-    ug_init_e(&gd, 'r', dk);
+    ug_init_e(&gd, 'r', 11);
     ug_init_e(&gl, 'g', 0);
     ug_seed_cont_e(&gl, 1);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
+    ug_encode(&gd, &r, (uint32_t)seq->n);
+    gd.k = (uint8_t)dk;
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
@@ -2092,7 +2094,7 @@ typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
     BVE dval;
-    UGE tc, gd, gl, gs, pg, pgn, pg2, gdl, gel, gadj;
+    UGE gd, gl, gs, pg, pgn, pg2, gdl, gel, gadj;
     IDXE dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
@@ -2160,8 +2162,7 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init_e(&M.flag);
     bt_init_e(&M.dval.t);
-    ug_init_e(&M.tc, 'r', 11);
-    ug_init_e(&M.gd, 'r', kd);
+    ug_init_e(&M.gd, 'r', 11);
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror rc_v3.c decoder */
     ug_init_e(&M.gs, 'g', 0);
@@ -2182,7 +2183,8 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror rc_v3.c */
     REnc rc;
     re_init(&rc);
-    ug_encode(&M.tc, &rc, (uint32_t)seq->n);
+    ug_encode(&M.gd, &rc, (uint32_t)seq->n);
+    M.gd.k = (uint8_t)kd;
     put_raw_bits(&rc, (uint32_t)kd, 4);
     w_gz(&rc, (uint32_t)ops->n);
     size_t tok_i = 0, pos = 0, span_pos = 0;

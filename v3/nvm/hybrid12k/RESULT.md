@@ -23,13 +23,13 @@ secondary reference implementation in this tree.
 | C encoder + C decoder, 16x16 image matrix | 256/256 byte-exact |
 | NVM row write amplification | 0 amplified rows, max 1 erase/row |
 | Sequential row frontier | 0 inversions |
-| ARM object at `SA_W=10` | text 4,764 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
+| ARM object at `SA_W=10` | text 4,748 B, data 0 B, bss 10,272 B (<= 12 KiB cap, 2,016 B margin) |
 | ARM divide check | 0 hardware divide instructions; 1 soft-divide call in init |
 | Coroutine stack high-water | 456 B of 576 B (120 B cushion; canary-guarded) |
 
 Patch-size metrics:
 
-- W=10 full 16x16 corpus total: **4,595,275 B**.
+- W=10 full 16x16 corpus total: **4,595,273 B**.
 - Real one-face 360-byte firmware update:
   - `v0_base -> v1_one_face`: **871 B**
   - `v1_one_face -> v0_base`: **581 B**
@@ -165,6 +165,12 @@ the price-feedback re-parse loop now iterates to its true fixpoint (its acceptan
 already keeps a candidate parse only when the exact flushed body shrinks, so the extra
 passes are strictly no-worse per pair); a few corpus pairs needed more than four passes
 to converge, trimming the corpus total a further 5 B with the protected one-face held.
+The token-count Rice symbol now warms the same `M_gd` model used for later fresh match
+distances: the decoder switches only `k` after reading the shipped distance parameter,
+and the encoder plus price-feedback mirror that state carryover. This removes the second
+decoder Rice-model initialization, drops 16 B of ARM `.text`, and moves the 256-pair
+matrix by only +/-2 B per affected pair while improving the corpus total by 2 B and
+holding the real one-face update at 871/581 B.
 
 Output is staged through a 256 B row write-back cache. Rows whose final bytes
 match the existing flash row are not erased or programmed. The preserve journal
@@ -223,7 +229,7 @@ arm-none-eabi-size /tmp/rc_v3_arm.o
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`. With the current packed byte-tree models, an `SA_W=11` build
-now fits the 12 KiB SRAM cap at text 4,764 B, data 0 B, bss 11,296 B (992 B
+now fits the 12 KiB SRAM cap at text 4,748 B, data 0 B, bss 11,296 B (992 B
 margin) and improves the corpus total to <= 4,580,068 B with the real one-face
 update at 871/581 B. The 256-pair patch-size split for W=11 vs W=10 is
 138 better / 14 worse / 104 equal. Production stays at W=10 to keep the larger
