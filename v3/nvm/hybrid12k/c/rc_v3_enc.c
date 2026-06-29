@@ -2175,7 +2175,7 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum (was RC_PBIT-RC_PBIT/4); match rc_v3.c */
+    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match rc_v3.c */
     idx_init_e(&M.diex, (uint16_t)2816u);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
@@ -2337,7 +2337,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     if (to_size > from_size) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
-     * information; the decoder used to skip it in rc_init. Drop it on the wire (-1 B/patch).
+     * information, so it is dropped from the wire.
      * Bit-exact invariant: body.d[0] is always 0 here. */
     if (body.n > 0 && body.d[0] == 0) { buf_write(&blob, body.d + 1, body.n - 1); }
     else { die("range-coder leading byte not 0 — wire invariant broken"); }

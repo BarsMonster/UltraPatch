@@ -177,10 +177,10 @@ static uint8_t g_reject;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|s_raw(); return v; }
 /* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. The only raw-gamma site
- * is the header op count, so the gamma reader and its -1 wrapper are merged into one function. */
+ * is the header op count, so the gamma reader and its -1 wrapper are one function. */
 static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
-    return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits (was a duplicate bit loop) */
+    return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits */
 /* ---- bit-tree byte ---- */
 static int s_bt(BitTree*t,int rate){
     int m=1;
@@ -222,7 +222,7 @@ typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]
  * valid for ANY UG_CTX, and UG_GAMMA_M = top-row start + its width. These derive the layout from
  * UG_CTX (no hand-typed offsets in the size/total), and the _Static_assert below pins the runtime
  * base[] table to the same formula — so changing UG_CTX is caught at COMPILE time (a clear assert)
- * instead of being silently miscomputed. This is bit-exact identical to the historical layout. */
+ * instead of being silently miscomputed. */
 #define UG_GAMMA_BASE(c) ((c)==0 ? 0 : 1 + ((c)*((c)-1))/2)
 #define UG_GAMMA_M (UG_GAMMA_BASE(UG_CTX) + (UG_CTX+1))
 typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_M]; } UGGamma;
@@ -237,7 +237,7 @@ static void ugr_init(UGRice*g,int k){
 /* init a gamma model, seeding EVERY unary-prefix prior to `useed` (the mantissa priors are always
  * RC_PHALF). useed==RC_PHALF is the neutral init; useed==RC_PBIT-RC_PBIT/4 biases toward STOP (bit 0)
  * so the smallest gamma values are cheap from the first symbol — used by the MTF dict-index gammas
- * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 was the
+ * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 is the
  * corpus optimum). Folding the u[] seed into the init avoids a second pass over u[]. */
 static void ugg_init_u(UGGamma*g,uint16_t useed){
     for(int i=0;i<=UG_CTX;i++) g->u[i]=useed;
@@ -251,22 +251,19 @@ static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 static void ugg_seed_cont(UGGamma*g,int depth){
     for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
 }
-/* shared adaptive unary prefix: read 1-bits on the per-clamped-level priors u[] until a 0 bit,
- * returning the run length cl (== the value's bit-length class). `cap` bounds the run so a corrupt
- * zero-fill stream can't spin forever / shift by >=32 (RC_UNARY_MAX for gamma, RC_RICE_UNARY_MAX for
- * rice); on overflow it sets g_rcerr and returns 0 so the mantissa loop is a no-op and the apply
- * cleanly rejects (same effect as the old per-function early return). Bit-exact for valid streams. */
 /* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
  * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
- * corrupt run-on. clampmax==UG_CTX(=6) reproduces UG_C over the 7-entry Golomb u[]; clampmax==IDX_CTX-1
- * (=4) reproduces the index code's min(pos,4) over the 5-entry u[]. Bit-exact for both call families. */
+ * corrupt run-on so a zero-fill stream can't spin forever / shift by >=32 (RC_UNARY_MAX for gamma,
+ * RC_RICE_UNARY_MAX for rice); on overflow it sets g_rcerr and returns 0 so the mantissa loop is a
+ * no-op and the apply cleanly rejects. clampmax==UG_CTX(=6) reproduces UG_C over the 7-entry Golomb
+ * u[]; clampmax==IDX_CTX-1 (=4) reproduces the index code's min(pos,4) over the 5-entry u[]. */
 static uint32_t s_unary(uint16_t*u,uint32_t clampmax,uint32_t cap){
     uint32_t cl=0; while(s_bit(&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
     return cl;
 }
 /* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
  * row already selected by caller (rice: m[UG_C(cl)] full square row; gamma: m[UG_GAMMA_BASE(UG_C(cl))]
- * packed-triangle row). Bit-exact identical to the inlined per-function loops. */
+ * packed-triangle row). */
 static uint32_t s_ug_mant(uint16_t*row,int cnt){
     uint32_t v=0; for(int pos=0;pos<cnt;pos++) v|=(uint32_t)s_bit(&row[UG_C(pos)])<<(cnt-1-pos);
     return v;
@@ -279,7 +276,7 @@ static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_unary(g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant(&g->m[UG_GAMMA_BASE(UG_C(cl))],cl)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code (replaces the per-stream UGGamma, ~60B each).
+/* MTF dict-index model: a lean adaptive UNARY code.
  * The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one, ~10% two, with a thin tail
  * to ~140 worst case. Unary fits this concentration: emit v continue-bits then a stop-bit, each on
  * the per-position prior idx[min(pos,IDX_CTX-1)]; tail positions share the last prior so the model
@@ -354,8 +351,8 @@ typedef struct {
 #endif
 /* HYBRID ARENA layout (apply phase): [journal JREGION][SA apply SA_ARENA]. The STREAMED-DELTA wire
  * holds NO resident per-detection store; the small MTF-dict streams (DR_BL/DR_EX), the M_dval
- * escape-value bit-tree, and the two index UGolombs are SEPARATE statics (~2.4 KB) — far smaller than
- * the old 8,080 B generator stores. Seed phase (hist0/hist1/w = 4096 B) overlays ARENA front. */
+ * escape-value bit-tree, and the two index UGolombs are SEPARATE statics (~2.4 KB). Seed phase
+ * (hist0/hist1/w = 4096 B) overlays ARENA front. */
 /* SA apply state = ring(2^W) + fixed correction arrays + the SA scalar/control fields. A1 derives
  * ldr positions per op and infers suppressed BL from `!pure`, so no ex/sbl offset buffers are
  * resident. The reservation is the two buffer caps (ring 2^W, op_corr 4*OPC_CAP) plus the non-buffer
@@ -481,9 +478,9 @@ static UGGamma M_pgn;            /* preserve/correction COUNTS (np/nc), SHARED �
 static UGGamma M_pg2;            /* preserve/correction REST gaps (2nd..Nth), SHARED. The first gap is
                                   * an op-relative offset (broad), but later gaps are ~98%/77% value=1
                                   * (consecutive run); a single shared model converges hard on that. */
-static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz(adj). Were raw dz
-                                  * (no model); their bit-length distributions are concentrated, so an
-                                  * adaptive gamma UGolomb beats the fixed raw code. */
+static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz(adj). Their bit-length
+                                  * distributions are concentrated, so an adaptive gamma UGolomb beats a
+                                  * fixed raw code. */
 static IdxUnary M_dibl, M_diex;  /* BL/EX MTF dict indices (lean unary code) */
 /* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
@@ -509,9 +506,9 @@ static Flag1   M_flag;
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))   /* 3072: P(rep0=1) prior ~ 1/4. rep0=1 reuses the
                                                    * previous match distance; corpus tuning (paired
                                                    * min-over-N sweep) puts the optimum that does NOT
-                                                   * regress the one-face product patch at ~1/4 (1/8
-                                                   * was the old value; 3/8 helps corpus more but
-                                                   * regresses the real one-face update by +1/+1). */
+                                                   * regress the one-face product patch at ~1/4 (3/8
+                                                   * helps corpus more but regresses the real one-face
+                                                   * update by +1/+1). */
 static uint16_t M_rep0[2];   /* order-1 on previous rep0 outcome: rep0 runs cluster */
 static int g_rep0h;          /* last rep0 bit (context) */
 static uint32_t g_lastdist;
@@ -519,12 +516,12 @@ static int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];   /* MTF dict array
 static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (resident) */
 
 /* ===================================================================================== */
-/* HYBRID STREAMED DELTAS (replaces the two resident generator stores; 12 KiB build). Each field's */
+/* HYBRID STREAMED DELTAS (12 KiB build). Each field's                                              */
 /* delta VALUE is pulled INLINE from the single range stream the instant the apply detects the      */
 /* field (the field TYPE is known from detection, so no untyped up-front decode is needed). Per      */
 /* stream we keep only a small MOVE-TO-FRONT dict of the distinct delta values (the frequently-      */
 /* repeated relocation offsets keep tiny MTF indices) + a repeat-last bit keyed by previous repeat   */
-/* and last-is-zero + a dict-hit bit. This fixed stream state replaces the old resident stores.      */
+/* and last-is-zero + a dict-hit bit.                                                                */
 /* ===================================================================================== */
 /* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
  * and no ranges side table. */
@@ -600,9 +597,9 @@ static int32_t corr_at(SA*s, int32_t off){
 }
 /* A1 ldr-derive: for FWD, a 1024-byte pristine window is represented as 512 even-halfword slots:
  * imm8 byte + one "is Thumb LDR literal" bit. The ldr back-scan never needs the full instruction
- * halfword after classification. Field probes PEEK at the current 4-byte field before recording it,
- * preserving the old fpk/fpk-1024 ring alias timing. Grow reads via the journal-aware source path
- * because lower instruction-window bytes may be clobbered. */
+ * halfword after classification. Field probes PEEK at the current 4-byte field before recording it.
+ * Grow reads via the journal-aware source path because lower instruction-window bytes may be
+ * clobbered. */
 #define PSRC_HW_MASK 511u
 static uint8_t g_psrc_imm[512], g_psrc_ldr[64];
 static uint8_t hy_src(int32_t fp);   /* fwd decl: journal-aware pristine source read */
@@ -717,7 +714,7 @@ static uint8_t hy_src(int32_t fp){
 }
 /* journal-aware pristine 4-byte field word (little-endian) at fpk, peeked WITHOUT touching the psrc
  * ring (suppressed-bl / no-field must record nothing). On a real BL/EX hit the caller replays this
- * word into the ring via hy_word4_rec — the ascending byte/order match the old read+record path. */
+ * word into the ring via hy_word4_rec (ascending byte order). */
 static uint32_t hy_word4_peek(uint32_t fpk){
     return  (uint32_t)hy_src_peek((int32_t)fpk)    | ((uint32_t)hy_src_peek((int32_t)fpk+1)<<8)
           | ((uint32_t)hy_src_peek((int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek((int32_t)fpk+3)<<24);
@@ -738,7 +735,7 @@ static void hy_word4_rec(uint32_t fpk, uint32_t w){
  * rather than reading the source again. Field kinds are mutually exclusive and tried in encoder
  * order: local-BL first (Thumb F000/D000 pattern, 2-aligned), else a same-op LDR-literal target.
  * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
- * stream, and — matching the original readers — record nothing into the ring). */
+ * stream, and record nothing into the ring). */
 static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     /* fpk = fp0 + ks, range-checked in pure 32-bit. ks >= 0 (op-local field offset) and image sizes are
      * < 2^31 (hard design invariant), so fpk < 0 iff fp0 < -ks (no overflow: -ks is a valid int32 for
@@ -759,7 +756,7 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
         return 1;
     }
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
-     * mirrors the encoder's pure(k) + op_ldr_set; positions are no longer shipped. ldr_targets
+     * mirrors the encoder's pure(k) + op_ldr_set; positions are derived, not shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(g_FWD?NULL:s, fp0, dl, fpk)){
         int32_t delta=pull_delta(&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* INLINE pull from the single stream */
@@ -770,9 +767,9 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     return 0;
 }
 /* Literal cursor over the op's content stream + the per-byte write helpers. `fwd` is loop-invariant,
- * so these inline to the same straight-line code the former LITCUR_/WR_ macros produced (the per-
- * direction branch folds away) — but with named typed parameters and no hidden mutation of enclosing
- * locals. The cursor advances in wire order regardless of write direction. */
+ * so these inline to straight-line code (the per-direction branch folds away) with named typed
+ * parameters and no hidden mutation of enclosing locals. The cursor advances in wire order regardless
+ * of write direction. */
 /* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
@@ -819,8 +816,8 @@ static void sa_apply_op(SA*s){
     int32_t tp0,fp0;
     if(g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
-         * checked with __builtin_add_overflow — same effect as the old int64 INT32_MIN/MAX bound, no
-         * 64-bit math. (For a valid stream fp is a small in-range position, so this never trips.) */
+         * checked with __builtin_add_overflow (no 64-bit math). (For a valid stream fp is a small
+         * in-range position, so this never trips.) */
         int32_t nfp;
         if(nw>(int32_t)g_to_size || s->tp>(int32_t)g_to_size-nw ||
            __builtin_add_overflow(s->fp,dl,&nfp) || __builtin_add_overflow(nfp,adj,&nfp)){ s->err=1; return; }
@@ -908,8 +905,8 @@ static void decode_body(void){
      * dict streams, and the two index UGolombs all persist through apply. ---- */
     bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL); dr_init(&DR_EX, DR_DIC_EX);
     idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); 2816 is the
-                                                          * corpus optimum holding one-face 582 (was
-                                                          * RC_PBIT-RC_PBIT/4=3072). Mirror in rc_v3_enc.c. */
+                                                          * corpus optimum holding one-face 582.
+                                                          * Mirror in rc_v3_enc.c. */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */

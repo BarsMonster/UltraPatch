@@ -42,7 +42,7 @@ void flash_write(uint32_t a, uint8_t v){
 long nvm_erases(void){ return g_erases; }
 long nvm_programs(void){ return g_programs; }
 uint32_t nvm_rows(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>0); return n; }
-/* NEW REQUIREMENT gate: every flash page/row erased 0 or 1 times — NO write amplification. */
+/* gate: every flash page/row erased 0 or 1 times — NO write amplification. */
 uint32_t nvm_rows_amplified(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>1); return n; }
 uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<g_nrows;i++) if(g_erasecnt[i]>m) m=g_erasecnt[i]; return m; }
 long nvm_frontier_inversions(void){ return g_finv; }  /* req #2: MUST be 0 (rows finalized in one monotonic direction) */

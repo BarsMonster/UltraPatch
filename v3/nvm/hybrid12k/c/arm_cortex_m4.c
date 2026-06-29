@@ -38,8 +38,8 @@ static void map_finalize(map_t *m) {
 static void map_free(map_t *m){ free(m->a); m->a=NULL; m->n=m->cap=0; }
 
 /* ---------- uint32 hash set (literal-pool addresses; O(1) membership) ----------
- * Replaces the old O(n^2) linear scan over the ldr/ldr_w maps. Power-of-two table,
- * open addressing, grown on 0.75 load. Sized to the number of literals (dynamic). */
+ * Power-of-two table, open addressing, grown on 0.75 load. Sized to the number of
+ * literals (dynamic). */
 typedef struct { uint32_t *key; uint8_t *used; size_t cap, n; } uset_t;
 static int uset_put_raw(uint32_t *key, uint8_t *used, size_t cap, uint32_t k) {
     size_t mask = cap - 1, i = (size_t)((k * 2654435761u) >> 11) & mask;
