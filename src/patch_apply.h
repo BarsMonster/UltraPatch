@@ -41,7 +41,7 @@
 #ifdef HY_DBG
 #include <stdio.h>
 #endif
-#include "../common/rc_models.h"
+#include "rc_models.h"
 
 /* ===================================================================================== */
 /* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */

@@ -53,9 +53,9 @@ is deterministic for a fixed `test-bench/corpus.sha256` manifest.
 ## Artifacts
 
 The release source artifact is the Git commit. The device decoder artifact is
-`patch_apply/patch_apply.h` plus `common/rc_models.h`; the host encoder is built
-from `patch_generate/patch_generate.c`, `patch_generate/arm_cortex_m4.c`, and the
-vendored `vendor/libdivsufsort/` sources.
+`src/patch_apply.h` plus `src/rc_models.h`; the host encoder is built from
+`src/patch_generate.c`, `src/arm_cortex_m4.c`, and the vendored
+`vendor/libdivsufsort/` sources.
 
 For traceability, release notes should include:
 
@@ -64,7 +64,9 @@ For traceability, release notes should include:
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
 - `make gate` output.
 - Toolchain package/version used for `check-arm`.
-- License statement: project MIT, vendored libdivsufsort retains upstream notice.
+- License statement: project MIT except vendored libdivsufsort, which retains
+  its upstream notice; `src/arm_cortex_m4.c` includes an attribution note for
+  the detools Python implementation that informed the C reimplementation.
 
 ## Scope Boundary
 

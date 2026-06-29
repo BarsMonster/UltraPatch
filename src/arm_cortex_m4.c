@@ -2,6 +2,9 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
+ *
+ * This module is a C reimplementation written after studying detools'
+ * detools/data_format/arm_cortex_m4.py ARM Cortex-M data-format logic.
  */
 
 /* ARM Cortex-M relocation field scanner and packers for the final A1 encoder. */

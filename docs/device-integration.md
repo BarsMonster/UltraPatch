@@ -1,12 +1,12 @@
 # Device Integration Contract
 
-`patch_apply/patch_apply.h` is the production decoder artifact. It is deliberately
+`src/patch_apply.h` is the production decoder artifact. It is deliberately
 small and static-state driven so the Cortex-M0+ `.bss` gate remains meaningful.
 Treat it as a bootloader/update component, not as a general reentrant library.
 
 ## Ownership
 
-Include `patch_apply/patch_apply.h` in exactly one translation unit. The header
+Include `src/patch_apply.h` in exactly one translation unit. The header
 owns decoder static state, the byte FIFO, the coroutine stack, entropy models, the
 journal arena, and the output row cache.
 
@@ -90,6 +90,6 @@ A1 does not provide power-fail rollback. If power is lost during apply, the host
 or bootloader must be able to detect the interrupted state and recover by full
 reflash or another product-defined recovery path.
 
-The host wrapper in `patch_apply/demo_patch.c` is a verification harness and NVM
+The host wrapper in `src/patch_apply_demo.c` is a verification harness and NVM
 emulator. It is useful as a reference for envelope parsing and metrics, but it is
 not the device integration layer.

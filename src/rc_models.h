@@ -7,7 +7,7 @@
 /* A1 divide-free range-coder model definitions (shared by decoder + host encoder).
  * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
  * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both
- * patch_apply/patch_apply.h (device decoder) and patch_generate/patch_generate.c
+ * src/patch_apply.h (device decoder) and src/patch_generate.c
  * (host encoder) carry their own range-coder bit I/O and only share the model
  * struct/constants below, so the wire stays bit-exact between the two. */
 #ifndef RC_MODELS_H

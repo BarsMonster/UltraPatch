@@ -2,14 +2,14 @@
 
 Final A1 firmware patcher for the Sensor Watch target.
 
-Production code lives at the repository root:
+Production code lives under `src/`, with third-party code under `vendor/`:
 
-- `patch_apply/patch_apply.h`: reusable header-only streaming in-place decoder.
-- `patch_apply/demo_patch.c`: host demo/gate wrapper used by `hy_dec`, including
+- `src/patch_apply.h`: reusable header-only streaming in-place decoder.
+- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`, including
   the host NVM emulator.
-- `patch_generate/patch_generate.c`: host-side C encoder.
+- `src/patch_generate.c`: host-side C encoder.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
-- `common/rc_models.h`: shared wire-model constants and packed model helpers.
+- `src/rc_models.h`: shared wire-model constants and packed model helpers.
 
 Build and smoke-test:
 
@@ -49,7 +49,7 @@ CI verifies the tracked corpus with `make check-assets` before the same
 
 Device integration contract:
 
-- Include `patch_apply/patch_apply.h` in exactly one update module.
+- Include `src/patch_apply.h` in exactly one update module.
 - Provide `flash_read(uint32_t)`, `flash_write(uint32_t, uint8_t)`, and
   `uint32_t g_image_span`.
 - Parse and authenticate the patch envelope outside the decoder, then call
@@ -60,9 +60,12 @@ Device integration contract:
 
 ## License
 
-Ultrapatcher is MIT licensed.
+Ultrapatcher is MIT licensed, except where a vendored dependency states
+otherwise.
 
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.
 
-Vendored files under `vendor/libdivsufsort/` keep their upstream
-license notices. See `THIRD_PARTY_NOTICES.md`.
+Vendored files under `vendor/libdivsufsort/` keep their upstream license
+notices. `src/arm_cortex_m4.c` includes an attribution note for the detools
+Python implementation that informed the C reimplementation. See
+`THIRD_PARTY_NOTICES.md`.

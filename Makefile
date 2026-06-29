@@ -16,17 +16,15 @@ CFLAGS += -Werror
 CFLAGS += -std=c99
 CFLAGS += $(OPT)
 CFLAGS += -I.
-CFLAGS += -Icommon
-CFLAGS += -Ipatch_apply
-CFLAGS += -Ipatch_generate
+CFLAGS += -Isrc
 CFLAGS += -Ivendor/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
-APPLY_HDR := patch_apply/patch_apply.h common/rc_models.h
-GEN_HDR := common/rc_models.h patch_generate/arm_cortex_m4.h
-ENC_SRCS := patch_generate/patch_generate.c patch_generate/arm_cortex_m4.c $(DIVSUF)
-DEC_SRCS := patch_apply/demo_patch.c
+APPLY_HDR := src/patch_apply.h src/rc_models.h
+GEN_HDR := src/rc_models.h src/arm_cortex_m4.h
+ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c $(DIVSUF)
+DEC_SRCS := src/patch_apply_demo.c
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
@@ -92,7 +90,7 @@ check-arm:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \

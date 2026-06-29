@@ -28,7 +28,7 @@ make
 make check
 make check-assets
 make gate
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I . -I common -x c -c patch_apply/patch_apply.h -o /tmp/patch_apply_arm.o
+arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o /tmp/patch_apply_arm.o
 arm-none-eabi-size /tmp/patch_apply_arm.o
 ```
 
