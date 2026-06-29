@@ -24,7 +24,9 @@
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
  * + the packed 576 B ldr-derive pristine metadata; the image lives ONLY in flash (0 image bytes in RAM).
  *
- * Embedded target: NO 64-bit integers in the hot path; all positions/sizes are 32-bit.
+ * Embedded target: NO 64-bit integers ANYWHERE in the decoder — all positions/sizes are 32-bit and
+ * every bounds/overflow guard is done in 32-bit (headroom tests plus __builtin_add/sub_overflow), so
+ * the ARM object emits no libgcc 64-bit (or float) helpers, only one 32-bit divide at init.
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -738,9 +740,12 @@ static void hy_word4_rec(uint32_t fpk, uint32_t w){
  * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
  * stream, and — matching the original readers — record nothing into the ring). */
 static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
-    int64_t fpk64=(int64_t)fp0+ks;
-    if(fpk64<0 || fpk64+4>(int64_t)g_from_size) return 0;
-    uint32_t fpk=(uint32_t)fpk64;
+    /* fpk = fp0 + ks, range-checked in pure 32-bit. ks >= 0 (op-local field offset) and image sizes are
+     * < 2^31 (hard design invariant), so fpk < 0 iff fp0 < -ks (no overflow: -ks is a valid int32 for
+     * ks >= 0), and once fpk >= 0 the unsigned sum fp0+ks cannot wrap (0 <= fp0+ks < 2^32). */
+    if(fp0 < -ks) return 0;                                /* fpk would be negative */
+    uint32_t fpk=(uint32_t)fp0+(uint32_t)ks;
+    if(fpk>g_from_size || g_from_size-fpk<4u) return 0;    /* fpk+4 > from_size (no +4 overflow) */
     if(fpk&1u) return 0;                                  /* BL is 2-aligned; LDR targets are 4-aligned */
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(fpk);
@@ -807,17 +812,24 @@ static void sa_apply_op(SA*s){
     int32_t adj=bb_unzz(adj_u);
     if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ s->err=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
-    int64_t nw=(int64_t)dl+el;
-    if(nw<0 || nw>(int64_t)g_image_span){ s->err=1; return; }
+    /* nw = dl+el (op output bytes). dl,el in [0,2^31) and the image span is < 2^31 (design invariant),
+     * so the overflow guard is a pure 32-bit headroom test: check dl, then el against the rest of span. */
+    if(dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ s->err=1; return; }
+    int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
     int32_t tp0,fp0;
     if(g_FWD){
-        int64_t ntp=(int64_t)s->tp+nw, nfp=(int64_t)s->fp+dl+adj;
-        if(ntp>(int64_t)g_to_size || nfp<INT32_MIN || nfp>INT32_MAX){ s->err=1; return; }
-        tp0=s->tp; fp0=s->fp; s->tp=(int32_t)ntp; s->fp=(int32_t)nfp;
+        /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
+         * checked with __builtin_add_overflow — same effect as the old int64 INT32_MIN/MAX bound, no
+         * 64-bit math. (For a valid stream fp is a small in-range position, so this never trips.) */
+        int32_t nfp;
+        if(nw>(int32_t)g_to_size || s->tp>(int32_t)g_to_size-nw ||
+           __builtin_add_overflow(s->fp,dl,&nfp) || __builtin_add_overflow(nfp,adj,&nfp)){ s->err=1; return; }
+        tp0=s->tp; fp0=s->fp; s->tp=s->tp+nw; s->fp=nfp;
     } else {
-        int64_t ntp=(int64_t)s->tp-nw, nfp=(int64_t)s->fp-dl-adj;
-        if(ntp<0 || nfp<INT32_MIN || nfp>INT32_MAX){ s->err=1; return; }
-        s->tp=(int32_t)ntp; s->fp=(int32_t)nfp; tp0=s->tp; fp0=s->fp;
+        int32_t nfp;
+        if(s->tp<nw ||
+           __builtin_sub_overflow(s->fp,dl,&nfp) || __builtin_sub_overflow(nfp,adj,&nfp)){ s->err=1; return; }
+        s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
     /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
     uint32_t np=s_ug_gamma(&M_pgn);
@@ -1034,13 +1046,16 @@ int main(int argc,char**argv){
     size_t p=4; int err=0;
     uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
         do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
+    /* to_size = from_size + zigzag-decoded delta, reconstructed and bounds-checked in pure 32-bit (no
+     * 64-bit intermediate): odd z is a negative delta of magnitude (z>>1)+1, even z a non-negative delta
+     * of z>>1; each branch validates to_size stays within [0, 64 MiB] using only 32-bit headroom tests. */
     { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      int64_t ts=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
-      if(ts<0 || ts>(int64_t)(64u<<20)){ err=1; ts=0; } to_size=(uint32_t)ts; }
+      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else to_size=from_size-m; }
+      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else to_size=from_size+d; } }
     /* fp_end is the grow (!FWD) start seed; FWD/shrink/equal patches omit it (computed inline). */
     if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      int64_t fe=(int64_t)from_size + ((z&1u)? -(int64_t)((z>>1)+1u) : (int64_t)(z>>1));
-      if(fe<0 || fe>(int64_t)(64u<<20)){ err=1; fe=0; } fp_end=(uint32_t)fe; }
+      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else fp_end=from_size-m; }
+      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else fp_end=from_size+d; } }
     if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
     /* host-harness sanity (fuzz-hardening): an implausibly large size field would make nvm_init malloc
      * a huge span. Real images are <1 MiB; reject >64 MiB up front. (Device has no malloc; host-only.) */
