@@ -8,8 +8,8 @@
 # Run from the repository root; needs ./hy_enc and ./hy_dec already built. Prints the eight gate
 # metric lines so the Makefile (or a measurement run) can parse them. The 256 (from,to) pairs
 # are independent, so they run in
-# parallel across all cores; each worker uses its OWN mktemp dir (no shared blob/mem path), which
-# keeps the deterministic encoder free of the cross-run contamination shared /tmp paths cause.
+# parallel across all cores; each worker uses its OWN mktemp dir, which keeps the
+# deterministic encoder free of cross-run contamination from shared output paths.
 #
 # Usage: check_corpus.sh [W] [jobs]      (W defaults to 10, jobs to nproc)
 # Exit 3 on a structural error (not 256 pairs, or a decode produced no parseable NVM metrics).

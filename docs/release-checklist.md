@@ -47,8 +47,8 @@ scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
 
 Publish both `artifacts/a1-corpus.tar.gz` and
-`artifacts/a1-corpus.tar.gz.sha256` in the internal release location. The archive
-is deterministic for a fixed `test-bench/corpus.sha256` manifest.
+`artifacts/a1-corpus.tar.gz.sha256` with the release. The archive is
+deterministic for a fixed `test-bench/corpus.sha256` manifest.
 
 ## Artifacts
 

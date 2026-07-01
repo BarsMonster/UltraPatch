@@ -1,10 +1,6 @@
 # Test Bench
 
-External firmware worktrees used for benchmarking live here.
-
-`Sensor-Watch/` is ignored by the ultrapatcher repository so local firmware edits and upstream history stay separate from the patcher code.
-
-`images/` and `fixtures/` are tracked binary corpora used by the A1 verification
+This directory contains the tracked binary corpora used by the A1 verification
 checks. The gate uses 16 matrix images plus the `v0_base` and `v1_one_face`
 fixtures; the root `Makefile` reads them directly by default.
 
