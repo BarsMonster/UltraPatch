@@ -78,7 +78,7 @@ int main(int argc,char**argv){
     FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
-    uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
+    uint8_t*blob=malloc((size_t)bsz); if(fread(blob,1,(size_t)bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
     /* MINIMAL envelope pre-parse, for the HOST EMULATOR ONLY (flash sizing + memfile sanity).
      * The decoder performs the authoritative envelope parse and both CRC gates itself; a device
      * integration needs none of this — its flash is fixed hardware.

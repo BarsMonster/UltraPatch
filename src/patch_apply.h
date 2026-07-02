@@ -79,7 +79,10 @@ static int      g_FWD;
 /* whatever 4 bytes remain in the ring at the end ARE the trailer.                         */
 /* ===================================================================================== */
 static void decode_body(void);
-static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
+/* may_alias: the literal-seed histograms overlay the unsigned-char ARENA as u32 words (see
+ * the SAst comment); the attribute makes that overlay defined under any integrator's flags. */
+typedef uint32_t __attribute__((may_alias)) u32_a;
+static void lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w);
 static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring (both modes) */
 enum {
     PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
@@ -94,12 +97,20 @@ static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then 
 static uint8_t  g_fifo_byte, g_fifo_full;  /* decoder_push() supplies one byte per resume */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
 
+/* Coroutine stack sizing is COMPILER-SPECIFIC: the decode call tree's frames measure 520 B
+ * high-water under gcc -O2 (x86-64; ARM gcc -Os frames are smaller still) but 3752 B under
+ * clang -O2 (measured 2026-07 -- clang segfaulted the 640 B gcc-sized stack). The defaults
+ * below carry a cushion per compiler family; when changing compiler, version, or flags,
+ * RE-MEASURE with -DRC_V3_STACKMEAS (prints the painted high-water after a decode) before
+ * trusting the default. The deepest 8 B are a 0xC5 canary checked at decode end -> a stack
+ * overflow REJECTS the patch rather than silently corrupting the output. PULL mode
+ * (-DPATCH_APPLY_PULL) has no coroutine stack and none of these concerns. */
 #ifndef DEC_STACK_BYTES
-#define DEC_STACK_BYTES 640                /* coroutine stack; measured high-water 520 B (data-independent
-                                            * call depth; re-measured 2026-07 after the in-decoder envelope
-                                            * phase landed) leaves a 120 B cushion for out-of-corpus call
-                                            * paths. The deepest 8 B are a 0xC5 canary checked at decode
-                                            * end -> stack overflow REJECTS, never silent-corrupts. */
+#ifdef __clang__
+#define DEC_STACK_BYTES 4096
+#else
+#define DEC_STACK_BYTES 640
+#endif
 #endif
 static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
 
@@ -274,7 +285,7 @@ static uint8_t g_rcerr;
 enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
 static uint8_t g_reject;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
-static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|s_raw(); return v; }
+static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(); return v; }
 /* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. The only raw-gamma site
  * is the header op count, so the gamma reader and its -1 wrapper are one function. */
 static uint32_t s_raw_gz(void){
@@ -393,7 +404,7 @@ static int s_flag(Flag1*f){ int b=s_bit(&f->m[f->h]); f->h=((f->h<<1)|b)&3; retu
 static uint32_t crc32_flash(uint32_t n){
     uint32_t c=0xffffffffu;
     for(uint32_t i=0;i<n;i++){ c^=flash_read(i);
-        for(int k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (-(int32_t)(c&1))); }
+        for(int k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (uint32_t)(-(int32_t)(c&1))); }
     return c^0xffffffffu;
 }
 
@@ -516,7 +527,7 @@ static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4])
     uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
     uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
     uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
-    out[0]=u&0xff; out[1]=(u>>8)&0xff; out[2]=l&0xff; out[3]=(l>>8)&0xff;
+    out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
 }
 
 /* ---- piecewise shift map (D1): predicts BL/EX de-reloc deltas from addresses/values the
@@ -645,7 +656,7 @@ static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (residen
 /* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
  * and no ranges side table. */
 /* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
-static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>8)&0xff; out[2]=(v>>16)&0xff; out[3]=(v>>24)&0xff; }
+static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=(uint8_t)v; out[1]=(uint8_t)(v>>8); out[2]=(uint8_t)(v>>16); out[3]=(uint8_t)(v>>24); }
 
 static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
     d->K=1; dic[0]=0;
@@ -659,7 +670,7 @@ static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
  *   then last=v. */
 static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=d->rh | (dic[0]==0 ? 2 : 0);
-      int rb=s_bit(&d->rep[ri]); d->rh=rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
+      int rb=s_bit(&d->rep[ri]); d->rh=(uint8_t)rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(&d->hit)==1){
         uint32_t j=s_unary(gix->u,IDX_CTX-1,cap)+1u;    /* cmp-1: dict idx 0 unreachable -> encode j-1 */
@@ -686,7 +697,7 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
 /* ===================================================================================== */
 #define SA_RING (1u<<SA_W)
 #define SA_MASK (SA_RING-1u)
-typedef struct {
+typedef struct __attribute__((may_alias)) {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
     /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
@@ -700,8 +711,12 @@ typedef struct {
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
     uint8_t err;
 } SA;
-/* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase). */
-#define SAst (*(SA*)(ARENA + JREGION))
+/* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase).
+ * ARENA is a declared unsigned-char array, so viewing it through SA / u32 pointer lvalues is
+ * formally a strict-aliasing violation even though every compiler handles this backing-store
+ * pattern; the may_alias typedefs make the overlay reads/writes DEFINED under any integrator's
+ * flags (gcc/clang attribute; this header already requires the GNU dialect). */
+#define SAst (*(SA*)(void*)(ARENA + JREGION))
 _Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reservation");
 _Static_assert(4096u <= ARENA_BYTES, "seed scratch (hist0+hist1+w) exceeds ARENA");
 
@@ -1080,9 +1095,9 @@ static int __attribute__((noinline)) decode_header(void){
     g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_FWD=(ts<=fs);
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
-    { uint32_t *hist0=(uint32_t*)ARENA;            /* [0..256)   */
-      uint32_t *hist1=hist0+256;                   /* [256..512) */
-      uint32_t *w=hist1+256;                       /* [512..1024) -> 4 KiB total, fits ARENA */
+    { u32_a *hist0=(u32_a*)(void*)ARENA;           /* [0..256)   */
+      u32_a *hist1=hist0+256;                      /* [256..512) */
+      u32_a *w=hist1+256;                          /* [512..1024) -> 4 KiB total, fits ARENA */
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
@@ -1163,7 +1178,7 @@ done:
 /* ===================================================================================== */
 /* public push API: decoder_push(byte) -> NEED_MORE / DONE / ERROR                         */
 /* ===================================================================================== */
-static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
+static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
     for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;

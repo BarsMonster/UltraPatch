@@ -31,3 +31,12 @@ jobs:
 
       - name: Run release gate
         run: make gate
+
+      # Second-compiler leg: clang must build warning-free and its encoder must produce
+      # byte-identical blobs (golden manifest) — proves the wire is compiler-independent.
+      - name: Clang build + host checks
+        run: |
+          sudo apt-get install -y --no-install-recommends clang
+          make CC=clang -B all
+          make check check-malformed check-golden
+          make -B all

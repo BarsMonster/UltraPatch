@@ -45,13 +45,15 @@ all: hy_enc hy_dec hy_dec_pull
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
+# The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
+# the stricter bar; the host-side encoder does not).
 hy_dec: $(DEC_SRCS) $(APPLY_HDR)
-	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
+	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
 
 # PULL-mode decoder (same wire, same core): patch_apply_run() + integrator callback,
 # no fiber/coroutine anywhere. `check` round-trips both modes to keep them wire-identical.
 hy_dec_pull: $(DEC_SRCS) $(APPLY_HDR)
-	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL $(DEC_SRCS) -o $@
+	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL $(DEC_SRCS) -o $@
 
 check: all
 	@set -e; \
