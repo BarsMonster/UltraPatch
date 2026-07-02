@@ -3039,12 +3039,17 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         /* default set: every config below won pairs in the corpus sweep (fuzz axis dominates:
          * 74 pairs prefer fuzz=6, 92 prefer fuzz=20). Ordered so ties keep the cheapest plan.
          * variant 3 additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
-        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {1, 11, 3}, {1, 6, 3}, {3, 11, 8},
+        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {3, 11, 8}, {1, 11, 3}, {1, 6, 3},
         /* A1_PLANS=full extras (measured worth only ~127 B corpus combined) */
         {1, 32, 8}, {2, 20, 8}, {3, 20, 8},
     };
     int nplans = 8;
-    { const char *pe = getenv("A1_PLANS"); if (pe && !strcmp(pe, "full")) nplans = (int)(sizeof(PLANS) / sizeof(PLANS[0])); }
+    /* A1_PLANS=full: widest sweep (release squeezing). A1_PLANS=lean: fastest iteration -- drops
+     * the two margin-3 configs and the LDR-mask config (measured +703 B corpus, -33% encode time);
+     * the default 8-config set is what the tracked gate metrics assume. */
+    { const char *pe = getenv("A1_PLANS");
+      if (pe && !strcmp(pe, "full")) nplans = (int)(sizeof(PLANS) / sizeof(PLANS[0]));
+      else if (pe && !strcmp(pe, "lean")) nplans = 6; }
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
     for (int v = 0; v < nplans; v++) {
         int32_t fpe = 0; EncStats stv = {0};
