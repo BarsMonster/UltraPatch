@@ -712,7 +712,7 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
     *last_offset_p = pos - scan;
 }
 
-static OpVec bsdiff_ops(const Buf *from, const Buf *to) {
+static OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
     OpVec ops = {0};
     int32_t from_size = (int32_t)from->n, to_size = (int32_t)to->n;
     int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(int32_t));
@@ -728,7 +728,7 @@ static OpVec bsdiff_ops(const Buf *from, const Buf *to) {
             for (; scsc < scan + len; scsc++) {
                 if ((scsc + last_offset < from_size) && (from->d[scsc + last_offset] == to->d[scsc])) from_score++;
             }
-            if (((len == from_score) && (len != 0)) || (len > from_score + 11)) break;
+            if (((len == from_score) && (len != 0)) || (len > from_score + fuzz)) break;
             if ((scan + last_offset < from_size) && (from->d[scan + last_offset] == to->d[scan])) from_score--;
         }
         if ((len != from_score) || (scan == to_size))
@@ -1240,14 +1240,14 @@ typedef struct { int32_t begin, end; } Run;
 
 static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 
-enum { SPLIT_GAIN_MARGIN_BITS = 8 };
+
 
 /* Dense diff runs can be represented either as literal diff bytes or as an
  * extra span plus an equal source skip. Choose the subset analytically per op:
  * dynamic programming minimizes the modeled cost of the resulting op sequence
  * using the same seeded literal bit-length proxy used by LZ planning, plus the
  * exact raw geometry code lengths. */
-static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
+static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to, int margin_bits) {
     uint8_t L0[256], L1[256];
     from_huff_lengths(from->d, from->n, L0, L1);
     OpVec out = {0};
@@ -1293,7 +1293,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
                                                runs[ri].begin, len, len,
                                                to->n <= from->n, L0, L1) +
                                  DP(ri + 1, ri + 1);
-                if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
+                if (split + (uint64_t)margin_bits < skip) {
                     DP(ri, p) = split;
                     TAKE(ri, p) = 1;
                 } else {
@@ -2895,15 +2895,18 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
+typedef struct { int variant, fuzz, margin; } PlanCfg;
+
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                       int W, int variant, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
+                       int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
+    int variant = cfg.variant;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks, variant >= 2);
-    OpVec ops = bsdiff_ops(&from_df, &to_df);
+    OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
-    split_nonzero_diff_runs(&ops, &from_df, &to_df);
+    split_nonzero_diff_runs(&ops, &from_df, &to_df, cfg.margin);
     if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(&ops, from->d, from_size, to_size, &fd);
     int32_t fp_end_s = 0;
@@ -2941,11 +2944,23 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     Ranges tr = elf_ranges(telf, &to, "to");
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     int stats_on = getenv("A1_ENC_STATS") != NULL;
+    /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
+     * ties keep the earliest entry, so adding configs can never regress. Config 0 must be the
+     * legacy plan (guaranteed feasible). A1_PLANS=full widens the sweep for measurement runs. */
+    static const PlanCfg PLANS[] = {
+        /* default set: every config below won pairs in the corpus sweep (fuzz axis dominates:
+         * 74 pairs prefer fuzz=6, 92 prefer fuzz=20). Ordered so ties keep the cheapest plan. */
+        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {1, 11, 3}, {1, 6, 3},
+        /* A1_PLANS=full extras (measured worth only ~127 B corpus combined) */
+        {1, 32, 8}, {2, 20, 8},
+    };
+    int nplans = 7;
+    { const char *pe = getenv("A1_PLANS"); if (pe && !strcmp(pe, "full")) nplans = (int)(sizeof(PLANS) / sizeof(PLANS[0])); }
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
-    for (int v = 0; v < 3; v++) {
+    for (int v = 0; v < nplans; v++) {
         int32_t fpe = 0; EncStats stv = {0};
-        Buf b = plan_encode(&from, &to, &fr, &tr, W, v, &fpe, &stv, stats_on);
-        if (v > 0 && b.n == 0) { buf_free(&b); continue; }   /* variant infeasible on the wire */
+        Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
+        if (v > 0 && b.n == 0) { buf_free(&b); continue; }   /* config infeasible on the wire */
         if (v == 0 || b.n < body.n) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; }
         else buf_free(&b);
     }
