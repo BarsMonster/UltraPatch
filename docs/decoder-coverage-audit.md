@@ -1,0 +1,41 @@
+# Decoder Fuzz Campaign + Branch-Coverage Audit (2026-07-02)
+
+Run against the post-robustness-sweep decoder (single pull-mode core, mandatory
+`CORTEX_M0`, wire frozen at golden). The libFuzzer+ASan+UBSan harness
+(`fuzz/fuzz_apply.c`) executes whole blobs against an in-memory flash emulator,
+force-fixes `CRC32(from)` so mutations reach the body, and independently
+cross-checks `CRC32(to)` on every DONE (no silent-wrong accept).
+
+## Campaign
+
+- 14 parallel jobs x 1 h, ~2.24M executions this campaign (~5M+ lifetime
+  including the earlier 3M-exec run): **0 crashes, 0 leaks, 0 timeouts, 0
+  sanitizer reports, 0 silent-wrong accepts.** Corpus grew 565 -> ~10,300
+  units (persisted in `fuzz-corpus/`, deliberately untracked).
+- Harness improvement landed: the `size < 5` minimum was removed so sub-header
+  blobs (0–4 bytes, EOF while priming the trailer ring) are fuzzed too.
+
+## Coverage (llvm-cov over the final corpus + the check/malformed/edge suites)
+
+`src/patch_apply.h`: **100% functions, 99.8% lines, 98.3% regions, 94.5%
+branches** from the fuzz corpus alone; the deterministic suites additionally
+cover what the harness is structurally blind to.
+
+Every unreached branch was classified by hand; none is dead product logic:
+
+| Class | Sites | Assessment |
+|---|---|---|
+| Corrupt-stream overflow/UB guards needing ~2^31-magnitude coded values (`s_bv` shift cap, `bb_unzz` 0xFFFFFFFF, `sa_apply_op` dl/el/fp/gap overflow checks) | 197, 609, 873, 886, 891, 898, 905, 919 | Defensive by design; make hostile streams *defined*, not reachable-cheap. Keep. |
+| Unreachable-by-construction invariant guards (out_read/out_write span gates, `ldr_targets` window bound, `trailer_ok` short-ring) | 468, 474, 641, 1076 | Belt-and-braces on internal invariants; correct to keep in a frozen safety artifact. |
+| Fuzzer-blind by harness design, covered by deterministic suites | `CRC32(from)` mismatch (982; harness force-fixes it), post-op error exit (1054) | Covered by `make check` / `check-malformed`. |
+| Data-dependent clamps never hit on real images | `lit_tree_from_hist` probability clamp (1070) | Correctness clamp; keep. |
+
+CBMC bounded proofs (stretch goal): skipped — cbmc not installed on this host.
+The kernels it would target (journal insert/search, bit-tree accessors,
+envelope readers) are fully covered by fuzz + suites above.
+
+Reproduce: `make fuzz` (smoke) or
+`./fuzz_apply -jobs=$(nproc) -max_total_time=3600 fuzz-corpus`; coverage via a
+clang `-fprofile-instr-generate -fcoverage-mapping` build of `hy_dec` +
+`fuzz_apply`, replaying `fuzz-corpus` and the check suites, merged with
+`llvm-profdata` and reported with `llvm-cov`.

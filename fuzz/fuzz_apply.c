@@ -78,7 +78,7 @@ static int pull_next(void *c, uint8_t *out){
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
-    if(size<5 || size>FZ_SPAN) return 0;
+    if(size>FZ_SPAN) return 0;   /* no minimum: sub-header blobs must reject cleanly too */
     uint8_t *blob=(uint8_t*)malloc(size);
     memcpy(blob,data,size);
 
