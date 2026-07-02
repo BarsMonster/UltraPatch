@@ -32,10 +32,7 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #ifndef DR_KCAP_EX
 #define DR_KCAP_EX 128
 #endif
-/* Per-patch model-seed tables; index 0 is the legacy default. MUST match patch_apply (bit-exact wire). */
-static const uint16_t SEED_HIT[4]  = {576, 1536, 2560, 3328};
-static const uint16_t SEED_IDX[4]  = {2816, 1536, 2048, 3328};
-static const uint16_t SEED_REP0[4] = {3072, 2048, 2560, 3584};
+#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
 
@@ -1261,7 +1258,9 @@ static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uin
  * dynamic programming minimizes the modeled cost of the resulting op sequence
  * using the same seeded literal bit-length proxy used by LZ planning, plus the
  * exact raw geometry code lengths. */
-static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to, int margin_bits) {
+enum { SPLIT_GAIN_MARGIN_BITS = 8 };
+
+static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
     from_huff_lengths(from->d, from->n, L0, L1);
     OpVec out = {0};
@@ -1307,7 +1306,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to, 
                                                runs[ri].begin, len, len,
                                                to->n <= from->n, L0, L1) +
                                  DP(ri + 1, ri + 1);
-                if (split + (uint64_t)margin_bits < skip) {
+                if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
                     DP(ri, p) = split;
                     TAKE(ri, p) = 1;
                 } else {
@@ -2141,22 +2140,14 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * parse is only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation
  * here can never corrupt the wire -- it only changes which legal parse is tried.
  * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
-/* Relax candidate arrival (cost c, rep rr, prevlit b, token v, predecessor hr) into the two
- * arrival-variants at base index jb = (j*4 + h')*2. Variant 0 holds the cheapest arrival; variant 1
- * holds the cheapest arrival carrying a rep distinct from variant 0's. This keeps a second, possibly
- * costlier path alive when it carries a rep distance a downstream rep0 reuse can exploit. */
+/* Relax a candidate arrival (cost c, rep rr, prevlit b, token v, predecessor h) into the state
+ * at index jb = j*4 + h'. Cheapest arrival only: a second distinct-rep arrival variant was
+ * measured worth 0.08% corpus for ~25% of encode time and removed. */
 __attribute__((always_inline))
 static inline void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via, uint8_t *vh,
                           size_t jb, uint64_t c, int32_t rr, uint8_t b, Token v, uint8_t hr) {
     if (c < cost[jb]) {
-        /* new cheapest. push old variant 0 down into variant 1 if it had a distinct rep. */
-        if (cost[jb] < cost[jb + 1] && rep[jb] != rr) {
-            cost[jb + 1] = cost[jb]; rep[jb + 1] = rep[jb]; pl[jb + 1] = pl[jb];
-            via[jb + 1] = via[jb]; vh[jb + 1] = vh[jb];
-        }
         cost[jb] = c; rep[jb] = rr; pl[jb] = b; via[jb] = v; vh[jb] = hr;
-    } else if (rr != rep[jb] && c < cost[jb + 1]) {
-        cost[jb + 1] = c; rep[jb + 1] = rr; pl[jb + 1] = b; via[jb + 1] = v; vh[jb + 1] = hr;
     }
 }
 
@@ -2212,15 +2203,14 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     size_t *next_tok = (size_t *)xmalloc((n + 2) * sizeof(size_t));
     next_tok[n] = n; next_tok[n + 1] = n;
     for (size_t j = n; j-- > 0;) next_tok[j] = (ncand[j] || nocand[j]) ? j : next_tok[j + 1];
-    size_t nh = (n + 1) * 4;
-    size_t ns = nh * 2;
+    size_t ns = (n + 1) * 4;   /* one state per (position, flag-history h): cheapest arrival */
     uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
     int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
     uint8_t  *pl   = (uint8_t *)xmalloc(ns * sizeof(uint8_t)); /* prevlit byte arriving at state */
     Token *via = (Token *)xcalloc(ns, sizeof(Token));         /* token that arrives at state */
     uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor (h<<1|r) for backtrack */
     for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; pl[s] = 0; }
-    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0, r=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
+    cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
     int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];
     for (size_t i = 0; i < n; i++) {
         /* len-ascending candidate ranges with suffix-min distance price: for lengths in
@@ -2241,9 +2231,9 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
             else ord_dpr[k] = dp2;
         }
         int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
-        for (int hr = 0; hr < 8; hr++) {
-            int h = hr >> 1;
-            size_t si = (i * 4 + (size_t)h) * 2 + (size_t)(hr & 1);
+        for (int hr = 0; hr < 4; hr++) {
+            int h = hr;
+            size_t si = i * 4 + (size_t)h;
             if (cost[si] >= INF) continue;       /* unreachable along any cheap path */
             uint64_t ci = cost[si]; int32_t ri = rep[si];
             /* spans: emit one span flag (kind 0) under context h, then the gamma length and the
@@ -2262,14 +2252,14 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
             for (size_t j = i + 1; j <= dense_end; j++) {
                 uint64_t runbits = firstbits + span_lit[j] - span_lit[i + 1];
                 uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
-                size_t jb = (j * 4 + (size_t)hs) * 2;
+                size_t jb = j * 4 + (size_t)hs;
                 relax2(cost, rep, pl, via, vh, jb, c, ri, content[j - 1],
                        (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
             }
             for (size_t j = next_tok[dense_end + 1]; j <= lim; j = next_tok[j + 1]) {
                 uint64_t runbits = firstbits + span_lit[j] - span_lit[i + 1];
                 uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
-                size_t jb = (j * 4 + (size_t)hs) * 2;
+                size_t jb = j * 4 + (size_t)hs;
                 relax2(cost, rep, pl, via, vh, jb, c, ri, content[j - 1],
                        (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
                 if (j >= n) break;
@@ -2288,7 +2278,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 for (int32_t l = prevl + 1; l <= lk; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = mbase + mlen[l];
-                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, pl, via, vh, jb, c, bd, pl[si],
                            (Token){ 'R', (int32_t)i, l, bd }, (uint8_t)hr);
                 }
@@ -2303,7 +2293,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 for (int32_t l = 4; l <= olm; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = obase + olen[l];
-                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, pl, via, vh, jb, c, ri, pl[si],
                            (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
                 }
@@ -2326,7 +2316,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                 for (size_t l = 3; l <= rl; l++) {
                     size_t j = i + l;
                     uint64_t c = ci + reuse_extra[h] + mlen[l];
-                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, pl, via, vh, jb, c, ri, pl[si],
                            (Token){ 'R', (int32_t)i, (int32_t)l, ri }, (uint8_t)hr);
                 }
@@ -2335,14 +2325,14 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     }
     /* reconstruct backward from the cheapest terminal (h,r) state at position n. */
     int hrbest = 0; uint64_t cbest = INF;
-    for (int hr = 0; hr < 8; hr++) {
-        size_t s = (n * 4 + (size_t)(hr >> 1)) * 2 + (size_t)(hr & 1);
+    for (int hr = 0; hr < 4; hr++) {
+        size_t s = n * 4 + (size_t)hr;
         if (cost[s] < cbest) { cbest = cost[s]; hrbest = hr; }
     }
     TokenVec tv = {0};
     size_t pos = n; int hr = hrbest;
     while (pos > 0) {
-        size_t s = (pos * 4 + (size_t)(hr >> 1)) * 2 + (size_t)(hr & 1);
+        size_t s = pos * 4 + (size_t)hr;
         tok_push(&tv, via[s]);
         pos = (size_t)via[s].start;
         hr = vh[s];
@@ -2660,7 +2650,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
-                     const size_t *ends, const InjVec *inj, const int sel[3],
+                     const size_t *ends, const InjVec *inj,
                      const uint32_t *mb, const int32_t *mv, int mn) {
     Models M;
     memset(&M, 0, sizeof(M));
@@ -2685,11 +2675,11 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, SEED_IDX[sel[1]]);
-    idx_init_e(&M.diex, SEED_IDX[sel[1]]);
-    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, SEED_HIT[sel[0]]);
-    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, SEED_HIT[sel[0]]);
-    M.rep0[0] = M.rep0[1] = SEED_REP0[sel[2]]; M.rep0h = 0; M.last_dist = 0;
+    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match patch_apply */
+    idx_init_e(&M.diex, (uint16_t)2816u);
+    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
+    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
+    M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
     g_emit_overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
@@ -2697,9 +2687,6 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     if (!FWD) { for (size_t i = 0; i < ops->n; i++) oexp += (uint32_t)(ops->v[i].diff_len + ops->v[i].extra_len); }
     REnc rc;
     re_init(&rc);
-    /* per-patch seed selection: 1-bit escape, then 3x2 raw bits (mirror patch_apply decode_body). */
-    if (sel[0] == 0 && sel[1] == 0 && sel[2] == 0) re_raw(&rc, 0);
-    else { re_raw(&rc, 1); put_raw_bits(&rc, (uint32_t)sel[0], 2); put_raw_bits(&rc, (uint32_t)sel[1], 2); put_raw_bits(&rc, (uint32_t)sel[2], 2); }
     /* piecewise shift map: gamma count, per entry gamma gap (first absolute, later -1) + zz value.
      * Mirror of the patch_apply decode_body map reader (bit-exact wire). */
     w_gz(&rc, (uint32_t)mn);
@@ -2785,8 +2772,6 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
     int kd = 0;
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
-    static const int SEL_LEGACY[3] = {0, 0, 0};
-    int best_sel[3] = {0, 0, 0};
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, content.n, litbits, W, &kd, &cands, &ncand);
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
@@ -2804,7 +2789,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
      * runs on the plain-delta inj; the map variant competes under the exact byte gate at the end. */
     uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;
     InjVec *inj_m = NULL;
-    int use_map = 0; int best_sel_m[3] = {0, 0, 0};
+    int use_map = 0;
     { size_t nfr = 0;
       FieldRef *frs = collect_fields(ops, frm, from_size, fd, &nfr);
       if (nfr) map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
@@ -2857,7 +2842,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        Buf cur_body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+        Buf cur_body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
         size_t cur_bytes = g_emit_overflow ? (size_t)-1 : cur_body.n; buf_free(&cur_body);
         /* Phase 1: ring-only price feedback to its fixpoint (the pre-out-match trajectory).
          * Phase 2: re-parse WITH out-candidates; each candidate must beat the phase-1 fixpoint
@@ -2874,7 +2859,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
-                Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
                 size_t cand_bytes = g_emit_overflow ? (size_t)-1 : cand_body.n; buf_free(&cand_body);
                 if (cand_bytes < cur_bytes) {
                     size_t gain = cur_bytes - cand_bytes;
@@ -2895,7 +2880,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
          * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                Buf b = emit_body(&seq, nk, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                Buf b = emit_body(&seq, nk, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
                 size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
                 else break;
@@ -2904,39 +2889,18 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         /* anneal-ko probe: same unimodal walk for the out-match position rice parameter. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nko = ko + dir; nko >= 0 && nko <= 15; nko += dir) {
-                Buf b = emit_body(&seq, kd, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                Buf b = emit_body(&seq, kd, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
                 size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; ko = nko; }
                 else break;
             }
         }
-        /* per-patch seed brute force: the parse/kd are fixed; try every non-legacy seed combo under
-         * the exact byte gate. Legacy (cur_bytes) wins ties, so shipping tuned seeds can only help. */
-        { int sel[3];
-          for (sel[0] = 0; sel[0] < 4; sel[0]++)
-            for (sel[1] = 0; sel[1] < 4; sel[1]++)
-              for (sel[2] = 0; sel[2] < 4; sel[2]++) {
-                if (!sel[0] && !sel[1] && !sel[2]) continue;
-                Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel, NULL, NULL, 0);
-                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
-                if (bb < cur_bytes) { cur_bytes = bb; memcpy(best_sel, sel, sizeof(best_sel)); }
-              } }
-        /* map variant: same fixed parse, residual-space inj + shipped map; its own seed sweep.
-         * Ships only if the exact emitted body beats the best no-map body. */
+        /* map variant: same fixed parse, residual-space inj + shipped map. Ships only if the
+         * exact emitted body beats the no-map body. */
         if (map_n > 0) {
-            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, SEL_LEGACY, map_b, map_v, map_n);
+            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, map_b, map_v, map_n);
             size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
-            int msel[3] = {0, 0, 0};
-            { int sel[3];
-              for (sel[0] = 0; sel[0] < 4; sel[0]++)
-                for (sel[1] = 0; sel[1] < 4; sel[1]++)
-                  for (sel[2] = 0; sel[2] < 4; sel[2]++) {
-                    if (!sel[0] && !sel[1] && !sel[2]) continue;
-                    Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, sel, map_b, map_v, map_n);
-                    if (!g_emit_overflow && b.n < mbytes) { mbytes = b.n; memcpy(msel, sel, sizeof(msel)); }
-                    buf_free(&b);
-                  } }
-            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; memcpy(best_sel_m, msel, sizeof(msel)); }
+            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; }
         }
     }
     free(cands); free(ncand);
@@ -2950,7 +2914,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         fprintf(stderr, "A1_OUT O=%zu(%zuB) R=%zu(%zuB) S=%zu(%zuB) content=%zu\n", no, ob, nr, rb, ns, sb, content.n);
     }
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         use_map ? inj_m : inj, use_map ? best_sel_m : best_sel,
+                         use_map ? inj_m : inj,
                          use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
     { const char *ldp = getenv("A1_LITDUMP");   /* scaffold: surviving span literals in wire order */
       if (ldp) {
@@ -2982,7 +2946,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
-typedef struct { int variant, fuzz, margin; } PlanCfg;
+typedef struct { int variant, fuzz; } PlanCfg;
 
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                        int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
@@ -2994,7 +2958,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
-    split_nonzero_diff_runs(&ops, &from_df, &to_df, cfg.margin);
+    split_nonzero_diff_runs(&ops, &from_df, &to_df);
     if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(&ops, from->d, from_size, to_size, &fd);
     int32_t fp_end_s = 0;
@@ -3033,25 +2997,16 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     int stats_on = getenv("A1_ENC_STATS") != NULL;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
-     * ties keep the earliest entry, so adding configs can never regress. Config 0 must be the
-     * legacy plan (guaranteed feasible). A1_PLANS=full widens the sweep for measurement runs. */
+     * ties keep the earliest entry, so added configs can never regress. Config 0 must be the
+     * legacy plan (guaranteed feasible). Every config below won pairs in the corpus sweep (the
+     * bsdiff fuzz axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20); variant 3
+     * additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
     static const PlanCfg PLANS[] = {
-        /* default set: every config below won pairs in the corpus sweep (fuzz axis dominates:
-         * 74 pairs prefer fuzz=6, 92 prefer fuzz=20). Ordered so ties keep the cheapest plan.
-         * variant 3 additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
-        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {3, 11, 8}, {1, 11, 3}, {1, 6, 3},
-        /* A1_PLANS=full extras (measured worth only ~127 B corpus combined) */
-        {1, 32, 8}, {2, 20, 8}, {3, 20, 8},
+        {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20}, {3, 11},
     };
-    int nplans = 8;
-    /* A1_PLANS=full: widest sweep (release squeezing). A1_PLANS=lean: fastest iteration -- drops
-     * the two margin-3 configs and the LDR-mask config (measured +703 B corpus, -33% encode time);
-     * the default 8-config set is what the tracked gate metrics assume. */
-    { const char *pe = getenv("A1_PLANS");
-      if (pe && !strcmp(pe, "full")) nplans = (int)(sizeof(PLANS) / sizeof(PLANS[0]));
-      else if (pe && !strcmp(pe, "lean")) nplans = 6; }
+    enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
-    for (int v = 0; v < nplans; v++) {
+    for (int v = 0; v < NPLANS; v++) {
         int32_t fpe = 0; EncStats stv = {0};
         Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
         if (v > 0 && b.n == 0) { buf_free(&b); continue; }   /* config infeasible on the wire */

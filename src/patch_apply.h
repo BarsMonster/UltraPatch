@@ -965,17 +965,6 @@ static void decode_body(void){
     g_rcerr=0; g_reject=REJ_NONE;
     rc_init();
     orow_reset();
-    /* ---- per-patch model-seed selection: a 1-bit escape (0 => the legacy corpus-tuned defaults,
-     * costing one near-free raw bit), else 3x2 raw bits picking the MTF hit seed, the dict-index
-     * seed, and the rep0 seed from small tables. The encoder brute-forces the combos under its
-     * exact byte gate, so a patch only ships non-default seeds when they pay for themselves.
-     * Tables MUST match patch_generate SEED_HIT/SEED_IDX/SEED_REP0 (bit-exact wire). ---- */
-    uint16_t seed_hit=576u, seed_idx=2816u, seed_rep0=RC_REP0_INIT;
-    if(s_raw()){
-        static const uint16_t SH[4]={576,1536,2560,3328}, SI[4]={2816,1536,2048,3328},
-                              SR[4]={3072,2048,2560,3584};
-        seed_hit=SH[s_raw_bits(2)]; seed_idx=SI[s_raw_bits(2)]; seed_rep0=SR[s_raw_bits(2)];
-    }
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
      * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
@@ -997,8 +986,10 @@ static void decode_body(void){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, seed_hit); dr_init(&DR_EX, DR_DIC_EX, seed_hit);
-    idx_init(&M_dibl, seed_idx); idx_init(&M_diex, seed_idx);
+    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, 576u); dr_init(&DR_EX, DR_DIC_EX, 576u);
+                                       /* hit seed 576: zero-seeded MTF dict makes hit-bit==1 likely */
+    idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); corpus optimum.
+                                                          * Mirror in patch_generate (bit-exact wire). */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -1021,7 +1012,7 @@ static void decode_body(void){
       ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
                                  * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
       fl_init(&M_flag);
-      M_rep0[0]=M_rep0[1]=seed_rep0; g_rep0h=0; g_lastdist=0;
+      M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_status=DEC_ERROR; goto done; }
       s->tok_left=nseq; s->tok_mode=0;
