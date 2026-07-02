@@ -76,6 +76,40 @@ static void *xcalloc(size_t n, size_t s) {
     return p;
 }
 
+/* Deterministic STABLE bottom-up merge sort — replaces libc qsort everywhere in the
+ * encoder so the emitted wire can never depend on the host libc's tie ordering (glibc
+ * qsort is an unstable introsort since 2.37; musl uses smoothsort; BSDs differ). Several
+ * comparators legitimately compare equal on distinct elements (same-address ELF symbols,
+ * equal-value b2j entries, equal-boundary map segments); stability pins those ties to
+ * insertion order, which every producer in this file generates deterministically. */
+static void a1_sort(void *base, size_t n, size_t esz,
+                    int (*cmp)(const void *, const void *)) {
+    unsigned char *src = (unsigned char *)base, *from = src, *to, *tmp;
+    if (n < 2) return;
+    tmp = (unsigned char *)xmalloc(n * esz);
+    to = tmp;
+    for (size_t w = 1; w < n; w *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * w) {
+            size_t mid = lo + w < n ? lo + w : n;
+            size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                if (cmp(from + j * esz, from + i * esz) < 0) {   /* strict <: ties keep LEFT */
+                    memcpy(to + k * esz, from + j * esz, esz); j++;
+                } else {
+                    memcpy(to + k * esz, from + i * esz, esz); i++;
+                }
+                k++;
+            }
+            if (i < mid) memcpy(to + k * esz, from + i * esz, (mid - i) * esz);
+            if (j < hi) memcpy(to + (k + (mid - i)) * esz, from + j * esz, (hi - j) * esz);
+        }
+        { unsigned char *sw = from; from = to; to = sw; }
+    }
+    if (from != src) memcpy(src, from, n * esz);
+    free(tmp);
+}
+
 static void *xrealloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
     if (!q) die("out of memory");
@@ -266,7 +300,7 @@ static void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
 
 static void fd_finalize(FieldDeltaVec *v) {
     if (!v->n) return;
-    qsort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
+    a1_sort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
     size_t w = 0;
     for (size_t i = 0; i < v->n; i++) {
         if (w && v->v[w - 1].addr == v->v[i].addr && v->v[w - 1].kind == v->v[i].kind) v->v[w - 1] = v->v[i];
@@ -414,7 +448,7 @@ static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which
             sym_push(&syms, (Sym){ value, size, type, (uint16_t)sec });
         }
     }
-    qsort(syms.v, syms.n, sizeof(syms.v[0]), cmp_sym_val);
+    a1_sort(syms.v, syms.n, sizeof(syms.v[0]), cmp_sym_val);
     RangeVec funcs = {0}, objs = {0};
     size_t i = 0;
     while (i < syms.n) {
@@ -545,7 +579,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
         int32_t ntest = lb / 100 + 1;
         for (size_t i = 0; i < b2j.n; i++) if ((int32_t)b2j.v[i].n > ntest) b2j.v[i].popular = 1;
     }
-    qsort(b2j.v, b2j.n, sizeof(b2j.v[0]), cmp_b2j_val);
+    a1_sort(b2j.v, b2j.n, sizeof(b2j.v[0]), cmp_b2j_val);
     typedef struct { int32_t alo, ahi, blo, bhi; } Region;
     Region *q = (Region *)xmalloc(64 * sizeof(*q));
     size_t qn = 1, qcap = 64;
@@ -566,7 +600,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
             }
         }
     }
-    qsort(raw.v, raw.n, sizeof(raw.v[0]), cmp_match);
+    a1_sort(raw.v, raw.n, sizeof(raw.v[0]), cmp_match);
     MatchVec out = {0};
     int32_t i1 = 0, j1 = 0, k1 = 0;
     for (size_t i = 0; i < raw.n; i++) {
@@ -802,7 +836,7 @@ static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t fro
         a += 2;
     }
     if (s.n) {
-        qsort(s.v, s.n, sizeof(s.v[0]), cmp_i32);
+        a1_sort(s.v, s.n, sizeof(s.v[0]), cmp_i32);
         size_t w = 0;
         for (size_t i = 0; i < s.n; i++) if (!w || s.v[w - 1] != s.v[i]) s.v[w++] = s.v[i];
         s.n = w;
@@ -1023,7 +1057,7 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
         size_t en = 0;
         for (size_t i = 0; i < nfr; i++)
             if (fk[i].kind == EV_EX) { ex[en].b = fk[i].k2; ex[en].v = -fk[i].need; en++; }
-        qsort(ex, en, sizeof(*ex), cmp_seg);
+        a1_sort(ex, en, sizeof(*ex), cmp_seg);
         for (size_t i = 0; i < en;) {
             size_t j = i;
             while (j < en && ex[j].v == ex[i].v) j++;
@@ -1041,7 +1075,7 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
         pn--;
     }
     /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
-    qsort(pool, pn, sizeof(*pool), cmp_seg);
+    a1_sort(pool, pn, sizeof(*pool), cmp_seg);
     uint32_t *tb = (uint32_t *)xmalloc((pn ? pn : 1) * sizeof(*tb));
     int32_t *tv = (int32_t *)xmalloc((pn ? pn : 1) * sizeof(*tv));
     int mn = 0;
@@ -1551,8 +1585,8 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
                 if (presset[wi]) ivec_push(&pc->pres, k);
                 if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
             }
-            if (pc->pres.n > 1) qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
-            if (pc->corr.n > 1) qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+            if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
     free(m);
