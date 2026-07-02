@@ -5,11 +5,15 @@ Final A1 firmware patcher for the Sensor Watch target.
 Production code lives under `src/`, with third-party code under `vendor/`:
 
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder.
-- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`, including
-  the host NVM emulator.
+- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec` and
+  `hy_dec_pull`, including the host NVM emulator.
 - `src/patch_generate.c`: host-side C encoder.
+- `src/patch_selfcheck.c`: reference-decoder self-verification built into
+  `hy_enc` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
 - `src/rc_models.h`: shared wire-model constants and packed model helpers.
+- `fuzz/fuzz_apply.c`: libFuzzer + ASan/UBSan harness over the decoder
+  (`make fuzz`).
 
 Build and smoke-test:
 
@@ -34,9 +38,12 @@ elsewhere.
 The expected corpus contents are pinned by `test-bench/corpus.sha256`; `make gate`
 runs `make check-assets` before the matrix so a stale or partial corpus fails
 early.
-`make gate` also runs `make check-malformed`, a deterministic reject-regression
+`make gate` also runs `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, appended garbage, and wrong-base
-application.
+application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
+random/text/page-boundary images), `make check-golden` (pinned sha256 of six
+representative blobs — any wire drift fails the gate), and `make check-qemu`
+(the decoder executed as real Thumb-1 code under qemu-arm).
 
 Create a deterministic standalone corpus bundle, if needed, with:
 
@@ -50,11 +57,13 @@ CI verifies the tracked corpus with `make check-assets` before the same
 Device integration contract:
 
 - Include `src/patch_apply.h` in exactly one update module.
-- Provide `flash_read(uint32_t)`, `flash_write(uint32_t, uint8_t)`, and
-  `uint32_t g_image_span`.
-- Parse and authenticate the patch envelope outside the decoder, then call
-  `patch_apply_set`, `patch_apply_init`, `patch_apply_push`, and
-  `patch_apply_finish`.
+- Provide exactly two flash primitives: `flash_read(uint32_t)` and
+  `flash_write(uint32_t, uint8_t)`.
+- Authenticate the update, then feed the WHOLE blob: `patch_apply_init`, then
+  `patch_apply_push` per byte, then `patch_apply_finish` for the verdict. The
+  decoder parses the envelope and verifies both CRC gates itself. Alternatively
+  build with `-DPATCH_APPLY_PULL` and call `patch_apply_run(callback, ctx)` —
+  no coroutine/fiber at all.
 - The decoder is single-instance and non-reentrant; see
   `docs/device-integration.md` before wiring it into a bootloader.
 

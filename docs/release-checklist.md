@@ -26,14 +26,27 @@ Record the complete output in the release notes. The gate must report:
 
 - `corpus assets`: verified through `test-bench/corpus.sha256`
 - `malformed rejects`: nonzero deterministic reject count
+- `edge inputs`: all synthetic edge cases round-tripped or cleanly refused
+- `golden wire`: OK against the committed `test-bench/golden.sha256` (the wire
+  freeze — an unexplained mismatch blocks release)
 - ARM `.text/.data/.bss`
 - ARM soft-divide count
+- `QEMU Thumb round-trip`: OK (the decoder executed as real Thumb-1 code)
 - `matrix round-trips`: `256/256`
 - corpus `full_total`
 - real one-face grow/revert patch sizes
 - NVM row amplification, max erases-per-row, frontier inversions
 - journal peak slots
 - final `RESULT: ALL GATES PASS`
+
+Also run before release (not part of `make gate`):
+
+- `make fuzz` — libFuzzer + ASan/UBSan smoke over the decoder; a longer
+  campaign (`./fuzz_apply -jobs=N -max_total_time=3600 fuzz-corpus`) is
+  recommended after any decoder change.
+- A clang leg (`make CC=clang -B all && make check check-malformed check-golden`)
+  — CI runs this on every push; the golden check proves the clang-built encoder
+  emits byte-identical blobs.
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.

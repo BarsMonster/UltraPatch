@@ -50,7 +50,27 @@ CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
 delivery manifest and patch blob before any flash write is attempted.
 
-## Call Sequence
+## Two Integration Modes
+
+**PULL mode (`-DPATCH_APPLY_PULL`) — recommended when the update task can
+block.** Supply a callback that returns the next blob byte (it may poll a
+UART/BLE buffer internally) or 0 at end-of-blob, and call
+`patch_apply_run(callback, ctx)`. The whole decode runs synchronously on the
+caller's stack: no coroutine, no fiber stack, no platform context-switch code,
+and ~640 B less `.bss`.
+
+**PUSH mode (default) — for event-driven producers.** Bytes are fed from the
+outside; the decoder suspends on a private coroutine stack while waiting. The
+platform must supply the context switch: `CO_SWAP_TO_MAIN`/`CO_SWAP_TO_DEC`
+under `RC_V3_ARM` are SIZING STUBS in this repository (the x86 host test
+carries a real fiber; a Cortex-M device needs its own SP-swap, typically a
+PendSV pair). Additionally, the coroutine stack size is COMPILER-SPECIFIC:
+`DEC_STACK_BYTES` defaults are measured for gcc (520 B high-water) and clang
+(3752 B!); re-measure with `-DRC_V3_STACKMEAS` whenever the compiler, version,
+or flags change. The deepest 8 bytes are an overflow canary — an overflow
+rejects the patch at decode end.
+
+## Call Sequence (push mode)
 
 1. Authenticate the update envelope and reject rollback or wrong-target updates.
 2. Call `patch_apply_init()`.
@@ -60,6 +80,9 @@ delivery manifest and patch blob before any flash write is attempted.
 4. After the last blob byte, call `patch_apply_finish()` and use its return —
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
    image was written and `CRC32(to)` verified.
+
+In pull mode, steps 2–4 collapse into one `patch_apply_run()` call whose return
+is the verdict.
 
 The decoder status values are:
 
