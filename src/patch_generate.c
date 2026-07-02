@@ -1641,10 +1641,12 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
     uint8_t prevlit = 0;                 /* last literal byte (any tag), seeds the tag0 context */
+    int last_span = 0;                   /* mirror the wire: match flag implicit after a span */
     for (size_t i = 0; i < seq->n; i++) {
         Token t = seq->v[i];
         if (t.type == 'S') {
             fl_encode(&flag, &r, 0);
+            last_span = 1;
             ug_encode(&gs, &r, (uint32_t)t.len - 1u);
             for (int32_t j = 0; j < t.len; j++) {
                 size_t cp = (size_t)t.start + (size_t)j;
@@ -1653,7 +1655,8 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
                 prevlit = byte;
             }
         } else {
-            fl_encode(&flag, &r, 1);
+            if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
+            else fl_encode(&flag, &r, 1);
             if (t.dist == last_dist) {
                 r0y_cost += bit_price(rep0[rep0h], 1); r0y_n++;
                 re_bit(&r, &rep0[rep0h], 1, RC_S_BIT_RATE); rep0h = 1;
@@ -1780,11 +1783,14 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         uint32_t c = tags[p] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(p ? content[p - 1] : 0)][byte];
         span_lit[p + 1] = span_lit[p] + c;
     }
-    /* per-context match-flag extras: match flag + fresh-distance flag + value, vs reuse flag (rep0). */
+    /* per-context match-flag extras: match flag + fresh-distance flag + value, vs reuse flag (rep0).
+     * After a span (h&1 == 0: previous token kind bit is 0) the match flag is implicit on the
+     * wire (adjacent spans never ship), so its price is zero in those contexts. */
     uint64_t fresh_extra[4], reuse_extra[4];
     for (int h = 0; h < 4; h++) {
-        fresh_extra[h] = (uint64_t)pt->fmatch_c[h] + pt->rep0_no;
-        reuse_extra[h] = (uint64_t)pt->fmatch_c[h] + pt->rep0_yes;
+        uint64_t mflag = (h & 1) ? (uint64_t)pt->fmatch_c[h] : 0;
+        fresh_extra[h] = mflag + pt->rep0_no;
+        reuse_extra[h] = mflag + pt->rep0_yes;
     }
     const uint64_t INF = UINT64_MAX / 4;
     /* Two arrival-variants per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1.
@@ -2196,13 +2202,15 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     size_t tok_i = 0, pos = 0, span_pos = 0;
     int tok_mode = 0;
     int32_t tok_left = 0;
+    int last_span = 0;     /* previous token was a span: the match flag is implicit (mirror patch_apply) */
     uint8_t prevlit = 0;   /* last literal byte emitted (any tag); seeds tag0 context. */
     Token cur = {0};
     #define START_TOKEN() do { \
         if (tok_i >= seq->n) die("content token underrun"); \
         cur = seq->v[tok_i++]; \
-        if (cur.type == 'S') { fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; } \
-        else { fl_encode(&M.flag, &rc, 1); \
+        if (cur.type == 'S') { if (last_span) die("adjacent span tokens on wire"); \
+            fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; last_span = 1; } \
+        else { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
             if ((int32_t)cur.dist == M.last_dist) { re_bit(&rc, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1; } \
             else { re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \
             ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \

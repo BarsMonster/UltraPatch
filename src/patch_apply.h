@@ -589,6 +589,7 @@ typedef struct {
      * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
+    uint8_t last_span;                            /* previous token was a span (flag implicit) */
     uint8_t err;
 } SA;
 /* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase). */
@@ -664,9 +665,15 @@ static uint8_t sa_next_content(SA*s, int tag){
             return b;
         }
         if(s->tok_left==0) goto fail;   /* content underrun -> reject */
-        if(s_flag(&M_flag)==0){
+        /* adjacent spans never ship (the encoder merges them), so after a span the
+         * span/match flag is IMPLICITLY "match": skip the coded bit but keep the order-2
+         * flag history tracking the true token kinds (mirror emit_body last_span). */
+        int is_match;
+        if(s->last_span){ M_flag.h=((M_flag.h<<1)|1)&3; is_match=1; }
+        else is_match=s_flag(&M_flag);
+        if(!is_match){
             uint32_t ln=s_ug_gamma(&M_gs)+1u;
-            s->tok_mode=1; s->span_left=ln;
+            s->tok_mode=1; s->span_left=ln; s->last_span=1;
         } else {
             uint32_t d;
             int rb=s_bit(&M_rep0[g_rep0h]); g_rep0h=rb;
@@ -674,7 +681,7 @@ static uint8_t sa_next_content(SA*s, int tag){
             else { d=s_ug_rice(&M_gd)+1u; g_lastdist=d; }
             uint32_t ln=s_ug_gamma(&M_gl)+1u;
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
-            s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln;
+            s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln; s->last_span=0;
         }
         s->tok_left--;
     }
