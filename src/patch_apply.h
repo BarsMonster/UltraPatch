@@ -814,7 +814,10 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
         uint32_t imm24=bl_imm24(up,lo);
         int32_t off=(int32_t)(imm24<<8)>>8;                 /* sign-extend the 24-bit imm */
         uint32_t T=fpk+4u+(uint32_t)(2*off);                /* BL target byte address (mod 2^32) */
-        int32_t pred=(smap_at(fpk)-smap_at(T))/2;           /* byte shift -> imm24 halfword units */
+        /* byte shift -> imm24 halfword units. The subtract is done mod 2^32 (a corrupt map can
+         * ship values near +-2^31; wrapped garbage is CRC-rejected, signed overflow would be UB);
+         * valid map values are tiny, so the wrapped diff equals the true diff bit-exactly. */
+        int32_t pred=(int32_t)((uint32_t)smap_at(fpk)-(uint32_t)smap_at(T))/2;
         bl_dereloc(up, lo, (uint32_t)pred+(uint32_t)res, packed);
         hy_word4_rec(fpk,w);                                /* record the 4 BL bytes into the ring */
         return 1;
@@ -839,14 +842,22 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
-typedef struct { int32_t nextpos, litb, li, step; } LitCur;
+typedef struct { int32_t nextpos, litb, li, step, lim; } LitCur;
 __attribute__((always_inline)) static inline void litcur_step(SA*s, LitCur*lc, int32_t nl){
-    if(lc->li<nl){ int32_t g=(int32_t)sa_read_uleb(s);
-        lc->nextpos += lc->step*g; lc->litb=sa_next_content(s,0); }
+    if(lc->li<nl){
+        uint32_t g=sa_read_uleb(s);
+        /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
+         * the cursor inside [0,lim] (lim==dl; the encoder emits only in-range positions), so
+         * bound the gap and the stepped position in pure uint32 (no wrap can slip through:
+         * g<=lim and base<=lim keep base+g < 2^32; a backward underflow lands >lim). */
+        uint32_t np=(lc->step>0)? (uint32_t)lc->nextpos+g : (uint32_t)lc->nextpos-g;
+        if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ s->err=1; lc->nextpos=-1; return; }
+        lc->nextpos=(int32_t)np; lc->litb=sa_next_content(s,0);
+    }
     else lc->nextpos=-1;
 }
 __attribute__((always_inline)) static inline void litcur_init(SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
-    lc->step = fwd ? 1 : -1;
+    lc->step = fwd ? 1 : -1; lc->lim = dl;
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
@@ -893,6 +904,11 @@ static void sa_apply_op(SA*s){
            __builtin_sub_overflow(s->fp,dl,&nfp) || __builtin_sub_overflow(nfp,adj,&nfp)){ s->err=1; return; }
         s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
+    /* fp headroom: the copy loop and the ldr back-scan form fp0+K for K<=dl, so fp0+dl must be
+     * representable in int32. The overflow builtins above only guard fp0+dl+adj / fp0 itself —
+     * a corrupt adj walk can park fp0 near INT32_MAX and make the bare fp0+dl overflow (UB).
+     * Valid streams keep fp inside the image plus small overshoot, so this never fires there. */
+    if(fp0>(int32_t)0x7fffffff-dl){ s->err=1; return; }
     /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
     uint32_t np=s_ug_gamma(&M_pgn);
     if(np>(uint32_t)nw){ s->err=1; return; }
