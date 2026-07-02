@@ -631,9 +631,22 @@ static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr,
     create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDRW], &ts[M4_LDRW], &blocks[STREAM_LDRW]);
-    if (mask_bl) {
+    if (mask_bl & 1) {
         mask_bl_imms(from->d, from_mut->d, from->n);
         mask_bl_imms(to->d, to_mut->d, to->n);
+    }
+    if (mask_bl & 2) {
+        /* zero ALL literal-pool words (each side's own disassembly, proper pool-skip logic) so
+         * copies extend through pointer churn; the decoder-side EX mechanism + op-derived deltas
+         * supply the values, and corrections absorb any mask-induced diff mismatch. */
+        for (size_t i = 0; i < fs[M4_LDR].n; i++) {
+            uint32_t a = fs[M4_LDR].a[i].addr;
+            if ((size_t)a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
+        }
+        for (size_t i = 0; i < ts[M4_LDR].n; i++) {
+            uint32_t a = ts[M4_LDR].a[i].addr;
+            if ((size_t)a + 4 <= to_mut->n) memset(to_mut->d + a, 0, 4);
+        }
     }
     a1_m4_free_streams(fs); a1_m4_free_streams(ts);
 }
@@ -2962,7 +2975,8 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     int variant = cfg.variant;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
-    data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks, variant >= 2);
+    data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks,
+                       variant >= 3 ? 3 : (variant >= 2 ? 1 : 0));
     OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
@@ -3009,12 +3023,13 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * legacy plan (guaranteed feasible). A1_PLANS=full widens the sweep for measurement runs. */
     static const PlanCfg PLANS[] = {
         /* default set: every config below won pairs in the corpus sweep (fuzz axis dominates:
-         * 74 pairs prefer fuzz=6, 92 prefer fuzz=20). Ordered so ties keep the cheapest plan. */
-        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {1, 11, 3}, {1, 6, 3},
+         * 74 pairs prefer fuzz=6, 92 prefer fuzz=20). Ordered so ties keep the cheapest plan.
+         * variant 3 additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
+        {0, 11, 8}, {1, 11, 8}, {2, 11, 8}, {1, 6, 8}, {1, 20, 8}, {1, 11, 3}, {1, 6, 3}, {3, 11, 8},
         /* A1_PLANS=full extras (measured worth only ~127 B corpus combined) */
-        {1, 32, 8}, {2, 20, 8},
+        {1, 32, 8}, {2, 20, 8}, {3, 20, 8},
     };
-    int nplans = 7;
+    int nplans = 8;
     { const char *pe = getenv("A1_PLANS"); if (pe && !strcmp(pe, "full")) nplans = (int)(sizeof(PLANS) / sizeof(PLANS[0])); }
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
     for (int v = 0; v < nplans; v++) {
