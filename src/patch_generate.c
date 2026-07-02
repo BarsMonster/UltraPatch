@@ -40,6 +40,16 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #endif
 #define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
 
+/* Decoder resource-cap mirrors — MUST match patch_apply JSLOTS / OPC_CAP (a deployment that
+ * -D-retunes the decoder caps must retune these identically). A1_JSLOTS is also the journal
+ * budget for plan degradation (degrade_ops_to_journal_budget). */
+#ifndef A1_JSLOTS
+#define A1_JSLOTS 1024
+#endif
+#ifndef A1_OPC_CAP
+#define A1_OPC_CAP 80
+#endif
+
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
@@ -2993,6 +3003,75 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     return body;
 }
 
+/* ---- journal-budget degradation (encoder-only; wire format and decoder untouched) ----
+ * The decoder's never-evict journal holds at most A1_JSLOTS overwritten source bytes. When
+ * the ideal op plan needs more, convert the OVER-BUDGET read-after-overwrite copy regions
+ * into plain extra bytes (the exact to-image bytes, shipped in the content stream):
+ * compression degrades — those bytes code as literals/LZ instead of free copies — but the
+ * plan becomes journal-feasible instead of refusing. Preserves are journaled in apply order
+ * (strictly ascending output positions for FWD, descending for grow — the NVM gate pins
+ * frontier monotonicity), so the first A1_JSLOTS preserves in that order stay protected and
+ * every read of a later (unprotected) overwritten position is converted. A read-behind-
+ * frontier within one op sits at the constant offset fp0-tp0, so the conversion range is
+ * contiguous per op and each affected op splits into at most two wire ops. Every remaining
+ * overwritten read still goes through the journal — the invariant that keeps the wire
+ * independent of the deployment's NVM row size. Correctness of the transformed plan is
+ * still proven per blob by the reference-decoder self-verification. */
+static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t from_size,
+                                          uint32_t to_size, size_t budget) {
+    int FWD = to_size <= from_size;
+    uint8_t *pres = preserve_indices(ops, from_size, to_size);
+    size_t total = 0;
+    for (uint32_t wi = 0; wi < to_size; wi++) total += pres[wi];
+    if (total <= budget) { free(pres); return; }
+    /* cutoff C = position of the first preserve past the budget, in apply order. pres[] is
+     * indexed by apply-order write index: wi == position for FWD, to_size-1-wi for grow. */
+    int32_t C = 0;
+    { size_t cnt = 0;
+      for (uint32_t wi = 0; wi < to_size; wi++) {
+          if (!pres[wi]) continue;
+          if (cnt == budget) { C = FWD ? (int32_t)wi : (int32_t)(to_size - 1u - wi); break; }
+          cnt++;
+      } }
+    free(pres);
+    OpVec out = {0};
+    int32_t tp0 = 0, fp0 = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        Op *o = &ops->v[oi];
+        int32_t dl = o->diff_len, ks = 0, ke = 0;
+        if (FWD ? (fp0 < tp0) : (fp0 > tp0)) {   /* op reads behind the write frontier */
+            if (FWD) {
+                /* unprotected overwritten reads: C <= a < to_size (a = fp0+k, a >= 0) */
+                if (fp0 < C) ks = C - fp0;
+                if (fp0 < 0 && ks < -fp0) ks = -fp0;
+                int64_t hi = (int64_t)to_size - fp0;
+                ke = hi < dl ? (hi < 0 ? 0 : (int32_t)hi) : dl;
+            } else {
+                /* unprotected overwritten reads: 0 <= a <= C and a < from_size */
+                if (fp0 < 0) ks = -fp0;
+                int64_t hi = (int64_t)C - fp0 + 1;
+                if ((int64_t)from_size - fp0 < hi) hi = (int64_t)from_size - fp0;
+                ke = hi < dl ? (hi < 0 ? 0 : (int32_t)hi) : dl;
+            }
+        }
+        if (ks < ke) {
+            /* split: [0,ks) stays a copy; [ks,ke) ships as exact extras with the source
+             * skipped via adj; [ke,dl) plus the original extras/adj continue in a second
+             * op. tp/fp walk totals are preserved exactly. */
+            opvec_push(&out, op_copy(ks, o->diff, ke - ks, to->d + (size_t)tp0 + (size_t)ks, ke - ks));
+            if ((dl - ke) || o->extra_len || o->adj)
+                opvec_push(&out, op_copy(dl - ke, o->diff + ke, o->extra_len, o->extra, o->adj));
+            free(o->diff); free(o->extra);
+        } else {
+            opvec_push(&out, *o);
+        }
+        tp0 += dl + o->extra_len;
+        fp0 += dl + o->adj;
+    }
+    free(ops->v);
+    *ops = out;
+}
+
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
@@ -3012,18 +3091,66 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     split_nonzero_diff_runs(&ops, &from_df, &to_df);
     if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(&ops, from->d, from_size, to_size, &fd);
+    degrade_ops_to_journal_budget(&ops, to, from_size, to_size, A1_JSLOTS);
+    /* corrections-cap degradation (same philosophy as the journal budget): OPC_CAP bounds
+     * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
+     * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
+     * op boundaries, which shifts field detection and thus the corrections themselves, so
+     * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
+     * computes exactly the untransformed plan (bit-identical wire). */
+    uint8_t *presset, *corr; OpPC *pc;
+    for (int pass = 0;; pass++) {
+        presset = preserve_indices(&ops, from_size, to_size);
+        corr = corrections_hybrid(&ops, from->d, to->d, &fd, from_size, to_size, presset);
+        pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
+        size_t old_n = ops.n;                               /* pc[] is sized for THIS op count */
+        int split_any = 0;
+        if (pass < 12) {
+            int FWDD = to_size <= from_size;
+            int32_t *cut = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
+            for (size_t i = 0; i < ops.n; i++) cut[i] = -1;
+            for (size_t step = 0; step < ops.n; step++) {
+                if (pc[step].corr.n <= A1_OPC_CAP) continue;
+                size_t oi = FWDD ? step : ops.n - 1 - step;
+                int32_t dl = ops.v[oi].diff_len;
+                if (dl < 2) continue;                       /* cannot split further: stays infeasible */
+                int32_t m = pc[step].corr.v[pc[step].corr.n / 2].off;
+                if (m <= 0 || m >= dl) m = dl / 2;
+                if (m <= 0 || m >= dl) continue;
+                cut[oi] = m;
+                split_any = 1;
+            }
+            if (split_any) {
+                OpVec out2 = {0};
+                for (size_t oi = 0; oi < ops.n; oi++) {
+                    Op *o = &ops.v[oi];
+                    if (cut[oi] < 0) { opvec_push(&out2, *o); continue; }
+                    /* split keeps the tp/fp walk exact: sub1 advances fp by cut (adj 0),
+                     * sub2 carries the remaining diff + the original extras and adj. */
+                    opvec_push(&out2, op_copy(cut[oi], o->diff, 0, NULL, 0));
+                    opvec_push(&out2, op_copy(o->diff_len - cut[oi], o->diff + cut[oi],
+                                              o->extra_len, o->extra, o->adj));
+                    free(o->diff); free(o->extra);
+                }
+                free(ops.v);
+                ops = out2;
+            }
+            free(cut);
+        }
+        if (!split_any) break;
+        free(presset); free(corr);
+        for (size_t i = 0; i < old_n; i++) { free(pc[i].pres.v); free(pc[i].corr.v); }
+        free(pc);
+    }
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
-    uint8_t *presset = preserve_indices(&ops, from_size, to_size);
-    uint8_t *corr = corrections_hybrid(&ops, from->d, to->d, &fd, from_size, to_size, presset);
-    OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
     if (stats_on) *st_out = collect_stats(&ops, from->d, from_size, to_size, &fd, pc);
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
     int feasible = 1;
     { size_t tpres = 0;
-      for (size_t i = 0; i < ops.n; i++) { if (pc[i].corr.n > 80) feasible = 0; tpres += pc[i].pres.n; }
-      if (tpres > 904) feasible = 0; }
+      for (size_t i = 0; i < ops.n; i++) { if (pc[i].corr.n > A1_OPC_CAP) feasible = 0; tpres += pc[i].pres.n; }
+      if (tpres > A1_JSLOTS) feasible = 0; }
     Buf body = {0};
     if (feasible) {
         body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc, W);

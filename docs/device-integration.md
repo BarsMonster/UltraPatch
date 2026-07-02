@@ -119,8 +119,13 @@ The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`, and this is what `make gate` verifies.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
-intentional reject limits. Raising them costs SRAM and must be followed by the
-plain release gate:
+intentional reject limits on the decoder. The ENCODER mirrors them
+(`A1_JSLOTS`/`A1_OPC_CAP` in `patch_generate.c` — retune both sides together)
+and degrades gracefully instead of refusing where the plan allows it: reads
+that would overflow the journal budget ship as plain extra bytes, and ops
+whose per-op corrections exceed `OPC_CAP` are split — worse compression, never
+a bad blob. A pair is refused only when no plan variant fits any cap. Raising
+a cap costs SRAM and must be followed by the plain release gate:
 
 ```sh
 make gate

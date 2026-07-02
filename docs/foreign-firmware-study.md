@@ -62,6 +62,31 @@ so this could only fire on foreign firmware. The sweep now soft-skips ANY
 infeasible config and fails, with a clear message, only when every config
 exceeds a cap. Wire-neutral (golden unchanged).
 
+## Addendum: graceful degradation landed (same day)
+
+Owner decision after the initial results: refusal is not acceptable for
+serviceable pairs — degrade compression instead. Two encoder-side degradations
+landed (wire format and decoder logic unchanged; home-corpus golden byte-identical):
+
+1. **Journal budget** (`JSLOTS` raised 904 -> 1024, +360 B `.bss`): when the
+   ideal plan needs more preserves than the budget, the encoder protects the
+   first-budget preserves in apply order and converts every read of a later
+   overwritten position into plain extra bytes (op split, source skipped via
+   `adj`). Every remaining overwritten read still goes through the journal, so
+   the wire stays independent of the deployment's NVM row size.
+2. **Per-op corrections** (`OPC_CAP` 80): an op needing more corrections is
+   split at its median-correction offset, iterated to a fixpoint (correction
+   sets shift with op boundaries because field detection is per-op).
+
+Result: **34/34 pair-directions round-trip** (was 14/34), zero refusals, NVM
+safety clean, journal exactly at the 1024 budget on degraded pairs. The
+moderate-churn showcase 2.3.0->2.3.1 (previously refused at 1,288 needed
+slots) ships at 408 B. Whole-relink pairs ship working 23-175 KB blobs on
+~250 KB images — degraded, as intended, but never refused; the cross-major
+3.0.3->10.0.0 (effectively unrelated programs) ships 175 KB. A pair can now be
+refused only if every plan variant still exceeds a cap after both
+degradations (none observed in this study).
+
 ## Permanent gate asset — decision: NO
 
 The foreign binaries stay out of the repo: they are third-party build

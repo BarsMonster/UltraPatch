@@ -330,11 +330,14 @@ typedef struct {
 } DRStream;
 
 #ifndef JSLOTS
-#define JSLOTS 904u                          /* packed journal capacity; corpus peak is 625, and the cap
-                                              * is kept well above it (the 8-byte-aligned journal region
-                                              * holds 904 slots) for out-of-corpus headroom. Refuse above. */
+#define JSLOTS 1024u                         /* packed journal capacity (home-corpus peak 478; sized with
+                                              * out-of-corpus headroom). The ENCODER mirrors this budget
+                                              * (A1_JSLOTS in patch_generate) and DEGRADES over-budget
+                                              * plans host-side (over-budget reads ship as extra bytes),
+                                              * so a valid blob never exceeds it; an over-cap stream
+                                              * still refuses cleanly here (REJ_RESOURCE). */
 #endif
-#define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (2712, 8-aligned) */
+#define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (3072, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
 /* LZSS window W (defined here so SA_ARENA can size the apply phase). W=10 (ring 1024) is the
  * default that keeps the decoder within the 12 KiB SRAM cap; MUST match the encoder W. */

@@ -37,9 +37,9 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 BASE_FULL_TOTAL ?= 4199788
 BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
-BASE_ARM_TEXT ?= 6200
+BASE_ARM_TEXT ?= 6184
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10288
+BASE_ARM_BSS ?= 10648
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-golden golden-update gate fuzz
