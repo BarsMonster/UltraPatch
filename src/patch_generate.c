@@ -2869,7 +2869,11 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
                 size_t cand_bytes = g_emit_overflow ? (size_t)-1 : cand_body.n; buf_free(&cand_body);
                 if (cand_bytes < cur_bytes) {
+                    size_t gain = cur_bytes - cand_bytes;
                     free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
+                    /* converged: on large content later passes shave a byte or two at full DP
+                     * cost; small patches (where every byte counts) always iterate to fixpoint. */
+                    if (gain < (content.n >> 13)) break;
                 } else {
                     free(cand_seq.v);
                     break;
