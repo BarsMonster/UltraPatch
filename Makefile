@@ -5,6 +5,9 @@
 CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
+# Target-family wire contract: CORTEX_M0 must be defined for BOTH the encoder and the
+# decoder TU (rc_models.h #errors without it). CORTEX_M4 is reserved (future wire).
+CFLAGS += -DCORTEX_M0
 CFLAGS += -g
 CFLAGS += -Wall
 CFLAGS += -Wextra
@@ -94,7 +97,7 @@ check-arm:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DCORTEX_M0 -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -123,7 +126,7 @@ check-qemu: hy_enc
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	arm-linux-gnueabi-gcc -static -mthumb -Os -std=c99 -Wall -Wextra -Werror \
-		-D_POSIX_C_SOURCE=200809L \
+		-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L \
 		-Isrc src/patch_apply_demo.c -o "$$tmp/hy_dec_qemu"; \
 	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
 	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
@@ -240,7 +243,7 @@ gate: all
 # campaign run the binary directly, e.g.: ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
 FUZZ_TIME ?= 60
 fuzz_apply: fuzz/fuzz_apply.c $(APPLY_HDR)
-	clang -g -O1 -std=c99 -Wall -Wextra -Werror \
+	clang -g -O1 -std=c99 -Wall -Wextra -Werror -DCORTEX_M0 \
 	  -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
 	  -Isrc fuzz/fuzz_apply.c -o $@
 

@@ -15,6 +15,19 @@
 #include <stdint.h>
 #include <string.h>
 
+/* ---- target-family wire contract ----
+ * The A1 wire is target-family-specific. CORTEX_M0 (Thumb-1/ARMv6-M, the implemented
+ * family) must be defined for BOTH the encoder and the decoder TU — this header is
+ * included by both, so a missing define fails BOTH builds and an encoder/decoder pair
+ * can never silently disagree about the family. CORTEX_M4 is RESERVED for a future
+ * Thumb-2 wire revision and MAY change the wire format (accepted by design). */
+#if !defined(CORTEX_M0) && !defined(CORTEX_M4)
+#error "define CORTEX_M0 for both the encoder and the decoder build (CORTEX_M4 is reserved)"
+#endif
+#ifdef CORTEX_M4
+#error "CORTEX_M4 is reserved for a future wire revision; only CORTEX_M0 is implemented"
+#endif
+
 #define RC_KTOP (1u<<24)
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u

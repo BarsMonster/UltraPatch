@@ -107,6 +107,14 @@ path.
 
 ## Build-Time Contract
 
+**Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
+build and the decoder TU — `rc_models.h` fails the build with a clear `#error`
+without it, so an encoder/decoder pair can never silently disagree about the
+target family. `CORTEX_M0` selects the implemented Thumb-1/ARMv6-M wire and
+compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
+is reserved for a future Thumb-2 wire revision; it may change the wire format
+and is currently rejected at compile time.
+
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`, and this is what `make gate` verifies.
 
