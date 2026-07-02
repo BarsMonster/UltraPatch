@@ -11,8 +11,9 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 ## Ownership
 
 Include `src/patch_apply.h` in exactly one translation unit. The header
-owns decoder static state, the byte FIFO, the coroutine stack, entropy models, the
-journal arena, and the output row cache.
+owns decoder static state: entropy models, the journal arena, and the output
+row cache. There is no coroutine, no fiber, and no private decode stack — the
+decode runs on the caller's stack.
 
 The target must provide exactly two flash primitives:
 
@@ -50,14 +51,13 @@ CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
 delivery manifest and patch blob before any flash write is attempted.
 
-## Two Integration Modes
+## Integration
 
-**PULL mode (`-DPATCH_APPLY_PULL`) — recommended when the update task can
-block.** Supply a callback that returns the next blob byte (it may poll a
-UART/BLE buffer internally) or 0 at end-of-blob, and call
+Supply a callback that returns the next blob byte (it may poll a UART/BLE
+buffer internally) or 0 at end-of-blob, and call
 `patch_apply_run(callback, ctx)`. The whole decode runs synchronously on the
 caller's stack: no coroutine, no fiber stack, no platform context-switch code,
-and ~640 B less `.bss`.
+no compiler-specific stack sizing.
 
 ```c
 /* return 1 and write one blob byte to *out; return 0 at end-of-blob.
@@ -70,38 +70,23 @@ int rc = patch_apply_run(next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
 `src/patch_apply_demo.c` (`PullCtx` / `pull_next`) is a minimal reference
 implementation of the callback.
 
-**PUSH mode (default) — for event-driven producers.** Bytes are fed from the
-outside; the decoder suspends on a private coroutine stack while waiting. The
-platform must supply the context switch: `CO_SWAP_TO_MAIN`/`CO_SWAP_TO_DEC`
-under `RC_V3_ARM` are SIZING STUBS in this repository (the x86 host test
-carries a real fiber; a Cortex-M device needs its own SP-swap, typically a
-PendSV pair). Additionally, the coroutine stack size is COMPILER-SPECIFIC:
-`DEC_STACK_BYTES` defaults are measured for gcc (520 B high-water) and clang
-(3752 B!); re-measure with `-DRC_V3_STACKMEAS` whenever the compiler, version,
-or flags change. The deepest 8 bytes are an overflow canary — an overflow
-rejects the patch at decode end.
+**Event-driven producers (ISR push)** adapt through the optional
+single-producer/single-consumer byte ring in `src/patch_apply_push_adapter.h`:
+the RX interrupt calls `patch_ring_push(&ring, byte)` (then `patch_ring_eof()`
+after the last byte), and the update task calls
+`patch_apply_run(patch_ring_next, &ring)`. While the ring is empty the adapter
+invokes an integrator wait hook (typically WFI/WFE, an RTOS yield, or a
+transport poll) — the hook must allow the producer to run; never call
+`patch_apply_run` from the producer's own context. The adapter is deliberately
+not part of the device decoder artifact: `patch_apply.h` compiles, fuzzes, and
+gets sized without it.
 
-## Call Sequence (push mode)
+## Call Sequence
 
 1. Authenticate the update envelope and reject rollback or wrong-target updates.
-2. Call `patch_apply_init()`.
-3. Feed EVERY blob byte, in order, with `patch_apply_push(byte)`. It returns
-   `PATCH_APPLY_NEED_MORE` while streaming and `PATCH_APPLY_ERROR` on early
-   reject (stop feeding then).
-4. After the last blob byte, call `patch_apply_finish()` and use its return —
+2. Call `patch_apply_run(callback, ctx)` and use its return —
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
-   image was written and `CRC32(to)` verified.
-
-In pull mode, steps 2–4 collapse into one `patch_apply_run()` call whose return
-is the verdict.
-
-The decoder status values are:
-
-```c
-PATCH_APPLY_NEED_MORE
-PATCH_APPLY_DONE
-PATCH_APPLY_ERROR
-```
+   image was written and both `CRC32(from)` and `CRC32(to)` verified.
 
 On `ERROR`, `g_reject` distinguishes `REJ_RESOURCE` (a decoder resource cap was
 exceeded — this firmware needs a larger-sized build) from `REJ_CORRUPT`

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* libFuzzer harness for the A1 decoder (PULL mode, ASan+UBSan).
+/* libFuzzer harness for the A1 decoder (ASan+UBSan).
  *
  * Input = one whole patch blob, applied to a fixed `from` image on an in-memory flash
  * emulator. Properties asserted every exec:
@@ -32,9 +32,6 @@ static uint8_t *fz_flash;
 uint8_t flash_read(uint32_t a){ return a<FZ_SPAN ? fz_flash[a] : 0xFF; }
 void flash_write(uint32_t a, uint8_t v){ if(a<FZ_SPAN) fz_flash[a]=v; }
 
-#ifndef PATCH_APPLY_PULL
-#define PATCH_APPLY_PULL 1
-#endif
 #ifndef A1_MAX_IMAGE
 #define A1_MAX_IMAGE FZ_SPAN
 #endif

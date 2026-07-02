@@ -5,8 +5,10 @@ Final A1 firmware patcher for the Sensor Watch target.
 Production code lives under `src/`, with third-party code under `vendor/`:
 
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder.
-- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec` and
-  `hy_dec_pull`, including the host NVM emulator.
+- `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
+  (ISR push) producers; not part of the device decoder artifact.
+- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`,
+  including the host NVM emulator.
 - `src/patch_generate.c`: host-side C encoder.
 - `src/patch_selfcheck.c`: reference-decoder self-verification built into
   `hy_enc` — every emitted patch is proven to apply before it is written.
@@ -59,11 +61,11 @@ Device integration contract:
 - Include `src/patch_apply.h` in exactly one update module.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write(uint32_t, uint8_t)`.
-- Authenticate the update, then feed the WHOLE blob: `patch_apply_init`, then
-  `patch_apply_push` per byte, then `patch_apply_finish` for the verdict. The
-  decoder parses the envelope and verifies both CRC gates itself. Alternatively
-  build with `-DPATCH_APPLY_PULL` and call `patch_apply_run(callback, ctx)` —
-  no coroutine/fiber at all.
+- Authenticate the update, then run the WHOLE blob through
+  `patch_apply_run(callback, ctx)` — the callback serves blob bytes (it may
+  block internally) and the return is the verdict. The decoder parses the
+  envelope and verifies both CRC gates itself; there is no coroutine/fiber.
+  Event-driven producers adapt via `src/patch_apply_push_adapter.h`.
 - The decoder is single-instance and non-reentrant; see
   `docs/device-integration.md` before wiring it into a bootloader.
 

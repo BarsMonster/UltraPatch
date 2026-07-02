@@ -8,13 +8,14 @@
 # sizes, and a >384 KiB span that can overflow the journal page table (REJ_RESOURCE path).
 #
 # Acceptance model: hy_enc SELF-VERIFIES every emitted patch on the reference decoder, so for
-# each pair either (a) hy_enc succeeds -> both host decoders (push + pull) MUST round-trip the
-# blob byte-exactly, or (b) hy_enc refuses cleanly (nonzero exit, no blob) -> logged as a
-# refusal. Crashes, hangs, or wrong output anywhere = failure.
+# each pair either (a) hy_enc succeeds -> the host decoder MUST round-trip the blob
+# byte-exactly (direct pull AND byte-at-a-time via the push adapter), or (b) hy_enc refuses
+# cleanly (nonzero exit, no blob) -> logged as a refusal. Crashes, hangs, or wrong output
+# anywhere = failure.
 #
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
-# Usage: check_edge.sh [W]   (needs ./hy_enc, ./hy_dec, ./hy_dec_pull already built)
+# Usage: check_edge.sh [W]   (needs ./hy_enc and ./hy_dec already built)
 set -u
 
 W="${1:-10}"
@@ -69,9 +70,9 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
   blob="$tmp/$name.blob"
   if ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$blob" "$W" >/dev/null 2>"$tmp/$name.encerr"; then
     ok=1
-    for dec in ./hy_dec ./hy_dec_pull; do
+    for mode in "" "1"; do   # direct pull, then byte-at-a-time via the push adapter
       cp "$from" "$tmp/$name.mem"
-      if ! "$dec" "$tmp/$name.mem" "$blob" >/dev/null 2>&1; then ok=0; fi
+      if ! ./hy_dec "$tmp/$name.mem" "$blob" $mode >/dev/null 2>&1; then ok=0; fi
       if ! cmp -s "$tmp/$name.mem" "$to"; then ok=0; fi
     done
     if [ "$ok" = 1 ]; then

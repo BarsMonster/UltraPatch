@@ -51,6 +51,15 @@ void flash_write(uint32_t a, uint8_t v) {
 
 #include "patch_apply.h"
 
+/* pull-mode byte source: serve the blob buffer to patch_apply_run() */
+typedef struct { const uint8_t *d; size_t n, i; } ScPull;
+static int sc_pull_next(void *c, uint8_t *out) {
+    ScPull *p = (ScPull *)c;
+    if (p->i >= p->n) return 0;
+    *out = p->d[p->i++];
+    return 1;
+}
+
 static int sc_uleb(const uint8_t *d, size_t n, size_t *p, uint32_t *out) {
     uint32_t v = 0; int sh = 0; uint8_t b;
     do {
@@ -99,14 +108,12 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
 
     /* ---- run the reference decoder over the WHOLE blob (it parses the envelope and
      * gates on both CRCs itself; DONE implies CRC32(from) and CRC32(to) both verified) ---- */
-    int rc = patch_apply_init();
-    size_t bi = 0;
-    while (bi < blob_n && rc == PATCH_APPLY_NEED_MORE) rc = patch_apply_push(blob[bi++]);
-    rc = patch_apply_finish();
+    ScPull pc = { blob, blob_n, 0 };
+    int rc = patch_apply_run(sc_pull_next, &pc);
     if (rc != PATCH_APPLY_DONE)
         return g_reject == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
                                         : "reference decoder rejected the patch";
-    if (bi != blob_n) return "decoder errored before consuming the whole blob";
+    if (pc.i != blob_n) return "decoder did not consume the whole blob";
 
     /* ---- exact output + NVM write-safety ---- */
     if (to_n && memcmp(sc_flash, to, to_n) != 0) return "decoded image differs from target";

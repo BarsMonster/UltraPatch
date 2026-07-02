@@ -22,6 +22,7 @@ CFLAGS += $(CFLAGS_EXTRA)
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 APPLY_HDR := src/patch_apply.h src/rc_models.h
+ADAPTER_HDR := src/patch_apply_push_adapter.h
 GEN_HDR := src/rc_models.h src/arm_cortex_m4.h
 ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
@@ -33,27 +34,23 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 BASE_FULL_TOTAL ?= 4199788
 BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
-BASE_ARM_TEXT ?= 6372
+BASE_ARM_TEXT ?= 6200
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10928
+BASE_ARM_BSS ?= 10288
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-golden golden-update gate fuzz
 
-all: hy_enc hy_dec hy_dec_pull
+all: hy_enc hy_dec
 
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 # The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
-# the stricter bar; the host-side encoder does not).
-hy_dec: $(DEC_SRCS) $(APPLY_HDR)
+# the stricter bar; the host-side encoder does not). Single decode mode: patch_apply_run()
+# + integrator callback; byte_mode (arg3) streams through the optional push adapter.
+hy_dec: $(DEC_SRCS) $(APPLY_HDR) $(ADAPTER_HDR)
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
-
-# PULL-mode decoder (same wire, same core): patch_apply_run() + integrator callback,
-# no fiber/coroutine anywhere. `check` round-trips both modes to keep them wire-identical.
-hy_dec_pull: $(DEC_SRCS) $(APPLY_HDR)
-	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL $(DEC_SRCS) -o $@
 
 check: all
 	@set -e; \
@@ -72,12 +69,6 @@ check: all
 	wc -c "$$tmp/grow.blob" "$$tmp/revert.blob"; \
 	test "$$grow_sz" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	./hy_dec_pull "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
-	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
-	./hy_dec_pull "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
 	printf '\377' | dd of="$$tmp/bad.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
@@ -86,9 +77,6 @@ check: all
 	head -c -1 "$$tmp/grow.blob" > "$$tmp/trunc.blob"; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/trunc.blob" 1 >/dev/null 2>/dev/null; then echo "truncated blob accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	if ./hy_dec_pull "$$tmp/mem.bin" "$$tmp/bad.blob" >/dev/null 2>/dev/null; then echo "corrupt body accepted (pull)"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad_from.blob"; \
 	printf '\000' | dd of="$$tmp/bad_from.blob" bs=1 seek=0 count=1 conv=notrunc >/dev/null 2>&1; \
@@ -126,9 +114,8 @@ check-assets:
 
 # Executes the decoder as REAL Thumb-1 code (the Cortex-M0+ ISA subset) under qemu-arm
 # user-mode emulation — catches ARM-only behavior (unsigned-by-default char, alignment,
-# Thumb codegen) that the x86 host gates cannot. Uses PULL mode, so no fiber asm is needed
-# for the ARM-Linux target. Auto-skips (successfully, with a message) when the cross-gcc or
-# qemu-arm is not installed, so foreign machines stay green.
+# Thumb codegen) that the x86 host gates cannot. Auto-skips (successfully, with a message)
+# when the cross-gcc or qemu-arm is not installed, so foreign machines stay green.
 check-qemu: hy_enc
 	@set -e; \
 	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
@@ -136,7 +123,7 @@ check-qemu: hy_enc
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	arm-linux-gnueabi-gcc -static -mthumb -Os -std=c99 -Wall -Wextra -Werror \
-		-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL \
+		-D_POSIX_C_SOURCE=200809L \
 		-Isrc src/patch_apply_demo.c -o "$$tmp/hy_dec_qemu"; \
 	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
 	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
@@ -248,7 +235,7 @@ gate: all
 	echo "====================================================="; \
 	exit $$rc
 
-# libFuzzer + ASan + UBSan harness over the PULL-mode decoder (fuzz/fuzz_apply.c).
+# libFuzzer + ASan + UBSan harness over the decoder (fuzz/fuzz_apply.c).
 # `make fuzz` seeds the corpus with real encoded blobs and runs a short smoke; for a real
 # campaign run the binary directly, e.g.: ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
 FUZZ_TIME ?= 60
@@ -266,4 +253,4 @@ fuzz: fuzz_apply hy_enc
 	./fuzz_apply -max_total_time=$(FUZZ_TIME) -max_len=4096 -print_final_stats=1 fuzz-corpus
 
 clean:
-	rm -f hy_enc hy_dec hy_dec_pull fuzz_apply
+	rm -f hy_enc hy_dec fuzz_apply

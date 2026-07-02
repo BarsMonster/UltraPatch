@@ -10,16 +10,17 @@
  * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
  * Production solution; integration and release gates are documented under docs/.
  *
- * The patch arrives BYTE-BY-BYTE over a slow link. The integrator pushes the WHOLE blob —
- * envelope, range-coded body, and CRC32(to) trailer — through patch_apply_push(byte) and then
- * calls patch_apply_finish() for the DONE/ERROR verdict; the decoder itself parses the envelope
- * (sizes, direction, span) and gates on CRC32(from) BEFORE the first flash write and CRC32(to)
- * after the apply. A single divide-free binary range coder (LZMA bound; no division —
- * Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are emitted in
- * decode-consumption order (no length prefixes, no byte-aligned sections). next_byte() BLOCKS on
- * an empty byte FIFO; the block is realised by a coroutine (a PendSV/SP swap on the device; a
- * minimal fiber on the x86 host test) — the decode state machine runs on its own small stack and
- * swaps back to the producer at the renorm point when the FIFO is empty.
+ * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
+ * callback (which may block internally — e.g. poll a UART ring) and passes the WHOLE blob —
+ * envelope, range-coded body, and CRC32(to) trailer — through one patch_apply_run(callback, ctx)
+ * call whose return is the DONE/ERROR verdict; the whole decode runs synchronously on the
+ * CALLER's stack (no coroutine, no fiber, no private decode stack). The decoder itself parses
+ * the envelope (sizes, direction, span) and gates on CRC32(from) BEFORE the first flash write
+ * and CRC32(to) after the apply. A single divide-free binary range coder (LZMA bound; no
+ * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
+ * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
+ * Event-driven producers (ISR push) integrate via the optional SPSC ring adapter in
+ * patch_apply_push_adapter.h, which stays OUTSIDE this device artifact.
  *
  * Reconstruction is NO-BAKE (A1): NO source writes. The [A] copy reads RAW from[fp]; the new image
  * is corrected at the monotonic output frontier by the to-ordered additive corrections [C]
@@ -69,12 +70,9 @@ static int      g_FWD;
 #endif
 
 /* ===================================================================================== */
-/* byte source. TWO integration modes share ONE decode core:                              */
-/*  - PUSH (default): the producer feeds bytes via patch_apply_push(); next_byte() blocks  */
-/*    on an empty FIFO by suspending a coroutine (fiber) back to the producer.             */
-/*  - PULL (-DPATCH_APPLY_PULL): the integrator supplies a (possibly blocking) callback    */
-/*    and calls patch_apply_run() — NO fiber, NO coroutine stack, NO FIFO, plain calls.    */
-/* Both modes withhold the 4 most recent blob bytes in the g_tail ring so the CRC32(to)    */
+/* byte source: the integrator supplies a (possibly blocking) callback and calls           */
+/* patch_apply_run() — the whole decode runs on the caller's stack, plain calls only.      */
+/* The 4 most recent blob bytes are withheld in the g_tail ring so the CRC32(to)           */
 /* trailer never reaches the range coder (the body length is implicit — optimal flush);    */
 /* whatever 4 bytes remain in the ring at the end ARE the trailer.                         */
 /* ===================================================================================== */
@@ -83,128 +81,16 @@ static void decode_body(void);
  * the SAst comment); the attribute makes that overlay defined under any integrator's flags. */
 typedef uint32_t __attribute__((may_alias)) u32_a;
 static void lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w);
-static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring (both modes) */
+static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring */
 enum {
     PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
     DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR,
     DEC_BODYOK=3   /* INTERNAL: body decoded; CRC32(to) trailer not yet verified. Never
-                    * returned to the caller — decoder_push maps it to NEED_MORE and
-                    * decoder_finish / patch_apply_run convert it after the trailer check. */
+                    * returned to the caller — patch_apply_run converts it to DONE (or
+                    * ERROR) after the trailer check. */
 };
 static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
 
-#ifndef PATCH_APPLY_PULL
-static uint8_t  g_fifo_byte, g_fifo_full;  /* decoder_push() supplies one byte per resume */
-static uint8_t  g_eof;                     /* producer signalled end-of-stream */
-
-/* Coroutine stack sizing is COMPILER-SPECIFIC: the decode call tree's frames measure 520 B
- * high-water under gcc -O2 (x86-64; ARM gcc -Os frames are smaller still) but 3752 B under
- * clang -O2 (measured 2026-07 -- clang segfaulted the 640 B gcc-sized stack). The defaults
- * below carry a cushion per compiler family; when changing compiler, version, or flags,
- * RE-MEASURE with -DRC_V3_STACKMEAS (prints the painted high-water after a decode) before
- * trusting the default. The deepest 8 B are a 0xC5 canary checked at decode end -> a stack
- * overflow REJECTS the patch rather than silently corrupting the output. PULL mode
- * (-DPATCH_APPLY_PULL) has no coroutine stack and none of these concerns. */
-#ifndef DEC_STACK_BYTES
-#ifdef __clang__
-#define DEC_STACK_BYTES 4096
-#else
-#define DEC_STACK_BYTES 640
-#endif
-#endif
-static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
-
-/* ===================================================================================== */
-/* Coroutine: a context is just a saved stack pointer (+ callee-saved regs spilled onto    */
-/* its own stack at the swap point) — a few words on a real Cortex-M0+ (PendSV-style swap, */
-/* ~16 B static for the two SP slots). The x86-64 host (the test arch) uses the same        */
-/* MINIMAL SP-fiber so the host SRAM number reflects the true device cost; the ARM device   */
-/* build also uses the fiber (no ucontext.h on bare metal).                                 */
-/*                                                                                         */
-/* The two arches share one interface (CO_SWAP_TO_MAIN / CO_SWAP_TO_DEC + fiber_setup): a   */
-/* context is one saved stack pointer. Common to both is the Fiber type, the two SP slots,  */
-/* decode_body, and the trampoline; they differ only in the swap mechanism (real naked asm  */
-/* on x86 vs the device's PendSV, stubbed here for static sizing) and the initial frame      */
-/* fiber_setup lays down.                                                                   */
-/* ===================================================================================== */
-/* --- shared SP-fiber core (x86 host + ARM device) --- */
-typedef void* Fiber;                       /* a context is just a saved stack pointer */
-static Fiber g_main_sp, g_dec_sp;
-static void pd_trampoline(void);           /* defined below the per-arch swap macros */
-
-#ifdef RC_V3_ARM
-/* RC_V3_ARM device-static measurement build: the real device coroutine is a PendSV/SP swap;
- * a context is two saved SP words (~16 B static). We retain the FULL decoder graph + the
- * coroutine-stack reservation so arm-none-eabi-size reports the true device .bss+.data: the
- * trampoline references decode_body, fiber_setup references g_dec_stack. The asm swap is the
- * device's PendSV; here a minimal volatile stub keeps the symbols (size is graph-complete). */
-static volatile void* g_arm_anchor;
-static void fiber_setup(void){
-    void**sp=(void**)(g_dec_stack+DEC_STACK_BYTES);   /* reserve & reference the coroutine stack */
-    *--sp=(void*)pd_trampoline; g_dec_sp=(Fiber)sp; g_arm_anchor=(void*)&g_dec_stack[0];
-}
-/* device PendSV; stubbed for sizing. The barrier ("" asm with a memory clobber) makes the
- * stub OPAQUE: without it the optimizer can prove the FIFO flags never change across a
- * "swap", collapse the blocking wait loops, and dead-strip most of decode_body — which
- * silently blinds the arm-none-eabi-size gate this build exists for. */
-#define CO_SWAP_TO_MAIN()  do{ g_main_sp=g_dec_sp; __asm__ volatile("" ::: "memory"); }while(0)
-#define CO_SWAP_TO_DEC()   do{ g_dec_sp=g_main_sp; __asm__ volatile("" ::: "memory"); }while(0)
-#else /* x86-64 host: real SP swap via naked asm */
-__attribute__((noinline,naked)) static void pd_swap(Fiber*from __attribute__((unused)),
-                                                    Fiber*to __attribute__((unused))){
-    __asm__ volatile(
-        "pushq %%rbp\n\t pushq %%rbx\n\t pushq %%r12\n\t pushq %%r13\n\t pushq %%r14\n\t pushq %%r15\n\t"
-        "movq %%rsp, (%%rdi)\n\t"           /* *from = rsp */
-        "movq (%%rsi), %%rsp\n\t"           /* rsp = *to */
-        "popq %%r15\n\t popq %%r14\n\t popq %%r13\n\t popq %%r12\n\t popq %%rbx\n\t popq %%rbp\n\t"
-        "ret\n\t" : : : "memory");
-}
-static void fiber_setup(void){
-    uintptr_t top=(uintptr_t)(g_dec_stack+DEC_STACK_BYTES);
-    top &= ~(uintptr_t)15;                 /* 16-align */
-    void**sp=(void**)top;
-    *--sp=(void*)0;                        /* fake return addr slot (alignment) */
-    *--sp=(void*)pd_trampoline;            /* ret target of pd_swap */
-    *--sp=(void*)0;  /* r15 */ *--sp=(void*)0;  /* r14 */ *--sp=(void*)0;  /* r13 */
-    *--sp=(void*)0;  /* r12 */ *--sp=(void*)0;  /* rbx */ *--sp=(void*)0;  /* rbp */
-    g_dec_sp=(Fiber)sp;
-}
-#define CO_SWAP_TO_MAIN()  pd_swap(&g_dec_sp,&g_main_sp)
-#define CO_SWAP_TO_DEC()   pd_swap(&g_main_sp,&g_dec_sp)
-#endif
-
-static void pd_trampoline(void){
-    decode_body();
-#ifndef RC_V3_STACKMEAS
-    /* stack-overflow canary: the deepest 8 B were painted 0xC5; if the coroutine overran them the
-     * decode is untrustworthy -> reject (CRC would catch corruption too, but this is direct). */
-    for(int i=0;i<8;i++) if((unsigned char)g_dec_stack[i]!=0xC5u){ g_dec_status=DEC_ERROR; break; }
-#endif
-    CO_SWAP_TO_MAIN();                     /* final yield: never resumed past this point */
-    for(;;);
-}
-
-/* next_byte(): pull one byte; if the FIFO is empty, suspend back to the producer (block). */
-static uint8_t next_byte(void){
-    while (!g_fifo_full){
-        if (g_eof) return 0;               /* zero-fill past EOF (optimal-flush rule) */
-        CO_SWAP_TO_MAIN();                 /* SUSPEND: yield to producer for more bytes */
-    }
-    g_fifo_full=0;
-    uint8_t b = g_fifo_byte;
-    return b;
-}
-
-/* ---- strict envelope readers (header fields). Unlike BODY reads, which zero-fill past EOF
- * under the optimal-flush rule, envelope bytes are MANDATORY: EOF here means a truncated
- * blob -> fail (returns 0). They run on the coroutine exactly like next_byte (suspend to
- * the producer while the FIFO is empty). */
-static int env_byte(uint8_t*out){
-    while(!g_fifo_full){ if(g_eof) return 0; CO_SWAP_TO_MAIN(); }
-    g_fifo_full=0; *out=g_fifo_byte; return 1;
-}
-
-#else /* PATCH_APPLY_PULL: integrator-supplied callback; no fiber, no FIFO, no extra stack */
 static int (*g_pull_fn)(void*, uint8_t*);
 static void *g_pull_ctx;
 static uint8_t g_pull_eof;
@@ -220,7 +106,6 @@ static int raw_next(uint8_t*out){
 }
 static uint8_t next_byte(void){ uint8_t b; return raw_next(&b)?b:0; }  /* body: zero-fill past EOF */
 static int env_byte(uint8_t*out){ return raw_next(out); }              /* envelope: strict */
-#endif /* PATCH_APPLY_PULL */
 
 static int env_u32le(uint32_t*out){
     uint32_t v=0; uint8_t b;
@@ -240,7 +125,7 @@ static int env_zz_abs(uint32_t base, uint32_t*out){
     return 1;
 }
 
-/* divide-free range decoder reading through the blocking FIFO. */
+/* divide-free range decoder reading through the (possibly blocking) byte source. */
 typedef struct { uint32_t range, code; } SDec;
 static SDec RC;
 static void rc_init(void){
@@ -1170,13 +1055,13 @@ static void decode_body(void){
       orow_commit();                       /* flush the last resident output row */
     }
 done:
-    /* body complete: the caller (decoder_finish / patch_apply_run) verifies the withheld
+    /* body complete: the caller (patch_apply_run) verifies the withheld
      * CRC32(to) trailer and converts BODYOK to the caller-visible DONE (or ERROR). */
     if(g_dec_status!=DEC_ERROR) g_dec_status=DEC_BODYOK;
 }
 
 /* ===================================================================================== */
-/* public push API: decoder_push(byte) -> NEED_MORE / DONE / ERROR                         */
+/* public API: patch_apply_run(callback, ctx) -> DONE / ERROR                              */
 /* ===================================================================================== */
 static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
@@ -1193,63 +1078,6 @@ static int trailer_ok(void){
     return crc32_flash(g_to_size)==want;
 }
 
-#ifndef PATCH_APPLY_PULL
-/* initialize the decoder coroutine. Geometry, model seeding, and both CRC gates are handled
- * inside the decode from the pushed blob bytes — nothing to configure here. */
-static int decoder_init(void){
-    g_fifo_full=0; g_eof=0; g_dec_status=DEC_NEED_MORE;
-    g_tailn=0; g_tailw=0;
-#ifdef RC_V3_STACKMEAS
-    memset(g_dec_stack,0xAA,sizeof g_dec_stack);   /* paint to measure coroutine high-water */
-#else
-    for(int i=0;i<8;i++) g_dec_stack[i]=(char)0xC5u;  /* deepest-8-B stack-overflow canary */
-#endif
-    fiber_setup();
-    /* first resume: runs until the decoder first blocks for a byte (FIFO empty) */
-    CO_SWAP_TO_DEC();
-    return g_dec_status;
-}
-
-/* Push EVERY blob byte (envelope + body + trailer) in order. The blob's last 4 bytes are
- * the CRC32(to) trailer, but the body length is implicit (range-coder optimal flush), so
- * the push layer WITHHOLDS the most recent 4 bytes in a tiny ring: the coroutine sees
- * exactly the header+body stream (bit-identical to the historical split-envelope flow,
- * zero-fill after the true body end), and whatever 4 bytes remain withheld at
- * decoder_finish() ARE the trailer, verified there against CRC32(to) over the written
- * image. Bytes between the body's last needed byte and the trailer (flush slack — or
- * injected garbage) are discarded: any injection shifts or corrupts the final-4 window
- * and fails the trailer check. */
-static int decoder_push(uint8_t byte){
-    if(g_dec_status==DEC_DONE || g_dec_status==DEC_ERROR) return g_dec_status;
-    if(g_tailn<4u){ g_tail[g_tailn++]=byte; return DEC_NEED_MORE; }
-    { uint8_t feed=g_tail[g_tailw]; g_tail[g_tailw]=byte; g_tailw=(uint8_t)((g_tailw+1u)&3u);
-      if(g_dec_status!=DEC_NEED_MORE) return DEC_NEED_MORE;   /* body done: slack byte, ring keeps rolling */
-      /* enqueue; the decoder drains the single byte before returning */
-      if(g_fifo_full){ return DEC_ERROR; }
-      g_fifo_byte=feed; g_fifo_full=1;
-      /* resume decoder; it consumes from the FIFO and suspends again when empty */
-      CO_SWAP_TO_DEC(); }
-    return g_dec_status==DEC_ERROR ? DEC_ERROR : DEC_NEED_MORE;
-}
-static int decoder_finish(void){
-    if(g_dec_status==DEC_DONE || g_dec_status==DEC_ERROR) return g_dec_status;
-    /* signal EOF so body reads zero-fill (and a mid-envelope EOF fails); drain the coroutine */
-    g_eof=1;
-    while(g_dec_status==DEC_NEED_MORE){ CO_SWAP_TO_DEC(); }
-    if(g_dec_status==DEC_ERROR) return g_dec_status;
-    /* ---- CRC32(to) trailer = the 4 withheld bytes, in push order. DONE only on match. ---- */
-    if(!trailer_ok()){
-        if(!g_reject) g_reject=REJ_CORRUPT;
-        g_dec_status=DEC_ERROR; return g_dec_status; }
-    g_dec_status=DEC_DONE;
-    return g_dec_status;
-}
-
-static int patch_apply_init(void){ return decoder_init(); }
-static int patch_apply_push(uint8_t byte){ return decoder_push(byte); }
-static int patch_apply_finish(void){ return decoder_finish(); }
-
-#else /* PATCH_APPLY_PULL public API */
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
  * byte, or 0 at end-of-blob (it may block internally — e.g. poll a UART — before returning;
  * the decoder consumes bytes strictly in order). Returns PATCH_APPLY_DONE (image written,
@@ -1268,22 +1096,15 @@ static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
     g_dec_status=DEC_DONE;
     return PATCH_APPLY_DONE;
 }
-#endif /* PATCH_APPLY_PULL */
 
 /* ===================================================================================== */
-/* DEVICE static measurement: exported entry points so arm-none-eabi-size sees the real     */
-/* .bss+.data (all decoder static + stack reservation). The push API is the device's actual  */
-/* interface; exporting it forces the linker to retain the whole decoder graph + its statics. */
-/* On the device flash_read/flash_write/g_image_span are the real flash primitives (extern).  */
+/* DEVICE static measurement: exported entry point so arm-none-eabi-size sees the real      */
+/* .bss+.data (all decoder statics). patch_apply_run is the device's actual interface;       */
+/* exporting it forces the linker to retain the whole decoder graph + its statics.           */
+/* On the device flash_read/flash_write are the real flash primitives (extern).              */
 /* ===================================================================================== */
 #ifdef RC_V3_ARM
-#ifndef PATCH_APPLY_PULL
-int  rcv3_init(void){ return patch_apply_init(); }
-int  rcv3_push(uint8_t b){ return patch_apply_push(b); }
-int  rcv3_finish(void){ return patch_apply_finish(); }
-#else
 int  rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(next, ctx); }
-#endif
 #endif
 
 #endif /* PATCH_APPLY_H */

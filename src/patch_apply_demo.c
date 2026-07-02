@@ -61,8 +61,8 @@ static uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<g_nro
 static long nvm_frontier_inversions(void){ return g_finv; }
 
 #include "patch_apply.h"
+#include "patch_apply_push_adapter.h"
 
-#ifdef PATCH_APPLY_PULL
 /* pull-mode byte source: serve the blob buffer to patch_apply_run() */
 typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
 static int pull_next(void *c, uint8_t *out){
@@ -70,11 +70,20 @@ static int pull_next(void *c, uint8_t *out){
     if(p->i>=p->n) return 0;
     *out=p->d[p->i++]; return 1;
 }
-#endif
+
+/* byte_mode: exercise the optional push adapter with a tiny ring. The wait hook plays the
+ * event-driven producer, feeding ONE blob byte per invocation (then EOF) — proving the
+ * decoder streams byte-by-byte through the adapter with an 8-byte buffer. */
+typedef struct { const uint8_t *d; size_t n, i; PatchRing *r; long feeds; } FeedCtx;
+static void feed_one(void *c){
+    FeedCtx *f=(FeedCtx*)c;
+    if(f->i < f->n){ if(patch_ring_push(f->r, f->d[f->i])){ f->i++; f->feeds++; } }
+    else patch_ring_eof(f->r);
+}
 
 int main(int argc,char**argv){
     if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
-    int byte_mode = (argc==4);   /* arg3 present -> push 1 byte at a time (suspend/resume proof) */
+    int byte_mode = (argc==4);   /* arg3 present -> stream via the push adapter, 1 byte per feed */
     FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
@@ -101,33 +110,27 @@ int main(int argc,char**argv){
       if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
       nvm_init(tmp,from_size,span); free(tmp); }
 
-#ifdef PATCH_APPLY_PULL
-    /* pull mode: the decoder drives; the callback serves blob bytes (no fiber involved) */
+    /* the decoder drives; the callback serves blob bytes. byte_mode routes through the
+     * push adapter (tiny ring, one byte fed per wait) as the streaming proof. */
     int rc;
-    { PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(pull_next,&pc); }
-    (void)byte_mode;
-#else
-    /* push the WHOLE blob; the decoder parses/gates the envelope internally */
-    int rc=patch_apply_init();
-    size_t bi=0; long suspends=0;
-    while(bi<(size_t)bsz && rc==PATCH_APPLY_NEED_MORE){ rc=patch_apply_push(blob[bi++]); if(rc==PATCH_APPLY_NEED_MORE) suspends++; }
-    rc=patch_apply_finish();
-    if(byte_mode && rc==PATCH_APPLY_DONE){
-        if(suspends < (long)(bsz/2)){
-            fprintf(stderr,"streaming check FAILED: only %ld suspends for %ld bytes\n",suspends,bsz);
-            fclose(mf); free(g_flash); free(blob); return 1;
+    if(byte_mode){
+        uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0};
+        patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc);
+        rc=patch_apply_run(patch_ring_next,&ring);
+        if(rc==PATCH_APPLY_DONE){
+            if(fc.feeds!=(long)bsz){
+                fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes\n",fc.feeds,bsz);
+                fclose(mf); free(g_flash); free(blob); return 1;
+            }
+            fprintf(stderr,"adapter streaming OK: %ld single-byte feeds over %ld blob bytes\n",fc.feeds,bsz);
         }
-        fprintf(stderr,"streaming OK: %ld suspends over %ld blob bytes\n",suspends,bsz);
+    } else {
+        PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(pull_next,&pc);
     }
-#endif
     if(rc==PATCH_APPLY_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%u: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         fclose(mf); free(g_flash); free(blob); return 1; }
-#ifdef RC_V3_STACKMEAS
-    { unsigned hw=0; for(unsigned k=0;k<sizeof g_dec_stack;k++) if((unsigned char)g_dec_stack[k]!=0xAA){ hw=(unsigned)sizeof g_dec_stack-k; break; }
-      fprintf(stderr,"STACKMEAS coroutine high-water = %u B (reserved %u)\n",hw,(unsigned)sizeof g_dec_stack); }
-#endif
 #ifdef RC_V3_BAKEDUMP
     { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(g_flash,1,to_size,f); fclose(f); } }
 #endif
