@@ -52,6 +52,23 @@ static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i
  * (REJ_RESOURCE) above SMAP_CAP, and the encoder never emits more entries than this. */
 #define SMAP_CAP 48
 
+/* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by
+ * agglomerative clustering of conditional literal histograms over surviving span literals
+ * (corpus + one-face fixtures). ENCODING-AFFECTING: patch_apply and patch_generate share this
+ * table (bit-exact wire). LIT0_CTX must equal 1 + max entry. ---- */
+#define LIT0_CTX 5
+static const uint8_t LIT0_MAP[256] = {
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,1,0,
+    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    3,1,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,3,1,3,1,3,0,3,1,
+    3,3,3,3,3,3,3,0,3,3,3,0,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,3,3,3,0,
+    3,3,3,3,0,1,1,1,3,3,3,1,1,0,0,1,2,2,2,2,1,1,2,1,2,2,2,2,1,1,2,1,
+    0,0,0,0,0,0,0,0,2,1,0,1,0,0,1,1,0,0,0,0,0,1,0,0,0,0,1,0,0,1,1,0,
+    0,1,0,0,0,0,0,1,0,0,0,0,0,1,1,0,1,1,1,1,1,1,0,0,1,1,1,3,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,0,1,0,0,0,2,1,0,1,0,1,0,4,0,0,0,0,0,0,0,0,
+};
+#define LIT0_SEL(p) (LIT0_MAP[(uint8_t)(p)])
+
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } Flag1;
 static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }

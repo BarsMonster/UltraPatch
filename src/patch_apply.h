@@ -525,15 +525,7 @@ static IdxUnary M_dibl, M_diex;  /* BL/EX MTF dict indices (lean unary code) */
 /* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
  * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
  * reset to 0 per blob; mirrors patch_generate encode_body prevlit. */
-#define LIT0_CTX 5
-/* tag0 context from the previous literal: 7 contiguous prevlit regions folded onto
- * 5 trees (a non-monotone region->tree map; one tree is shared by two disjoint ranges).
- * The region cuts and the fold were derived by minimising the conditional entropy of the
- * tag0-literal distribution over the firmware corpus (DP over cuts + optimal tree merge).
- * prevlit==0x00 (zero-runs, ~8% of literals) and ==0xf7 (high-byte/0xff region) are their
- * own contexts; the rest fold so the high range reuses tree 1. Affects compression ratio
- * only, never correctness; all 5 trees seed from the same parity-0 histogram. */
-#define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
+/* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 static BitTree M_lit0[LIT0_CTX], M_lit1;
 static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */

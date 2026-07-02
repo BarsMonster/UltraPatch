@@ -11,6 +11,7 @@
  * allowed to be large. It emits the final A1 blob consumed by patch_apply.h.
  */
 #include <errno.h>
+#include <unistd.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1933,13 +1934,7 @@ static uint32_t bit_price(uint32_t p, int bit) {
     return intbits - fracbits;                 /* (12 - log2(pr)) * PR_SCALE */
 }
 
-/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX contexts); tag1 single tree.
- * Mirrors patch_apply M_lit0[]/M_lit1 + g_litprev. Defined here (ahead of the DP parse) so the
- * price-feedback DP can price tag0 literals under the SAME order-1 prev-byte context the wire
- * uses, instead of an order-0 average. Encoder-only; the wire is unchanged. */
-#define LIT0_CTX 5
-/* Mirrors patch_apply LIT0_SEL: 7 prevlit regions folded onto 5 trees (non-monotone map). */
-#define LIT0_SEL(p) ( (p)==0 ? 0 : (p)<0x20 ? 1 : (p)<0x3d ? 0 : (p)<0x90 ? 2 : (p)<0xf7 ? 4 : (p)==0xf7 ? 3 : 1 )
+/* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 
 typedef struct {
     uint32_t fspan_c[4], fmatch_c[4];        /* per-flag-context span/match price (order-2 Flag1) */
@@ -2957,6 +2952,25 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          use_map ? inj_m : inj, use_map ? best_sel_m : best_sel,
                          use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
+    { const char *ldp = getenv("A1_LITDUMP");   /* scaffold: surviving span literals in wire order */
+      if (ldp) {
+        char fn[4096]; snprintf(fn, sizeof fn, "%s.%d.bin", ldp, (int)getpid());
+        FILE *lf = fopen(fn, "ab");
+        if (lf) {
+            uint8_t prevlit = 0; size_t pos = 0;
+            for (size_t t = 0; t < seq.n; t++) {
+                Token tk = seq.v[t];
+                if (tk.type == 'S') {
+                    for (int32_t j2 = 0; j2 < tk.len; j2++) {
+                        uint8_t rec[3] = { prevlit, content.d[pos], tags.d[pos] };
+                        fwrite(rec, 1, 3, lf);
+                        prevlit = content.d[pos]; pos++;
+                    }
+                } else pos += (size_t)tk.len;
+            }
+            fclose(lf);
+        }
+      } }
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
