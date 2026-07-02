@@ -614,8 +614,10 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     free(ao); free(bo); free(m.v);
 }
 
+static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
+
 static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N]) {
+                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n; memcpy(from_mut->d, from->d, from->n);
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n; memcpy(to_mut->d, to->d, to->n);
     m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
@@ -629,6 +631,10 @@ static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr,
     create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDRW], &ts[M4_LDRW], &blocks[STREAM_LDRW]);
+    if (mask_bl) {
+        mask_bl_imms(from->d, from_mut->d, from->n);
+        mask_bl_imms(to->d, to_mut->d, to->n);
+    }
     a1_m4_free_streams(fs); a1_m4_free_streams(ts);
 }
 
@@ -830,6 +836,62 @@ static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, 
         return (Event){ EV_EX, r ? r->delta : 0 };
     }
     return (Event){ EV_NONE, 0 };
+}
+
+/* Mask every local-BL immediate in `mut` (positions detected on the REAL image), keeping the
+ * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
+ * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
+ * corrections_hybrid absorbs any mask-induced diff mismatch by construction. */
+static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
+    for (size_t a = 0; a + 4 <= n;) {
+        uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
+        if ((up & 0xf800u) == 0xf000u && (lo & 0xd000u) == 0xd000u) {
+            mut[a] = 0x00; mut[a + 1] = 0xf0; mut[a + 2] = 0x00; mut[a + 3] = 0xd0;
+            a += 4;
+        } else a += 2;
+    }
+}
+
+/* Op-derived field deltas: for every BL/LDR field candidate inside a copy, the exact delta under
+ * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
+ * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
+static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
+                                  uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
+    FieldDeltaVec add = {0};
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len; k += 2) {
+            uint32_t fpk;
+            if (!field_addr(fp, k, from_size, &fpk)) continue;
+            int64_t tpk = (int64_t)tp + k;
+            if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
+            if (is_local_bl(frm, from_size, fpk)) {
+                uint16_t tu = u16le_at(tob + (size_t)tpk), tl = u16le_at(tob + (size_t)tpk + 2);
+                if ((tu & 0xf800u) == 0xf000u && (tl & 0xd000u) == 0xd000u) {
+                    uint16_t fu = u16le_at(frm + fpk), fl2 = u16le_at(frm + fpk + 2);
+                    fd_put(&add, fpk, STREAM_BL,
+                           (int64_t)unpack_bl_local(fu, fl2) - unpack_bl_local(tu, tl));
+                }
+            } else if (ivec_has(&ldr, (int32_t)fpk)) {
+                fd_put(&add, fpk, STREAM_LDR,
+                       (int64_t)(int32_t)u32le_at(frm + fpk) - (int64_t)(int32_t)u32le_at(tob + (size_t)tpk));
+            }
+        }
+        free(ldr.v);
+        tp += o->diff_len + o->extra_len;
+        fp += o->diff_len + o->adj;
+    }
+    fd_finalize(&add);
+    /* rebuild fd: old entries not overridden + all op-derived entries */
+    FieldDeltaVec out = {0};
+    for (size_t i = 0; i < fd->n; i++)
+        if (!fd_find_kind(&add, fd->v[i].addr, fd->v[i].kind)) fd_put(&out, fd->v[i].addr, fd->v[i].kind, fd->v[i].delta);
+    for (size_t i = 0; i < add.n; i++) fd_put(&out, add.v[i].addr, add.v[i].kind, add.v[i].delta);
+    fd_finalize(&out);
+    free(add.v); free(fd->v);
+    *fd = out;
 }
 
 /* ---- piecewise shift map (D1) — encoder mirror of patch_apply smap_at ---- */
@@ -2440,7 +2502,12 @@ typedef struct {
     uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror patch_apply M_rep0/g_lastdist) */
 } Models;
 
+/* Set when an emit exceeds a decoder resource cap (e.g. the MTF dict): the candidate
+ * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
+static int g_emit_overflow;
+
 static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
+    if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     IDXE *gix = kind == EV_BL ? &M->dibl : &M->diex;
     int ri = D->rh | (D->last == 0 ? 2 : 0);
@@ -2462,7 +2529,7 @@ static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
         for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
         D->dic[0] = t;
     } else {
-        if (D->K >= D->cap) die("delta dictionary cap exceeded");
+        if (D->K >= D->cap) { g_emit_overflow = 1; return; }
         re_bit(r, &D->hit, 0, RC_S_BIT_RATE);
         bv_encode(&M->dval, r, delta);
         for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
@@ -2524,6 +2591,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, SEED_HIT[sel[0]]);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, SEED_HIT[sel[0]]);
     M.rep0[0] = M.rep0[1] = SEED_REP0[sel[2]]; M.rep0h = 0; M.last_dist = 0;
+    g_emit_overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
     uint32_t oexp = 0;
@@ -2682,7 +2750,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
         Buf cur_body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
-        size_t cur_bytes = cur_body.n; buf_free(&cur_body);
+        size_t cur_bytes = g_emit_overflow ? (size_t)-1 : cur_body.n; buf_free(&cur_body);
         /* Phase 1: ring-only price feedback to its fixpoint (the pre-out-match trajectory).
          * Phase 2: re-parse WITH out-candidates; each candidate must beat the phase-1 fixpoint
          * under the exact byte gate, so out-matches (and their per-fresh-match out-bit tax +
@@ -2699,7 +2767,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
                 Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
-                size_t cand_bytes = cand_body.n; buf_free(&cand_body);
+                size_t cand_bytes = g_emit_overflow ? (size_t)-1 : cand_body.n; buf_free(&cand_body);
                 if (cand_bytes < cur_bytes) {
                     free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
                 } else {
@@ -2716,7 +2784,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
                 Buf b = emit_body(&seq, nk, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
-                size_t bb = b.n; buf_free(&b);
+                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
                 else break;
             }
@@ -2725,7 +2793,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nko = ko + dir; nko >= 0 && nko <= 15; nko += dir) {
                 Buf b = emit_body(&seq, kd, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
-                size_t bb = b.n; buf_free(&b);
+                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; ko = nko; }
                 else break;
             }
@@ -2738,14 +2806,14 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
               for (sel[2] = 0; sel[2] < 4; sel[2]++) {
                 if (!sel[0] && !sel[1] && !sel[2]) continue;
                 Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel, NULL, NULL, 0);
-                size_t bb = b.n; buf_free(&b);
+                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; memcpy(best_sel, sel, sizeof(best_sel)); }
               } }
         /* map variant: same fixed parse, residual-space inj + shipped map; its own seed sweep.
          * Ships only if the exact emitted body beats the best no-map body. */
         if (map_n > 0) {
             Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, SEL_LEGACY, map_b, map_v, map_n);
-            size_t mbytes = b0.n; buf_free(&b0);
+            size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
             int msel[3] = {0, 0, 0};
             { int sel[3];
               for (sel[0] = 0; sel[0] < 4; sel[0]++)
@@ -2753,7 +2821,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                   for (sel[2] = 0; sel[2] < 4; sel[2]++) {
                     if (!sel[0] && !sel[1] && !sel[2]) continue;
                     Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, sel, map_b, map_v, map_n);
-                    if (b.n < mbytes) { mbytes = b.n; memcpy(msel, sel, sizeof(msel)); }
+                    if (!g_emit_overflow && b.n < mbytes) { mbytes = b.n; memcpy(msel, sel, sizeof(msel)); }
                     buf_free(&b);
                   } }
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; memcpy(best_sel_m, msel, sizeof(msel)); }
@@ -2779,28 +2847,65 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     return body;
 }
 
+/* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
+ * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
+ * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
+ * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
+static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+                       int W, int variant, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
+    BlockVec blocks[STREAM_N] = {{0}};
+    Buf from_df = {0}, to_df = {0};
+    data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks, variant >= 2);
+    OpVec ops = bsdiff_ops(&from_df, &to_df);
+    uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
+    FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
+    split_nonzero_diff_runs(&ops, &from_df, &to_df);
+    if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
+    coerce_reloc_literals(&ops, from->d, from_size, to_size, &fd);
+    int32_t fp_end_s = 0;
+    for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
+    uint8_t *presset = preserve_indices(&ops, from_size, to_size);
+    uint8_t *corr = corrections_hybrid(&ops, from->d, to->d, &fd, from_size, to_size, presset);
+    OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
+    if (stats_on) *st_out = collect_stats(&ops, from->d, from_size, to_size, &fd, pc);
+    /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
+     * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
+    int feasible = 1;
+    { size_t tpres = 0;
+      for (size_t i = 0; i < ops.n; i++) { if (pc[i].corr.n > 80) feasible = 0; tpres += pc[i].pres.n; }
+      if (tpres > 904) feasible = 0; }
+    Buf body = {0};
+    if (feasible) {
+        body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc, W);
+        if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
+    }
+    if (!feasible && variant == 0) die("legacy plan infeasible");
+    free(presset); free(corr); free(fd.v);
+    for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
+    free(pc); free(ops.v);
+    for (int s2 = 0; s2 < STREAM_N; s2++) { for (size_t i = 0; i < blocks[s2].n; i++) free(blocks[s2].v[i].values); free(blocks[s2].v); }
+    buf_free(&from_df); buf_free(&to_df);
+    *fp_end_out = fp_end_s;
+    return body;
+}
+
 static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out, int W) {
     char *fbin = join2(from_dir, "watch.bin"), *tbin = join2(to_dir, "watch.bin");
     char *felf = join2(from_dir, "watch.elf"), *telf = join2(to_dir, "watch.elf");
     Buf from = slurp(fbin), to = slurp(tbin);
     Ranges fr = elf_ranges(felf, &from, "from");
     Ranges tr = elf_ranges(telf, &to, "to");
-    BlockVec blocks[STREAM_N] = {{0}};
-    Buf from_df = {0}, to_df = {0};
-    data_format_encode(&from, &to, &fr, &tr, &from_df, &to_df, blocks);
-    OpVec ops = bsdiff_ops(&from_df, &to_df);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
-    FieldDeltaVec fd = build_field_deltas(&from, &fr, blocks);
-    split_nonzero_diff_runs(&ops, &from_df, &to_df);
-    coerce_reloc_literals(&ops, from.d, from_size, to_size, &fd);
-    int32_t fp_end_s = 0;
-    for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
-    uint8_t *presset = preserve_indices(&ops, from_size, to_size);
-    uint8_t *corr = corrections_hybrid(&ops, from.d, to.d, &fd, from_size, to_size, presset);
-    OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
     int stats_on = getenv("A1_ENC_STATS") != NULL;
-    EncStats st = stats_on ? collect_stats(&ops, from.d, from_size, to_size, &fd, pc) : (EncStats){0};
-    Buf body = encode_body(&ops, from.d, from_size, to.d, to_size, &fd, pc, W);
+    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
+    for (int v = 0; v < 3; v++) {
+        int32_t fpe = 0; EncStats stv = {0};
+        Buf b = plan_encode(&from, &to, &fr, &tr, W, v, &fpe, &stv, stats_on);
+        if (v > 0 && b.n == 0) { buf_free(&b); continue; }   /* variant infeasible on the wire */
+        if (v == 0 || b.n < body.n) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; }
+        else buf_free(&b);
+    }
+    if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d\n", bestv);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);
@@ -2828,11 +2933,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
                 from_dir, to_dir, blob.n, st.ops, st.diff_bytes, st.extra_bytes, st.literals,
                 st.preserves, st.corrections, st.bl_fields, st.ex_fields, st.suppressed_bl);
     }
-    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to); buf_free(&from_df); buf_free(&to_df);
-    free(presset); free(corr); free(fd.v);
-    for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
-    free(pc); free(ops.v);
-    for (int s = 0; s < STREAM_N; s++) { for (size_t i = 0; i < blocks[s].n; i++) free(blocks[s].v[i].values); free(blocks[s].v); }
+    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to);
     free(fbin); free(tbin); free(felf); free(telf);
 }
 
