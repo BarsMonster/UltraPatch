@@ -1734,6 +1734,64 @@ static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
     if (cv > worstv || (cv == worstv && c.dist < cands[worst].dist)) cands[worst] = c;
 }
 
+/* ---- out-match candidates (D2): matches of the content stream against the ALREADY-PRODUCED
+ * output image. olim[i] bounds the usable output window for a token starting at content position
+ * i (conservative: fixed at the op that consumes position i, valid for the whole token):
+ * FWD window is [0, olim[i]) — everything below the op's tp0 is written; grow window is
+ * [olim[i], to_size) — everything above the op's output end is written. ---- */
+typedef struct { int32_t pos, len; } OCand;
+#define OC_MAX 4
+static void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim, int FWD,
+                           const uint8_t *to, size_t to_n,
+                           OCand (**oc_out)[OC_MAX], uint8_t **noc_out) {
+    OCand (*oc)[OC_MAX] = (OCand (*)[OC_MAX])xcalloc(n ? n : 1, sizeof(OCand[OC_MAX]));
+    uint8_t *noc = (uint8_t *)xcalloc(n ? n : 1, 1);
+    if (to_n >= 4 && n >= 4) {
+        int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
+        for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
+        int32_t *prev = (int32_t *)xmalloc(to_n * sizeof(int32_t));
+        /* grow content carries extras byte-REVERSED (build_content emits them descending), and the
+         * decoder replays out-matches in write direction; index reversed trigrams for grow. */
+        if (FWD) {
+            for (size_t i = 0; i + 3 < to_n; i++) {
+                uint32_t key = (uint32_t)to[i] | ((uint32_t)to[i + 1] << 8) | ((uint32_t)to[i + 2] << 16);
+                prev[i] = head[key]; head[key] = (int32_t)i;
+            }
+        } else {
+            for (size_t i = 2; i < to_n; i++) {
+                uint32_t key = (uint32_t)to[i] | ((uint32_t)to[i - 1] << 8) | ((uint32_t)to[i - 2] << 16);
+                prev[i] = head[key]; head[key] = (int32_t)i;
+            }
+        }
+        for (size_t i = 0; i + 4 <= n; i++) {
+            uint32_t key = (uint32_t)content[i] | ((uint32_t)content[i + 1] << 8) | ((uint32_t)content[i + 2] << 16);
+            uint32_t lim = olim[i];
+            int visits = 0;
+            for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
+                size_t maxl;
+                if (FWD) {
+                    if ((uint32_t)pj + 4 > lim) continue;      /* too high: keep walking down */
+                    maxl = (size_t)(lim - (uint32_t)pj);
+                } else {
+                    if ((uint32_t)pj < lim + 3u) break;        /* run [pj-l+1, pj] must stay >= lim */
+                    maxl = (size_t)((uint32_t)pj - lim + 1u);
+                }
+                if (maxl > n - i) maxl = n - i;
+                size_t l = 0;
+                if (FWD) while (l < maxl && to[(size_t)pj + l] == content[i + l]) l++;
+                else     while (l < maxl && to[(size_t)pj - l] == content[i + l]) l++;
+                if (l < 4) continue;
+                int w = -1;                                    /* keep the OC_MAX longest */
+                for (int q = 0; q < noc[i]; q++) if (oc[i][q].len < (int32_t)l) { w = q; break; }
+                if (noc[i] < OC_MAX) { oc[i][noc[i]].pos = pj; oc[i][noc[i]].len = (int32_t)l; noc[i]++; }
+                else if (w >= 0) { oc[i][w].pos = pj; oc[i][w].len = (int32_t)l; }
+            }
+        }
+        free(head); free(prev);
+    }
+    *oc_out = oc; *noc_out = noc;
+}
+
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
  * The DP proxy (1-bit flag + gamma/rice bit-length + static-Huffman litbits) systematically
  * mis-prices tokens because the wire uses *adaptive* range-coder models whose steady-state
@@ -1776,9 +1834,14 @@ static uint32_t bit_price(uint32_t p, int bit) {
 typedef struct {
     uint32_t fspan_c[4], fmatch_c[4];        /* per-flag-context span/match price (order-2 Flag1) */
     uint32_t rep0_yes, rep0_no;              /* avg measured rep0-flag price (reuse vs fresh distance) */
+    uint32_t outb_yes, outb_no;              /* avg measured out-bit price (out-match vs ring backref) */
+    uint32_t opos_avg;                       /* avg measured out-match position price (delta-coded) */
+    uint32_t oexp0;                          /* expected-position seed (set by caller BEFORE measure) */
+    int fwd;                                 /* apply direction (set by caller BEFORE measure) */
     uint32_t lit0[LIT0_CTX][256];            /* tag0 per-prevbyte-context per-byte literal price */
     uint32_t lit1[256];                      /* tag1 per-byte literal price */
     UGE gs, gl, gd;                          /* snapshot of length/dist models for value pricing */
+    UGE go, glo;                             /* out-match position/length model snapshots */
     int dk;
     int valid;
 } PriceTab;
@@ -1817,7 +1880,7 @@ static uint32_t bt_price(const BTE *t, uint8_t byte) {
 /* Simulate the real adaptive content models over a token sequence to obtain steady-state
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
 static void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
-                           const uint8_t *frm, size_t from_size, int dk, PriceTab *pt) {
+                           const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
     BTE lit0[LIT0_CTX], lit1;            /* mirror the wire's order-1 tag0 trees + single tag1 tree */
     FLE flag;
     UGE gs, gl, gd;
@@ -1828,6 +1891,13 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     ug_init_e(&gl, 'g', 0);
     ug_seed_cont_e(&gl, 1);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
+    UGE go, glo;
+    ug_init_e(&go, 'r', ko);
+    ug_init_e(&glo, 'g', 0);
+    uint16_t outb = RC_PHALF;
+    uint64_t oy_cost = 0, on_cost = 0; uint32_t oy_n = 0, on_n = 0;
+    uint32_t oexp = pt->oexp0;                    /* caller pre-sets oexp0 (FWD ? 0 : to_size) */
+    uint64_t op_cost = 0; uint32_t op_n = 0;
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
     ug_encode(&gd, &r, (uint32_t)seq->n);
     gd.k = (uint8_t)dk;
@@ -1848,6 +1918,19 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
                 bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte, tags[cp] ? 4 : 5);
                 prevlit = byte;
             }
+        } else if (t.type == 'O') {
+            if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
+            else fl_encode(&flag, &r, 1);
+            r0n_cost += bit_price(rep0[rep0h], 0); r0n_n++;
+            re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
+            oy_cost += bit_price(outb, 1); oy_n++;
+            re_bit(&r, &outb, 1, RC_S_BIT_RATE);
+            { uint32_t zv = zz32((int32_t)((uint32_t)t.dist - oexp));
+              op_cost += ug_price(&go, zv); op_n++;
+              ug_encode(&go, &r, zv);
+              oexp = pt->fwd ? (uint32_t)t.dist + (uint32_t)t.len
+                             : (uint32_t)t.dist - (uint32_t)t.len; }
+            ug_encode(&glo, &r, (uint32_t)t.len - 4u);
         } else {
             if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
             else fl_encode(&flag, &r, 1);
@@ -1857,6 +1940,8 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
             } else {
                 r0n_cost += bit_price(rep0[rep0h], 0); r0n_n++;
                 re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
+                on_cost += bit_price(outb, 0); on_n++;
+                re_bit(&r, &outb, 0, RC_S_BIT_RATE);
                 ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
                 last_dist = t.dist;
             }
@@ -1875,6 +1960,12 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
     pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
     pt->rep0_no  = r0n_n ? (uint32_t)(r0n_cost / r0n_n) : bit_price(RC_REP0_INIT, 0);
+    pt->outb_yes = oy_n ? (uint32_t)(oy_cost / oy_n) : bit_price(RC_PHALF, 1);
+    pt->outb_no  = on_n ? (uint32_t)(on_cost / on_n) : bit_price(RC_PHALF, 0);
+    /* DP position price: the measured average (the DP cannot track the expected-position state);
+     * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
+    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&go, zz32(256));
+    pt->go = go; pt->glo = glo;
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&lit0[c], (uint8_t)b);
     for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price(&lit1, (uint8_t)b);
@@ -1953,8 +2044,9 @@ static inline void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via,
 }
 
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
-                                Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, const PriceTab *pt,
-                                int W) {
+                                Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
+                                OCand (*ocands)[OC_MAX], const uint8_t *nocand,
+                                const PriceTab *pt, int W) {
     uint32_t maxrun = 1024, win = 1u << W;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. */
@@ -1963,9 +2055,11 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
     uint64_t *span_lit = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+    uint32_t *olen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     for (size_t L = 1; L <= maxlen; L++) {
         slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
+        olen[L] = L >= 4 ? ug_price(&pt->glo, (uint32_t)L - 4u) : 0;
     }
     for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
     /* For a span, only the first literal's tag0 context depends on the incoming prevlit.
@@ -1980,11 +2074,12 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     /* per-context match-flag extras: match flag + fresh-distance flag + value, vs reuse flag (rep0).
      * After a span (h&1 == 0: previous token kind bit is 0) the match flag is implicit on the
      * wire (adjacent spans never ship), so its price is zero in those contexts. */
-    uint64_t fresh_extra[4], reuse_extra[4];
+    uint64_t fresh_extra[4], reuse_extra[4], out_extra[4];
     for (int h = 0; h < 4; h++) {
         uint64_t mflag = (h & 1) ? (uint64_t)pt->fmatch_c[h] : 0;
-        fresh_extra[h] = mflag + pt->rep0_no;
+        fresh_extra[h] = mflag + pt->rep0_no + pt->outb_no;   /* fresh ring dist also pays outb=0 */
         reuse_extra[h] = mflag + pt->rep0_yes;
+        out_extra[h]   = mflag + pt->rep0_no + pt->outb_yes;
     }
     const uint64_t INF = UINT64_MAX / 4;
     /* Two arrival-variants per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1.
@@ -2044,6 +2139,20 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
                            (Token){ 'R', (int32_t)i, l, bd }, (uint8_t)hr);
                 }
             }
+            /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
+             * The rep distance is carried through unchanged (out-matches do not set last_dist). */
+            for (int cix = 0; cix < nocand[i]; cix++) {
+                int32_t opos = ocands[i][cix].pos, olm = ocands[i][cix].len;
+                uint64_t obase = ci + out_extra[h] + pt->opos_avg;
+                (void)opos;
+                for (int32_t l = 4; l <= olm; l++) {
+                    size_t j = i + (size_t)l;
+                    uint64_t c = obase + olen[l];
+                    size_t jb = (j * 4 + (size_t)hm) * 2;
+                    relax2(cost, rep, pl, via, vh, jb, c, ri, pl[si],
+                           (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
+                }
+            }
             /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
              * distance == ri (the incoming rep distance) because it is not on the (dist,len) frontier,
              * yet there it costs only the reuse flag (no fresh-distance value). Recover it directly from
@@ -2078,7 +2187,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(dpr); free(span_lit);
+    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(olen); free(dpr); free(span_lit);
     return tv;
 }
 
@@ -2115,6 +2224,24 @@ static int fit_k_tokens(const TokenVec *tv) {
         if (c < bestc) { bestc = c; best = k; }
     }
     return best;
+}
+
+static int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
+    int best = cur, any = 0;
+    uint64_t bestc = UINT64_MAX;
+    for (int k = 0; k < 16; k++) {
+        uint64_t c = 0;
+        uint32_t exp = oexp0;
+        for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'O') {
+            any = 1;
+            uint32_t v = zz32((int32_t)((uint32_t)tv->v[i].dist - exp));
+            exp = fwd ? (uint32_t)tv->v[i].dist + (uint32_t)tv->v[i].len
+                      : (uint32_t)tv->v[i].dist - (uint32_t)tv->v[i].len;
+            c += (v >> k) + 1u + (uint32_t)k;
+        }
+        if (c < bestc) { bestc = c; best = k; }
+    }
+    return any ? best : cur;
 }
 
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
@@ -2305,7 +2432,8 @@ typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
     BVE dval;
-    UGE gd, gl, gs, pg, pgn, pg2, gdl, gel, gadj;
+    UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
+    uint16_t outb;
     IDXE dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
@@ -2363,7 +2491,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
-static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
+static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const size_t *ends, const InjVec *inj, const int sel[3],
@@ -2378,6 +2506,9 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror patch_apply */
     ug_init_e(&M.gs, 'g', 0);
+    ug_init_e(&M.go, 'r', ko);
+    ug_init_e(&M.glo, 'g', 0);
+    M.outb = RC_PHALF;
     ug_init_e(&M.pg, 'g', 0);
     ug_init_e(&M.pgn, 'g', 0);
     ug_init_e(&M.pg2, 'g', 0);
@@ -2393,6 +2524,10 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, SEED_HIT[sel[0]]);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, SEED_HIT[sel[0]]);
     M.rep0[0] = M.rep0[1] = SEED_REP0[sel[2]]; M.rep0h = 0; M.last_dist = 0;
+    int out_en = 0;
+    for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
+    uint32_t oexp = 0;
+    if (!FWD) { for (size_t i = 0; i < ops->n; i++) oexp += (uint32_t)(ops->v[i].diff_len + ops->v[i].extra_len); }
     REnc rc;
     re_init(&rc);
     /* per-patch seed selection: 1-bit escape, then 3x2 raw bits (mirror patch_apply decode_body). */
@@ -2408,9 +2543,11 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
           prev = mb[i];
           w_gz(&rc, zz32(mv[i]));
       } }
+    re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     ug_encode(&M.gd, &rc, (uint32_t)seq->n);
     M.gd.k = (uint8_t)kd;
     put_raw_bits(&rc, (uint32_t)kd, 4);
+    if (out_en) put_raw_bits(&rc, (uint32_t)ko, 4);
     w_gz(&rc, (uint32_t)ops->n);
     size_t tok_i = 0, pos = 0, span_pos = 0;
     int tok_mode = 0;
@@ -2423,9 +2560,15 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
         cur = seq->v[tok_i++]; \
         if (cur.type == 'S') { if (last_span) die("adjacent span tokens on wire"); \
             fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; last_span = 1; } \
+        else if (cur.type == 'O') { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
+            re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; \
+            re_bit(&rc, &M.outb, 1, RC_S_BIT_RATE); \
+            ug_encode(&M.go, &rc, zz32((int32_t)((uint32_t)cur.dist - oexp))); \
+            oexp = FWD ? (uint32_t)cur.dist + (uint32_t)cur.len : (uint32_t)cur.dist - (uint32_t)cur.len; \
+            ug_encode(&M.glo, &rc, (uint32_t)cur.len - 4u); tok_mode = 'R'; tok_left = cur.len; } \
         else { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
             if ((int32_t)cur.dist == M.last_dist) { re_bit(&rc, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1; } \
-            else { re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \
+            else { re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; if (out_en) re_bit(&rc, &M.outb, 0, RC_S_BIT_RATE); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \
             ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \
     } while (0)
     #define EMIT_TO(ENDPOS) do { \
@@ -2462,7 +2605,8 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     return re_flush_opt(&rc);
 }
 
-static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size, uint32_t to_size,
+static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                       const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc, int W) {
     int FWD = to_size <= from_size;
     Buf content = {0}, tags = {0};
@@ -2473,6 +2617,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
     for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
     int kd = 0;
+    int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     static const int SEL_LEGACY[3] = {0, 0, 0};
     int best_sel[3] = {0, 0, 0};
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
@@ -2506,6 +2651,29 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             free(ldr.v);
         }
     }
+    /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
+     * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
+    uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
+    { int32_t *tp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+      int32_t tpw = 0;
+      for (size_t i = 0; i < ops->n; i++) { tp0s[i] = tpw; tpw += ops->v[i].diff_len + ops->v[i].extra_len; }
+      size_t prev_end = 0;
+      for (size_t step = 0; step < ops->n; step++) {
+          size_t oi = FWD ? step : ops->n - 1 - step;
+          uint32_t lim = FWD ? (uint32_t)tp0s[oi]
+                             : (uint32_t)(tp0s[oi] + ops->v[oi].diff_len + ops->v[oi].extra_len);
+          for (size_t c = prev_end; c < ends[step]; c++) olim[c] = lim;
+          prev_end = ends[step];
+      }
+      free(tp0s); }
+    OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
+    out_candidates(content.d, content.n, olim, FWD, tob, to_size, &ocands, &nocand);
+    if (getenv("A1_OUT_DBG")) {
+        size_t np = 0, nc = 0, maxl = 0;
+        for (size_t i = 0; i < content.n; i++) { if (nocand[i]) np++; nc += nocand[i];
+            for (int q = 0; q < nocand[i]; q++) if ((size_t)ocands[i][q].len > maxl) maxl = (size_t)ocands[i][q].len; }
+        fprintf(stderr, "A1_OCAND pos_with_cand=%zu/%zu total=%zu maxlen=%zu FWD=%d\n", np, content.n, nc, maxl, FWD);
+    }
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -2513,32 +2681,52 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+        Buf cur_body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
         size_t cur_bytes = cur_body.n; buf_free(&cur_body);
-        for (int pass = 0; pass < 16; pass++) {
-            PriceTab pt;
-            measure_prices(&seq, content.d, tags.d, frm, from_size, kd, &pt);
-            TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, &pt, W);
-            int nk = fit_k_tokens(&cand_seq);
-            merge_adjacent_spans(&cand_seq);
-            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
-            size_t cand_bytes = cand_body.n; buf_free(&cand_body);
-            if (cand_bytes < cur_bytes) {
-                free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk;
-            } else {
-                free(cand_seq.v);
-                break;
+        /* Phase 1: ring-only price feedback to its fixpoint (the pre-out-match trajectory).
+         * Phase 2: re-parse WITH out-candidates; each candidate must beat the phase-1 fixpoint
+         * under the exact byte gate, so out-matches (and their per-fresh-match out-bit tax +
+         * ko header) ship only when they win outright — no pair can end worse than ring-only. */
+        uint8_t *nocand0 = (uint8_t *)xcalloc(content.n ? content.n : 1, 1);
+        for (int phase = 0; phase < 2; phase++) {
+            const uint8_t *noc = phase ? nocand : nocand0;
+            for (int pass = 0; pass < 16; pass++) {
+                PriceTab pt;
+                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD;
+                measure_prices(&seq, content.d, tags.d, frm, from_size, kd, ko, &pt);
+                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, ocands, noc, &pt, W);
+                int nk = fit_k_tokens(&cand_seq);
+                int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
+                merge_adjacent_spans(&cand_seq);
+                Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                size_t cand_bytes = cand_body.n; buf_free(&cand_body);
+                if (cand_bytes < cur_bytes) {
+                    free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
+                } else {
+                    free(cand_seq.v);
+                    break;
+                }
             }
         }
+        free(nocand0);
         /* anneal-k probe: fit_k_tokens minimizes the rice codelen of the raw distances, but the
          * shipped cost is the ADAPTIVE ug_encode of M_gd seeded at k; the two optima can differ by
          * one. Walk kd outward in each direction under the EXACT full-body byte gate and stop as soon
          * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                Buf b = emit_body(&seq, nk, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
                 size_t bb = b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
+                else break;
+            }
+        }
+        /* anneal-ko probe: same unimodal walk for the out-match position rice parameter. */
+        for (int dir = -1; dir <= 1; dir += 2) {
+            for (int nko = ko + dir; nko >= 0 && nko <= 15; nko += dir) {
+                Buf b = emit_body(&seq, kd, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
+                size_t bb = b.n; buf_free(&b);
+                if (bb < cur_bytes) { cur_bytes = bb; ko = nko; }
                 else break;
             }
         }
@@ -2549,14 +2737,14 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             for (sel[1] = 0; sel[1] < 4; sel[1]++)
               for (sel[2] = 0; sel[2] < 4; sel[2]++) {
                 if (!sel[0] && !sel[1] && !sel[2]) continue;
-                Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel, NULL, NULL, 0);
+                Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel, NULL, NULL, 0);
                 size_t bb = b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; memcpy(best_sel, sel, sizeof(best_sel)); }
               } }
         /* map variant: same fixed parse, residual-space inj + shipped map; its own seed sweep.
          * Ships only if the exact emitted body beats the best no-map body. */
         if (map_n > 0) {
-            Buf b0 = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, SEL_LEGACY, map_b, map_v, map_n);
+            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, SEL_LEGACY, map_b, map_v, map_n);
             size_t mbytes = b0.n; buf_free(&b0);
             int msel[3] = {0, 0, 0};
             { int sel[3];
@@ -2564,7 +2752,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 for (sel[1] = 0; sel[1] < 4; sel[1]++)
                   for (sel[2] = 0; sel[2] < 4; sel[2]++) {
                     if (!sel[0] && !sel[1] && !sel[2]) continue;
-                    Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, sel, map_b, map_v, map_n);
+                    Buf b = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, sel, map_b, map_v, map_n);
                     if (b.n < mbytes) { mbytes = b.n; memcpy(msel, sel, sizeof(msel)); }
                     buf_free(&b);
                   } }
@@ -2572,11 +2760,21 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         }
     }
     free(cands); free(ncand);
-    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends,
+    if (getenv("A1_OUT_DBG")) {
+        size_t no = 0, ob = 0, nr = 0, rb = 0, ns = 0, sb = 0;
+        for (size_t i = 0; i < seq.n; i++) {
+            if (seq.v[i].type == 'O') { no++; ob += (size_t)seq.v[i].len; }
+            else if (seq.v[i].type == 'R') { nr++; rb += (size_t)seq.v[i].len; }
+            else { ns++; sb += (size_t)seq.v[i].len; }
+        }
+        fprintf(stderr, "A1_OUT O=%zu(%zuB) R=%zu(%zuB) S=%zu(%zuB) content=%zu\n", no, ob, nr, rb, ns, sb, content.n);
+    }
+    Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          use_map ? inj_m : inj, use_map ? best_sel_m : best_sel,
                          use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
+    free(olim); free(ocands); free(nocand);
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
@@ -2602,7 +2800,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     OpPC *pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
     int stats_on = getenv("A1_ENC_STATS") != NULL;
     EncStats st = stats_on ? collect_stats(&ops, from.d, from_size, to_size, &fd, pc) : (EncStats){0};
-    Buf body = encode_body(&ops, from.d, from_size, to_size, &fd, pc, W);
+    Buf body = encode_body(&ops, from.d, from_size, to.d, to_size, &fd, pc, W);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);

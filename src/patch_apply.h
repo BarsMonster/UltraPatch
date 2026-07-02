@@ -368,7 +368,7 @@ typedef struct {
  * fields: 8 u32 (ototal/tok_left/span_left/br_left/br_src/tp/fp/op_nc = 32 B) +
  * 2 u8 (tok_mode/err) struct-padded and rounded to 40 B to keep ARENA_BYTES 8-aligned. The
  * _Static_assert(sizeof(SA) <= SA_ARENA) below is the hard guard if a field is ever added. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 40u)
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
 static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
 static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
@@ -477,6 +477,15 @@ static void orow_commit(void){
     g_orow_dirty=0; g_orow_base=OROW_NONE;
 }
 static void orow_reset(void){ g_orow_base=OROW_NONE; g_orow_dirty=0; }
+/* read one byte of ALREADY-PRODUCED output at absolute position a: the resident row from RAM,
+ * anything else from flash (rows below/above the resident row are committed by monotonicity).
+ * Valid streams only reference written positions; a corrupt position yields stale flash bytes,
+ * which the CRC32(to) gate rejects. */
+static uint8_t out_read(uint32_t a){
+    if(a>=g_image_span) return 0;
+    if(g_orow_base!=OROW_NONE && a>=g_orow_base && a<g_orow_base+OUTROW) return g_orow_buf[a-g_orow_base];
+    return flash_read(a);
+}
 /* OUTPUT write: buffer in the resident row, committing the previous row on a row change. */
 static void out_write(uint32_t a, uint8_t v){
     if(a>=g_image_span) return;
@@ -496,6 +505,11 @@ static void out_write(uint32_t a, uint8_t v){
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
 static UGRice  M_gd;             /* token_count first, then k-switched for backref_dist */
 static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
+static UGRice  M_go;             /* out-match absolute output position (k from header) */
+static UGGamma M_glo;            /* out-match length - 4 */
+static uint16_t M_outb;          /* fresh match kind: 0 = ring backref, 1 = out-match */
+static uint8_t  g_out_en;        /* out-matches enabled for this patch (1 header bit) */
+static uint32_t g_oexp;          /* expected next out-match position (prev src end; seeds 0 / to_size) */
 static UGGamma M_pg;             /* preserve/correction FIRST gaps, SHARED (corr gaps are the same
                                   * op-relative offset distribution; one model adapts on both). */
 static UGGamma M_pgn;            /* preserve/correction COUNTS (np/nc), SHARED — separated from gaps so
@@ -598,6 +612,7 @@ typedef struct {
     /* pauseable LZSS token replay state (pull-driven content producer) */
     uint32_t tok_left;                            /* tokens remaining (token_count) */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
+    uint32_t o_src, o_left;                       /* out-match replay: absolute OUTPUT position */
     int32_t tp, fp;                               /* running accumulators (apply order) */
     /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
      * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
@@ -678,6 +693,11 @@ static uint8_t sa_next_content(SA*s, int tag){
             if(s->br_left==0) s->tok_mode=0;
             return b;
         }
+        if(s->tok_mode==3 && s->o_left>0){               /* out-match: copy already-produced output */
+            uint8_t b=out_read(s->o_src); sa_emit_ring(s,b); s->o_src+=(uint32_t)(g_FWD?1:-1); s->o_left--;
+            if(s->o_left==0) s->tok_mode=0;
+            return b;
+        }
         if(s->tok_left==0) goto fail;   /* content underrun -> reject */
         /* adjacent spans never ship (the encoder merges them), so after a span the
          * span/match flag is IMPLICITLY "match": skip the coded bit but keep the order-2
@@ -692,6 +712,18 @@ static uint8_t sa_next_content(SA*s, int tag){
             uint32_t d;
             int rb=s_bit(&M_rep0[g_rep0h]); g_rep0h=rb;
             if(rb){ d=g_lastdist; }                         /* rep0: reuse last distance */
+            else if(g_out_en && s_bit(&M_outb)){            /* fresh + out-bit: long-range OUTPUT match */
+                int32_t dpos=bb_unzz(s_ug_rice(&M_go));     /* position as zigzag delta vs expected */
+                uint32_t p=g_oexp+(uint32_t)dpos;
+                uint32_t ln=s_ug_gamma(&M_glo)+4u;
+                /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
+                 * grow content (whose extras are byte-reversed) still matches produced output. */
+                if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
+                g_oexp=g_FWD?p+ln:p-ln;                     /* sequential runs keep deltas tiny */
+                s->tok_mode=3; s->o_src=p; s->o_left=ln; s->last_span=0;
+                s->tok_left--;
+                continue;
+            }
             else { d=s_ug_rice(&M_gd)+1u; g_lastdist=d; }
             uint32_t ln=s_ug_gamma(&M_gl)+1u;
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
@@ -967,6 +999,9 @@ static void decode_body(void){
       }
       if(g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
       g_smap_n=(uint16_t)mn; }
+    /* out-match enable: 1 raw bit. 0 => no ko header field and no out-bit on any fresh match,
+     * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
+    g_out_en=(uint8_t)s_raw();
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
@@ -987,7 +1022,10 @@ static void decode_body(void){
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
       ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
       int kd=(int)s_raw_bits(4);
+      int ko=g_out_en?(int)s_raw_bits(4):0;
       M_gd.k=(uint8_t)kd; ugg_init(&M_gl); ugg_init(&M_gs);
+      ugr_init(&M_go,ko); ugg_init(&M_glo); M_outb=RC_PHALF;
+      g_oexp=g_FWD?0u:g_to_size;
       ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
                                  * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
       fl_init(&M_flag);
