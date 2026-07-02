@@ -3029,7 +3029,11 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
         body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc, W);
         if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
-    if (!feasible && variant == 0) die("legacy plan infeasible");
+    /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
+     * and the sweep tries the remaining configs — different bsdiff alignments need different
+     * preserve/correction budgets, so another variant may fit the decoder caps (measured on
+     * foreign firmware: config 0 over-journal while fuzz variants fit). encode_a1 dies only
+     * when EVERY config is infeasible. */
     free(presset); free(corr); free(fd.v);
     for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
     free(pc); free(ops.v);
@@ -3055,22 +3059,25 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     int stats_on = getenv("A1_ENC_STATS") != NULL;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
-     * ties keep the earliest entry, so added configs can never regress. Config 0 must be the
-     * legacy plan (guaranteed feasible). Every config below won pairs in the corpus sweep (the
-     * bsdiff fuzz axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20); variant 3
+     * ties keep the earliest entry, so added configs can never regress. A config whose plan
+     * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
+     * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
+     * in-family firmware. Every config below won pairs in the corpus sweep (the bsdiff fuzz
+     * axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20); variant 3
      * additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
     static const PlanCfg PLANS[] = {
         {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20}, {3, 11},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
-    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = 0;
+    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1;
     for (int v = 0; v < NPLANS; v++) {
         int32_t fpe = 0; EncStats stv = {0};
         Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
-        if (v > 0 && b.n == 0) { buf_free(&b); continue; }   /* config infeasible on the wire */
-        if (v == 0 || b.n < body.n) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; }
+        if (b.n == 0) { buf_free(&b); continue; }            /* config infeasible on the wire */
+        if (bestv < 0 || b.n < body.n) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; }
         else buf_free(&b);
     }
+    if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
     if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d\n", bestv);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
