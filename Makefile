@@ -38,7 +38,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10928
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus gate
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge gate fuzz
 
 all: hy_enc hy_dec hy_dec_pull
 
@@ -122,8 +122,43 @@ check-arm:
 check-assets:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 
+# Executes the decoder as REAL Thumb-1 code (the Cortex-M0+ ISA subset) under qemu-arm
+# user-mode emulation — catches ARM-only behavior (unsigned-by-default char, alignment,
+# Thumb codegen) that the x86 host gates cannot. Uses PULL mode, so no fiber asm is needed
+# for the ARM-Linux target. Auto-skips (successfully, with a message) when the cross-gcc or
+# qemu-arm is not installed, so foreign machines stay green.
+check-qemu: hy_enc
+	@set -e; \
+	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
+		echo "qemu_thumb_roundtrip=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	arm-linux-gnueabi-gcc -static -mthumb -Os -std=c99 -Wall -Wextra -Werror \
+		-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL \
+		-Isrc src/patch_apply_demo.c -o "$$tmp/hy_dec_qemu"; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
+	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null 2>&1; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
+	qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null 2>&1; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
+	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
+	printf '\377' | dd of="$$tmp/bad.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	if qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/bad.blob" >/dev/null 2>&1; then \
+		echo "qemu: corrupt body accepted"; exit 1; fi; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
+	echo "qemu_thumb_roundtrip=OK"
+
 check-malformed: all
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh 10
+
+# Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
+# page-boundary/>384KiB-span pairs). hy_enc self-verifies every blob, so each case must
+# either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
+check-edge: all
+	@scripts/check_edge.sh 10
 
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
@@ -164,13 +199,17 @@ gate: all
 	$(MAKE) --no-print-directory check-assets >"$$tmp/assets.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-edge   >"$$tmp/e.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
 	echo "==================== A1 FULL GATE ===================="; \
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
+	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
+	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
 	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/m.txt"; \
@@ -187,11 +226,30 @@ gate: all
 		echo "------------------ check-assets ------------------"; cat "$$tmp/assets.txt"; \
 		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
 		echo "------------------ check-malformed ------------------"; cat "$$tmp/malformed.txt"; \
+		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
+		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
 	fi; \
 	echo "====================================================="; \
 	exit $$rc
 
+# libFuzzer + ASan + UBSan harness over the PULL-mode decoder (fuzz/fuzz_apply.c).
+# `make fuzz` seeds the corpus with real encoded blobs and runs a short smoke; for a real
+# campaign run the binary directly, e.g.: ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
+FUZZ_TIME ?= 60
+fuzz_apply: fuzz/fuzz_apply.c $(APPLY_HDR)
+	clang -g -O1 -std=c99 -Wall -Wextra -Werror \
+	  -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+	  -Isrc fuzz/fuzz_apply.c -o $@
+
+fuzz: fuzz_apply hy_enc
+	@mkdir -p fuzz-corpus; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" fuzz-corpus/seed_grow.blob 10 >/dev/null; \
+	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
+	cp "$$tmp/revert.blob" fuzz-corpus/seed_revert.blob; \
+	./fuzz_apply -max_total_time=$(FUZZ_TIME) -max_len=4096 -print_final_stats=1 fuzz-corpus
+
 clean:
-	rm -f hy_enc hy_dec hy_dec_pull
+	rm -f hy_enc hy_dec hy_dec_pull fuzz_apply

@@ -62,8 +62,11 @@ static uint32_t g_image_span;
 static uint32_t g_from_size, g_to_size, g_fp_end;
 static int      g_FWD;
 /* plausibility cap on header sizes (was the host wrapper's gate; now enforced in-decoder).
- * Also pins the "image sizes < 2^31" design invariant every 32-bit overflow guard relies on. */
+ * Also pins the "image sizes < 2^31" design invariant every 32-bit overflow guard relies on.
+ * -D overridable: a deployment (or the fuzz harness) may tighten it to its real flash size. */
+#ifndef A1_MAX_IMAGE
 #define A1_MAX_IMAGE (64u<<20)
+#endif
 
 /* ===================================================================================== */
 /* byte source. TWO integration modes share ONE decode core:                              */

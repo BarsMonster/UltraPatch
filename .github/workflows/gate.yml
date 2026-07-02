@@ -21,6 +21,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-arm-none-eabi \
             binutils-arm-none-eabi \
+            gcc-arm-linux-gnueabi \
+            libc6-dev-armel-cross \
+            qemu-user \
             make
 
       - name: Verify corpus assets

@@ -2998,8 +2998,15 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     char *fbin = join2(from_dir, "watch.bin"), *tbin = join2(to_dir, "watch.bin");
     char *felf = join2(from_dir, "watch.elf"), *telf = join2(to_dir, "watch.elf");
     Buf from = slurp(fbin), to = slurp(tbin);
-    Ranges fr = elf_ranges(felf, &from, "from");
-    Ranges tr = elf_ranges(telf, &to, "to");
+    /* watch.elf is OPTIONAL: without it the whole image is treated as opaque data (zeroed
+     * Ranges -> no code/data windows for the disassembler filter; plain bsdiff+LZ path).
+     * A present-but-malformed ELF still dies loudly — only absence is tolerated. This
+     * enables raw-binary pairs (edge gate, foreign firmware without build artifacts). */
+    Ranges fr = {0}, tr = {0};
+    { FILE *fe = fopen(felf, "rb");
+      if (fe) { fclose(fe); fr = elf_ranges(felf, &from, "from"); } }
+    { FILE *te = fopen(telf, "rb");
+      if (te) { fclose(te); tr = elf_ranges(telf, &to, "to"); } }
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     int stats_on = getenv("A1_ENC_STATS") != NULL;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
