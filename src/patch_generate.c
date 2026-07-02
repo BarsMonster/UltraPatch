@@ -832,6 +832,197 @@ static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, 
     return (Event){ EV_NONE, 0 };
 }
 
+/* ---- piecewise shift map (D1) — encoder mirror of patch_apply smap_at ---- */
+static int32_t smap_at_e(const uint32_t *mb, const int32_t *mv, int mn, uint32_t x) {
+    int lo = 0, hi = mn - 1, r = -1;
+    while (lo <= hi) { int mid = (lo + hi) >> 1; if (mb[mid] <= x) { r = mid; lo = mid + 1; } else hi = mid - 1; }
+    return r < 0 ? 0 : mv[r];
+}
+
+/* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
+ * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
+ * EX pred is -shift(word value). mn==0 degenerates to residual == delta (no-map wire). */
+static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
+                              const uint32_t *mb, const int32_t *mv, int mn) {
+    int32_t pred;
+    if (kind == EV_BL) {
+        uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+        uint32_t T = fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
+        pred = (smap_at_e(mb, mv, mn, fpk) - smap_at_e(mb, mv, mn, T)) / 2;
+    } else {
+        pred = -smap_at_e(mb, mv, mn, u32le_at(frm + fpk));
+    }
+    return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
+}
+
+typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
+
+/* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan. */
+static FieldRef *collect_fields(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                                const FieldDeltaVec *fd, size_t *nout) {
+    FieldRef *out = NULL; size_t n = 0, cap = 0;
+    int32_t fp0 = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len;) {
+            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+            if (ev.type == EV_BL || ev.type == EV_EX) {
+                if (n == cap) { cap = cap ? cap * 2 : 256; out = (FieldRef *)xrealloc(out, cap * sizeof(*out)); }
+                out[n].kind = ev.type; out[n].fpk = (uint32_t)(fp0 + k); out[n].delta = ev.delta; n++;
+                k += 4; continue;
+            }
+            if (ev.type == EV_SBL) { k += 4; continue; }
+            k++;
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+    *nout = n;
+    return out;
+}
+
+typedef struct { uint32_t b; int32_t v; } SegCand;
+static int cmp_seg(const void *a, const void *b) {
+    const SegCand *x = (const SegCand *)a, *y = (const SegCand *)b;
+    return (x->b > y->b) - (x->b < y->b);
+}
+
+/* per-field precomputed keys: BL hits iff (g(k1)-g(k2))/2 == need; EX hits iff -g(k2) == need. */
+typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
+
+static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const FieldKey *fk, size_t nfk) {
+    size_t hits = 0;
+    for (size_t i = 0; i < nfk; i++) {
+        int32_t pred = fk[i].kind == EV_BL
+            ? (smap_at_e(mb, mv, mn, fk[i].k1) - smap_at_e(mb, mv, mn, fk[i].k2)) / 2
+            : -smap_at_e(mb, mv, mn, fk[i].k2);
+        if (pred == fk[i].need) hits++;
+    }
+    return hits;
+}
+
+/* Fit the piecewise shift map: build the UNION of all structural candidates (bsdiff op-walk
+ * boundaries, a span-end terminator, and the exact EX value-run boundaries over sorted word
+ * values), then prune by BACKWARD elimination — remove segments whose removal costs at most
+ * SMAP_MAX_LOSS exact hits (their wire cost outweighs the few residuals they fix), batched per
+ * round with a verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only
+ * ships when the exact byte gate says the whole body got smaller, so the fit needs to be good,
+ * not perfect. */
+enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
+static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                         const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                         uint32_t *mb, int32_t *mv) {
+    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
+    size_t nex = 0;
+    for (size_t i = 0; i < nfr; i++) {
+        fk[i].kind = fr[i].kind;
+        fk[i].k1 = fr[i].fpk;
+        fk[i].need = (int32_t)(uint32_t)fr[i].delta;
+        if (fr[i].kind == EV_BL) {
+            uint16_t up = u16le_at(frm + fr[i].fpk), lo = u16le_at(frm + fr[i].fpk + 2);
+            fk[i].k2 = fr[i].fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
+        } else { fk[i].k2 = u32le_at(frm + fr[i].fpk); nex++; }
+    }
+    /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
+    size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
+    SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
+    uint32_t *pw = (uint32_t *)xmalloc(pcap * sizeof(*pw));
+    { int32_t tp = 0, fp = 0;
+      for (size_t i = 0; i < ops->n; i++) {
+          if (ops->v[i].diff_len > 0 && fp >= 0) {
+              pool[pn].b = (uint32_t)fp; pool[pn].v = tp - fp;
+              pw[pn] = (uint32_t)ops->v[i].diff_len; pn++;
+          }
+          tp += ops->v[i].diff_len + ops->v[i].extra_len;
+          fp += ops->v[i].diff_len + ops->v[i].adj;
+      }
+      pool[pn].b = from_size > to_size ? from_size : to_size; pool[pn].v = 0;
+      pw[pn] = 0x7fffffffu; pn++; }                      /* terminator: never pre-trimmed */
+    if (nex) {
+        SegCand *ex = (SegCand *)xmalloc(nex * sizeof(*ex));
+        size_t en = 0;
+        for (size_t i = 0; i < nfr; i++)
+            if (fk[i].kind == EV_EX) { ex[en].b = fk[i].k2; ex[en].v = -fk[i].need; en++; }
+        qsort(ex, en, sizeof(*ex), cmp_seg);
+        for (size_t i = 0; i < en;) {
+            size_t j = i;
+            while (j < en && ex[j].v == ex[i].v) j++;
+            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pw[pn] = (uint32_t)(j - i); pn++;
+            i = j;
+        }
+        free(ex);
+    }
+    /* pre-trim an oversized pool by weight so elimination stays fast */
+    while (pn > SMAP_POOL_MAX) {
+        size_t worst = 0;
+        for (size_t i = 1; i < pn; i++) if (pw[i] < pw[worst]) worst = i;
+        memmove(pool + worst, pool + worst + 1, (pn - worst - 1) * sizeof(*pool));
+        memmove(pw + worst, pw + worst + 1, (pn - worst - 1) * sizeof(*pw));
+        pn--;
+    }
+    /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
+    qsort(pool, pn, sizeof(*pool), cmp_seg);
+    uint32_t *tb = (uint32_t *)xmalloc((pn ? pn : 1) * sizeof(*tb));
+    int32_t *tv = (int32_t *)xmalloc((pn ? pn : 1) * sizeof(*tv));
+    int mn = 0;
+    for (size_t i = 0; i < pn; i++) {
+        if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
+        tb[mn] = pool[i].b; tv[mn] = pool[i].v; mn++;
+    }
+    size_t cur = smap_hits(tb, tv, mn, fk, nfr);
+    /* backward elimination: batch-remove <=SMAP_MAX_LOSS-loss segments, verify, fall back */
+    uint32_t *b2 = (uint32_t *)xmalloc((mn ? mn : 1) * sizeof(*b2));
+    int32_t *v2 = (int32_t *)xmalloc((mn ? mn : 1) * sizeof(*v2));
+    for (int round = 0; round < 8 && mn > 1; round++) {
+        int kept = 0, removed = 0;
+        for (int i = 0; i < mn; i++) {                    /* per-segment loss in full-map context */
+            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
+            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
+            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
+            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
+            if (h + SMAP_MAX_LOSS >= cur) { removed++; tv[i] = INT32_MIN; }  /* mark */
+            else kept++;
+        }
+        if (!removed) break;
+        int w = 0;
+        for (int i = 0; i < mn; i++) if (tv[i] != INT32_MIN) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+        size_t h = smap_hits(tb, tv, w, fk, nfr);
+        if (h + SMAP_MAX_LOSS * (size_t)removed >= cur || h >= cur) { mn = w; cur = h; continue; }
+        /* batch interaction lost too much: rebuild is impossible (marks destroyed values), so
+         * re-derive the union and stop batching. In practice this path is never taken; guard it. */
+        mn = w; cur = h; break;
+        (void)kept;
+    }
+    /* cap enforcement: cheapest-loss removal one at a time */
+    while (mn > SMAP_CAP) {
+        int drop = 0; size_t besth = 0;
+        for (int i = 0; i < mn; i++) {
+            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
+            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
+            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
+            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
+            if (h > besth) { besth = h; drop = i; }
+        }
+        memmove(tb + drop, tb + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tb));
+        memmove(tv + drop, tv + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tv));
+        mn--; cur = besth;
+    }
+    /* merge adjacent equal values (pure wire savings; lookups unchanged) */
+    { int w = 0;
+      for (int i = 0; i < mn; i++) { if (w && tv[w - 1] == tv[i]) continue; tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+      mn = w; }
+    if (mn == 1 && tv[0] == 0) mn = 0;
+    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
+    if (getenv("A1_MAP_DBG")) {
+        size_t h = smap_hits(mb, mv, mn, fk, nfr);
+        fprintf(stderr, "A1_MAP fields=%zu segs=%d hits=%zu (%.1f%%)\n",
+                nfr, mn, h, nfr ? 100.0 * (double)h / (double)nfr : 0.0);
+    }
+    free(fk); free(pool); free(pw); free(tb); free(tv); free(b2); free(v2);
+    return mn;
+}
+
 static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
     FieldDeltaVec out = {0};
     m4_stream_t st[M4_NSTREAMS];
@@ -2039,7 +2230,8 @@ static void inj_push(InjVec *v, uint32_t cc, int kind, int64_t delta) {
 }
 
 static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
-                                   int32_t fp0, const FieldDeltaVec *fd, const IVec *ldr) {
+                                   int32_t fp0, const FieldDeltaVec *fd, const IVec *ldr,
+                                   const uint32_t *mb, const int32_t *mv, int mn) {
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
     InjVec out = {0};
@@ -2058,7 +2250,9 @@ static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uin
         for (int32_t k = 0; k < o->diff_len;) {
             if (k + 4 <= o->diff_len) {
                 Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, k);
-                if (ev.type == EV_BL || ev.type == EV_EX) { inj_push(&out, cc, ev.type, ev.delta); k += 4; continue; }
+                if (ev.type == EV_BL || ev.type == EV_EX) {
+                    inj_push(&out, cc, ev.type, field_residual(ev.type, frm, (uint32_t)(fp0 + k), ev.delta, mb, mv, mn));
+                    k += 4; continue; }
                 if (ev.type == EV_SBL) { for (int b = 0; b < 4; b++) CONSUME_F(k + b); k += 4; continue; }
             }
             CONSUME_F(k); k++;
@@ -2081,7 +2275,9 @@ static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uin
             int32_t ks = k - 3;
             if (ks >= 0) {
                 Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, ks);
-                if (ev.type == EV_BL || ev.type == EV_EX) { inj_push(&out, cc, ev.type, ev.delta); k -= 4; continue; }
+                if (ev.type == EV_BL || ev.type == EV_EX) {
+                    inj_push(&out, cc, ev.type, field_residual(ev.type, frm, (uint32_t)(fp0 + ks), ev.delta, mb, mv, mn));
+                    k -= 4; continue; }
                 if (ev.type == EV_SBL) { for (int b = 3; b >= 0; b--) CONSUME_D(ks + b); k -= 4; continue; }
             }
             CONSUME_D(k); k--;
@@ -2170,7 +2366,8 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
 static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
-                     const size_t *ends, const InjVec *inj, const int sel[3]) {
+                     const size_t *ends, const InjVec *inj, const int sel[3],
+                     const uint32_t *mb, const int32_t *mv, int mn) {
     Models M;
     memset(&M, 0, sizeof(M));
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
@@ -2201,6 +2398,16 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     /* per-patch seed selection: 1-bit escape, then 3x2 raw bits (mirror patch_apply decode_body). */
     if (sel[0] == 0 && sel[1] == 0 && sel[2] == 0) re_raw(&rc, 0);
     else { re_raw(&rc, 1); put_raw_bits(&rc, (uint32_t)sel[0], 2); put_raw_bits(&rc, (uint32_t)sel[1], 2); put_raw_bits(&rc, (uint32_t)sel[2], 2); }
+    /* piecewise shift map: gamma count, per entry gamma gap (first absolute, later -1) + zz value.
+     * Mirror of the patch_apply decode_body map reader (bit-exact wire). */
+    w_gz(&rc, (uint32_t)mn);
+    { uint32_t prev = 0;
+      for (int i = 0; i < mn; i++) {
+          uint32_t gap = mb[i] - prev;
+          w_gz(&rc, i ? gap - 1u : gap);
+          prev = mb[i];
+          w_gz(&rc, zz32(mv[i]));
+      } }
     ug_encode(&M.gd, &rc, (uint32_t)seq->n);
     M.gd.k = (uint8_t)kd;
     put_raw_bits(&rc, (uint32_t)kd, 4);
@@ -2277,8 +2484,27 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
         IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
-        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr);
+        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr, NULL, NULL, 0);
         free(ldr.v);
+    }
+    /* ---- D1 shift map: fit from the op walk, build the residual-space injection variant. The
+     * LZ parse is map-independent (inj values never touch content bytes), so the pipeline below
+     * runs on the plain-delta inj; the map variant competes under the exact byte gate at the end. */
+    uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;
+    InjVec *inj_m = NULL;
+    int use_map = 0; int best_sel_m[3] = {0, 0, 0};
+    { size_t nfr = 0;
+      FieldRef *frs = collect_fields(ops, frm, from_size, fd, &nfr);
+      if (nfr) map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
+      free(frs); }
+    if (map_n > 0) {
+        inj_m = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj_m));
+        for (size_t step = 0; step < ops->n; step++) {
+            size_t oi = FWD ? step : ops->n - 1 - step;
+            IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
+            inj_m[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr, map_b, map_v, map_n);
+            free(ldr.v);
+        }
     }
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
@@ -2287,7 +2513,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
+        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
         size_t cur_bytes = cur_body.n; buf_free(&cur_body);
         for (int pass = 0; pass < 16; pass++) {
             PriceTab pt;
@@ -2295,7 +2521,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, &pt, W);
             int nk = fit_k_tokens(&cand_seq);
             merge_adjacent_spans(&cand_seq);
-            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
+            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
             size_t cand_bytes = cand_body.n; buf_free(&cand_body);
             if (cand_bytes < cur_bytes) {
                 free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk;
@@ -2310,7 +2536,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
          * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
+                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY, NULL, NULL, 0);
                 size_t bb = b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
                 else break;
@@ -2323,14 +2549,34 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             for (sel[1] = 0; sel[1] < 4; sel[1]++)
               for (sel[2] = 0; sel[2] < 4; sel[2]++) {
                 if (!sel[0] && !sel[1] && !sel[2]) continue;
-                Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel);
+                Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel, NULL, NULL, 0);
                 size_t bb = b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; memcpy(best_sel, sel, sizeof(best_sel)); }
               } }
+        /* map variant: same fixed parse, residual-space inj + shipped map; its own seed sweep.
+         * Ships only if the exact emitted body beats the best no-map body. */
+        if (map_n > 0) {
+            Buf b0 = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, SEL_LEGACY, map_b, map_v, map_n);
+            size_t mbytes = b0.n; buf_free(&b0);
+            int msel[3] = {0, 0, 0};
+            { int sel[3];
+              for (sel[0] = 0; sel[0] < 4; sel[0]++)
+                for (sel[1] = 0; sel[1] < 4; sel[1]++)
+                  for (sel[2] = 0; sel[2] < 4; sel[2]++) {
+                    if (!sel[0] && !sel[1] && !sel[2]) continue;
+                    Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, sel, map_b, map_v, map_n);
+                    if (b.n < mbytes) { mbytes = b.n; memcpy(msel, sel, sizeof(msel)); }
+                    buf_free(&b);
+                  } }
+            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; memcpy(best_sel_m, msel, sizeof(msel)); }
+        }
     }
     free(cands); free(ncand);
-    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, best_sel);
+    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends,
+                         use_map ? inj_m : inj, use_map ? best_sel_m : best_sel,
+                         use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
+    if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }

@@ -46,6 +46,12 @@ static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i
 #define UG_CTX 6
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
 
+/* ---- piecewise shift map (BL/EX delta prediction) ----
+ * Shipped per patch: ascending u32 boundaries + int32 byte-shift values; keys below the first
+ * boundary (or an absent map) predict shift 0. ENCODING-AFFECTING: the decoder rejects
+ * (REJ_RESOURCE) above SMAP_CAP, and the encoder never emits more entries than this. */
+#define SMAP_CAP 48
+
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } Flag1;
 static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }

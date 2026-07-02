@@ -416,17 +416,34 @@ static int jr_get(uint32_t pos, uint8_t*out){
 /* relocation unpack/pack (Thumb bl + s32) — de-relocation override only (no flash write).      */
 /* The journal-aware pristine reads + the bl/ldr predicates live with the apply state below.    */
 /* ===================================================================================== */
-/* de-relocate a Thumb BL halfword pair (imm24 = imm - delta), repacked into 4 bytes (no flash write).
- * j1/j2 are the s-conditioned complements of the imm's i1/i2 bits; the subtract is mod 2^24 (masked
- * & repacked immediately) so no sign-extension is needed. */
-static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
+/* unpack the 24-bit BL immediate (halfword units, two's-complement in 24 bits). */
+static uint32_t bl_imm24(uint16_t up, uint16_t lo){
     uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
-    uint32_t imm24=(((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21)) - delta;
-    imm24&=0x00ffffffu; s=(imm24>>23)&1u;
+    return ((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21);
+}
+/* de-relocate a Thumb BL halfword pair (imm24 = imm - delta), repacked into 4 bytes (no flash write).
+ * The subtract is mod 2^24 (masked & repacked immediately) so no sign-extension is needed. */
+static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
+    uint32_t imm24=(bl_imm24(up,lo) - delta) & 0x00ffffffu;
+    uint32_t s=(imm24>>23)&1u;
     uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
     uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
     uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
     out[0]=u&0xff; out[1]=(u>>8)&0xff; out[2]=l&0xff; out[3]=(l>>8)&0xff;
+}
+
+/* ---- piecewise shift map (D1): predicts BL/EX de-reloc deltas from addresses/values the
+ * decoder already has in hand; only the RESIDUAL (delta - pred) rides the MTF dict streams.
+ * smap_at(x) = value of the last segment with boundary <= x, else 0 (also 0 when no map).
+ * Values are BYTE shifts; BL predictions divide by 2 (imm24 is in halfwords) with C
+ * truncation-toward-zero on both sides (bit-exact vs patch_generate). ---- */
+static uint32_t g_smap_b[SMAP_CAP];
+static int32_t  g_smap_v[SMAP_CAP];
+static uint16_t g_smap_n;
+static int32_t smap_at(uint32_t x){
+    int lo=0, hi=(int)g_smap_n-1, r=-1;
+    while(lo<=hi){ int mid=(lo+hi)>>1; if(g_smap_b[mid]<=x){ r=mid; lo=mid+1; } else hi=mid-1; }
+    return r<0 ? 0 : g_smap_v[r];
 }
 
 /* ===================================================================================== */
@@ -769,8 +786,12 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
     if((up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
-        int32_t delta=pull_delta(&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* INLINE pull from the single stream */
-        bl_dereloc(up, lo, (uint32_t)delta, packed);
+        int32_t res=pull_delta(&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
+        uint32_t imm24=bl_imm24(up,lo);
+        int32_t off=(int32_t)(imm24<<8)>>8;                 /* sign-extend the 24-bit imm */
+        uint32_t T=fpk+4u+(uint32_t)(2*off);                /* BL target byte address (mod 2^32) */
+        int32_t pred=(smap_at(fpk)-smap_at(T))/2;           /* byte shift -> imm24 halfword units */
+        bl_dereloc(up, lo, (uint32_t)pred+(uint32_t)res, packed);
         hy_word4_rec(fpk,w);                                /* record the 4 BL bytes into the ring */
         return 1;
     }
@@ -778,9 +799,10 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
      * mirrors the encoder's pure(k) + op_ldr_set; positions are derived, not shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(g_FWD?NULL:s, fp0, dl, fpk)){
-        int32_t delta=pull_delta(&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* INLINE pull from the single stream */
+        int32_t res=pull_delta(&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
+        int32_t pred=-smap_at(w);                           /* pointer words move by the value's shift */
         hy_word4_rec(fpk,w);                                /* record the 4 EX bytes into the ring */
-        pack_s32_buf((w-(uint32_t)delta)&0xffffffffu, packed);
+        pack_s32_buf((w-((uint32_t)pred+(uint32_t)res))&0xffffffffu, packed);
         return 1;
     }
     return 0;
@@ -930,6 +952,21 @@ static void decode_body(void){
                               SR[4]={3072,2048,2560,3584};
         seed_hit=SH[s_raw_bits(2)]; seed_idx=SI[s_raw_bits(2)]; seed_rep0=SR[s_raw_bits(2)];
     }
+    /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
+     * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
+     * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
+    g_smap_n=0;
+    { uint32_t mn=s_raw_gz();
+      if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; g_dec_status=DEC_ERROR; goto done; }
+      uint32_t b=0;
+      for(uint32_t i=0;i<mn && !g_rcerr;i++){
+          uint32_t gap=s_raw_gz(); if(i) gap+=1u;
+          if(gap>UINT32_MAX-b){ g_rcerr=1; break; }
+          b+=gap;
+          g_smap_b[i]=b; g_smap_v[i]=bb_unzz(s_raw_gz());
+      }
+      if(g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
+      g_smap_n=(uint16_t)mn; }
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */

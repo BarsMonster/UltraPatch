@@ -30,12 +30,12 @@ FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
 
-BASE_FULL_TOTAL ?= 4594184
-BASE_ONEFACE_GROW ?= 870
-BASE_ONEFACE_REVERT ?= 580
-BASE_ARM_TEXT ?= 4888
+BASE_FULL_TOTAL ?= 4411857
+BASE_ONEFACE_GROW ?= 592
+BASE_ONEFACE_REVERT ?= 305
+BASE_ARM_TEXT ?= 5164
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10272
+BASE_ARM_BSS ?= 10672
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-assets check-malformed check-corpus gate
