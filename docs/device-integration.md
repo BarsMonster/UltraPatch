@@ -51,6 +51,14 @@ CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
 delivery manifest and patch blob before any flash write is attempted.
 
+**No version byte — deliberate (decision recorded 2026-07-02).** The envelope
+carries no format-version or magic field, per requirements: the envelope stays
+minimal, and a blob in any future wire revision is rejected by the CRC/decode
+gates as `REJ_CORRUPT`, which is the accepted behavior. Target-family wire
+variants are governed at BUILD time by the `CORTEX_M0`/`CORTEX_M4` define
+contract (see Build-Time Contract), not by an in-band version field. Do not
+add one.
+
 ## Integration
 
 Supply a callback that returns the next blob byte (it may poll a UART/BLE
@@ -115,9 +123,20 @@ remain representative of the shipping decoder.
 
 ## Flash And Recovery Policy
 
-A1 does not provide power-fail rollback. If power is lost during apply, the host
-or bootloader must be able to detect the interrupted state and recover by full
-reflash or another product-defined recovery path.
+A1 does not provide power-fail rollback or resume, and never will — this is a
+permanent non-goal (decision recorded 2026-07-02), not a missing feature. Resume
+is impossible by construction: the decode state is volatile. The never-evict
+journal (the preserved source bytes the output frontier has already overwritten
+in flash), the adaptive entropy-model state, and the output row cache all live
+only in RAM and cannot be reconstructed mid-stream after power loss — the
+source image below the write frontier is already destroyed. Do not attempt to
+retrofit checkpointing.
+
+If power is lost during apply, the host or bootloader must detect the
+interrupted state and recover by full reflash or another product-defined
+recovery path. A retry of the same patch on the interrupted image rejects
+cleanly at the `CRC32(from)` gate with no further flash writes, which is the
+supported detection mechanism.
 
 The host wrapper in `src/patch_apply_demo.c` is a verification harness and NVM
 emulator. It is useful as a reference for driving the push API and collecting
