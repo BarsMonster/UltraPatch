@@ -38,7 +38,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10928
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge gate fuzz
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-golden golden-update gate fuzz
 
 all: hy_enc hy_dec hy_dec_pull
 
@@ -160,6 +160,15 @@ check-malformed: all
 check-edge: all
 	@scripts/check_edge.sh 10
 
+# Golden-wire regression: sha256 of six representative blobs pinned in test-bench/golden.sha256.
+# Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
+# `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
+check-golden: hy_enc
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check 10
+
+golden-update: hy_enc
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update 10
+
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
 # It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
@@ -200,6 +209,7 @@ gate: all
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-edge   >"$$tmp/e.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-golden >"$$tmp/g.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
@@ -207,6 +217,7 @@ gate: all
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
+	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
@@ -227,6 +238,7 @@ gate: all
 		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
 		echo "------------------ check-malformed ------------------"; cat "$$tmp/malformed.txt"; \
 		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
+		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
