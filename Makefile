@@ -40,13 +40,18 @@ BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-assets check-malformed check-corpus gate
 
-all: hy_enc hy_dec
+all: hy_enc hy_dec hy_dec_pull
 
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 hy_dec: $(DEC_SRCS) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
+
+# PULL-mode decoder (same wire, same core): patch_apply_run() + integrator callback,
+# no fiber/coroutine anywhere. `check` round-trips both modes to keep them wire-identical.
+hy_dec_pull: $(DEC_SRCS) $(APPLY_HDR)
+	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_PULL $(DEC_SRCS) -o $@
 
 check: all
 	@set -e; \
@@ -65,6 +70,12 @@ check: all
 	wc -c "$$tmp/grow.blob" "$$tmp/revert.blob"; \
 	test "$$grow_sz" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	./hy_dec_pull "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
+	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
+	./hy_dec_pull "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
 	printf '\377' | dd of="$$tmp/bad.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
@@ -73,6 +84,9 @@ check: all
 	head -c -1 "$$tmp/grow.blob" > "$$tmp/trunc.blob"; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/trunc.blob" 1 >/dev/null 2>/dev/null; then echo "truncated blob accepted"; exit 1; fi; \
+	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	if ./hy_dec_pull "$$tmp/mem.bin" "$$tmp/bad.blob" >/dev/null 2>/dev/null; then echo "corrupt body accepted (pull)"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad_from.blob"; \
 	printf '\000' | dd of="$$tmp/bad_from.blob" bs=1 seek=0 count=1 conv=notrunc >/dev/null 2>&1; \
@@ -180,4 +194,4 @@ gate: all
 	exit $$rc
 
 clean:
-	rm -f hy_enc hy_dec
+	rm -f hy_enc hy_dec hy_dec_pull

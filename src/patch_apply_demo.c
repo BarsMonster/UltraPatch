@@ -62,6 +62,16 @@ static long nvm_frontier_inversions(void){ return g_finv; }
 
 #include "patch_apply.h"
 
+#ifdef PATCH_APPLY_PULL
+/* pull-mode byte source: serve the blob buffer to patch_apply_run() */
+typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
+static int pull_next(void *c, uint8_t *out){
+    PullCtx *p=(PullCtx*)c;
+    if(p->i>=p->n) return 0;
+    *out=p->d[p->i++]; return 1;
+}
+#endif
+
 int main(int argc,char**argv){
     if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
     int byte_mode = (argc==4);   /* arg3 present -> push 1 byte at a time (suspend/resume proof) */
@@ -91,6 +101,12 @@ int main(int argc,char**argv){
       if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
       nvm_init(tmp,from_size,span); free(tmp); }
 
+#ifdef PATCH_APPLY_PULL
+    /* pull mode: the decoder drives; the callback serves blob bytes (no fiber involved) */
+    int rc;
+    { PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(pull_next,&pc); }
+    (void)byte_mode;
+#else
     /* push the WHOLE blob; the decoder parses/gates the envelope internally */
     int rc=patch_apply_init();
     size_t bi=0; long suspends=0;
@@ -103,6 +119,7 @@ int main(int argc,char**argv){
         }
         fprintf(stderr,"streaming OK: %ld suspends over %ld blob bytes\n",suspends,bsz);
     }
+#endif
     if(rc==PATCH_APPLY_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%u: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");

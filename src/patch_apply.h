@@ -66,13 +66,30 @@ static int      g_FWD;
 #define A1_MAX_IMAGE (64u<<20)
 
 /* ===================================================================================== */
-/* byte FIFO + ucontext coroutine (the push / blocking-fetch core)                        */
+/* byte source. TWO integration modes share ONE decode core:                              */
+/*  - PUSH (default): the producer feeds bytes via patch_apply_push(); next_byte() blocks  */
+/*    on an empty FIFO by suspending a coroutine (fiber) back to the producer.             */
+/*  - PULL (-DPATCH_APPLY_PULL): the integrator supplies a (possibly blocking) callback    */
+/*    and calls patch_apply_run() — NO fiber, NO coroutine stack, NO FIFO, plain calls.    */
+/* Both modes withhold the 4 most recent blob bytes in the g_tail ring so the CRC32(to)    */
+/* trailer never reaches the range coder (the body length is implicit — optimal flush);    */
+/* whatever 4 bytes remain in the ring at the end ARE the trailer.                         */
 /* ===================================================================================== */
+static void decode_body(void);
+static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
+static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring (both modes) */
+enum {
+    PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
+    DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR,
+    DEC_BODYOK=3   /* INTERNAL: body decoded; CRC32(to) trailer not yet verified. Never
+                    * returned to the caller — decoder_push maps it to NEED_MORE and
+                    * decoder_finish / patch_apply_run convert it after the trailer check. */
+};
+static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
+
+#ifndef PATCH_APPLY_PULL
 static uint8_t  g_fifo_byte, g_fifo_full;  /* decoder_push() supplies one byte per resume */
 static uint8_t  g_eof;                     /* producer signalled end-of-stream */
-/* trailer withhold ring: decoder_push delays every byte by 4 so the blob's final 4 bytes
- * (the CRC32(to) trailer) never reach the range coder; decoder_finish verifies them. */
-static uint8_t  g_tail[4], g_tailn, g_tailw;
 
 #ifndef DEC_STACK_BYTES
 #define DEC_STACK_BYTES 640                /* coroutine stack; measured high-water 520 B (data-independent
@@ -82,14 +99,6 @@ static uint8_t  g_tail[4], g_tailn, g_tailw;
                                             * end -> stack overflow REJECTS, never silent-corrupts. */
 #endif
 static char     g_dec_stack[DEC_STACK_BYTES] __attribute__((aligned(16)));
-enum {
-    PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
-    DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR,
-    DEC_BODYOK=3   /* INTERNAL: body decoded; CRC32(to) trailer not yet verified. Never
-                    * returned to the caller — decoder_push maps it to NEED_MORE and
-                    * decoder_finish converts it to DONE/ERROR after the trailer check. */
-};
-static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
 
 /* ===================================================================================== */
 /* Coroutine: a context is just a saved stack pointer (+ callee-saved regs spilled onto    */
@@ -104,13 +113,10 @@ static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then 
 /* on x86 vs the device's PendSV, stubbed here for static sizing) and the initial frame      */
 /* fiber_setup lays down.                                                                   */
 /* ===================================================================================== */
-static void decode_body(void);
-static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
-
 /* --- shared SP-fiber core (x86 host + ARM device) --- */
 typedef void* Fiber;                       /* a context is just a saved stack pointer */
 static Fiber g_main_sp, g_dec_sp;
-static void pd_trampoline(void){ decode_body(); for(;;); }  /* never returns (final swap inside) */
+static void pd_trampoline(void);           /* defined below the per-arch swap macros */
 
 #ifdef RC_V3_ARM
 /* RC_V3_ARM device-static measurement build: the real device coroutine is a PendSV/SP swap;
@@ -153,6 +159,17 @@ static void fiber_setup(void){
 #define CO_SWAP_TO_DEC()   pd_swap(&g_main_sp,&g_dec_sp)
 #endif
 
+static void pd_trampoline(void){
+    decode_body();
+#ifndef RC_V3_STACKMEAS
+    /* stack-overflow canary: the deepest 8 B were painted 0xC5; if the coroutine overran them the
+     * decode is untrustworthy -> reject (CRC would catch corruption too, but this is direct). */
+    for(int i=0;i<8;i++) if((unsigned char)g_dec_stack[i]!=0xC5u){ g_dec_status=DEC_ERROR; break; }
+#endif
+    CO_SWAP_TO_MAIN();                     /* final yield: never resumed past this point */
+    for(;;);
+}
+
 /* next_byte(): pull one byte; if the FIFO is empty, suspend back to the producer (block). */
 static uint8_t next_byte(void){
     while (!g_fifo_full){
@@ -172,6 +189,25 @@ static int env_byte(uint8_t*out){
     while(!g_fifo_full){ if(g_eof) return 0; CO_SWAP_TO_MAIN(); }
     g_fifo_full=0; *out=g_fifo_byte; return 1;
 }
+
+#else /* PATCH_APPLY_PULL: integrator-supplied callback; no fiber, no FIFO, no extra stack */
+static int (*g_pull_fn)(void*, uint8_t*);
+static void *g_pull_ctx;
+static uint8_t g_pull_eof;
+/* next blob byte after the 4-byte withhold: prime/rotate the ring with the callback's
+ * bytes; callback EOF is latched (the ring then holds exactly the trailer). */
+static int raw_next(uint8_t*out){
+    uint8_t b;
+    if(g_pull_eof) return 0;
+    while(g_tailn<4u){ if(!g_pull_fn(g_pull_ctx,&b)){ g_pull_eof=1; return 0; } g_tail[g_tailn++]=b; }
+    if(!g_pull_fn(g_pull_ctx,&b)){ g_pull_eof=1; return 0; }
+    *out=g_tail[g_tailw]; g_tail[g_tailw]=b; g_tailw=(uint8_t)((g_tailw+1u)&3u);
+    return 1;
+}
+static uint8_t next_byte(void){ uint8_t b; return raw_next(&b)?b:0; }  /* body: zero-fill past EOF */
+static int env_byte(uint8_t*out){ return raw_next(out); }              /* envelope: strict */
+#endif /* PATCH_APPLY_PULL */
+
 static int env_u32le(uint32_t*out){
     uint32_t v=0; uint8_t b;
     for(int i=0;i<4;i++){ if(!env_byte(&b)) return 0; v|=(uint32_t)b<<(8*i); }
@@ -1116,15 +1152,9 @@ static void decode_body(void){
       orow_commit();                       /* flush the last resident output row */
     }
 done:
-#ifndef RC_V3_STACKMEAS
-    /* stack-overflow canary: the deepest 8 B were painted 0xC5; if the coroutine overran them the
-     * decode is untrustworthy -> reject (CRC would catch corruption too, but this is direct). */
-    for(int i=0;i<8;i++) if((unsigned char)g_dec_stack[i]!=0xC5u){ g_dec_status=DEC_ERROR; break; }
-#endif
-    /* body complete: decoder_finish verifies the withheld CRC32(to) trailer and converts
-     * BODYOK to the caller-visible DONE (or ERROR). */
+    /* body complete: the caller (decoder_finish / patch_apply_run) verifies the withheld
+     * CRC32(to) trailer and converts BODYOK to the caller-visible DONE (or ERROR). */
     if(g_dec_status!=DEC_ERROR) g_dec_status=DEC_BODYOK;
-    CO_SWAP_TO_MAIN();                      /* final yield: never returns here */
 }
 
 /* ===================================================================================== */
@@ -1137,6 +1167,15 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
         bt_set(t,m-1,(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr))); }
 }
 
+/* shared trailer verdict: the 4 withheld ring bytes must equal CRC32(to) over the image. */
+static int trailer_ok(void){
+    uint32_t want=0;
+    if(g_tailn!=4u) return 0;
+    for(unsigned i=0;i<4u;i++) want|=(uint32_t)g_tail[(g_tailw+i)&3u]<<(8u*i);
+    return crc32_flash(g_to_size)==want;
+}
+
+#ifndef PATCH_APPLY_PULL
 /* initialize the decoder coroutine. Geometry, model seeding, and both CRC gates are handled
  * inside the decode from the pushed blob bytes — nothing to configure here. */
 static int decoder_init(void){
@@ -1181,11 +1220,9 @@ static int decoder_finish(void){
     while(g_dec_status==DEC_NEED_MORE){ CO_SWAP_TO_DEC(); }
     if(g_dec_status==DEC_ERROR) return g_dec_status;
     /* ---- CRC32(to) trailer = the 4 withheld bytes, in push order. DONE only on match. ---- */
-    { uint32_t want=0;
-      for(unsigned i=0;i<4u;i++) want|=(uint32_t)g_tail[(g_tailw+i)&3u]<<(8u*i);
-      if(g_tailn!=4u || crc32_flash(g_to_size)!=want){
-          if(!g_reject) g_reject=REJ_CORRUPT;
-          g_dec_status=DEC_ERROR; return g_dec_status; } }
+    if(!trailer_ok()){
+        if(!g_reject) g_reject=REJ_CORRUPT;
+        g_dec_status=DEC_ERROR; return g_dec_status; }
     g_dec_status=DEC_DONE;
     return g_dec_status;
 }
@@ -1194,6 +1231,27 @@ static int patch_apply_init(void){ return decoder_init(); }
 static int patch_apply_push(uint8_t byte){ return decoder_push(byte); }
 static int patch_apply_finish(void){ return decoder_finish(); }
 
+#else /* PATCH_APPLY_PULL public API */
+/* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
+ * byte, or 0 at end-of-blob (it may block internally — e.g. poll a UART — before returning;
+ * the decoder consumes bytes strictly in order). Returns PATCH_APPLY_DONE (image written,
+ * both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds the reason). */
+static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
+    uint8_t b;
+    g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0;
+    g_tailn=0; g_tailw=0;
+    g_dec_status=DEC_NEED_MORE;
+    decode_body();
+    if(g_dec_status==DEC_ERROR) return PATCH_APPLY_ERROR;
+    while(raw_next(&b)) ;                  /* discard flush slack; the ring ends on the final 4 */
+    if(!trailer_ok()){
+        if(!g_reject) g_reject=REJ_CORRUPT;
+        g_dec_status=DEC_ERROR; return PATCH_APPLY_ERROR; }
+    g_dec_status=DEC_DONE;
+    return PATCH_APPLY_DONE;
+}
+#endif /* PATCH_APPLY_PULL */
+
 /* ===================================================================================== */
 /* DEVICE static measurement: exported entry points so arm-none-eabi-size sees the real     */
 /* .bss+.data (all decoder static + stack reservation). The push API is the device's actual  */
@@ -1201,9 +1259,13 @@ static int patch_apply_finish(void){ return decoder_finish(); }
 /* On the device flash_read/flash_write/g_image_span are the real flash primitives (extern).  */
 /* ===================================================================================== */
 #ifdef RC_V3_ARM
+#ifndef PATCH_APPLY_PULL
 int  rcv3_init(void){ return patch_apply_init(); }
 int  rcv3_push(uint8_t b){ return patch_apply_push(b); }
 int  rcv3_finish(void){ return patch_apply_finish(); }
+#else
+int  rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(next, ctx); }
+#endif
 #endif
 
 #endif /* PATCH_APPLY_H */
