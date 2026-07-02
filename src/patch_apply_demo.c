@@ -14,8 +14,8 @@
 #include <unistd.h>
 
 /* SAML22-shaped NVM emulator for the host demo/gate. The reusable decoder only
- * needs flash_read(), flash_write(), and g_image_span; all emulation and safety
- * counters live here, outside the production header artifact. */
+ * needs flash_read() and flash_write(); all emulation and safety counters live
+ * here, outside the production header artifact. */
 #ifndef NVM_PAGE
 #define NVM_PAGE 64u
 #endif
@@ -24,13 +24,12 @@
 #endif
 static uint8_t *g_flash, *g_erasecnt;
 static uint32_t g_flash_n, g_nrows;
-uint32_t g_image_span;
 static long g_erases, g_programs, g_finv;
 static uint32_t g_last_erow;
 static int g_edir, g_ecount;
 
 static void nvm_init(const uint8_t *from, uint32_t from_size, uint32_t span){
-    g_image_span = span; g_flash_n = span;
+    g_flash_n = span;
     free(g_flash); g_flash = (uint8_t*)malloc(span?span:1);
     memcpy(g_flash, from, from_size);
     if(span>from_size) memset(g_flash+from_size, 0xFF, span-from_size);
@@ -70,45 +69,39 @@ int main(int argc,char**argv){
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
     uint8_t*blob=malloc(bsz); if(fread(blob,1,bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
-    /* CRC32(from)[4] | from_size | zz(to_size-from_size)
+    /* MINIMAL envelope pre-parse, for the HOST EMULATOR ONLY (flash sizing + memfile sanity).
+     * The decoder performs the authoritative envelope parse and both CRC gates itself; a device
+     * integration needs none of this — its flash is fixed hardware.
+     * Envelope: CRC32(from)[4] | from_size | zz(to_size-from_size)
      * | [zz(fp_end-from_size) iff to_size>from_size] | range body | CRC32(to)[4]. */
-    uint32_t want_from_crc = blob[0]|(blob[1]<<8)|(blob[2]<<16)|((uint32_t)blob[3]<<24);
-    size_t p=4; int err=0;
-    uint32_t from_size=0,to_size=0,fp_end=0; { uint32_t v=0; int sh=0; uint8_t b;
+    size_t p=4; int err=(size_t)bsz<12;
+    uint32_t from_size=0,to_size=0; { uint32_t v=0; int sh=0; uint8_t b;
         do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
-    { uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else to_size=from_size-m; }
+    { uint32_t z=0; int sh=0; uint8_t b; do{ if(err||p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
+      if(err){} else if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size){err=1;} else to_size=from_size-m; }
       else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else to_size=from_size+d; } }
-    if(to_size>from_size){ uint32_t z=0; int sh=0; uint8_t b; do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);
-      if(z&1u){ uint32_t m=(z>>1)+1u; if(m>from_size || from_size-m>(64u<<20)){err=1;} else fp_end=from_size-m; }
-      else    { uint32_t d=z>>1;     if(d>(64u<<20) || from_size>(64u<<20)-d){err=1;} else fp_end=from_size+d; } }
     if(err){ fprintf(stderr,"bad header\n"); free(blob); return 1; }
-    if(from_size>(64u<<20) || to_size>(64u<<20)){ fprintf(stderr,"implausible size - rejected\n"); free(blob); return 1; }
-    size_t body_start=p; size_t body_end=bsz-4;
-    uint32_t want_to_crc = blob[bsz-4]|(blob[bsz-3]<<8)|(blob[bsz-2]<<16)|((uint32_t)blob[bsz-1]<<24);
+    if(from_size>(64u<<20)){ fprintf(stderr,"implausible size - rejected\n"); free(blob); return 1; }
 
     FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
     fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
     if((uint32_t)fsz!=from_size){ fprintf(stderr,"from_size mismatch (%ld vs %u)\n",fsz,from_size); fclose(mf); free(blob); return 1; }
-    g_image_span = from_size>to_size? from_size:to_size;
-    { uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);
+    { uint32_t span = from_size>to_size? from_size:to_size;
+      uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);
       if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
-      nvm_init(tmp,from_size,g_image_span); free(tmp); }
+      nvm_init(tmp,from_size,span); free(tmp); }
 
-    patch_apply_set(from_size,to_size,fp_end,to_size<=from_size);
-    if(crc32_flash(from_size)!=want_from_crc){ fprintf(stderr,"crc(from) mismatch - refusing\n"); fclose(mf); free(g_flash); free(blob); return 1; }
-
+    /* push the WHOLE blob; the decoder parses/gates the envelope internally */
     int rc=patch_apply_init();
-    size_t bi=body_start; long suspends=0;
-    while(bi<body_end && rc==PATCH_APPLY_NEED_MORE){ rc=patch_apply_push(blob[bi++]); if(rc==PATCH_APPLY_NEED_MORE) suspends++; }
-    if(rc==PATCH_APPLY_NEED_MORE) rc=patch_apply_finish();
-    else patch_apply_finish();
-    if(byte_mode){
-        if(suspends < (long)((body_end-body_start)/2)){
-            fprintf(stderr,"streaming check FAILED: only %ld suspends for %zu bytes\n",suspends,body_end-body_start);
+    size_t bi=0; long suspends=0;
+    while(bi<(size_t)bsz && rc==PATCH_APPLY_NEED_MORE){ rc=patch_apply_push(blob[bi++]); if(rc==PATCH_APPLY_NEED_MORE) suspends++; }
+    rc=patch_apply_finish();
+    if(byte_mode && rc==PATCH_APPLY_DONE){
+        if(suspends < (long)(bsz/2)){
+            fprintf(stderr,"streaming check FAILED: only %ld suspends for %ld bytes\n",suspends,bsz);
             fclose(mf); free(g_flash); free(blob); return 1;
         }
-        fprintf(stderr,"streaming OK: %ld suspends over %zu body bytes\n",suspends,body_end-body_start);
+        fprintf(stderr,"streaming OK: %ld suspends over %ld blob bytes\n",suspends,bsz);
     }
     if(rc==PATCH_APPLY_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%u: %s)\n", rj,
@@ -121,7 +114,6 @@ int main(int argc,char**argv){
 #ifdef RC_V3_BAKEDUMP
     { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(g_flash,1,to_size,f); fclose(f); } }
 #endif
-    if(crc32_flash(to_size)!=want_to_crc){ fprintf(stderr,"crc(to) mismatch - corrupt patch rejected\n"); fclose(mf); free(g_flash); free(blob); return 1; }
     if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
                 nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
@@ -133,7 +125,7 @@ int main(int argc,char**argv){
     if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",(unsigned)g_jpage[JPAGE_MAX],(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
-            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_image_span,(g_image_span+255)/256);
+            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_flash_n,(g_flash_n+255)/256);
     fclose(mf); free(blob);
     return 0;
 }

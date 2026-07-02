@@ -33,9 +33,9 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 BASE_FULL_TOTAL ?= 4199788
 BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
-BASE_ARM_TEXT ?= 5720
+BASE_ARM_TEXT ?= 6372
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10864
+BASE_ARM_BSS ?= 10928
 BASE_ARM_SOFT_DIV ?= 1
 
 .PHONY: all clean check check-arm check-assets check-malformed check-corpus gate

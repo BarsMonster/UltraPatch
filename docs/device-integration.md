@@ -4,30 +4,32 @@
 small and static-state driven so the Cortex-M0+ `.bss` gate remains meaningful.
 Treat it as a bootloader/update component, not as a general reentrant library.
 
+The decoder owns the whole patch blob: envelope parsing, both CRC gates, the
+apply direction, and the image span are all derived internally from the pushed
+bytes. The integrator does not parse the envelope and cannot get it wrong.
+
 ## Ownership
 
 Include `src/patch_apply.h` in exactly one translation unit. The header
 owns decoder static state, the byte FIFO, the coroutine stack, entropy models, the
 journal arena, and the output row cache.
 
-The target must provide:
+The target must provide exactly two flash primitives:
 
 ```c
 uint8_t flash_read(uint32_t addr);
-void flash_write(uint32_t addr, uint8_t value);
-uint32_t g_image_span;
+void    flash_write(uint32_t addr, uint8_t value);
 ```
 
-`g_image_span` must be `max(from_size, to_size)` for the patch being applied.
 `flash_read` must return the current byte at the image address. `flash_write`
-must implement the platform flash programming behavior. The decoder writes rows
-monotonically through its resident row buffer, so each row should be erased and
+must implement the platform flash programming behavior (program the byte,
+erasing its row first when a 0-to-1 transition requires it). The decoder writes
+rows monotonically through its resident row buffer, so each row is erased and
 programmed at most once for valid A1 patches.
 
 ## Patch Envelope
 
-The decoder consumes only the range-coded body. Production code must parse the
-outer envelope before calling the decoder:
+The blob layout (all of it is pushed through the decoder):
 
 ```text
 CRC32(from)[4]
@@ -38,6 +40,12 @@ range-coded body bytes
 CRC32(to)[4]
 ```
 
+The decoder verifies `CRC32(from)` against the current flash content BEFORE
+its first flash write (wrong or dirty current image rejects with flash
+untouched) and verifies `CRC32(to)` over the final image inside
+`patch_apply_finish()` — `PATCH_APPLY_DONE` is returned only after both gates
+pass. Header sizes above 64 MiB are rejected as implausible.
+
 CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
 delivery manifest and patch blob before any flash write is attempted.
@@ -45,15 +53,13 @@ delivery manifest and patch blob before any flash write is attempted.
 ## Call Sequence
 
 1. Authenticate the update envelope and reject rollback or wrong-target updates.
-2. Parse the envelope and verify `CRC32(from)` against the current image.
-3. Set `g_image_span = max(from_size, to_size)`.
-4. Call `patch_apply_set(from_size, to_size, fp_end, to_size <= from_size)`.
-5. Call `patch_apply_init()`.
-6. Feed each body byte with `patch_apply_push(byte)` until it returns
-   `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR`.
-7. After the last body byte, call `patch_apply_finish()` if the decoder still
-   needs input.
-8. Verify `CRC32(to)` over the final image before booting it.
+2. Call `patch_apply_init()`.
+3. Feed EVERY blob byte, in order, with `patch_apply_push(byte)`. It returns
+   `PATCH_APPLY_NEED_MORE` while streaming and `PATCH_APPLY_ERROR` on early
+   reject (stop feeding then).
+4. After the last blob byte, call `patch_apply_finish()` and use its return —
+   `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
+   image was written and `CRC32(to)` verified.
 
 The decoder status values are:
 
@@ -63,10 +69,14 @@ PATCH_APPLY_DONE
 PATCH_APPLY_ERROR
 ```
 
+On `ERROR`, `g_reject` distinguishes `REJ_RESOURCE` (a decoder resource cap was
+exceeded — this firmware needs a larger-sized build) from `REJ_CORRUPT`
+(malformed, truncated, or wrong-image patch).
+
 The API is single-instance, non-reentrant, and not thread-safe. Do not run two
-decoders concurrently in one image. Do not call `patch_apply_set` for a new patch
-until the previous patch has reached `DONE` or `ERROR` and the bootloader has
-chosen a recovery path.
+decoders concurrently in one image. Do not start a new patch until the previous
+patch has reached `DONE` or `ERROR` and the bootloader has chosen a recovery
+path.
 
 ## Build-Time Contract
 
@@ -91,5 +101,5 @@ or bootloader must be able to detect the interrupted state and recover by full
 reflash or another product-defined recovery path.
 
 The host wrapper in `src/patch_apply_demo.c` is a verification harness and NVM
-emulator. It is useful as a reference for envelope parsing and metrics, but it is
-not the device integration layer.
+emulator. It is useful as a reference for driving the push API and collecting
+NVM metrics, but it is not the device integration layer.

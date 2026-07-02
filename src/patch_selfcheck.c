@@ -29,7 +29,6 @@ static uint32_t sc_last_erow;
 static int sc_edir, sc_ecount;
 static long sc_finv;
 
-uint32_t g_image_span;
 uint8_t flash_read(uint32_t a) { return a < sc_flash_n ? sc_flash[a] : 0xFF; }
 void flash_write(uint32_t a, uint8_t v) {
     if (a >= sc_flash_n) return;
@@ -61,9 +60,6 @@ static int sc_uleb(const uint8_t *d, size_t n, size_t *p, uint32_t *out) {
     *out = v; return 0;
 }
 static int32_t sc_unzz(uint32_t z) { return (z & 1u) ? -(int32_t)((z >> 1) + 1u) : (int32_t)(z >> 1); }
-static uint32_t sc_u32le(const uint8_t *d) {
-    return (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
-}
 
 /* Verify that `blob` applies from -> to on the reference decoder.
  * Returns NULL on success, else a short static error message. */
@@ -71,9 +67,9 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
                          const uint8_t *to, size_t to_n)
 {
-    /* ---- envelope parse, cross-checked against the encoder's ground truth ---- */
+    /* ---- envelope cross-check against the encoder's ground truth (the decoder performs
+     * its own authoritative parse; this validates the fields were EMITTED correctly) ---- */
     if (blob_n < 12) return "blob too short";
-    uint32_t want_from_crc = sc_u32le(blob);
     size_t p = 4;
     uint32_t from_size, zz;
     if (sc_uleb(blob, blob_n, &p, &from_size)) return "bad from_size uleb";
@@ -82,16 +78,12 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     int64_t to_size_s = (int64_t)from_size + sc_unzz(zz);
     if (to_size_s < 0 || to_size_s != (int64_t)to_n) return "header to_size != actual to size";
     uint32_t to_size = (uint32_t)to_size_s;
-    uint32_t fp_end = 0;
     if (to_size > from_size) {
         if (sc_uleb(blob, blob_n, &p, &zz)) return "bad fp_end delta uleb";
         int64_t fpe = (int64_t)from_size + sc_unzz(zz);
-        if (fpe < 0 || fpe > (int64_t)from_size) return "header fp_end out of range";
-        fp_end = (uint32_t)fpe;
+        if (fpe < 0) return "header fp_end out of range";
     }
     if (blob_n < p || blob_n - p < 4) return "no room for CRC32(to) trailer";
-    size_t body_start = p, body_end = blob_n - 4;
-    uint32_t want_to_crc = sc_u32le(blob + blob_n - 4);
 
     /* ---- fresh emulator: flash = from image, padded to span with 0xFF ---- */
     uint32_t span = from_size > to_size ? from_size : to_size;
@@ -104,23 +96,19 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     if (span > from_n) memset(sc_flash + from_n, 0xFF, span - from_n);
     sc_flash_n = span;
     sc_last_erow = 0; sc_edir = 0; sc_ecount = 0; sc_finv = 0;
-    g_image_span = span;
 
-    if (crc32_flash(from_size) != want_from_crc) return "CRC32(from) header mismatch";
-
-    /* ---- run the reference decoder over the body ---- */
-    patch_apply_set(from_size, to_size, fp_end, to_size <= from_size);
+    /* ---- run the reference decoder over the WHOLE blob (it parses the envelope and
+     * gates on both CRCs itself; DONE implies CRC32(from) and CRC32(to) both verified) ---- */
     int rc = patch_apply_init();
-    size_t bi = body_start;
-    while (bi < body_end && rc == PATCH_APPLY_NEED_MORE) rc = patch_apply_push(blob[bi++]);
-    if (rc == PATCH_APPLY_NEED_MORE) rc = patch_apply_finish();
+    size_t bi = 0;
+    while (bi < blob_n && rc == PATCH_APPLY_NEED_MORE) rc = patch_apply_push(blob[bi++]);
+    rc = patch_apply_finish();
     if (rc != PATCH_APPLY_DONE)
         return g_reject == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
                                         : "reference decoder rejected the patch";
-    if (bi != body_end) return "decoder finished before consuming the whole body";
+    if (bi != blob_n) return "decoder errored before consuming the whole blob";
 
-    /* ---- exact output + trailer CRC + NVM write-safety ---- */
-    if (crc32_flash(to_size) != want_to_crc) return "CRC32(to) trailer mismatch";
+    /* ---- exact output + NVM write-safety ---- */
     if (to_n && memcmp(sc_flash, to, to_n) != 0) return "decoded image differs from target";
     for (uint32_t r = 0; r < sc_nrows; r++)
         if (sc_erasecnt[r] > 1) return "NVM row erased more than once (write amplification)";
