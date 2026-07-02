@@ -2076,17 +2076,29 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
     uint32_t maxrun = 1024;
     uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
     Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
+    /* litbits prefix sums + span ends restricted to candidate positions (same argument as
+     * lz_parse_priced: spans ending in a literal desert fold into a longer span). */
+    uint64_t *lsum = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+    lsum[0] = 0;
+    for (size_t i = 0; i < n; i++) lsum[i + 1] = lsum[i] + litbits[i];
+    size_t *ntok = (size_t *)xmalloc((n + 2) * sizeof(size_t));
+    ntok[n] = n; ntok[n + 1] = n;
+    for (size_t j = n; j-- > 0;) ntok[j] = ncand[j] ? j : ntok[j + 1];
     const uint64_t INF = UINT64_MAX / 4;
     cost[n] = 0;
     for (size_t ri = n; ri-- > 0;) {
         uint64_t best = INF;
         Token bt = {0};
-        uint64_t runbits = 0;
         size_t lim = n < ri + maxrun ? n : ri + maxrun;
-        for (size_t j = ri + 1; j <= lim; j++) {
-            runbits += litbits[j - 1];
-            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + runbits + cost[j];
+        size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
+        for (size_t j = ri + 1; j <= dense_end; j++) {
+            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + (lsum[j] - lsum[ri]) + cost[j];
             if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+        }
+        for (size_t j = ntok[dense_end + 1]; j <= lim; j = ntok[j + 1]) {
+            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + (lsum[j] - lsum[ri]) + cost[j];
+            if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+            if (j >= n) break;
         }
         for (int ci = 0; ci < ncand[ri]; ci++) {
             int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
@@ -2105,7 +2117,7 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
         tok_push(&tv, t);
         i += (size_t)t.len;
     }
-    free(cost); free(nxt);
+    free(cost); free(nxt); free(lsum); free(ntok);
     return tv;
 }
 
@@ -2186,6 +2198,12 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
      * arrives with the rep a downstream match wants can beat the cheapest-cost path that does not.
      * Keeping the two cheapest distinct-rep arrivals lets the forward DP exploit that. State index
      * s = (i*4 + h)*2 + r. Encoder-only; the chosen parse is re-checked by the exact byte gate. */
+    /* span ends only matter where a token can START (or at the content end): spans ending in a
+     * literal desert fold into a longer span (merge_adjacent_spans keeps the wire identical, the
+     * DP merely prices long spans as several). next_tok[j] = first j' >= j with candidates. */
+    size_t *next_tok = (size_t *)xmalloc((n + 2) * sizeof(size_t));
+    next_tok[n] = n; next_tok[n + 1] = n;
+    for (size_t j = n; j-- > 0;) next_tok[j] = (ncand[j] || nocand[j]) ? j : next_tok[j + 1];
     size_t nh = (n + 1) * 4;
     size_t ns = nh * 2;
     uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
@@ -2195,7 +2213,26 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor (h<<1|r) for backtrack */
     for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; pl[s] = 0; }
     cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0, r=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
+    int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];
     for (size_t i = 0; i < n; i++) {
+        /* len-ascending candidate ranges with suffix-min distance price: for lengths in
+         * (len[k-1], len[k]] the cheapest eligible candidate is the suffix argmin, so each
+         * length is relaxed ONCE per state instead of once per candidate. Distance-reuse
+         * (rep0) pricing is fully covered by the explicit rep probe below, so the candidate
+         * loop prices fresh only. State-independent; computed once per position. */
+        int nc = ncand[i];
+        for (int k = 0; k < nc; k++) {
+            int32_t lk = cands[i][k].len, dk2 = cands[i][k].dist;
+            int at = k;
+            while (at > 0 && ord_len[at - 1] > lk) { ord_len[at] = ord_len[at - 1]; ord_dist[at] = ord_dist[at - 1]; at--; }
+            ord_len[at] = lk; ord_dist[at] = dk2;
+        }
+        for (int k = nc; k-- > 0;) {
+            uint32_t dp2 = dpr[ord_dist[k]];
+            if (k + 1 < nc && ord_dpr[k + 1] < dp2) { ord_dpr[k] = ord_dpr[k + 1]; ord_dist[k] = ord_dist[k + 1]; }
+            else ord_dpr[k] = dp2;
+        }
+        int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
         for (int hr = 0; hr < 8; hr++) {
             int h = hr >> 1;
             size_t si = (i * 4 + (size_t)h) * 2 + (size_t)(hr & 1);
@@ -2213,29 +2250,42 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
             size_t lim = n < i + maxrun ? n : i + maxrun;
             uint8_t first = content[i];
             uint64_t firstbits = tags[i] ? pt->lit1[first] : pt->lit0[LIT0_SEL(pl[si])][first];
-            for (size_t j = i + 1; j <= lim; j++) {
+            size_t dense_end = i + 8 < lim ? i + 8 : lim;
+            for (size_t j = i + 1; j <= dense_end; j++) {
                 uint64_t runbits = firstbits + span_lit[j] - span_lit[i + 1];
                 uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
                 size_t jb = (j * 4 + (size_t)hs) * 2;
                 relax2(cost, rep, pl, via, vh, jb, c, ri, content[j - 1],
                        (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
             }
+            for (size_t j = next_tok[dense_end + 1]; j <= lim; j = next_tok[j + 1]) {
+                uint64_t runbits = firstbits + span_lit[j] - span_lit[i + 1];
+                uint64_t c = span_base + (uint64_t)slen[j - i] + runbits;
+                size_t jb = (j * 4 + (size_t)hs) * 2;
+                relax2(cost, rep, pl, via, vh, jb, c, ri, content[j - 1],
+                       (Token){ 'S', (int32_t)i, (int32_t)(j - i), 0 }, (uint8_t)hr);
+                if (j >= n) break;
+            }
             /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
              * distance equals the incoming rep distance. A match does not emit a literal, so prevlit
              * is carried through unchanged. New flag history after a match: h' = (h<<1|1)&3. */
             int hm = ((h << 1) | 1) & 3;
-            for (int cix = 0; cix < ncand[i]; cix++) {
-                int32_t bd = cands[i][cix].dist, bl = cands[i][cix].len;
-                uint64_t dext = (bd == ri) ? reuse_extra[h] : (fresh_extra[h] + dpr[bd]);
-                uint64_t mbase = ci + dext;
-                for (int32_t l = 3; l <= bl; l++) {
+            { int32_t prevl = 2;
+              uint64_t fbase = ci + fresh_extra[h];
+              for (int k = 0; k < nc; k++) {
+                int32_t lk = ord_len[k];
+                if (lk <= prevl) continue;
+                int32_t bd = ord_dist[k];
+                uint64_t mbase = fbase + ord_dpr[k];
+                for (int32_t l = prevl + 1; l <= lk; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = mbase + mlen[l];
                     size_t jb = (j * 4 + (size_t)hm) * 2;
                     relax2(cost, rep, pl, via, vh, jb, c, bd, pl[si],
                            (Token){ 'R', (int32_t)i, l, bd }, (uint8_t)hr);
                 }
-            }
+                prevl = lk;
+              } }
             /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
              * The rep distance is carried through unchanged (out-matches do not set last_dist). */
             for (int cix = 0; cix < nocand[i]; cix++) {
@@ -2256,9 +2306,15 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
              * content so the DP can extend the previous distance for one cheap flag bit (len>=3 like the
              * wire; the chosen parse is re-checked by encode_body's exact full-body byte gate). */
             if (ri > 0 && (size_t)ri <= i) {
-                size_t src = i - (size_t)ri;
-                size_t rl = 0, rlim = lim - i;     /* same maxrun cap as spans (lim from the span block) */
-                while (rl < rlim && content[src + rl] == content[i + rl]) rl++;
+                size_t rl;
+                if (ri == probe_ri) rl = probe_rl;
+                else {
+                    size_t src = i - (size_t)ri;
+                    size_t rlim = lim - i;         /* same maxrun cap as spans (lim from the span block) */
+                    rl = 0;
+                    while (rl < rlim && content[src + rl] == content[i + rl]) rl++;
+                    probe_ri = ri; probe_rl = rl;
+                }
                 for (size_t l = 3; l <= rl; l++) {
                     size_t j = i + l;
                     uint64_t c = ci + reuse_extra[h] + mlen[l];
@@ -2284,7 +2340,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(olen); free(dpr); free(span_lit);
+    free(cost); free(rep); free(pl); free(via); free(vh); free(slen); free(mlen); free(olen); free(dpr); free(span_lit); free(next_tok);
     return tv;
 }
 
