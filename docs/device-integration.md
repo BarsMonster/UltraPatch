@@ -59,6 +59,17 @@ UART/BLE buffer internally) or 0 at end-of-blob, and call
 caller's stack: no coroutine, no fiber stack, no platform context-switch code,
 and ~640 B less `.bss`.
 
+```c
+/* return 1 and write one blob byte to *out; return 0 at end-of-blob.
+ * May block internally (e.g. wait on a UART ring buffer) before returning. */
+int next_byte(void *ctx, uint8_t *out);
+
+int rc = patch_apply_run(next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
+```
+
+`src/patch_apply_demo.c` (`PullCtx` / `pull_next`) is a minimal reference
+implementation of the callback.
+
 **PUSH mode (default) — for event-driven producers.** Bytes are fed from the
 outside; the decoder suspends on a private coroutine stack while waiting. The
 platform must supply the context switch: `CO_SWAP_TO_MAIN`/`CO_SWAP_TO_DEC`
