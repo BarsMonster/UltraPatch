@@ -31,7 +31,10 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #ifndef DR_KCAP_EX
 #define DR_KCAP_EX 128
 #endif
-#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
+/* Per-patch model-seed tables; index 0 is the legacy default. MUST match patch_apply (bit-exact wire). */
+static const uint16_t SEED_HIT[4]  = {576, 1536, 2560, 3328};
+static const uint16_t SEED_IDX[4]  = {2816, 1536, 2048, 3328};
+static const uint16_t SEED_REP0[4] = {3072, 2048, 2560, 3584};
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
 
@@ -2096,8 +2099,8 @@ static void bv_encode(BVE *v, REnc *r, int64_t x) {
     buf_free(&tmp);
 }
 
-static void dr_init_e(DRE *d, int64_t *dic, int cap) {
-    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->last = 0; d->rh = 0; d->hit = DR_HIT_INIT;
+static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
+    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->last = 0; d->rh = 0; d->hit = hitseed;
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
@@ -2167,7 +2170,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
 static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
-                     const size_t *ends, const InjVec *inj) {
+                     const size_t *ends, const InjVec *inj, const int sel[3]) {
     Models M;
     memset(&M, 0, sizeof(M));
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
@@ -2188,13 +2191,16 @@ static Buf emit_body(const TokenVec *seq, int kd, const OpVec *ops, int FWD,
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, 6);
     ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match patch_apply */
-    idx_init_e(&M.diex, (uint16_t)2816u);
-    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
-    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
-    M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
+    idx_init_e(&M.dibl, SEED_IDX[sel[1]]);
+    idx_init_e(&M.diex, SEED_IDX[sel[1]]);
+    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, SEED_HIT[sel[0]]);
+    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, SEED_HIT[sel[0]]);
+    M.rep0[0] = M.rep0[1] = SEED_REP0[sel[2]]; M.rep0h = 0; M.last_dist = 0;
     REnc rc;
     re_init(&rc);
+    /* per-patch seed selection: 1-bit escape, then 3x2 raw bits (mirror patch_apply decode_body). */
+    if (sel[0] == 0 && sel[1] == 0 && sel[2] == 0) re_raw(&rc, 0);
+    else { re_raw(&rc, 1); put_raw_bits(&rc, (uint32_t)sel[0], 2); put_raw_bits(&rc, (uint32_t)sel[1], 2); put_raw_bits(&rc, (uint32_t)sel[2], 2); }
     ug_encode(&M.gd, &rc, (uint32_t)seq->n);
     M.gd.k = (uint8_t)kd;
     put_raw_bits(&rc, (uint32_t)kd, 4);
@@ -2260,6 +2266,8 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
     for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
     int kd = 0;
+    static const int SEL_LEGACY[3] = {0, 0, 0};
+    int best_sel[3] = {0, 0, 0};
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, content.n, litbits, W, &kd, &cands, &ncand);
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
@@ -2279,7 +2287,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+        Buf cur_body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
         size_t cur_bytes = cur_body.n; buf_free(&cur_body);
         for (int pass = 0; pass < 16; pass++) {
             PriceTab pt;
@@ -2287,7 +2295,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
             TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, &pt, W);
             int nk = fit_k_tokens(&cand_seq);
             merge_adjacent_spans(&cand_seq);
-            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+            Buf cand_body = emit_body(&cand_seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
             size_t cand_bytes = cand_body.n; buf_free(&cand_body);
             if (cand_bytes < cur_bytes) {
                 free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk;
@@ -2302,15 +2310,26 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
          * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+                Buf b = emit_body(&seq, nk, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, SEL_LEGACY);
                 size_t bb = b.n; buf_free(&b);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
                 else break;
             }
         }
+        /* per-patch seed brute force: the parse/kd are fixed; try every non-legacy seed combo under
+         * the exact byte gate. Legacy (cur_bytes) wins ties, so shipping tuned seeds can only help. */
+        { int sel[3];
+          for (sel[0] = 0; sel[0] < 4; sel[0]++)
+            for (sel[1] = 0; sel[1] < 4; sel[1]++)
+              for (sel[2] = 0; sel[2] < 4; sel[2]++) {
+                if (!sel[0] && !sel[1] && !sel[2]) continue;
+                Buf b = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, sel);
+                size_t bb = b.n; buf_free(&b);
+                if (bb < cur_bytes) { cur_bytes = bb; memcpy(best_sel, sel, sizeof(best_sel)); }
+              } }
     }
     free(cands); free(ncand);
-    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj);
+    Buf body = emit_body(&seq, kd, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, best_sel);
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;

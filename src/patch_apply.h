@@ -345,9 +345,6 @@ typedef struct {
     uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
-#define DR_HIT_INIT 576u              /* zero-seeded MTF dict makes hit-bit==1 likely; 576 is the
-                                       * corpus optimum that still holds the one-face revert at 582
-                                       * (higher seeds nick it to 583). Must match patch_generate. */
 
 #ifndef JSLOTS
 #define JSLOTS 904u                          /* packed journal capacity; corpus peak is 625, and the cap
@@ -540,10 +537,10 @@ static DRStream DR_BL, DR_EX;      /* the two streamed-delta MTF states (residen
 /* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
 static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=v&0xff; out[1]=(v>>8)&0xff; out[2]=(v>>16)&0xff; out[3]=(v>>24)&0xff; }
 
-static void dr_init(DRStream*d, int32_t*dic){
+static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
     d->K=1; dic[0]=0;
     for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
-    d->rh=0; d->hit=DR_HIT_INIT;
+    d->rh=0; d->hit=hitseed;
 }
 /* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
@@ -922,13 +919,22 @@ static void decode_body(void){
     g_rcerr=0; g_reject=REJ_NONE;
     rc_init();
     orow_reset();
+    /* ---- per-patch model-seed selection: a 1-bit escape (0 => the legacy corpus-tuned defaults,
+     * costing one near-free raw bit), else 3x2 raw bits picking the MTF hit seed, the dict-index
+     * seed, and the rep0 seed from small tables. The encoder brute-forces the combos under its
+     * exact byte gate, so a patch only ships non-default seeds when they pay for themselves.
+     * Tables MUST match patch_generate SEED_HIT/SEED_IDX/SEED_REP0 (bit-exact wire). ---- */
+    uint16_t seed_hit=576u, seed_idx=2816u, seed_rep0=RC_REP0_INIT;
+    if(s_raw()){
+        static const uint16_t SH[4]={576,1536,2560,3328}, SI[4]={2816,1536,2048,3328},
+                              SR[4]={3072,2048,2560,3584};
+        seed_hit=SH[s_raw_bits(2)]; seed_idx=SI[s_raw_bits(2)]; seed_rep0=SR[s_raw_bits(2)];
+    }
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL); dr_init(&DR_EX, DR_DIC_EX);
-    idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); 2816 is the
-                                                          * corpus optimum holding one-face 582.
-                                                          * Mirror in patch_generate. */
+    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, seed_hit); dr_init(&DR_EX, DR_DIC_EX, seed_hit);
+    idx_init(&M_dibl, seed_idx); idx_init(&M_diex, seed_idx);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -948,7 +954,7 @@ static void decode_body(void){
       ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
                                  * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
       fl_init(&M_flag);
-      M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
+      M_rep0[0]=M_rep0[1]=seed_rep0; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_status=DEC_ERROR; goto done; }
       s->tok_left=nseq; s->tok_mode=0;
