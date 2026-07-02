@@ -1803,32 +1803,52 @@ static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
  * [olim[i], to_size) — everything above the op's output end is written. ---- */
 typedef struct { int32_t pos, len; } OCand;
 #define OC_MAX 4
-static void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim, int FWD,
-                           const uint8_t *to, size_t to_n,
+static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
+    int w = -1;                                    /* keep the OC_MAX longest */
+    for (int q = 0; q < *nc; q++) if (row[q].len < len) { w = q; break; }
+    if (*nc < OC_MAX) { row[*nc].pos = pos; row[*nc].len = len; (*nc)++; }
+    else if (w >= 0) { row[w].pos = pos; row[w].len = len; }
+}
+
+/* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for grow —
+ * grow content carries extras byte-REVERSED and the decoder replays in write direction). */
+static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_out, int32_t **prev_out) {
+    int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
+    for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
+    int32_t *prev = (int32_t *)xmalloc((src_n ? src_n : 1) * sizeof(int32_t));
+    if (FWD) {
+        for (size_t i = 0; i + 3 < src_n; i++) {
+            uint32_t key = (uint32_t)src[i] | ((uint32_t)src[i + 1] << 8) | ((uint32_t)src[i + 2] << 16);
+            prev[i] = head[key]; head[key] = (int32_t)i;
+        }
+    } else {
+        for (size_t i = 2; i < src_n; i++) {
+            uint32_t key = (uint32_t)src[i] | ((uint32_t)src[i - 1] << 8) | ((uint32_t)src[i - 2] << 16);
+            prev[i] = head[key]; head[key] = (int32_t)i;
+        }
+    }
+    *head_out = head; *prev_out = prev;
+}
+
+/* Out-match candidates from BOTH decode-time flash states:
+ *  NEW window (source `to`): FWD [0, olim[i]);      grow [olim[i], to_size)        — written output.
+ *  OLD window (source `frm`): FWD [olim2[i], from_size); grow [0, olim2[i])        — pristine flash
+ *    the frontier has not reached (out_read returns it verbatim). OLD regions DECAY as later ops
+ *    write, so OLD candidates are clipped to finish inside the op that starts them (ocap[i]). */
+static void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
+                           const uint32_t *olim2, const uint32_t *ocap, int FWD,
+                           const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
                            OCand (**oc_out)[OC_MAX], uint8_t **noc_out) {
     OCand (*oc)[OC_MAX] = (OCand (*)[OC_MAX])xcalloc(n ? n : 1, sizeof(OCand[OC_MAX]));
     uint8_t *noc = (uint8_t *)xcalloc(n ? n : 1, 1);
     if (to_n >= 4 && n >= 4) {
-        int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
-        for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
-        int32_t *prev = (int32_t *)xmalloc(to_n * sizeof(int32_t));
-        /* grow content carries extras byte-REVERSED (build_content emits them descending), and the
-         * decoder replays out-matches in write direction; index reversed trigrams for grow. */
-        if (FWD) {
-            for (size_t i = 0; i + 3 < to_n; i++) {
-                uint32_t key = (uint32_t)to[i] | ((uint32_t)to[i + 1] << 8) | ((uint32_t)to[i + 2] << 16);
-                prev[i] = head[key]; head[key] = (int32_t)i;
-            }
-        } else {
-            for (size_t i = 2; i < to_n; i++) {
-                uint32_t key = (uint32_t)to[i] | ((uint32_t)to[i - 1] << 8) | ((uint32_t)to[i - 2] << 16);
-                prev[i] = head[key]; head[key] = (int32_t)i;
-            }
-        }
+        int32_t *head, *prev, *fhead, *fprev;
+        oc_index(to, to_n, FWD, &head, &prev);
+        oc_index(frm, from_n, FWD, &fhead, &fprev);
         for (size_t i = 0; i + 4 <= n; i++) {
             uint32_t key = (uint32_t)content[i] | ((uint32_t)content[i + 1] << 8) | ((uint32_t)content[i + 2] << 16);
-            uint32_t lim = olim[i];
             int visits = 0;
+            uint32_t lim = olim[i];
             for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
                 size_t maxl;
                 if (FWD) {
@@ -1842,14 +1862,29 @@ static void out_candidates(const uint8_t *content, size_t n, const uint32_t *oli
                 size_t l = 0;
                 if (FWD) while (l < maxl && to[(size_t)pj + l] == content[i + l]) l++;
                 else     while (l < maxl && to[(size_t)pj - l] == content[i + l]) l++;
-                if (l < 4) continue;
-                int w = -1;                                    /* keep the OC_MAX longest */
-                for (int q = 0; q < noc[i]; q++) if (oc[i][q].len < (int32_t)l) { w = q; break; }
-                if (noc[i] < OC_MAX) { oc[i][noc[i]].pos = pj; oc[i][noc[i]].len = (int32_t)l; noc[i]++; }
-                else if (w >= 0) { oc[i][w].pos = pj; oc[i][w].len = (int32_t)l; }
+                if (l >= 4) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
+            }
+            uint32_t lim2 = olim2[i], cap = ocap[i];
+            if (cap < 4) continue;
+            visits = 0;
+            for (int32_t pj = fhead[key]; pj >= 0 && visits < 1024; pj = fprev[pj], visits++) {
+                size_t maxl;
+                if (FWD) {
+                    if ((uint32_t)pj < lim2) break;            /* below the OLD window: chain descends */
+                    maxl = from_n - (size_t)pj;
+                } else {
+                    if ((uint32_t)pj + 1 > lim2) continue;     /* run [pj-l+1, pj] must stay < lim2 */
+                    maxl = (size_t)pj + 1u;
+                }
+                if (maxl > n - i) maxl = n - i;
+                if (maxl > cap) maxl = cap;                    /* OLD tokens end inside their op */
+                size_t l = 0;
+                if (FWD) while (l < maxl && frm[(size_t)pj + l] == content[i + l]) l++;
+                else     while (l < maxl && frm[(size_t)pj - l] == content[i + l]) l++;
+                if (l >= 4) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
             }
         }
-        free(head); free(prev);
+        free(head); free(prev); free(fhead); free(fprev);
     }
     *oc_out = oc; *noc_out = noc;
 }
@@ -2722,20 +2757,29 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
      * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
     uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
+    uint32_t *olim2 = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
+    uint32_t *ocap = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
     { int32_t *tp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
       int32_t tpw = 0;
       for (size_t i = 0; i < ops->n; i++) { tp0s[i] = tpw; tpw += ops->v[i].diff_len + ops->v[i].extra_len; }
       size_t prev_end = 0;
       for (size_t step = 0; step < ops->n; step++) {
           size_t oi = FWD ? step : ops->n - 1 - step;
-          uint32_t lim = FWD ? (uint32_t)tp0s[oi]
-                             : (uint32_t)(tp0s[oi] + ops->v[oi].diff_len + ops->v[oi].extra_len);
-          for (size_t c = prev_end; c < ends[step]; c++) olim[c] = lim;
+          uint32_t tpe = (uint32_t)(tp0s[oi] + ops->v[oi].diff_len + ops->v[oi].extra_len);
+          uint32_t lim = FWD ? (uint32_t)tp0s[oi] : tpe;
+          /* OLD window edge: FWD [tp_end, from_size) stays pristine through this op; grow
+           * [0, min(tp0, from_size)) likewise (beyond from_size is erased/undefined flash). */
+          uint32_t lim2 = FWD ? tpe
+                              : ((uint32_t)tp0s[oi] < from_size ? (uint32_t)tp0s[oi] : from_size);
+          for (size_t c = prev_end; c < ends[step]; c++) {
+              olim[c] = lim; olim2[c] = lim2;
+              ocap[c] = (uint32_t)(ends[step] - c);          /* OLD tokens end inside their op */
+          }
           prev_end = ends[step];
       }
       free(tp0s); }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
-    out_candidates(content.d, content.n, olim, FWD, tob, to_size, &ocands, &nocand);
+    out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
     if (getenv("A1_OUT_DBG")) {
         size_t np = 0, nc = 0, maxl = 0;
         for (size_t i = 0; i < content.n; i++) { if (nocand[i]) np++; nc += nocand[i];
@@ -2842,7 +2886,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                          use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
-    free(olim); free(ocands); free(nocand);
+    free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
