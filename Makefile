@@ -23,7 +23,7 @@ CFLAGS += $(CFLAGS_EXTRA)
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 APPLY_HDR := src/patch_apply.h src/rc_models.h
 GEN_HDR := src/rc_models.h src/arm_cortex_m4.h
-ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c $(DIVSUF)
+ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
 
 FIXTURES ?= test-bench/fixtures
@@ -42,7 +42,7 @@ BASE_ARM_SOFT_DIV ?= 1
 
 all: hy_enc hy_dec
 
-hy_enc: $(ENC_SRCS) $(GEN_HDR)
+hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 hy_dec: $(DEC_SRCS) $(APPLY_HDR)

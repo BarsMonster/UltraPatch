@@ -21,6 +21,12 @@
 #include "arm_cortex_m4.h"
 #include "rc_models.h"
 
+/* patch_selfcheck.c: reference-decoder self-verification of an emitted blob.
+ * Returns NULL on success, else a short static error message. */
+extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
+                                const uint8_t *from, size_t from_n,
+                                const uint8_t *to, size_t to_n);
+
 int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 
 #ifndef PATHE_W
@@ -3034,6 +3040,13 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     if (body.n > 0 && body.d[0] == 0) { buf_write(&blob, body.d + 1, body.n - 1); }
     else { die("range-coder leading byte not 0 — wire invariant broken"); }
     buf_put_u32le(&blob, crc32_buf(to.d, to.n));
+    /* Self-verification (patch_selfcheck.c): apply the finished blob to `from` on the
+     * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
+     * exact `to` image plus clean NVM write-safety. hy_enc refuses to ship a patch it
+     * cannot prove applies. */
+    { const char *scerr = a1_selfcheck(blob.d, blob.n, from.d, from.n, to.d, to.n);
+      if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
+                   die("emitted patch failed reference-decoder self-verification"); } }
     write_file(blob_out, blob.d, blob.n);
     if (stats_on) {
         fprintf(stderr,
