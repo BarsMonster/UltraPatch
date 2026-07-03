@@ -114,7 +114,7 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     sc_flash = (uint8_t *)malloc(span ? span : 1);
     sc_erasecnt = (uint8_t *)calloc(sc_nrows ? sc_nrows : 1, 1);
     if (!sc_flash || !sc_erasecnt) return "selfcheck out of memory";
-    memcpy(sc_flash, from, from_n);
+    if (from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
     if (span > from_n) memset(sc_flash + from_n, 0xFF, span - from_n);
     sc_flash_n = span;
     sc_last_erow = 0; sc_edir = 0; sc_ecount = 0; sc_finv = 0;

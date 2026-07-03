@@ -111,7 +111,10 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 
-static void die(const char *msg) {
+/* noreturn: lets the reader AND -fanalyzer know an allocation/parse failure terminates the
+ * process, so the `if (!p) die(...); return p;` allocator wrappers below provably never return
+ * NULL (without this the analyzer models a NULL return and reports spurious null-arg/OOB). */
+static __attribute__((noreturn)) void die(const char *msg) {
     fprintf(stderr, "patch_generate: %s\n", msg);
     exit(2);
 }
@@ -204,7 +207,9 @@ static Buf slurp(const char *path) {
     if (sz < 0) die("tell failed");
     if (fseek(f, 0, SEEK_SET)) die("seek failed");
     Buf b = {0};
-    buf_reserve(&b, (size_t)sz);
+    buf_reserve(&b, sz ? (size_t)sz : 1);   /* never leave b.d NULL: an empty image is a valid
+                                             * input, and from->d/to->d flow straight into memcpy/
+                                             * memcmp whose args are declared nonnull (0-len UB) */
     b.n = (size_t)sz;
     if (b.n && fread(b.d, 1, b.n, f) != b.n) die("read failed");
     fclose(f);
@@ -483,6 +488,18 @@ static uint32_t find_data_offset_in_bin(const Buf *elf, const Shdr *sh, const Bu
 
 static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     Buf e = slurp(elf_path);
+    /* -fanalyzer FALSE POSITIVES suppressed within this validated header/section-table parse only
+     * (checkers stay active for the rest of the function): the analyzer cannot see through slurp's
+     * allocator wrappers, so it models `e.d` as possibly-NULL at the memcmp (it is not: slurp always
+     * allocates >=1 byte and the `e.n < 52` guard short-circuits before the memcmp); and it cannot
+     * relate `sh = xcalloc(shnum, sizeof *sh)` to the `i < shnum` loop, so it reports the in-bounds
+     * `sh[i]` field stores as heap overflow. Verified by construction + the ASan encoder-fuzz
+     * campaign (hostile/truncated/oversized ELFs: clean die() or round-trip, zero ASan reports). */
+#if defined(__GNUC__) && !defined(__clang__)   /* -Wanalyzer-* is gcc-only; clang -Werror rejects it */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-null-argument"
+#pragma GCC diagnostic ignored "-Wanalyzer-out-of-bounds"
+#endif
     if (e.n < 52 || memcmp(e.d, "\177" "ELF", 4) || e.d[4] != 1 || e.d[5] != 1) die("expected ELF32 little-endian");
     uint32_t shoff = rd32le(e.d + 32);
     uint16_t shentsize = rd16le(e.d + 46), shnum = rd16le(e.d + 48);
@@ -497,6 +514,9 @@ static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which
         sh[i].link = rd32le(p + 24);
         sh[i].entsize = rd32le(p + 36);
     }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
     SymVec syms = {0};
     for (uint16_t si = 0; si < shnum; si++) {
         if (sh[si].type != 2 || sh[si].entsize < 16 ||
@@ -731,8 +751,10 @@ enum { A1_EMIT_WIDE = 1 };
 
 static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                                Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
-    from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n; memcpy(from_mut->d, from->d, from->n);
-    to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n; memcpy(to_mut->d, to->d, to->n);
+    from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
+    if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
+    to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
+    if (to->n) memcpy(to_mut->d, to->d, to->n);
     m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
     if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
                           fr->code_begin, fr->code_end, A1_EMIT_WIDE, A1_EMIT_WIDE, fs)) die("from disassemble failed");
@@ -1036,9 +1058,12 @@ static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_
     if (kind == EV_BL) {
         uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
         uint32_t T = fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
-        pred = (smap_at_e(mb, mv, mn, fpk) - smap_at_e(mb, mv, mn, T)) / 2;
+        /* mod-2^32 subtract then /2, bit-identical to the decoder's smap_at recombination
+         * (patch_apply.h): a corrupt/degenerate map can make a shift INT32_MIN, so the signed
+         * form would be UB — the unsigned wrap is both defined and the exact wire semantics. */
+        pred = (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fpk) - (uint32_t)smap_at_e(mb, mv, mn, T)) / 2;
     } else {
-        pred = -smap_at_e(mb, mv, mn, u32le_at(frm + fpk));
+        pred = (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, u32le_at(frm + fpk)));
     }
     return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
 }
@@ -1082,9 +1107,12 @@ typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
 static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const FieldKey *fk, size_t nfk) {
     size_t hits = 0;
     for (size_t i = 0; i < nfk; i++) {
+        /* mod-2^32 arithmetic mirrors field_residual / the decoder's smap_at (a degenerate
+         * map value can be INT32_MIN; the signed subtract/negate would be UB, the unsigned
+         * wrap is defined and is the exact wire semantics). */
         int32_t pred = fk[i].kind == EV_BL
-            ? (smap_at_e(mb, mv, mn, fk[i].k1) - smap_at_e(mb, mv, mn, fk[i].k2)) / 2
-            : -smap_at_e(mb, mv, mn, fk[i].k2);
+            ? (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fk[i].k1) - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2)) / 2
+            : (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2));
         if (pred == fk[i].need) hits++;
     }
     return hits;
