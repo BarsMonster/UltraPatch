@@ -53,9 +53,24 @@ BASE_ARM_SOFT_DIV ?= 1
 # which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
-.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
+# ---- hard 60 s execution cap on EVERY public target ---------------------------------
+# Owner rule: we do not throw compute just for fun — an operation that cannot finish in
+# 60 s gets fixed or deleted, not waited for. Each public name is a thin cap over its
+# *-internal twin: coreutils `timeout` bounds the whole subtree (it runs the child in
+# its own process group, so backgrounded gate legs die with it) and an overrun reports
+# an explicit error instead of a bare status 124. One-off override (never commit a
+# longer default): A1_TIMEOUT=<secs> make <target>.
+A1_TIMEOUT ?= 60
+CAPPED := all check check-arm check-stack check-stack-qemu check-assets \
+          check-malformed check-corpus check-edge check-degrade check-golden \
+          check-models golden-update gate fuzz check-encfuzz check-analyze clean
+.PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
+$(CAPPED): %:
+	@timeout $(A1_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
+	if [ $$s -eq 124 ]; then echo "Execution timelimit $(A1_TIMEOUT) exceeded" >&2; fi; \
+	exit $$s
 
-all: hy_enc hy_dec
+all-internal: hy_enc hy_dec
 
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
@@ -75,7 +90,7 @@ hy_enc_asan: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 hy_dec: $(DEC_SRCS) $(APPLY_HDR) $(ADAPTER_HDR)
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
 
-check: all
+check-internal: all-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -114,7 +129,7 @@ check: all
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad_to.blob" 1 >/dev/null 2>/dev/null; then echo "bad to CRC accepted"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"
 
-check-arm:
+check-arm-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -143,7 +158,7 @@ check-arm:
 # invalidate the static method. The bound EXCLUDES the integrator's externs (flash_read/
 # flash_write/byte-callback) and toolchain leaves (memmove/memset/__aeabi_uidiv); the ceiling's
 # headroom absorbs those + interrupt-frame slack. Same cross-gcc as check-arm.
-check-stack:
+check-stack-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -155,7 +170,7 @@ check-stack:
 	test -n "$$bound"; \
 	test "$$bound" -le "$(BASE_STACK_CEIL_O2)"
 
-check-assets:
+check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 
 # qemu-based decode validation REMOVED — permanent decision (owner, 2026-07-03): too slow
@@ -173,7 +188,7 @@ check-assets:
 # thousands -- i.e. the static call-graph method missed no deep/unbounded path. Informational
 # and STANDALONE (not in `make gate`, which pins the authoritative static bound); auto-skips
 # without the cross-gcc / qemu-user.
-check-stack-qemu: hy_enc
+check-stack-qemu-internal: hy_enc
 	@set -e; \
 	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
 		echo "stack_probe=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
@@ -193,13 +208,13 @@ check-stack-qemu: hy_enc
 		echo "stack_probe_highwater_$$o=$$hw (hosted ARMv7 Thumb -$$o, decode=DONE)"; \
 	done
 
-check-malformed: all
+check-malformed-internal: all-internal
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh 10
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
 # page-boundary/>384KiB-span pairs). hy_enc self-verifies every blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
-check-edge: all
+check-edge-internal: all-internal
 	@scripts/check_edge.sh 10
 
 # Degradation / direction / row-window / refusal gate: synthetic pairs that FORCE each encoder
@@ -207,16 +222,16 @@ check-edge: all
 # op-split, unnatural apply direction, row-window-oracle reliance, and clean refusal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
-check-degrade: all
+check-degrade-internal: all-internal
 	@scripts/check_degrade.sh 10
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
 # `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
-check-golden: hy_enc
+check-golden-internal: hy_enc
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check 10
 
-golden-update: hy_enc
+golden-update-internal: hy_enc
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update 10
 
 # Model-LEVEL encoder/decoder differential test. The golden gate proves the WHOLE wire is bit-exact
@@ -232,14 +247,14 @@ model_diff: $(MODEL_DIFF_SRCS) test/model_diff.h src/patch_generate.c $(APPLY_HD
 	$(CC) $(CFLAGS) -Itest -Wno-unused-function -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		$(MODEL_DIFF_SRCS) -o $@
 
-check-models: model_diff
+check-models-internal: model_diff
 	@./model_diff
 
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
 # It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
 # asserted here. Override parallelism with JOBS=N (defaults to nproc).
-check-corpus: all check-assets
+check-corpus-internal: all-internal check-assets-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -271,20 +286,20 @@ check-corpus: all check-assets
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
 # metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes
 # never race on a compile; legs run undisturbed even if sources change mid-gate.
-gate: all model_diff
+gate-internal: all-internal model_diff
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
 	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack + check-corpus..."; \
-	$(MAKE) --no-print-directory check-assets    >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
-	$(MAKE) --no-print-directory check           >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
-	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
-	$(MAKE) --no-print-directory check-edge      >"$$tmp/e.txt"         2>&1 & p_e=$$!; \
-	$(MAKE) --no-print-directory check-degrade   >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
-	$(MAKE) --no-print-directory check-golden    >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
-	$(MAKE) --no-print-directory check-models    >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
-	$(MAKE) --no-print-directory check-arm       >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
-	$(MAKE) --no-print-directory check-stack     >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
-	$(MAKE) --no-print-directory check-corpus    >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
+	$(MAKE) --no-print-directory check-assets-internal >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
+	$(MAKE) --no-print-directory check-internal >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
+	$(MAKE) --no-print-directory check-malformed-internal >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
+	$(MAKE) --no-print-directory check-edge-internal >"$$tmp/e.txt"         2>&1 & p_e=$$!; \
+	$(MAKE) --no-print-directory check-degrade-internal >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
+	$(MAKE) --no-print-directory check-golden-internal >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
+	$(MAKE) --no-print-directory check-models-internal >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
+	$(MAKE) --no-print-directory check-arm-internal >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
+	$(MAKE) --no-print-directory check-stack-internal >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
+	$(MAKE) --no-print-directory check-corpus-internal >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
 	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st $$p_m; do \
 		wait $$p || rc=1; \
 	done; \
@@ -330,13 +345,15 @@ gate: all model_diff
 # libFuzzer + ASan + UBSan harness over the decoder (fuzz/fuzz_apply.c).
 # `make fuzz` seeds the corpus with real encoded blobs and runs a short smoke; for a real
 # campaign run the binary directly, e.g.: ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
-FUZZ_TIME ?= 60
+# 50, not 60: the smoke campaign + corpus seeding run inside the public `fuzz` cap
+# (A1_TIMEOUT, 60 s wall) — the campaign must leave build/seeding headroom.
+FUZZ_TIME ?= 50
 fuzz_apply: fuzz/fuzz_apply.c $(APPLY_HDR)
 	clang -g -O1 -std=c99 -Wall -Wextra -Werror -DCORTEX_M0 \
 	  -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
 	  -Isrc fuzz/fuzz_apply.c -o $@
 
-fuzz: fuzz_apply hy_enc
+fuzz-internal: fuzz_apply hy_enc
 	@mkdir -p fuzz-corpus; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" fuzz-corpus/seed_grow.blob 10 >/dev/null; \
@@ -350,14 +367,14 @@ fuzz: fuzz_apply hy_enc
 # STANDALONE (needs clang + sanitizer runtime), so it is NOT wired into `make gate` — same policy
 # as `make fuzz`. Full campaign: `python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec`
 # (add `--large` for the 64K..300K scale/round-trip pass against the plain self-checking hy_enc).
-check-encfuzz: hy_enc_asan hy_dec
+check-encfuzz-internal: hy_enc_asan hy_dec
 	@python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec --smoke --timeout 30
 
 # Static-analysis leg: gcc -fanalyzer over BOTH first-party TUs (encoder + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
-check-analyze:
+check-analyze-internal:
 	@scripts/check_analyze.sh
 
-clean:
+clean-internal:
 	rm -f hy_enc hy_enc_asan hy_dec fuzz_apply model_diff
