@@ -700,13 +700,29 @@ static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *l
     for (size_t i = 0; i < n; i++) {
         if (i + 3 <= n) {
             uint32_t key = (uint32_t)data[i] | ((uint32_t)data[i+1] << 8) | ((uint32_t)data[i+2] << 16);
-            for (int32_t pj = head[key]; pj >= 0;) {
+            int32_t ml = (int32_t)((n - i) < (size_t)maxm ? (n - i) : (size_t)maxm);
+            int32_t lbest = 0;   /* longest len RETAINED at i (only lens >= 3 reach cands[i]) */
+            for (int32_t pj = head[key]; pj >= 0; pj = prev[pj]) {
                 int32_t dist = (int32_t)i - pj;
                 if (dist > win) break;
-                int32_t ml = (int32_t)((n - i) < (size_t)maxm ? (n - i) : (size_t)maxm), l = 0;
+                /* EXACT chain pruning — the candidate set is provably unchanged, because the
+                 * chain is walked in ascending dist order and cand_add drops any candidate
+                 * dominated by a retained one (dist <=, len >=):
+                 *   (a) probe data[.+lbest] first: a mismatch there bounds this entry at
+                 *       l <= lbest, dominated by the retained lbest candidate — skip the
+                 *       O(ml) extension. Sound while no capacity eviction has occurred
+                 *       (ncand < LZ_CAND_MAX: eviction could remove the dominator).
+                 *   (b) an entry that reaches the position cap ml dominates every later
+                 *       entry — stop the walk. This kills the constant-data blowup
+                 *       (dist=1 hits ml immediately: walk length 1, was ~window x ml). */
+                if (lbest > 0 && ncand[i] < LZ_CAND_MAX &&
+                    data[(size_t)pj + (size_t)lbest] != data[i + (size_t)lbest])
+                    continue;
+                int32_t l = 0;
                 while (l < ml && data[(size_t)pj + (size_t)l] == data[i + (size_t)l]) l++;
                 cand_add(cands[i], &ncand[i], (Cand){ dist, l });
-                pj = prev[pj];
+                if (l >= 3 && l > lbest) lbest = l;
+                if (l == ml) break;
             }
             prev[i] = head[key];
             head[key] = (int32_t)i;

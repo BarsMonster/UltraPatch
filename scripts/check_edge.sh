@@ -113,6 +113,12 @@ run_case equal
 mkpair fills; gen "$tmp/fills_from/watch.bin" 8192 const 0xFF; gen "$tmp/fills_to/watch.bin" 8192 const 0x00
 run_case fills
 
+# --- constant fill, 0x00 -> 0xFF: regression-locks the exact-equivalent LZ chain pruning
+# (this shape was ~18 s before the fix, ~2 s after; a quadratic regression would blow the
+# gate's 60 s execution cap) ---
+mkpair fills_grow; gen "$tmp/fills_grow_from/watch.bin" 8192 const 0x00; gen "$tmp/fills_grow_to/watch.bin" 8192 const 0xFF
+run_case fills_grow
+
 # --- incompressible random: near-identical and unrelated ---
 mkpair rand_mut; gen "$tmp/rand_mut_from/watch.bin" 65536 rand 33
 gen "$tmp/rand_mut_to/watch.bin" 0 mutate "$tmp/rand_mut_from/watch.bin" 34 10
