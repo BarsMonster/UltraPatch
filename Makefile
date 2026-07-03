@@ -53,7 +53,7 @@ BASE_ARM_SOFT_DIV ?= 1
 # which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
-.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-qemu check-qemu-spot check-edge check-degrade check-golden check-models golden-update gate gate-full fuzz check-encfuzz check-analyze
+.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-edge check-degrade check-golden check-models golden-update gate gate-full fuzz check-encfuzz check-analyze
 
 all: hy_enc hy_dec
 
@@ -158,24 +158,12 @@ check-stack:
 check-assets:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 
-# Executes the decoder as REAL Thumb-1 code (the Cortex-M0+ ISA subset) under qemu-arm
-# user-mode emulation — catches ARM-only behavior (unsigned-by-default char, alignment,
-# Thumb codegen) that the x86 host gates cannot. FULL matrix: all 256 corpus pairs, the
-# one-face grow/revert fixtures, and the two synthetic golden pins are host-encoded and
-# APPLIED under qemu-arm, byte-compared against the expected target (260 pairs, parallel
-# like check-corpus; ~1.5 min wall at 32 jobs), plus the pull-mode one-face round-trip
-# and corrupt-body reject the old sample-level check covered. Any failure names the
-# (from,to) pair. Auto-skips (successfully, with a message) when the cross-gcc or
-# qemu-arm is not installed, so foreign machines stay green. Parallelism: JOBS=N.
-check-qemu: hy_enc
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_qemu_matrix.sh 10 $(JOBS)
-
-# Fast qemu SPOT check for the dev gate: same harness in `spot` mode — drops ONLY the 256
-# corpus matrix pairs and keeps the one-face grow/revert, both synthetic pins, the pull-mode
-# one-face round-trip, and the corrupt-body reject, so the decoder still executes as real
-# Thumb-1 code every dev cycle. The full 260-pair matrix stays in check-qemu (gate-full).
-check-qemu-spot: hy_enc
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_qemu_matrix.sh 10 "$(JOBS)" spot
+# qemu-based decode validation REMOVED — permanent decision (owner, 2026-07-03): too slow
+# for its marginal value (the 260-pair matrix re-encoded every corpus pair just to apply it
+# under emulation; ~45 CPU-min per run). Host-vs-ARM divergence is systematic when it exists,
+# not pair-specific; the ARM cross-build + size/divide gate (check-arm) still compiles the
+# real Thumb-1 decoder every cycle, and a one-time 260-pair qemu study (db6d693) found ZERO
+# divergence. Do not reintroduce qemu legs into the gate.
 
 # Runtime cross-check for the static caller-stack bound (check-stack / scripts/stack_bound.py).
 # Runs a REAL decode under qemu-arm with the stack painted with a sentinel, then reports the
@@ -184,7 +172,7 @@ check-qemu-spot: hy_enc
 # full decode costs a few HUNDRED bytes of caller stack (same order as the static bound), never
 # thousands -- i.e. the static call-graph method missed no deep/unbounded path. Informational
 # and STANDALONE (not in `make gate`, which pins the authoritative static bound); auto-skips
-# without the cross-gcc / qemu-user, like check-qemu.
+# without the cross-gcc / qemu-user.
 check-stack-qemu: hy_enc
 	@set -e; \
 	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
@@ -278,20 +266,17 @@ check-corpus: all check-assets
 #    Builds up-front, then runs the independent fast legs CONCURRENTLY: check-assets, check
 #    (one-face grow/revert round-trip + BASE_ONEFACE_* size gates), check-malformed,
 #    check-edge, check-degrade, check-golden, check-models, check-arm (sizes + divide
-#    policy), check-stack, and check-qemu-spot (real Thumb-1 execution under qemu-arm,
-#    reduced pair set). Wall time ~= the slowest leg (check-edge), not the sum.
+#    policy), and check-stack. Wall time ~= the slowest leg, not the sum.
 #
 #  - `make gate-full` — the RELEASE gate, a STRICT SUPERSET of `gate`: every leg above plus
 #    the FULL 256-pair corpus matrix (corpus full_total vs BASE_FULL_TOTAL, NVM write-safety,
-#    journal peak — check-corpus) and the FULL 260-pair qemu-arm matrix (check-qemu). The
-#    heavy matrices run after the fast legs are launched, so wall time ~= check-qemu +
-#    check-corpus. MANDATORY before release and after any wire-affecting or
-#    encoder-output-affecting change (see AGENTS.md; the 256-pair better/worse judging
-#    rule lives here).
+#    journal peak — check-corpus), launched after the fast legs so wall time ~= check-corpus.
+#    MANDATORY before release and after any wire-affecting or encoder-output-affecting
+#    change (see AGENTS.md; the 256-pair better/worse judging rule lives here).
 #
 # Both print the single consolidated summary with every metric their legs track — ARM
 # .text/.data/.bss + divide policy, caller-stack bound, one-face grow/revert, golden wire,
-# model diff, degradation paths, qemu Thumb round-trip, and (gate-full) corpus full total,
+# model diff, degradation paths, and (gate-full) corpus full total,
 # matrix round-trips, NVM write-safety, journal peak. Exits nonzero if ANY gate fails, and
 # on failure dumps the raw blocks so the offending metric is visible. Binaries are built
 # BEFORE the legs fork, so concurrent sub-makes never race on a compile; legs run
@@ -303,9 +288,9 @@ gate gate-full: all model_diff
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
 	: > "$$tmp/m.txt"; \
 	if [ "$(GATE_MODE)" = full ]; then \
-		echo "running RELEASE gate (strict superset of dev gate): concurrent fast legs + full 260-pair qemu matrix + full 256-pair corpus matrix..."; \
+		echo "running RELEASE gate (strict superset of dev gate): concurrent fast legs + full 256-pair corpus matrix..."; \
 	else \
-		echo "running DEV gate (fast legs, concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack + qemu spot (full matrices: make gate-full)..."; \
+		echo "running DEV gate (fast legs, concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack (full matrix: make gate-full)..."; \
 	fi; \
 	$(MAKE) --no-print-directory check-assets    >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
 	$(MAKE) --no-print-directory check           >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
@@ -317,10 +302,7 @@ gate gate-full: all model_diff
 	$(MAKE) --no-print-directory check-arm       >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
 	$(MAKE) --no-print-directory check-stack     >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
 	if [ "$(GATE_MODE)" = full ]; then \
-		$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
 		$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
-	else \
-		$(MAKE) --no-print-directory check-qemu-spot >"$$tmp/q.txt" 2>&1 || rc=1; \
 	fi; \
 	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st; do \
 		wait $$p || rc=1; \
@@ -339,7 +321,6 @@ gate gate-full: all model_diff
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \
-	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
 	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/c.txt"; \
@@ -362,7 +343,6 @@ gate gate-full: all model_diff
 		echo "------------------ check-models ------------------"; cat "$$tmp/mdl.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
-		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
 		if [ -s "$$tmp/m.txt" ]; then \
 			echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
 		fi; \

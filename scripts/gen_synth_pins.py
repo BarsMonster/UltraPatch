@@ -4,7 +4,7 @@
 
 # Deterministic generator for the two SYNTHETIC wire-surface pin pairs (fixed-seed LCG,
 # the check_edge.sh technique) — no committed binaries. Shared by check_golden.sh (hash
-# pins) and check_qemu_matrix.sh (qemu-arm apply), so both legs see IDENTICAL pairs.
+# pins). (The qemu-arm apply leg that also consumed these pairs was removed 2026-07-03.)
 # Usage: gen_synth_pins.py <outdir>   (writes <outdir>/<name>_{from,to}/watch.bin)
 import os, sys
 root = sys.argv[1]
