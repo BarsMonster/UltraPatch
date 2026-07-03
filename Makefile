@@ -42,7 +42,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10904
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden golden-update gate fuzz
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz
 
 all: hy_enc hy_dec
 
@@ -169,6 +169,22 @@ check-golden: hy_enc
 golden-update: hy_enc
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update 10
 
+# Model-LEVEL encoder/decoder differential test. The golden gate proves the WHOLE wire is bit-exact
+# for the corpus-exercised symbol values; this proves each entropy-model PAIR is bit-exact across its
+# full value space in isolation, so a future mirror bug localizes to the exact model (not "some blob's
+# sha changed"). test/model_diff.c #includes the host encoder (src/patch_generate.c, no RC_V3_ENC_MAIN
+# => no main, wire untouched) and drives every ENCODER model; test/model_diff_dec.c #includes the REAL
+# decoder (src/patch_apply.h) unchanged and decodes with the mirror DECODER model. --gc-sections drops
+# the encoder's unused planner (and its divsufsort/arm deps), so the test links from just the two TUs.
+# Host-only, deterministic (fixed-seed LCG), wire-neutral, fast (<1 s).
+MODEL_DIFF_SRCS := test/model_diff.c test/model_diff_dec.c
+model_diff: $(MODEL_DIFF_SRCS) test/model_diff.h src/patch_generate.c $(APPLY_HDR) $(GEN_HDR)
+	$(CC) $(CFLAGS) -Itest -Wno-unused-function -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		$(MODEL_DIFF_SRCS) -o $@
+
+check-models: model_diff
+	@./model_diff
+
 # The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
 # check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
 # It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
@@ -211,6 +227,7 @@ gate: all
 	$(MAKE) --no-print-directory check-edge   >"$$tmp/e.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-degrade >"$$tmp/dg.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-golden >"$$tmp/g.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-models >"$$tmp/mdl.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
@@ -219,6 +236,7 @@ gate: all
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
+	sed -n 's/^model_diff=/model diff              : /p' "$$tmp/mdl.txt"; \
 	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_refusal=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s refuse=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
@@ -242,6 +260,7 @@ gate: all
 		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
 		echo "------------------ check-degrade ------------------"; cat "$$tmp/dg.txt"; \
 		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
+		echo "------------------ check-models ------------------"; cat "$$tmp/mdl.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
@@ -267,4 +286,4 @@ fuzz: fuzz_apply hy_enc
 	./fuzz_apply -max_total_time=$(FUZZ_TIME) -max_len=4096 -print_final_stats=1 fuzz-corpus
 
 clean:
-	rm -f hy_enc hy_dec fuzz_apply
+	rm -f hy_enc hy_dec fuzz_apply model_diff
