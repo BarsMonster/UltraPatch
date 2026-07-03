@@ -37,9 +37,18 @@ Every unreached branch was classified by hand; none is dead product logic:
 | Fuzzer-blind by harness design, covered by deterministic suites | `CRC32(from)` mismatch (982; harness force-fixes it), post-op error exit (1054) | Covered by `make check` / `check-malformed`. |
 | Data-dependent clamps never hit on real images | `lit_tree_from_hist` probability clamp (1070) | Correctness clamp; keep. |
 
-CBMC bounded proofs (stretch goal): skipped — cbmc not installed on this host.
-The kernels it would target (journal insert/search, bit-tree accessors,
-envelope readers) are fully covered by fuzz + suites above.
+CBMC bounded proofs (stretch goal): ABANDONED — permanent decision (2026-07-03).
+An attempt with per-kernel harnesses (journal insert/search, bit-tree accessors,
+envelope readers, Golomb/varint readers) was intractable in practice: without
+hand-pinned per-proof `--unwind` bounds CBMC saturation-unwinds the adaptive-unary
+loops (corrupt-stream cap `RC_RICE_UNARY_MAX` = 2^20) and bit-blasts symbolic
+range-coder state into a SAT instance that consumed >64 GB and repeatedly took
+the host down. Taming it (nondet-bit abstractions, cgroup-guarded runners,
+per-proof unwind tables) is real ongoing maintenance for kernels that are
+already covered by the 5M+-exec sanitized fuzz campaign, the model-level
+encoder/decoder differential tests (`make check-models`), and the deterministic
+suites. Cost/benefit negative — do not retry. Any future formal-methods attempt
+must run under a hard memory cap + timeout from the first invocation.
 
 Reproduce: `make fuzz` (smoke) or
 `./fuzz_apply -jobs=$(nproc) -max_total_time=3600 fuzz-corpus`; coverage via a
