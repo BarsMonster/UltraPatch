@@ -41,6 +41,7 @@
  * the ARM object emits no libgcc 64-bit (or float) helpers, only one 32-bit divide at init.
  */
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #ifdef HY_DBG
 #include <stdio.h>
@@ -77,10 +78,9 @@ static int      g_FWD;
 /* whatever 4 bytes remain in the ring at the end ARE the trailer.                         */
 /* ===================================================================================== */
 static void decode_body(void);
-/* may_alias: the literal-seed histograms overlay the unsigned-char ARENA as u32 words (see
- * the SAst comment); the attribute makes that overlay defined under any integrator's flags. */
-typedef uint32_t __attribute__((may_alias)) u32_a;
-static void lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w);
+/* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
+ * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
+static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
 static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring */
 enum {
     PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
@@ -342,25 +342,56 @@ typedef struct {
 #endif
 #define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (3072, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
-/* LZSS window W (defined here so SA_ARENA can size the apply phase). Default value in rc_models.h
+/* LZSS window W (defined here so SA can size the apply phase). Default value in rc_models.h
  * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder W arg MUST match this SA_W. */
 #ifndef SA_W
 #define SA_W RC_WINDOW_LOG_DEFAULT
 #endif
-/* HYBRID ARENA layout (apply phase): [journal JREGION][SA apply SA_ARENA]. The STREAMED-DELTA wire
- * holds NO resident per-detection store; the small MTF-dict streams (DR_BL/DR_EX), the M_dval
- * escape-value bit-tree, and the two index UGolombs are SEPARATE statics (~2.4 KB). Seed phase
- * (hist0/hist1/w = 4096 B) overlays ARENA front. */
-/* SA apply state = ring(2^W) + fixed correction arrays + the SA scalar/control fields. A1 derives
- * ldr positions per op and infers suppressed BL from `!pure`, so no ex/sbl offset buffers are
- * resident. The reservation is the two buffer caps (ring 2^W, op_corr 4*OPC_CAP) plus the non-buffer
- * fields: 8 u32 (ototal/tok_left/span_left/br_left/br_src/tp/fp/op_nc = 32 B) +
- * 2 u8 (tok_mode/err) struct-padded and rounded to 40 B to keep ARENA_BYTES 8-aligned. The
- * _Static_assert(sizeof(SA) <= SA_ARENA) below is the hard guard if a field is ever added. */
+#define SA_RING (1u<<SA_W)
+#define SA_MASK (SA_RING-1u)
+/* SA = the whole apply-phase working set (defined here so the ARENA union below can embed it as a
+ * real member): the LZSS content-history ring (2^W) + the count-bounded per-op correction array +
+ * the streaming scalars/cursors. A1 derives ldr positions per op and infers suppressed BL from
+ * `!pure`, so no ex/sbl offset buffers are resident. Accessed only as ARENA.apply.sab.sa, i.e.
+ * through its own type, so it needs no may_alias. */
+typedef struct {
+    uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
+    /* pauseable LZSS token replay state (pull-driven content producer) */
+    uint32_t tok_left;                            /* tokens remaining (token_count) */
+    uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
+    uint32_t o_src, o_left;                       /* out-match replay: absolute OUTPUT position */
+    int32_t tp, fp;                               /* running accumulators (apply order) */
+    /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
+     * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
+    uint32_t op_corr[OPC_CAP]; int32_t op_nc;
+    uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
+    uint8_t last_span;                            /* previous token was a span (flag implicit) */
+    uint8_t err;
+} SA;
+/* SA_ARENA: the hand-rounded byte RESERVATION for the apply-phase SA. Kept as the sab union's sized
+ * alternative below so the arena's total .bss is byte-stable regardless of sizeof(SA)'s tail padding
+ * (sizeof(SA) is a few bytes under this). ring 2^W + op_corr 4*OPC_CAP + 48 B for the scalars/cursors,
+ * chosen 8-aligned; the _Static_assert(sizeof(SA) <= SA_ARENA) below is the hard guard if a field grows. */
 #define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
-static unsigned char ARENA[ARENA_BYTES] __attribute__((aligned(8)));
-static uint8_t *const Jbuf = (uint8_t*)ARENA;        /* packed journal (apply phase): JSLOTS*3 bytes */
+/* One ARENA, two DISJOINT phase lifetimes overlaid as a union (standard C, no pointer casts):
+ *  - seed  (decode_header ONLY): the flash parity histograms hist0/hist1 + the 512-word scratch w
+ *           that lit_tree_from_hist folds into the M_lit* trees. Exactly 4096 B.
+ *  - apply (jr_reset onward): the packed journal jbuf (JREGION) then the SA working set.
+ * The seed phase completes INSIDE decode_header and its result is copied into the M_lit* statics
+ * before rc_init/jr_reset ever touch the apply member, so the two lifetimes never overlap. sab
+ * reserves SA_ARENA bytes (>= sizeof(SA)) so the union's size equals the old ARENA_BYTES exactly. */
+typedef union {
+    struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
+    struct { uint8_t jbuf[JREGION]; union { SA sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
+} Arena;
+static Arena ARENA __attribute__((aligned(8)));
+#define Jbuf (ARENA.apply.jbuf)                      /* packed journal (apply phase): JSLOTS*3 bytes */
+#define SAst (ARENA.apply.sab.sa)                    /* SA apply state (apply phase) */
+_Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reservation");
+_Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
+_Static_assert(offsetof(Arena, apply.sab.sa) == JREGION && (offsetof(Arena, apply.sab.sa) & 3u)==0u,
+               "SA must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
 /* page[p] = index of the first slot whose (pos>>16) >= p, for p in [0..JPAGE_MAX].  Since slots
  * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). Every journalled
  * pos is < g_image_span, so a pos with pos>>16 >= JPAGE_MAX exists only for out-of-corpus firmware
@@ -613,31 +644,8 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
 /* The LZSS ring (size 2^SA_W) is the content history; backref distances <= 2^SA_W.             */
 /* ===================================================================================== */
-#define SA_RING (1u<<SA_W)
-#define SA_MASK (SA_RING-1u)
-typedef struct __attribute__((may_alias)) {
-    uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
-    /* pauseable LZSS token replay state (pull-driven content producer) */
-    uint32_t tok_left;                            /* tokens remaining (token_count) */
-    uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
-    uint32_t o_src, o_left;                       /* out-match replay: absolute OUTPUT position */
-    int32_t tp, fp;                               /* running accumulators (apply order) */
-    /* per-op corrections (sorted by offset; cursor by binary search). count-bounded, NOT op-size.
-     * Packed as high 24 bits = op-local offset, low 8 bits = additive correction byte. */
-    uint32_t op_corr[OPC_CAP]; int32_t op_nc;
-    uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
-    uint8_t last_span;                            /* previous token was a span (flag implicit) */
-    uint8_t err;
-} SA;
-/* SA apply state overlaid in ARENA right after the journal (both live only in the apply phase).
- * ARENA is a declared unsigned-char array, so viewing it through SA / u32 pointer lvalues is
- * formally a strict-aliasing violation even though every compiler handles this backing-store
- * pattern; the may_alias typedefs make the overlay reads/writes DEFINED under any integrator's
- * flags (gcc/clang attribute; this header already requires the GNU dialect). */
-#define SAst (*(SA*)(void*)(ARENA + JREGION))
-_Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reservation");
-_Static_assert(4096u <= ARENA_BYTES, "seed scratch (hist0+hist1+w) exceeds ARENA");
-
+/* SA type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
+ * union (near JREGION), since the union embeds SA and reserves SA_ARENA bytes for it. */
 static int32_t bb_unzz(uint32_t u){
     if(u==0xffffffffu){ g_rcerr=1; return 0; }
     return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
@@ -1025,9 +1033,7 @@ static int __attribute__((noinline)) decode_header(void){
     g_from_size=fs; g_to_size=ts; g_fp_end=fpe;
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
-    { u32_a *hist0=(u32_a*)(void*)ARENA;           /* [0..256)   */
-      u32_a *hist1=hist0+256;                      /* [256..512) */
-      u32_a *w=hist1+256;                          /* [512..1024) -> 4 KiB total, fits ARENA */
+    { uint32_t *hist0=ARENA.seed.hist0, *hist1=ARENA.seed.hist1, *w=ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
@@ -1106,7 +1112,7 @@ done:
 /* ===================================================================================== */
 /* public API: patch_apply_run(callback, ctx) -> DONE / ERROR                              */
 /* ===================================================================================== */
-static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const u32_a*hist,u32_a*w){
+static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
     for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
