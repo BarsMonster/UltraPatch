@@ -38,7 +38,18 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
     size_t best_tot = 0;
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
-    for (int dir = 0; dir < 2; dir++) {              /* 0 = ascending (FWD), 1 = descending */
+    /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
+     * the unnatural direction is swept ONLY when the natural winner engaged journal-budget
+     * degradation or no natural plan was feasible. Measured separator (foreign study +
+     * home corpus): every pair that ever preferred the flip also degraded in the natural
+     * direction (insertion shifts journal-overflow ascending), while home pairs never
+     * degrade — so pruning halves encode time with byte-identical home output. A clean
+     * natural winner that would still lose to the flip is unobserved in any corpus; if one
+     * exists, the cost is a slightly larger blob, never a bad one. */
+    int natdir = (to_size > from_size) ? 1 : 0;
+    for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
+        int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
+        if (pass && bestv >= 0 && !st.deg_engaged) break;
         g_enc_fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0; EncStats stv = {0};
