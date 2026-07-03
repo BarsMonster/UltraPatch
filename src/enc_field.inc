@@ -462,33 +462,6 @@ static uint64_t uleb_proxy_bits(uint32_t v, const uint8_t L0[256]) {
     }
 }
 
-static uint64_t diff_proxy_bits(const Op *o, int32_t begin, int32_t end,
-                                int FWD, const uint8_t L0[256]) {
-    int32_t dl = end - begin;
-    uint32_t nlit = 0;
-    uint64_t bits = 0;
-    for (int32_t k = begin; k < end; k++) nlit += o->diff[k] != 0;
-    bits += uleb_proxy_bits(nlit, L0);
-    if (FWD) {
-        int32_t prev = 0;
-        for (int32_t k = begin; k < end; k++) if (o->diff[k]) {
-            int32_t loc = k - begin;
-            bits += uleb_proxy_bits((uint32_t)(loc - prev), L0);
-            bits += L0[o->diff[k]];
-            prev = loc;
-        }
-    } else {
-        int32_t prev = dl;
-        for (int32_t k = end; k-- > begin;) if (o->diff[k]) {
-            int32_t loc = k - begin;
-            bits += uleb_proxy_bits((uint32_t)(prev - loc), L0);
-            bits += L0[o->diff[k]];
-            prev = loc;
-        }
-    }
-    return bits;
-}
-
 static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
                                  const uint8_t L0[256], const uint8_t L1[256]) {
     uint64_t bits = 0;
@@ -496,19 +469,6 @@ static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
         const uint8_t *L = ((abs_begin + i) & 1) ? L1 : L0;
         bits += L[to->d[(size_t)abs_begin + (size_t)i]];
     }
-    return bits;
-}
-
-static uint64_t op_proxy_bits(const Op *o, const Buf *to, int32_t tp0,
-                              int32_t begin, int32_t end, int32_t extra_begin,
-                              int32_t extra_len, int32_t adj, int FWD,
-                              const uint8_t L0[256], const uint8_t L1[256]) {
-    uint64_t bits = dz_bits_u32((uint32_t)(end - begin)) +
-                    dz_bits_u32((uint32_t)extra_len) +
-                    dz_bits_u32(zz32(adj));
-    bits += 2; /* zero preserve-count and correction-count symbols. */
-    bits += diff_proxy_bits(o, begin, end, FWD, L0);
-    bits += extra_proxy_bits(to, tp0 + extra_begin, extra_len, L0, L1);
     return bits;
 }
 
@@ -551,49 +511,83 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
             free(runs);
             continue;
         }
-        size_t states = (nr + 1) * (nr + 1);
-        uint64_t *dp = (uint64_t *)xmalloc(states * sizeof(dp[0]));
-        uint8_t *take = (uint8_t *)xcalloc(states, 1);
-#define DP(I, P) dp[(I) * (nr + 1) + (P)]
-#define TAKE(I, P) take[(I) * (nr + 1) + (P)]
-        for (size_t p = 0; p <= nr; p++) {
+        /* The historical DP re-priced every (segment start, split run) pair with a fresh
+         * op_proxy_bits walk over the diff bytes -- O(nr^2 * diff_len) time and an O(nr^2)
+         * state table, quadratic-cubic on scattered-diff inputs (the stress_journal_scatter
+         * / stress_corr_storm hangs). Every query boundary is a RUN boundary, so
+         * diff_proxy_bits decomposes exactly into run-indexed prefix sums (uint64 addition
+         * is associative; the terms are the same uleb_proxy_bits/L0 values in a different
+         * association order), and the full (ri, p) table collapses to its diagonal
+         * E(p) = DP(p, p) plus a first-take pointer per p. Same decisions, same margins,
+         * bit-identical output; O(nr^2) time with O(1) transitions and O(nr) memory.
+         *
+         * Per run j: W[j+1]-W[j] = literal bits of run j (its L0 bytes + (len-1) gap-1
+         * ulebs); GP[j] accumulates the between-run gap uleb (run j-1 -> run j); CNT is the
+         * nonzero-count prefix. diff_proxy_bits(seg_p, end) over runs p..e-1 is then
+         *   uleb(CNT[e]-CNT[p]) [+ boundary-gap uleb + (W[e]-W[p]) + (GP[e-1]-GP[p]) if e>p]
+         * where the boundary gap is the only direction-dependent term: FWD prices the gap
+         * from seg_p to the first run, grow prices the gap from `end` back to the last. */
+        uint64_t *W = (uint64_t *)xmalloc((nr + 1) * sizeof(uint64_t));
+        uint64_t *GP = (uint64_t *)xmalloc(nr * sizeof(uint64_t));
+        uint32_t *CNT = (uint32_t *)xmalloc((nr + 1) * sizeof(uint32_t));
+        uint64_t *X = (uint64_t *)xmalloc(nr * sizeof(uint64_t));
+        const uint64_t uleb1 = uleb_proxy_bits(1u, L0);
+        W[0] = 0; CNT[0] = 0; GP[0] = 0;
+        for (size_t j = 0; j < nr; j++) {
+            uint64_t w = 0;
+            for (int32_t k = runs[j].begin; k < runs[j].end; k++) w += L0[o->diff[k]];
+            w += (uint64_t)(runs[j].end - runs[j].begin - 1) * uleb1;
+            W[j + 1] = W[j] + w;
+            CNT[j + 1] = CNT[j] + (uint32_t)(runs[j].end - runs[j].begin);
+            if (j) GP[j] = GP[j - 1] + uleb_proxy_bits((uint32_t)(runs[j].begin - runs[j - 1].end + 1), L0);
+            X[j] = extra_proxy_bits(to, tp + runs[j].begin,
+                                    runs[j].end - runs[j].begin, L0, L1);
+        }
+        const uint64_t XF = extra_proxy_bits(to, tp + o->diff_len, o->extra_len, L0, L1);
+        const int FWD = g_enc_fwd;
+#define DIFFBITS(P, E, ENDPOS, SEG) \
+        (uleb_proxy_bits(CNT[E] - CNT[P], L0) + \
+         ((E) > (P) ? (FWD ? uleb_proxy_bits((uint32_t)(runs[P].begin - (SEG)), L0) \
+                           : uleb_proxy_bits((uint32_t)((ENDPOS) - runs[(E) - 1].end + 1), L0)) \
+                      + (W[E] - W[P]) + (GP[(E) - 1] - GP[P]) : 0u))
+        uint64_t *E = (uint64_t *)xmalloc((nr + 1) * sizeof(uint64_t));
+        int32_t *ft = (int32_t *)xmalloc((nr + 1) * sizeof(int32_t));
+        for (size_t p = nr + 1; p-- > 0;) {
             int32_t seg = p ? runs[p - 1].end : 0;
-            DP(nr, p) = op_proxy_bits(o, to, tp, seg, o->diff_len,
-                                      o->diff_len, o->extra_len, o->adj,
-                                      g_enc_fwd, L0, L1);
-        }
-        for (size_t ri = nr; ri-- > 0;) {
-            for (size_t p = 0; p <= ri; p++) {
-                int32_t seg = p ? runs[p - 1].end : 0;
-                int32_t len = runs[ri].end - runs[ri].begin;
-                uint64_t skip = DP(ri + 1, p);
-                uint64_t split = op_proxy_bits(o, to, tp, seg, runs[ri].begin,
-                                               runs[ri].begin, len, len,
-                                               g_enc_fwd, L0, L1) +
-                                 DP(ri + 1, ri + 1);
-                if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
-                    DP(ri, p) = split;
-                    TAKE(ri, p) = 1;
-                } else {
-                    DP(ri, p) = skip;
-                }
+            /* terminal (no further split): the historical DP(nr, p) row */
+            uint64_t v = dz_bits_u32((uint32_t)(o->diff_len - seg)) +
+                         dz_bits_u32((uint32_t)o->extra_len) +
+                         dz_bits_u32(zz32(o->adj)) + 2 +
+                         DIFFBITS(p, nr, o->diff_len, seg) + XF;
+            int32_t take = -1;
+            /* downward scan mirrors the historical backward recurrence: at each s the
+             * running v IS DP(s+1, p), and the margin fires under the same condition,
+             * so the lowest firing s equals the first TAKE the old walk would hit. */
+            for (size_t s = nr; s-- > p;) {
+                int32_t len = runs[s].end - runs[s].begin;
+                uint64_t c = dz_bits_u32((uint32_t)(runs[s].begin - seg)) +
+                             dz_bits_u32((uint32_t)len) +
+                             dz_bits_u32(zz32(len)) + 2 +
+                             DIFFBITS(p, s, runs[s].begin, seg) + X[s] +
+                             E[s + 1];
+                if (c + SPLIT_GAIN_MARGIN_BITS < v) { v = c; take = (int32_t)s; }
             }
+            E[p] = v; ft[p] = take;
         }
-        size_t ri = 0, p = 0;
+#undef DIFFBITS
         int32_t seg = 0;
         int split_any = 0;
-        while (ri < nr) {
-            if (TAKE(ri, p)) {
-                int32_t len = runs[ri].end - runs[ri].begin;
-                int32_t pre = runs[ri].begin - seg;
-                opvec_push(&out, op_copy(pre, o->diff + seg, len,
-                                         to->d + (size_t)tp + (size_t)runs[ri].begin, len));
-                seg = runs[ri].end;
-                p = ri + 1;
-                split_any = 1;
-            }
-            ri++;
-        }
+        { size_t p = 0;
+          while (ft[p] >= 0) {
+              size_t s = (size_t)ft[p];
+              int32_t len = runs[s].end - runs[s].begin;
+              int32_t pre = runs[s].begin - seg;
+              opvec_push(&out, op_copy(pre, o->diff + seg, len,
+                                       to->d + (size_t)tp + (size_t)runs[s].begin, len));
+              seg = runs[s].end;
+              p = s + 1;
+              split_any = 1;
+          } }
         if (split_any) {
             int32_t tail = o->diff_len - seg;
             if (tail || o->extra_len || o->adj)
@@ -603,11 +597,8 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
         } else {
             opvec_push(&out, *o);
         }
-        free(dp);
-        free(take);
+        free(W); free(GP); free(CNT); free(X); free(E); free(ft);
         free(runs);
-#undef DP
-#undef TAKE
         tp += o->diff_len + o->extra_len;
     }
     free(ops->v);
