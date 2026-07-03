@@ -31,7 +31,12 @@ Record the complete output in the release notes. The gate must report:
   freeze — an unexplained mismatch blocks release)
 - ARM `.text/.data/.bss`
 - ARM soft-divide count
-- `QEMU Thumb round-trip`: OK (the decoder executed as real Thumb-1 code)
+- `QEMU Thumb round-trip`: OK (the decoder executed as real Thumb-1 code under
+  qemu-arm for all 260 tracked pairs — the full 256-pair corpus matrix, the
+  one-face grow/revert fixtures, and both synthetic golden pins — each
+  host-encoded patch applied under emulation and byte-compared against the
+  expected target, plus the pull-mode one-face round-trip and corrupt-body
+  reject)
 - `matrix round-trips`: `256/256`
 - corpus `full_total`
 - real one-face grow/revert patch sizes

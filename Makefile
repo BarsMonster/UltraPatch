@@ -158,31 +158,15 @@ check-assets:
 
 # Executes the decoder as REAL Thumb-1 code (the Cortex-M0+ ISA subset) under qemu-arm
 # user-mode emulation — catches ARM-only behavior (unsigned-by-default char, alignment,
-# Thumb codegen) that the x86 host gates cannot. Auto-skips (successfully, with a message)
-# when the cross-gcc or qemu-arm is not installed, so foreign machines stay green.
+# Thumb codegen) that the x86 host gates cannot. FULL matrix: all 256 corpus pairs, the
+# one-face grow/revert fixtures, and the two synthetic golden pins are host-encoded and
+# APPLIED under qemu-arm, byte-compared against the expected target (260 pairs, parallel
+# like check-corpus; ~1.5 min wall at 32 jobs), plus the pull-mode one-face round-trip
+# and corrupt-body reject the old sample-level check covered. Any failure names the
+# (from,to) pair. Auto-skips (successfully, with a message) when the cross-gcc or
+# qemu-arm is not installed, so foreign machines stay green. Parallelism: JOBS=N.
 check-qemu: hy_enc
-	@set -e; \
-	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
-		echo "qemu_thumb_roundtrip=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-linux-gnueabi-gcc -static -mthumb -Os -std=c99 -Wall -Wextra -Werror \
-		-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L \
-		-Isrc src/patch_apply_demo.c -o "$$tmp/hy_dec_qemu"; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
-	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null 2>&1; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
-	qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null 2>&1; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
-	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
-	printf '\377' | dd of="$$tmp/bad.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	if qemu-arm "$$tmp/hy_dec_qemu" "$$tmp/mem.bin" "$$tmp/bad.blob" >/dev/null 2>&1; then \
-		echo "qemu: corrupt body accepted"; exit 1; fi; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
-	echo "qemu_thumb_roundtrip=OK"
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_qemu_matrix.sh 10 $(JOBS)
 
 # Runtime cross-check for the static caller-stack bound (check-stack / scripts/stack_bound.py).
 # Runs a REAL decode under qemu-arm with the stack painted with a sentinel, then reports the

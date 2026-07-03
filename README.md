@@ -50,9 +50,11 @@ early.
 `make gate` also runs `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, appended garbage, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
-random/text/page-boundary images), `make check-golden` (pinned sha256 of six
+random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
 representative blobs — any wire drift fails the gate), and `make check-qemu`
-(the decoder executed as real Thumb-1 code under qemu-arm).
+(the decoder executed as real Thumb-1 code under qemu-arm: every host-encoded
+patch for all 256 matrix pairs, the one-face fixtures, and both synthetic golden
+pins is applied under emulation and byte-compared against the expected target).
 
 Create a deterministic standalone corpus bundle, if needed, with:
 
