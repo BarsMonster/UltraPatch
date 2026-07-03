@@ -37,14 +37,15 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 BASE_FULL_TOTAL ?= 4199637
 BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
-BASE_ARM_TEXT ?= 6324
+BASE_ARM_TEXT ?= 6212
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10904
 BASE_ARM_SOFT_DIV ?= 1
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
-# derives the exact static bound from -fstack-usage frames + the call graph. Measured 368 B;
-# pinned = round-up-to-64 (384) + ~25% headroom. check-stack re-baselines and fails above this.
+# derives the exact static bound from -fstack-usage frames + the call graph. Measured 336 B
+# (was 368 B before the CRC32(to)-in-header change deleted the trailer-withhold raw_next rotation,
+# which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
 .PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
@@ -101,8 +102,7 @@ check: all
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad_from.blob" 1 >/dev/null 2>/dev/null; then echo "bad from CRC accepted"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad_to.blob"; \
-	last=$$((grow_sz - 1)); \
-	printf '\000' | dd of="$$tmp/bad_to.blob" bs=1 seek="$$last" count=1 conv=notrunc >/dev/null 2>&1; \
+	printf '\336\255\276\357' | dd of="$$tmp/bad_to.blob" bs=1 seek=4 count=4 conv=notrunc >/dev/null 2>&1; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	if ./hy_dec "$$tmp/mem.bin" "$$tmp/bad_to.blob" 1 >/dev/null 2>/dev/null; then echo "bad to CRC accepted"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"

@@ -10,13 +10,16 @@
  * emulator. Properties asserted every exec:
  *   - no crash / no sanitizer report (never-crash guarantee)
  *   - the decoder returns DONE or ERROR
- *   - on DONE, an INDEPENDENT CRC32 over the written image must equal the blob trailer
- *     (cross-checks the decoder's internal gate -> no silent-wrong accept)
+ *   - on DONE, an INDEPENDENT CRC32 over the written image must equal the CRC32(to) field
+ *     in the header (blob bytes [4..7]) — cross-checks the decoder's internal gate -> no
+ *     silent-wrong accept
  *
  * The first 4 blob bytes are overwritten with the correct CRC32(from) for the header's
- * from_size, so mutations are not all rejected at the header gate (that gate has dedicated
- * malformed-case coverage; fuzzing wants the body). A1_MAX_IMAGE is tightened to the
- * emulator span so a mutated from_size cannot stall an exec on a 64 MiB CRC scan.
+ * from_size, so mutations are not all rejected at the CRC32(from) gate (that gate has
+ * dedicated malformed-case coverage; fuzzing wants the body). CRC32(to) (bytes [4..7]) is
+ * NOT force-fixed: it stays a live mutation surface (reject-path coverage) AND the DONE
+ * oracle below, so a mutated CRC32(to) that the decoder wrongly accepts is caught. A1_MAX_IMAGE
+ * is tightened to the emulator span so a mutated from_size cannot stall an exec on a 64 MiB scan.
  *
  * Build/run:  make fuzz            (60 s smoke, corpus persisted in fuzz-corpus/)
  * Long run:   make fuzz_apply && ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
@@ -88,8 +91,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
     memcpy(fz_flash,fz_from,fz_from_n);
     if(fz_dirty>fz_from_n) memset(fz_flash+fz_from_n,0xFF,fz_dirty-fz_from_n);
 
-    /* parse the header's from_size (mini-uLEB) and force the CRC32(from) gate open for it */
-    { uint32_t fs=0; int sh=0; size_t p=4; int ok=1; uint8_t b;
+    /* parse the header's from_size (mini-uLEB; it sits after CRC32(from)[4] | CRC32(to)[4], so
+     * at offset 8) and force the CRC32(from) gate open for it */
+    { uint32_t fs=0; int sh=0; size_t p=8; int ok=1; uint8_t b;
       do{ if(p>=size||sh>28){ ok=0; break; } b=blob[p++]; fs|=(uint32_t)(b&0x7fu)<<sh; sh+=7; }while(b&0x80u);
       if(ok && fs<=FZ_SPAN){
           uint32_t c = fs<=fz_from_n ? fz_crc(fz_from,fs) : fz_crc(fz_flash,fs);
@@ -101,9 +105,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size){
     int rc=patch_apply_run(pull_next,&pc);
     fz_dirty=g_image_span;
     if(rc==PATCH_APPLY_DONE){
-        /* independent silent-wrong cross-check */
-        uint32_t want=(uint32_t)blob[size-4]|((uint32_t)blob[size-3]<<8)
-                     |((uint32_t)blob[size-2]<<16)|((uint32_t)blob[size-1]<<24);
+        /* independent silent-wrong cross-check: CRC32(to) now lives in the header at [4..7]
+         * (a DONE guarantees the whole envelope was read, so size>=8). */
+        uint32_t want=(uint32_t)blob[4]|((uint32_t)blob[5]<<8)
+                     |((uint32_t)blob[6]<<16)|((uint32_t)blob[7]<<24);
         if(fz_crc(fz_flash,g_to_size)!=want) abort();
     } else if(rc!=PATCH_APPLY_ERROR) abort();
 

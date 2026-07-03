@@ -34,11 +34,11 @@ The blob layout (all of it is pushed through the decoder):
 
 ```text
 CRC32(from)[4]
+CRC32(to)[4]
 from_size uLEB
 zigzag(to_size - from_size) uLEB  # overlong encoding = unnatural apply direction
 zigzag(fp_end - from_size) uLEB   # present only when the apply is DESCENDING
 range-coded body bytes
-CRC32(to)[4]
 ```
 
 The apply direction is an encoder choice. The NATURAL direction (descending iff
@@ -48,12 +48,18 @@ canonical uLEB; the unnatural direction is signaled by an overlong encoding
 when it wins by more than that byte. `fp_end` is present exactly when the
 apply is descending.
 
-The decoder verifies `CRC32(from)` against the current flash content BEFORE
-its first flash write (wrong or dirty current image rejects with flash
-untouched) and verifies `CRC32(to)` over the final image at the end of the
-same `patch_apply_run()` call (against the withheld 4-byte trailer) —
-`PATCH_APPLY_DONE` is returned only after both gates pass. Header sizes above
-64 MiB are rejected as implausible.
+Both CRCs ride the header. The decoder verifies `CRC32(from)` against the
+current flash content BEFORE its first flash write (wrong or dirty current
+image rejects with flash untouched), and verifies `CRC32(to)` over the final
+image at the end of the same `patch_apply_run()` call. Because `CRC32(to)`
+gates the *result*, a wrong `CRC32(to)` is detected only AFTER the image has
+been written to flash — the same order as a wrong trailer in the previous wire
+revision; only `CRC32(from)` protects flash from being touched. The
+range-coded body is the last thing on the wire and its length is implicit, so
+the decoder consumes it to EOF; `PATCH_APPLY_DONE` is returned only after both
+CRC gates pass AND no trailing bytes remain (any leftover byte is appended
+garbage and is rejected as `REJ_CORRUPT`). Header sizes above 64 MiB are
+rejected as implausible.
 
 CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
@@ -112,7 +118,7 @@ caller-stack cost of `patch_apply_run()` on Cortex-M0+, measured statically:
 
 | Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
 | --------------------------------- | ----------------------- |
-| **gcc -O2 (gated ceiling: 480 B)** | **368 B** |
+| **gcc -O2 (gated ceiling: 480 B)** | **336 B** |
 | gcc -Os                            | 304 B |
 | clang (armv6m) -O2                 | 360 B |
 | clang (armv6m) -Os                 | 336 B |

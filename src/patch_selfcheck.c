@@ -88,9 +88,11 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *to, size_t to_n)
 {
     /* ---- envelope cross-check against the encoder's ground truth (the decoder performs
-     * its own authoritative parse; this validates the fields were EMITTED correctly) ---- */
-    if (blob_n < 12) return "blob too short";
-    size_t p = 4;
+     * its own authoritative parse; this validates the fields were EMITTED correctly).
+     * Layout: CRC32(from)[4] | CRC32(to)[4] | from_size uLEB | zz(to-from) | [zz(fp_end)] |
+     * range body. Skip both 4-byte CRCs (the decoder gates on them) and validate the sizes. */
+    if (blob_n < 10) return "blob too short";
+    size_t p = 8;
     uint32_t from_size, zz;
     if (sc_uleb(blob, blob_n, &p, &from_size)) return "bad from_size uleb";
     if (from_size != (uint32_t)from_n) return "header from_size != actual from size";
@@ -105,7 +107,7 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
         int64_t fpe = (int64_t)from_size + sc_unzz(zz);
         if (fpe < 0) return "header fp_end out of range";
     }
-    if (blob_n < p || blob_n - p < 4) return "no room for CRC32(to) trailer";
+    if (blob_n < p) return "header runs past end of blob";
 
     /* ---- fresh emulator: flash = from image, padded to span with 0xFF ---- */
     uint32_t span = from_size > to_size ? from_size : to_size;

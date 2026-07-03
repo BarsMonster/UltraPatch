@@ -15,8 +15,8 @@
 #   frames : arm-none-eabi-gcc -fstack-usage emits a .su file, one line per emitted
 #            function: "<file>:<line>:<col>:<name>\t<bytes>\t<qualifier>". The <bytes>
 #            value is the full prologue SP decrement of that function INCLUDING every
-#            pushed register and the saved LR (verified empirically: raw_next pushes
-#            {r4,r5,r6,lr}=16B + sub sp,#8 => .su=24). So a function's saved return
+#            pushed register and the saved LR (verified empirically: rc_decode pushes
+#            {r4-r7,lr}=20B + 3 saved regs=12B + 8B locals => .su=40). So a function's saved return
 #            address is already counted inside ITS OWN frame; a plain `bl` pushes nothing
 #            (it writes LR), and the callee's push{...,lr} that spills LR is in the
 #            callee's .su. Summing frames along a call chain therefore already includes
@@ -64,7 +64,7 @@ TOOLCHAIN_EXTERN_RE = re.compile(
 )
 
 HDR_RE = re.compile(r"^[0-9a-fA-F]+ <([^>]+)>:")
-# a disassembled instruction line: "   92:\tf7ff ffb5 \tbl\t0 <raw_next>"
+# a disassembled instruction line: "   92:\tf7ff ffb5 \tbl\t0 <rc_decode>"
 BL_RE = re.compile(r"\bbl\b\s+[0-9a-fA-F]+ <([^>]+)>")
 BLX_RE = re.compile(r"\bblx\b")
 # an objdump -r record: "00000032 R_ARM_THM_CALL   flash_read"
@@ -218,7 +218,8 @@ def main():
 
     # indirect calls (blx): prove they can only reach the external byte callback, never
     # internal code, by showing no internal function address is ever taken. Robust across
-    # toolchains/opt-levels (clang inlines raw_next, spreading the callback blx into rcv3_run).
+    # toolchains/opt-levels (the compiler inlines the byte-source read, spreading the callback blx
+    # across its callers).
     check_no_code_address_taken(args.objdump, args.obj, internal)
     callback_sites = sum(indirect.values())
 

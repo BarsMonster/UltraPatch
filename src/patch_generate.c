@@ -3332,6 +3332,11 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
                 (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
+    /* CRC32(to) rides in the HEADER immediately after CRC32(from) (moved off the old
+     * 4-byte trailer). The decoder reads it up front (g_want_to) and verifies it over the
+     * final image after apply — so the range-coded body length stays implicit (optimal
+     * flush) WITHOUT the decoder needing a trailer-withhold ring. */
+    buf_put_u32le(&blob, crc32_buf(to.d, to.n));
     put_uleb(&blob, from_size);
     /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
      * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
@@ -3353,7 +3358,8 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * Bit-exact invariant: body.d[0] is always 0 here. */
     if (body.n > 0 && body.d[0] == 0) { buf_write(&blob, body.d + 1, body.n - 1); }
     else { die("range-coder leading byte not 0 — wire invariant broken"); }
-    buf_put_u32le(&blob, crc32_buf(to.d, to.n));
+    /* No trailer: CRC32(to) already sits in the header above. The range body is the last thing
+     * on the wire; its length is implicit and the decoder consumes it to EOF. */
     /* Self-verification (patch_selfcheck.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. hy_enc refuses to ship a patch it

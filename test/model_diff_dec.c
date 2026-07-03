@@ -21,13 +21,11 @@ void    flash_write(uint32_t a, uint8_t v) { (void)a; (void)v; }
 #include "model_diff.h"
 
 /* ---- byte-source priming ------------------------------------------------------------------
- * rc_init() and next_byte() pull through patch_apply.h's 4-byte withhold ring (g_tail): the ring
- * holds the 4 most-recent pulled bytes and serves bytes with a 4-byte delay, so the last 4 bytes
- * of the pull source are NEVER handed to the range coder (on the real wire those 4 are the
- * CRC32(to) trailer). To feed the range coder the WHOLE encoder body we therefore pull
- * body ++ 4 dummy bytes: the body is served in full and the 4 dummies stay withheld. Reads past
- * the body zero-fill (raw_next latches EOF) — exactly matching the encoder's re_flush_opt, which
- * strips trailing zero bytes. This mirrors how patch_selfcheck.c / patch_apply_run prime the ring. */
+ * rc_init() and next_byte() pull straight from the callback (no trailer-withhold ring anymore —
+ * CRC32(to) rides in the header on the real wire, so the range body is the last thing on the
+ * stream and is consumed to EOF). We feed the range coder the encoder body directly; reads past
+ * the body zero-fill (pull_raw latches EOF), exactly matching the encoder's re_flush_opt, which
+ * strips trailing zero bytes. This mirrors how patch_selfcheck.c / patch_apply_run drive it. */
 static uint8_t *md_src;
 static size_t   md_cap;
 typedef struct { const uint8_t *d; size_t n, i; } MdPull;
@@ -39,12 +37,10 @@ static int md_pull(void *c, uint8_t *out) {
     return 1;
 }
 static void md_begin(const uint8_t *body, size_t n) {
-    if (n + 4u > md_cap) { md_cap = n + 4u; md_src = (uint8_t *)realloc(md_src, md_cap); }
+    if (n > md_cap) { md_cap = n; md_src = (uint8_t *)realloc(md_src, md_cap ? md_cap : 1); }
     if (n) memcpy(md_src, body, n);
-    md_src[n] = md_src[n + 1] = md_src[n + 2] = md_src[n + 3] = 0u;  /* 4 dummy trailer bytes */
-    md_ctx.d = md_src; md_ctx.n = n + 4u; md_ctx.i = 0;
+    md_ctx.d = md_src; md_ctx.n = n; md_ctx.i = 0;
     g_pull_fn = md_pull; g_pull_ctx = &md_ctx; g_pull_eof = 0;
-    g_tailn = 0; g_tailw = 0;
     g_rcerr = 0; g_reject = REJ_NONE;
     rc_init();
 }

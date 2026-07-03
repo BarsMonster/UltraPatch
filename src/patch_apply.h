@@ -12,11 +12,13 @@
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
  * callback (which may block internally — e.g. poll a UART ring) and passes the WHOLE blob —
- * envelope, range-coded body, and CRC32(to) trailer — through one patch_apply_run(callback, ctx)
- * call whose return is the DONE/ERROR verdict; the whole decode runs synchronously on the
- * CALLER's stack (no coroutine, no fiber, no private decode stack). The decoder itself parses
- * the envelope (sizes, direction, span) and gates on CRC32(from) BEFORE the first flash write
- * and CRC32(to) after the apply. A single divide-free binary range coder (LZMA bound; no
+ * envelope (both CRCs in the header) followed by the range-coded body — through one
+ * patch_apply_run(callback, ctx) call whose return is the DONE/ERROR verdict; the whole decode
+ * runs synchronously on the CALLER's stack (no coroutine, no fiber, no private decode stack).
+ * The decoder itself parses the envelope (sizes, direction, span) and gates on CRC32(from)
+ * BEFORE the first flash write and CRC32(to) after the apply. The body is the last thing on the
+ * wire (implicit length), so there is no trailer and no withhold ring — the decoder consumes to
+ * EOF and rejects any trailing byte as appended garbage. A single divide-free binary range coder (LZMA bound; no
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
  * Event-driven producers (ISR push) integrate via the optional SPSC ring adapter in
@@ -62,6 +64,7 @@ extern void    flash_write(uint32_t addr, uint8_t val);
  * bounds every flash access. */
 static uint32_t g_image_span;
 static uint32_t g_from_size, g_to_size, g_fp_end;
+static uint32_t g_want_to;     /* CRC32(to) read from the header; verified over the final image */
 static int      g_FWD;
 /* plausibility cap on header sizes (was the host wrapper's gate; now enforced in-decoder).
  * Also pins the "image sizes < 2^31" design invariant every 32-bit overflow guard relies on.
@@ -73,39 +76,39 @@ static int      g_FWD;
 /* ===================================================================================== */
 /* byte source: the integrator supplies a (possibly blocking) callback and calls           */
 /* patch_apply_run() — the whole decode runs on the caller's stack, plain calls only.      */
-/* The 4 most recent blob bytes are withheld in the g_tail ring so the CRC32(to)           */
-/* trailer never reaches the range coder (the body length is implicit — optimal flush);    */
-/* whatever 4 bytes remain in the ring at the end ARE the trailer.                         */
+/* CRC32(to) rides in the header (g_want_to), so the range-coded body is the LAST thing on  */
+/* the wire and the decoder simply consumes it to EOF — NO trailer-withhold ring. The body  */
+/* length stays implicit (optimal flush): rc_init reads 4 bytes + one per renorm, while the  */
+/* encoder's re_flush_opt trims trailing flush zeros and the wire drops the leading cache    */
+/* byte, so the decoder zero-fills the small shortfall past EOF (see next_byte) and consumes  */
+/* the entire blob. patch_apply_run then drains the callback: any byte left over is appended  */
+/* garbage (strict reject). */
 /* ===================================================================================== */
 static void decode_body(void);
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
 static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
-static uint8_t  g_tail[4], g_tailn, g_tailw;   /* trailer withhold ring */
 enum {
     PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
     DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR,
-    DEC_BODYOK=3   /* INTERNAL: body decoded; CRC32(to) trailer not yet verified. Never
-                    * returned to the caller — patch_apply_run converts it to DONE (or
-                    * ERROR) after the trailer check. */
+    DEC_BODYOK=3   /* INTERNAL: body decoded; the appended-garbage drain + CRC32(to) verdict
+                    * are still pending. Never returned to the caller — patch_apply_run
+                    * converts it to DONE (or ERROR). */
 };
 static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
 
 static int (*g_pull_fn)(void*, uint8_t*);
 static void *g_pull_ctx;
 static uint8_t g_pull_eof;
-/* next blob byte after the 4-byte withhold: prime/rotate the ring with the callback's
- * bytes; callback EOF is latched (the ring then holds exactly the trailer). */
-static int raw_next(uint8_t*out){
-    uint8_t b;
+/* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
+ * (later reads keep returning 0 without re-invoking the callback). */
+static int pull_raw(uint8_t*out){
     if(g_pull_eof) return 0;
-    while(g_tailn<4u){ if(!g_pull_fn(g_pull_ctx,&b)){ g_pull_eof=1; return 0; } g_tail[g_tailn++]=b; }
-    if(!g_pull_fn(g_pull_ctx,&b)){ g_pull_eof=1; return 0; }
-    *out=g_tail[g_tailw]; g_tail[g_tailw]=b; g_tailw=(uint8_t)((g_tailw+1u)&3u);
+    if(!g_pull_fn(g_pull_ctx,out)){ g_pull_eof=1; return 0; }
     return 1;
 }
-static uint8_t next_byte(void){ uint8_t b; return raw_next(&b)?b:0; }  /* body: zero-fill past EOF */
-static int env_byte(uint8_t*out){ return raw_next(out); }              /* envelope: strict */
+static uint8_t next_byte(void){ uint8_t b; return pull_raw(&b)?b:0; }  /* body: zero-fill past EOF */
+static int env_byte(uint8_t*out){ return pull_raw(out); }             /* envelope: strict */
 
 static int env_u32le(uint32_t*out){
     uint32_t v=0; uint8_t b;
@@ -1006,18 +1009,19 @@ static void sa_apply_op(SA*s){
 /* stack (plain calls, no coroutine/fiber). Shared state is passed via the file-scope globals*/
 /* that patch_apply_run primes before invoking decode_body.                                  */
 /* ===================================================================================== */
-/* ---- envelope header (strict reads): CRC32(from)[4] | from_size uLEB |
- * zz(to_size-from_size) | [zz(fp_end-from_size) iff to_size>from_size]. The decoder derives
+/* ---- envelope header (strict reads): CRC32(from)[4] | CRC32(to)[4] | from_size uLEB |
+ * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending]. The decoder derives
  * the apply direction and the image span itself and verifies CRC32(from) over flash BEFORE
  * the first flash write — a truncated header, implausible sizes, or a wrong/dirty current
- * image all reject cleanly with flash untouched. Then the literal bit-trees are seeded from
- * flash parity histograms (hist0/hist1/w borrow 4 KiB of ARENA before the apply overlays it).
- * noinline: this runs ONCE at the top of decode_body, so keeping its locals in their own
- * frame (not merged into decode_body's) keeps them off the deep apply call chain that runs
- * afterward — it trims the decode's peak CALLER-stack usage. */
+ * image all reject cleanly with flash untouched. CRC32(to) is stashed in g_want_to here and
+ * checked over the final image after apply (patch_apply_run). Then the literal bit-trees are
+ * seeded from flash parity histograms (hist0/hist1/w borrow 4 KiB of ARENA before the apply
+ * overlays it). noinline: this runs ONCE at the top of decode_body, so keeping its locals in
+ * their own frame (not merged into decode_body's) keeps them off the deep apply call chain
+ * that runs afterward — it trims the decode's peak CALLER-stack usage. */
 static int __attribute__((noinline)) decode_header(void){
-    uint32_t want_from, fs, ts, fpe, z; uint8_t ov;
-    if(!env_u32le(&want_from) || !env_uleb(&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(&z,&ov)) return 0;
+    uint32_t want_from, want_to, fs, ts, fpe, z; uint8_t ov;
+    if(!env_u32le(&want_from) || !env_u32le(&want_to) || !env_uleb(&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
     else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
     /* Apply direction is an ENCODER CHOICE. The NATURAL direction (descending iff the image
@@ -1030,7 +1034,7 @@ static int __attribute__((noinline)) decode_header(void){
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !env_zz_abs(fs,&fpe)) return 0;
       g_FWD=!desc; }
-    g_from_size=fs; g_to_size=ts; g_fp_end=fpe;
+    g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_want_to=want_to;
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
     { uint32_t *hist0=ARENA.seed.hist0, *hist1=ARENA.seed.hist1, *w=ARENA.seed.w;
@@ -1104,8 +1108,8 @@ static void decode_body(void){
       orow_commit_all();                   /* flush the remaining uncommitted rows */
     }
 done:
-    /* body complete: the caller (patch_apply_run) verifies the withheld
-     * CRC32(to) trailer and converts BODYOK to the caller-visible DONE (or ERROR). */
+    /* body complete: the caller (patch_apply_run) drains any appended garbage and verifies
+     * CRC32(to) (g_want_to) over the final image, converting BODYOK to DONE (or ERROR). */
     if(g_dec_status!=DEC_ERROR) g_dec_status=DEC_BODYOK;
 }
 
@@ -1119,27 +1123,27 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
         bt_set(t,m-1,(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr))); }
 }
 
-/* shared trailer verdict: the 4 withheld ring bytes must equal CRC32(to) over the image. */
-static int trailer_ok(void){
-    uint32_t want=0;
-    if(g_tailn!=4u) return 0;
-    for(unsigned i=0;i<4u;i++) want|=(uint32_t)g_tail[(g_tailw+i)&3u]<<(8u*i);
-    return crc32_flash(g_to_size)==want;
-}
-
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
  * byte, or 0 at end-of-blob (it may block internally — e.g. poll a UART — before returning;
  * the decoder consumes bytes strictly in order). Returns PATCH_APPLY_DONE (image written,
  * both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds the reason). */
 static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
-    uint8_t b;
     g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0;
-    g_tailn=0; g_tailw=0;
     g_dec_status=DEC_NEED_MORE;
     decode_body();
     if(g_dec_status==DEC_ERROR) return PATCH_APPLY_ERROR;
-    while(raw_next(&b)) ;                  /* discard flush slack; the ring ends on the final 4 */
-    if(!trailer_ok()){
+    /* APPENDED-GARBAGE STRICT REJECT (flush-slack bound = 0). A valid blob is consumed
+     * EXACTLY to EOF: the range decoder reads rc_init's 4 bytes + one byte per renorm, i.e.
+     * the same byte count the encoder produced (its renorm count is identical) plus the 4
+     * init bytes; the encoder's re_flush_opt rounds `low` up and TRIMS trailing flush zeros,
+     * and the wire drops the always-zero leading cache byte, so the encoder emits no MORE
+     * wire body bytes than the decoder reads — the decoder zero-fills the small (>=0) byte
+     * shortfall past EOF (next_byte). Hence a well-formed blob leaves ZERO callback bytes;
+     * any byte still available here is trailing garbage -> REJ_CORRUPT. (Proven by the gate:
+     * hy_enc self-verifies every emitted blob on this decoder, so a false reject here would
+     * fail the whole matrix + edge + degrade set.) */
+    { uint8_t b; if(pull_raw(&b)){ g_reject=REJ_CORRUPT; g_dec_status=DEC_ERROR; return PATCH_APPLY_ERROR; } }
+    if(crc32_flash(g_to_size)!=g_want_to){
         if(!g_reject) g_reject=REJ_CORRUPT;
         g_dec_status=DEC_ERROR; return PATCH_APPLY_ERROR; }
     g_dec_status=DEC_DONE;

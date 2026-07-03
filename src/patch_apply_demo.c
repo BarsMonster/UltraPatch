@@ -6,7 +6,7 @@
 
 /* Host demo/gate wrapper for the header-only patch_apply decoder.
  * The reusable device artifact is patch_apply.h; this file owns only file I/O,
- * plaintext patch header/trailer parsing, and the host NVM safety checks. */
+ * a minimal envelope header pre-parse (host flash sizing), and the NVM safety checks. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,11 +91,11 @@ int main(int argc,char**argv){
     /* MINIMAL envelope pre-parse, for the HOST EMULATOR ONLY (flash sizing + memfile sanity).
      * The decoder performs the authoritative envelope parse and both CRC gates itself; a device
      * integration needs none of this — its flash is fixed hardware.
-     * Envelope: CRC32(from)[4] | from_size | zz(to_size-from_size) [overlong = unnatural
-     * apply direction] | [zz(fp_end-from_size) iff descending] | range body | CRC32(to)[4].
-     * The emulator only needs to_size; the overlong marker is value-neutral, so the plain
-     * uLEB loop below parses it correctly without caring about the direction. */
-    size_t p=4; int err=(size_t)bsz<12;
+     * Envelope: CRC32(from)[4] | CRC32(to)[4] | from_size | zz(to_size-from_size) [overlong =
+     * unnatural apply direction] | [zz(fp_end-from_size) iff descending] | range body.
+     * The emulator only needs to_size; skip both 4-byte CRCs (p=8). The overlong marker is
+     * value-neutral, so the plain uLEB loop below parses it correctly regardless of direction. */
+    size_t p=8; int err=(size_t)bsz<12;
     uint32_t from_size=0,to_size=0; { uint32_t v=0; int sh=0; uint8_t b;
         do{ if(p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; v|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80); from_size=v; }
     { uint32_t z=0; int sh=0; uint8_t b; do{ if(err||p>=(size_t)bsz||sh>28){err=1;break;} b=blob[p++]; z|=(uint32_t)(b&0x7f)<<sh; sh+=7; }while(b&0x80);

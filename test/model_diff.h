@@ -21,9 +21,9 @@
  *                            ENCODER-side stream helper (it can reach the file-static encoder
  *                            models directly). Prints the summary and exits.
  *   - test/model_diff_dec.c  #includes src/patch_apply.h with stub flash primitives; exposes
- *                            the DECODER-side whole-stream bridges below, priming the decoder's
- *                            4-byte withhold ring (g_tail) with the encoder body + 4 dummy
- *                            trailer bytes so the range decoder sees the whole real stream.
+ *                            the DECODER-side whole-stream bridges below, feeding the encoder
+ *                            body straight to the callback (no trailer-withhold ring — CRC32(to)
+ *                            rides in the header, so the range body is the last thing on the wire).
  * The mixed-stream opcodes are single-sourced here so the two sides can never drift on the
  * model-selection or the fixed rate/k choices that drive the shared range-coder session. */
 

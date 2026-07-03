@@ -192,7 +192,7 @@ if enc dir; then
   ov=$(python3 - "$tmp/dir.blob" <<'EOF'
 import sys
 b = open(sys.argv[1], "rb").read()
-p = 4                                   # skip CRC32(from)[4]
+p = 8                                   # skip CRC32(from)[4] | CRC32(to)[4]
 def uleb(p):
     v = sh = n = 0
     while True:
