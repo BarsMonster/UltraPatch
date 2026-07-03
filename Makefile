@@ -53,7 +53,7 @@ BASE_ARM_SOFT_DIV ?= 1
 # which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
-.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
+.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-qemu check-qemu-spot check-edge check-degrade check-golden check-models golden-update gate gate-full fuzz check-encfuzz check-analyze
 
 all: hy_enc hy_dec
 
@@ -90,6 +90,8 @@ check: all
 	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
 	revert_sz=$$(wc -c < "$$tmp/revert.blob"); \
 	wc -c "$$tmp/grow.blob" "$$tmp/revert.blob"; \
+	echo "oneface_grow=$$grow_sz"; \
+	echo "oneface_revert=$$revert_sz"; \
 	test "$$grow_sz" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"; \
 	cp "$$tmp/grow.blob" "$$tmp/bad.blob"; \
@@ -167,6 +169,13 @@ check-assets:
 # qemu-arm is not installed, so foreign machines stay green. Parallelism: JOBS=N.
 check-qemu: hy_enc
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_qemu_matrix.sh 10 $(JOBS)
+
+# Fast qemu SPOT check for the dev gate: same harness in `spot` mode — drops ONLY the 256
+# corpus matrix pairs and keeps the one-face grow/revert, both synthetic pins, the pull-mode
+# one-face round-trip, and the corrupt-body reject, so the decoder still executes as real
+# Thumb-1 code every dev cycle. The full 260-pair matrix stays in check-qemu (gate-full).
+check-qemu-spot: hy_enc
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_qemu_matrix.sh 10 "$(JOBS)" spot
 
 # Runtime cross-check for the static caller-stack bound (check-stack / scripts/stack_bound.py).
 # Runs a REAL decode under qemu-arm with the stack painted with a sentinel, then reports the
@@ -263,29 +272,64 @@ check-corpus: all check-assets
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
-# ONE command for the full gate: builds, verifies corpus assets, and runs the host, malformed,
-# ARM, and corpus gates,
-# and prints a single consolidated summary with every metric the project tracks — ARM .text/.data/
-# .bss + divide policy, corpus full total, the real one-face update (grow/revert), matrix
-# round-trips, NVM write-safety, and journal peak. Exits nonzero if ANY gate fails, and on failure
-# dumps the raw blocks so the offending metric is visible. Dominated by check-corpus, whose
-# runtime scales with the configured JOBS value.
-gate: all
+# The gate comes in TWO sizes (same consolidated summary block, same failure semantics):
+#
+#  - `make gate` — the FAST dev gate (hard budget: <= 60 s wall on the reference machine).
+#    Builds up-front, then runs the independent fast legs CONCURRENTLY: check-assets, check
+#    (one-face grow/revert round-trip + BASE_ONEFACE_* size gates), check-malformed,
+#    check-edge, check-degrade, check-golden, check-models, check-arm (sizes + divide
+#    policy), check-stack, and check-qemu-spot (real Thumb-1 execution under qemu-arm,
+#    reduced pair set). Wall time ~= the slowest leg (check-edge), not the sum.
+#
+#  - `make gate-full` — the RELEASE gate, a STRICT SUPERSET of `gate`: every leg above plus
+#    the FULL 256-pair corpus matrix (corpus full_total vs BASE_FULL_TOTAL, NVM write-safety,
+#    journal peak — check-corpus) and the FULL 260-pair qemu-arm matrix (check-qemu). The
+#    heavy matrices run after the fast legs are launched, so wall time ~= check-qemu +
+#    check-corpus. MANDATORY before release and after any wire-affecting or
+#    encoder-output-affecting change (see AGENTS.md; the 256-pair better/worse judging
+#    rule lives here).
+#
+# Both print the single consolidated summary with every metric their legs track — ARM
+# .text/.data/.bss + divide policy, caller-stack bound, one-face grow/revert, golden wire,
+# model diff, degradation paths, qemu Thumb round-trip, and (gate-full) corpus full total,
+# matrix round-trips, NVM write-safety, journal peak. Exits nonzero if ANY gate fails, and
+# on failure dumps the raw blocks so the offending metric is visible. Binaries are built
+# BEFORE the legs fork, so concurrent sub-makes never race on a compile; legs run
+# undisturbed even if sources change mid-gate.
+gate:      GATE_MODE = dev
+gate-full: GATE_MODE = full
+gate gate-full: all model_diff
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running full gate: check-assets + check + check-malformed + check-arm + check-stack + check-corpus..."; \
-	$(MAKE) --no-print-directory check-assets >"$$tmp/assets.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-edge   >"$$tmp/e.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-degrade >"$$tmp/dg.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-golden >"$$tmp/g.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-models >"$$tmp/mdl.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-stack  >"$$tmp/st.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
-	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
-	echo "==================== A1 FULL GATE ===================="; \
+	: > "$$tmp/m.txt"; \
+	if [ "$(GATE_MODE)" = full ]; then \
+		echo "running RELEASE gate (strict superset of dev gate): concurrent fast legs + full 260-pair qemu matrix + full 256-pair corpus matrix..."; \
+	else \
+		echo "running DEV gate (fast legs, concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack + qemu spot (full matrices: make gate-full)..."; \
+	fi; \
+	$(MAKE) --no-print-directory check-assets    >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
+	$(MAKE) --no-print-directory check           >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
+	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
+	$(MAKE) --no-print-directory check-edge      >"$$tmp/e.txt"         2>&1 & p_e=$$!; \
+	$(MAKE) --no-print-directory check-degrade   >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
+	$(MAKE) --no-print-directory check-golden    >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
+	$(MAKE) --no-print-directory check-models    >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
+	$(MAKE) --no-print-directory check-arm       >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
+	$(MAKE) --no-print-directory check-stack     >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
+	if [ "$(GATE_MODE)" = full ]; then \
+		$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
+		$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
+	else \
+		$(MAKE) --no-print-directory check-qemu-spot >"$$tmp/q.txt" 2>&1 || rc=1; \
+	fi; \
+	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st; do \
+		wait $$p || rc=1; \
+	done; \
+	if [ "$(GATE_MODE)" = full ]; then \
+		echo "==================== A1 FULL GATE ===================="; \
+	else \
+		echo "==================== A1 DEV GATE ====================="; \
+	fi; \
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
@@ -298,8 +342,8 @@ gate: all
 	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
-	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/m.txt"; \
-	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/m.txt"; \
+	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/c.txt"; \
+	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/c.txt"; \
 	sed -n 's/^max_amplified=/NVM rows amplified       : /p' "$$tmp/m.txt"; \
 	sed -n 's/^max_maxrowerase=/NVM max erases-per-row   : /p' "$$tmp/m.txt"; \
 	sed -n 's/^max_inversions=/NVM frontier inversions  : /p' "$$tmp/m.txt"; \
@@ -319,7 +363,9 @@ gate: all
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
 		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
-		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
+		if [ -s "$$tmp/m.txt" ]; then \
+			echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
+		fi; \
 	fi; \
 	echo "====================================================="; \
 	exit $$rc

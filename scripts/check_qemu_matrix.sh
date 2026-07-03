@@ -15,10 +15,23 @@
 # check_corpus.sh). Any failure names the (from,to) pair. Deterministic and offline.
 # Auto-skips (successfully, with a message) without the cross-gcc or qemu-arm.
 #
-# Usage: check_qemu_matrix.sh [W] [jobs]      (W defaults to 10, jobs to nproc)
+# Modes: `full` (default) runs the whole 260-pair matrix; `spot` is the fast dev-gate
+# subset — it drops ONLY the 256 corpus matrix pairs and keeps everything else (one-face
+# grow/revert, both synthetic pins, the pull-mode one-face round-trip, and the
+# corrupt-body reject), so real Thumb-1 execution is still exercised every dev cycle.
+# The full matrix remains mandatory in `make gate-full` (release gate).
+#
+# Usage: check_qemu_matrix.sh [W] [jobs] [mode]   (W defaults to 10, jobs to nproc,
+#                                                  mode `full`|`spot`, default full)
 set -u
 W="${1:-10}"
 JOBS="${2:-$(nproc 2>/dev/null || echo 4)}"
+MODE="${3:-full}"
+case "$MODE" in
+  full) EXPECT=260 ;;
+  spot) EXPECT=4 ;;
+  *) echo "check_qemu_matrix.sh: bad mode '$MODE' (want full|spot)" >&2; exit 1 ;;
+esac
 IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 
@@ -52,7 +65,9 @@ export -f qm_work
 export QM_W="$W" QM_DEC="$top/hy_dec_qemu"
 
 lines=$(
-  { for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf '%s\t%s\n' "$from" "$to"; done; done; \
+  { if [ "$MODE" = full ]; then \
+      for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf '%s\t%s\n' "$from" "$to"; done; done; \
+    fi; \
     printf '%s\t%s\n' "$FIX/v0_base" "$FIX/v1_one_face"; \
     printf '%s\t%s\n' "$FIX/v1_one_face" "$FIX/v0_base"; \
     printf '%s\t%s\n' "$top/synthfix/synth_journal_degrade_from" "$top/synthfix/synth_journal_degrade_to"; \
@@ -61,8 +76,8 @@ lines=$(
 )
 n=$(printf '%s\n' "$lines" | wc -l)
 okn=$(printf '%s\n' "$lines" | awk '{ ok+=$1 } END { print ok+0 }')
-if [ "$n" -ne 260 ] || [ "$okn" -ne "$n" ]; then
-  echo "check_qemu_matrix.sh: host-vs-qemu DIVERGENCE or structural error (pairs=$n ok=$okn/260)" >&2
+if [ "$n" -ne "$EXPECT" ] || [ "$okn" -ne "$n" ]; then
+  echo "check_qemu_matrix.sh: host-vs-qemu DIVERGENCE or structural error (pairs=$n ok=$okn/$EXPECT)" >&2
   printf '%s\n' "$lines" | awk '$1==0 { printf "  QEMU-FAIL %s -> %s\n", $2, $3 }' >&2
   exit 1
 fi
@@ -86,5 +101,9 @@ if qemu-arm "$QM_DEC" "$d/mem.bin" "$d/bad.blob" >/dev/null 2>&1; then
 cmp -s "$d/mem.bin" "$FIX/v0_base/watch.bin" \
   || { echo "check_qemu_matrix.sh: qemu corrupt reject modified flash" >&2; exit 1; }
 
-echo "qemu_matrix_ok=$okn/260"
-echo "qemu_thumb_roundtrip=OK (260-pair matrix: 256 corpus + one-face both ways + 2 synthetic pins; + pull-mode one-face + corrupt reject)"
+echo "qemu_matrix_ok=$okn/$EXPECT"
+if [ "$MODE" = full ]; then
+  echo "qemu_thumb_roundtrip=OK (260-pair matrix: 256 corpus + one-face both ways + 2 synthetic pins; + pull-mode one-face + corrupt reject)"
+else
+  echo "qemu_thumb_roundtrip=OK (SPOT: one-face both ways + 2 synthetic pins; + pull-mode one-face + corrupt reject; full 260-pair matrix in gate-full)"
+fi
