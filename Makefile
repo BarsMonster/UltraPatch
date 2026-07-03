@@ -42,12 +42,21 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10904
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
 
 all: hy_enc hy_dec
 
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
+
+# ASan+UBSan host encoder for the adversarial encoder-fuzz campaign (scripts/fuzz_encoder.py).
+# clang matches the decoder fuzz harness toolchain; -fno-sanitize-recover=all aborts on the first
+# memory/UB error so a finding is unmissable. The encoder self-verifies every emitted blob on the
+# reference decoder (src/patch_selfcheck.c), so a clean run == provably-applicable patches.
+SAN_CC ?= clang
+hy_enc_asan: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
+	$(SAN_CC) -DCORTEX_M0 -g -O1 -std=c99 -Wall -Wextra -Werror -I. -Isrc -Ivendor/libdivsufsort \
+	  -fsanitize=address,undefined -fno-sanitize-recover=all -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 # The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
 # the stricter bar; the host-side encoder does not). Single decode mode: patch_apply_run()
@@ -285,5 +294,20 @@ fuzz: fuzz_apply hy_enc
 	cp "$$tmp/revert.blob" fuzz-corpus/seed_revert.blob; \
 	./fuzz_apply -max_total_time=$(FUZZ_TIME) -max_len=4096 -print_final_stats=1 fuzz-corpus
 
+# Short (~30 s) deterministic smoke subset of the adversarial ENCODER campaign
+# (scripts/fuzz_encoder.py) over the ASan+UBSan encoder: one representative case per class
+# (random/degenerate/thumb/ELF/empty), each round-tripped through hy_dec or cleanly refused.
+# STANDALONE (needs clang + sanitizer runtime), so it is NOT wired into `make gate` — same policy
+# as `make fuzz`. Full campaign: `python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec`
+# (add `--large` for the 64K..300K scale/round-trip pass against the plain self-checking hy_enc).
+check-encfuzz: hy_enc_asan hy_dec
+	@python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec --smoke --timeout 30
+
+# Static-analysis leg: gcc -fanalyzer over BOTH first-party TUs (encoder + decoder + arm + selfcheck)
+# with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
+# fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
+check-analyze:
+	@scripts/check_analyze.sh
+
 clean:
-	rm -f hy_enc hy_dec fuzz_apply model_diff
+	rm -f hy_enc hy_enc_asan hy_dec fuzz_apply model_diff

@@ -13,9 +13,11 @@
 /detools
 /hy_dec
 /hy_enc
+/hy_enc_asan
 /fuzz_apply
 /model_diff
 /fuzz-corpus/
+/encfuzz-findings/
 /crash-*
 /leak-*
 /timeout-*
