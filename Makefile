@@ -26,7 +26,12 @@ CFLAGS += $(CFLAGS_EXTRA)
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 APPLY_HDR := src/patch_apply.h src/rc_models.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
-GEN_HDR := src/rc_models.h src/arm_cortex_m4.h
+# patch_generate.c is a thin umbrella TU that #includes the ordered enc_*.inc modules
+# (the host encoder is one translation unit -- see the include block in patch_generate.c).
+# Listed here so editing any module re-triggers every target that compiles the encoder.
+ENC_MODULES := src/enc_util.inc src/enc_elf.inc src/enc_bsdiff.inc src/enc_field.inc \
+               src/enc_rc.inc src/enc_lz.inc src/enc_emit.inc src/enc_plan.inc src/enc_cli.inc
+GEN_HDR := src/rc_models.h src/arm_cortex_m4.h $(ENC_MODULES)
 ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
 

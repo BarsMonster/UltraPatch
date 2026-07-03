@@ -1,0 +1,856 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections, collect_stats.
+ * Part of the single translation unit rooted at src/patch_generate.c, which
+ * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
+ * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
+ * wire and model_diff.c's #include "patch_generate.c".
+ */
+/* ------------------------------------------------------------------------------------- */
+/* A1 field and apply planning.                                                            */
+/* ------------------------------------------------------------------------------------- */
+static uint16_t u16le_at(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t u32le_at(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
+    int32_t s = (up >> 10) & 1, imm10 = up & 0x3ff, imm11 = lo & 0x7ff;
+    int32_t j1 = (lo >> 13) & 1, j2 = (lo >> 11) & 1;
+    int32_t i1 = 1 - (j1 ^ s), i2 = 1 - (j2 ^ s);
+    int32_t v = (s << 23) | (i1 << 22) | (i2 << 21) | (imm10 << 11) | imm11;
+    if (s) v -= (1 << 24);
+    return v;
+}
+
+static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
+    a1_m4_pack(M4_PK_BL, imm32, out);
+}
+
+static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
+    if (fpk & 1u) return 0;
+    if (fpk > from_size || from_size - fpk < 4u) return 0;
+    uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+    return ((up & 0xf800u) == 0xf000u) && ((lo & 0xd000u) == 0xd000u);
+}
+
+static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out) {
+    int64_t a = (int64_t)fp0 + k;
+    if (a < 0 || a + 4 > (int64_t)from_size) return 0;
+    *out = (uint32_t)a;
+    return 1;
+}
+
+static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
+    IVec s = {0};
+    int32_t lo = fp0, hi = fp0 + dl;
+    int32_t a = (lo & 1) ? lo + 1 : lo;
+    while (a + 2 <= hi && a + 2 <= (int32_t)from_size) {
+        uint16_t up = u16le_at(frm + a);
+        if ((up & 0xf800u) == 0x4800u) {
+            int32_t t = (a & ~3) + 4 * (int32_t)(up & 0xffu) + 4;
+            if (lo <= t && t + 4 <= hi && t + 4 <= (int32_t)from_size) ivec_push(&s, t);
+        }
+        a += 2;
+    }
+    if (s.n) {
+        a1_sort(s.v, s.n, sizeof(s.v[0]), cmp_i32);
+        size_t w = 0;
+        for (size_t i = 0; i < s.n; i++) if (!w || s.v[w - 1] != s.v[i]) s.v[w++] = s.v[i];
+        s.n = w;
+    }
+    return s;
+}
+
+static int ivec_has(const IVec *v, int32_t x) {
+    size_t lo = 0, hi = v->n;
+    while (lo < hi) {
+        size_t m = (lo + hi) >> 1;
+        if (v->v[m] < x) lo = m + 1;
+        else hi = m;
+    }
+    return lo < v->n && v->v[lo] == x;
+}
+
+enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
+typedef struct { int type; int64_t delta; } Event;
+
+static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
+                            const IVec *ldr, const Op *o, int32_t fp0, int32_t k) {
+    uint32_t fpk;
+    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
+    int pure = o->diff[k] == 0 && o->diff[k + 1] == 0 && o->diff[k + 2] == 0 && o->diff[k + 3] == 0;
+    if (is_local_bl(frm, from_size, fpk)) {
+        if (!pure) return (Event){ EV_SBL, 0 };
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
+        return (Event){ EV_BL, r ? r->delta : 0 };
+    }
+    if (pure && ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
+        return (Event){ EV_EX, r ? r->delta : 0 };
+    }
+    return (Event){ EV_NONE, 0 };
+}
+
+static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
+                                        const IVec *ldr, int32_t fp0, int32_t k) {
+    uint32_t fpk;
+    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
+    if (is_local_bl(frm, from_size, fpk)) {
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
+        return (Event){ EV_BL, r ? r->delta : 0 };
+    }
+    if (ivec_has(ldr, (int32_t)fpk)) {
+        const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
+        return (Event){ EV_EX, r ? r->delta : 0 };
+    }
+    return (Event){ EV_NONE, 0 };
+}
+
+/* Mask every local-BL immediate in `mut` (positions detected on the REAL image), keeping the
+ * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
+ * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
+ * corrections_hybrid absorbs any mask-induced diff mismatch by construction. */
+static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
+    for (size_t a = 0; a + 4 <= n;) {
+        uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
+        if ((up & 0xf800u) == 0xf000u && (lo & 0xd000u) == 0xd000u) {
+            mut[a] = 0x00; mut[a + 1] = 0xf0; mut[a + 2] = 0x00; mut[a + 3] = 0xd0;
+            a += 4;
+        } else a += 2;
+    }
+}
+
+/* Op-derived field deltas: for every BL/LDR field candidate inside a copy, the exact delta under
+ * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
+ * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
+static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
+                                  uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
+    FieldDeltaVec add = {0};
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len; k += 2) {
+            uint32_t fpk;
+            if (!field_addr(fp, k, from_size, &fpk)) continue;
+            int64_t tpk = (int64_t)tp + k;
+            if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
+            if (is_local_bl(frm, from_size, fpk)) {
+                uint16_t tu = u16le_at(tob + (size_t)tpk), tl = u16le_at(tob + (size_t)tpk + 2);
+                if ((tu & 0xf800u) == 0xf000u && (tl & 0xd000u) == 0xd000u) {
+                    uint16_t fu = u16le_at(frm + fpk), fl2 = u16le_at(frm + fpk + 2);
+                    fd_put(&add, fpk, STREAM_BL,
+                           (int64_t)unpack_bl_local(fu, fl2) - unpack_bl_local(tu, tl));
+                }
+            } else if (ivec_has(&ldr, (int32_t)fpk)) {
+                fd_put(&add, fpk, STREAM_LDR,
+                       (int64_t)(int32_t)u32le_at(frm + fpk) - (int64_t)(int32_t)u32le_at(tob + (size_t)tpk));
+            }
+        }
+        free(ldr.v);
+        tp += o->diff_len + o->extra_len;
+        fp += o->diff_len + o->adj;
+    }
+    fd_finalize(&add);
+    /* rebuild fd: old entries not overridden + all op-derived entries */
+    FieldDeltaVec out = {0};
+    for (size_t i = 0; i < fd->n; i++)
+        if (!fd_find_kind(&add, fd->v[i].addr, fd->v[i].kind)) fd_put(&out, fd->v[i].addr, fd->v[i].kind, fd->v[i].delta);
+    for (size_t i = 0; i < add.n; i++) fd_put(&out, add.v[i].addr, add.v[i].kind, add.v[i].delta);
+    fd_finalize(&out);
+    free(add.v); free(fd->v);
+    *fd = out;
+}
+
+/* ---- piecewise shift map (D1) — encoder mirror of patch_apply smap_at ---- */
+static int32_t smap_at_e(const uint32_t *mb, const int32_t *mv, int mn, uint32_t x) {
+    int lo = 0, hi = mn - 1, r = -1;
+    while (lo <= hi) { int mid = (lo + hi) >> 1; if (mb[mid] <= x) { r = mid; lo = mid + 1; } else hi = mid - 1; }
+    return r < 0 ? 0 : mv[r];
+}
+
+/* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
+ * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
+ * EX pred is -shift(word value). mn==0 degenerates to residual == delta (no-map wire). */
+static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
+                              const uint32_t *mb, const int32_t *mv, int mn) {
+    int32_t pred;
+    if (kind == EV_BL) {
+        uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+        uint32_t T = fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
+        /* mod-2^32 subtract then /2, bit-identical to the decoder's smap_at recombination
+         * (patch_apply.h): a corrupt/degenerate map can make a shift INT32_MIN, so the signed
+         * form would be UB — the unsigned wrap is both defined and the exact wire semantics. */
+        pred = (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fpk) - (uint32_t)smap_at_e(mb, mv, mn, T)) / 2;
+    } else {
+        pred = (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, u32le_at(frm + fpk)));
+    }
+    return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
+}
+
+typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
+
+/* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan. */
+static FieldRef *collect_fields(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                                const FieldDeltaVec *fd, size_t *nout) {
+    FieldRef *out = NULL; size_t n = 0, cap = 0;
+    int32_t fp0 = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len;) {
+            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+            if (ev.type == EV_BL || ev.type == EV_EX) {
+                if (n == cap) { cap = cap ? cap * 2 : 256; out = (FieldRef *)xrealloc(out, cap * sizeof(*out)); }
+                out[n].kind = ev.type; out[n].fpk = (uint32_t)(fp0 + k); out[n].delta = ev.delta; n++;
+                k += 4; continue;
+            }
+            if (ev.type == EV_SBL) { k += 4; continue; }
+            k++;
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+    *nout = n;
+    return out;
+}
+
+typedef struct { uint32_t b; int32_t v; } SegCand;
+static int cmp_seg(const void *a, const void *b) {
+    const SegCand *x = (const SegCand *)a, *y = (const SegCand *)b;
+    return (x->b > y->b) - (x->b < y->b);
+}
+
+/* per-field precomputed keys: BL hits iff (g(k1)-g(k2))/2 == need; EX hits iff -g(k2) == need. */
+typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
+
+static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const FieldKey *fk, size_t nfk) {
+    size_t hits = 0;
+    for (size_t i = 0; i < nfk; i++) {
+        /* mod-2^32 arithmetic mirrors field_residual / the decoder's smap_at (a degenerate
+         * map value can be INT32_MIN; the signed subtract/negate would be UB, the unsigned
+         * wrap is defined and is the exact wire semantics). */
+        int32_t pred = fk[i].kind == EV_BL
+            ? (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fk[i].k1) - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2)) / 2
+            : (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2));
+        if (pred == fk[i].need) hits++;
+    }
+    return hits;
+}
+
+/* Fit the piecewise shift map: build the UNION of all structural candidates (bsdiff op-walk
+ * boundaries, a span-end terminator, and the exact EX value-run boundaries over sorted word
+ * values), then prune by BACKWARD elimination — remove segments whose removal costs at most
+ * SMAP_MAX_LOSS exact hits (their wire cost outweighs the few residuals they fix), batched per
+ * round with a verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only
+ * ships when the exact byte gate says the whole body got smaller, so the fit needs to be good,
+ * not perfect. */
+enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
+static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                         const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                         uint32_t *mb, int32_t *mv) {
+    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
+    size_t nex = 0;
+    for (size_t i = 0; i < nfr; i++) {
+        fk[i].kind = fr[i].kind;
+        fk[i].k1 = fr[i].fpk;
+        fk[i].need = (int32_t)(uint32_t)fr[i].delta;
+        if (fr[i].kind == EV_BL) {
+            uint16_t up = u16le_at(frm + fr[i].fpk), lo = u16le_at(frm + fr[i].fpk + 2);
+            fk[i].k2 = fr[i].fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
+        } else { fk[i].k2 = u32le_at(frm + fr[i].fpk); nex++; }
+    }
+    /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
+    size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
+    SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
+    uint32_t *pw = (uint32_t *)xmalloc(pcap * sizeof(*pw));
+    { int32_t tp = 0, fp = 0;
+      for (size_t i = 0; i < ops->n; i++) {
+          if (ops->v[i].diff_len > 0 && fp >= 0) {
+              pool[pn].b = (uint32_t)fp; pool[pn].v = tp - fp;
+              pw[pn] = (uint32_t)ops->v[i].diff_len; pn++;
+          }
+          tp += ops->v[i].diff_len + ops->v[i].extra_len;
+          fp += ops->v[i].diff_len + ops->v[i].adj;
+      }
+      pool[pn].b = from_size > to_size ? from_size : to_size; pool[pn].v = 0;
+      pw[pn] = 0x7fffffffu; pn++; }                      /* terminator: never pre-trimmed */
+    if (nex) {
+        SegCand *ex = (SegCand *)xmalloc(nex * sizeof(*ex));
+        size_t en = 0;
+        for (size_t i = 0; i < nfr; i++)
+            if (fk[i].kind == EV_EX) { ex[en].b = fk[i].k2; ex[en].v = -fk[i].need; en++; }
+        a1_sort(ex, en, sizeof(*ex), cmp_seg);
+        for (size_t i = 0; i < en;) {
+            size_t j = i;
+            while (j < en && ex[j].v == ex[i].v) j++;
+            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pw[pn] = (uint32_t)(j - i); pn++;
+            i = j;
+        }
+        free(ex);
+    }
+    /* pre-trim an oversized pool by weight so elimination stays fast */
+    while (pn > SMAP_POOL_MAX) {
+        size_t worst = 0;
+        for (size_t i = 1; i < pn; i++) if (pw[i] < pw[worst]) worst = i;
+        memmove(pool + worst, pool + worst + 1, (pn - worst - 1) * sizeof(*pool));
+        memmove(pw + worst, pw + worst + 1, (pn - worst - 1) * sizeof(*pw));
+        pn--;
+    }
+    /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
+    a1_sort(pool, pn, sizeof(*pool), cmp_seg);
+    uint32_t *tb = (uint32_t *)xmalloc((pn ? pn : 1) * sizeof(*tb));
+    int32_t *tv = (int32_t *)xmalloc((pn ? pn : 1) * sizeof(*tv));
+    int mn = 0;
+    for (size_t i = 0; i < pn; i++) {
+        if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
+        tb[mn] = pool[i].b; tv[mn] = pool[i].v; mn++;
+    }
+    size_t cur = smap_hits(tb, tv, mn, fk, nfr);
+    /* backward elimination: batch-remove <=SMAP_MAX_LOSS-loss segments, verify, fall back */
+    uint32_t *b2 = (uint32_t *)xmalloc((mn ? mn : 1) * sizeof(*b2));
+    int32_t *v2 = (int32_t *)xmalloc((mn ? mn : 1) * sizeof(*v2));
+    for (int round = 0; round < 8 && mn > 1; round++) {
+        int kept = 0, removed = 0;
+        for (int i = 0; i < mn; i++) {                    /* per-segment loss in full-map context */
+            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
+            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
+            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
+            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
+            if (h + SMAP_MAX_LOSS >= cur) { removed++; tv[i] = INT32_MIN; }  /* mark */
+            else kept++;
+        }
+        if (!removed) break;
+        int w = 0;
+        for (int i = 0; i < mn; i++) if (tv[i] != INT32_MIN) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+        size_t h = smap_hits(tb, tv, w, fk, nfr);
+        if (h + SMAP_MAX_LOSS * (size_t)removed >= cur || h >= cur) { mn = w; cur = h; continue; }
+        /* batch interaction lost too much: rebuild is impossible (marks destroyed values), so
+         * re-derive the union and stop batching. In practice this path is never taken; guard it. */
+        mn = w; cur = h; break;
+        (void)kept;
+    }
+    /* cap enforcement: cheapest-loss removal one at a time */
+    while (mn > SMAP_CAP) {
+        int drop = 0; size_t besth = 0;
+        for (int i = 0; i < mn; i++) {
+            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
+            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
+            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
+            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
+            if (h > besth) { besth = h; drop = i; }
+        }
+        memmove(tb + drop, tb + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tb));
+        memmove(tv + drop, tv + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tv));
+        mn--; cur = besth;
+    }
+    /* merge adjacent equal values (pure wire savings; lookups unchanged) */
+    { int w = 0;
+      for (int i = 0; i < mn; i++) { if (w && tv[w - 1] == tv[i]) continue; tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+      mn = w; }
+    if (mn == 1 && tv[0] == 0) mn = 0;
+    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
+    if (getenv("A1_MAP_DBG")) {
+        size_t h = smap_hits(mb, mv, mn, fk, nfr);
+        fprintf(stderr, "A1_MAP fields=%zu segs=%d hits=%zu (%.1f%%)\n",
+                nfr, mn, h, nfr ? 100.0 * (double)h / (double)nfr : 0.0);
+    }
+    free(fk); free(pool); free(pw); free(tb); free(tv); free(b2); free(v2);
+    return mn;
+}
+
+static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
+    FieldDeltaVec out = {0};
+    m4_stream_t st[M4_NSTREAMS];
+    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                          fr->code_begin, fr->code_end, 0, 0, st)) die("M0 disassemble failed");
+    int active[STREAM_N] = {1, 1, 0, 1, 1, 0};
+    int mapidx[STREAM_N] = {M4_DATA, M4_CODE, M4_BW, M4_BL, M4_LDR, M4_LDRW};
+    for (int s = 0; s < STREAM_N; s++) {
+        if (!active[s]) continue;
+        const m4_stream_t *ms = &st[mapidx[s]];
+        for (size_t bi = 0; bi < blocks[s].n; bi++) {
+            const Block *b = &blocks[s].v[bi];
+            for (int32_t k = 0; k < b->n; k++) {
+                size_t idx = (size_t)b->from_offset + (size_t)k;
+                if (idx < ms->n) fd_put(&out, ms->a[idx].addr, s, b->values[k]);
+            }
+        }
+    }
+    a1_m4_free_streams(st);
+    fd_finalize(&out);
+    return out;
+}
+
+static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                                  uint32_t to_size, const FieldDeltaVec *fd) {
+    int FWD = g_enc_fwd; (void)to_size;
+    int32_t fp0 = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        Op *o = &ops->v[oi];
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len;) {
+                if (k + 4 <= o->diff_len) {
+                    Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
+                    uint32_t fpk = 0;
+                    const FieldDelta *real = NULL;
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        (void)field_addr(fp0, k, from_size, &fpk);
+                        real = fd_find_kind(fd, fpk, ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
+                    }
+                    int ok = real != NULL;
+                    if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
+                        memset(o->diff + k, 0, 4);
+                    }
+                    if (ev.type) { k += 4; continue; }
+                }
+                k++;
+            }
+        } else {
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field_assume_pure(frm, from_size, fd, &ldr, fp0, k);
+                    uint32_t fpk = 0;
+                    const FieldDelta *real = NULL;
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        (void)field_addr(fp0, k, from_size, &fpk);
+                        real = fd_find_kind(fd, fpk, ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
+                    }
+                    int ok = real != NULL;
+                    if (ok && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) {
+                        memset(o->diff + k, 0, 4);
+                    }
+                    if (ev.type) { top -= 4; continue; }
+                }
+                top--;
+            }
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+}
+
+static Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj) {
+    Op o;
+    o.diff_len = diff_len;
+    o.diff = (uint8_t *)xmalloc((size_t)diff_len);
+    if (diff_len) memcpy(o.diff, diff, (size_t)diff_len);
+    o.extra_len = extra_len;
+    o.extra = (uint8_t *)xmalloc((size_t)extra_len);
+    if (extra_len) memcpy(o.extra, extra, (size_t)extra_len);
+    o.adj = adj;
+    return o;
+}
+
+static uint64_t dz_bits_u32(uint32_t x) {
+    uint32_t m = x + 1u;
+    int n = bitlen32(m);
+    return (uint64_t)(2 * bitlen32((uint32_t)n) - 1 + n - 1);
+}
+
+static uint64_t uleb_proxy_bits(uint32_t v, const uint8_t L0[256]) {
+    uint64_t bits = 0;
+    for (;;) {
+        uint8_t x = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        bits += L0[v ? (uint8_t)(x | 0x80u) : x];
+        if (!v) return bits;
+    }
+}
+
+static uint64_t diff_proxy_bits(const Op *o, int32_t begin, int32_t end,
+                                int FWD, const uint8_t L0[256]) {
+    int32_t dl = end - begin;
+    uint32_t nlit = 0;
+    uint64_t bits = 0;
+    for (int32_t k = begin; k < end; k++) nlit += o->diff[k] != 0;
+    bits += uleb_proxy_bits(nlit, L0);
+    if (FWD) {
+        int32_t prev = 0;
+        for (int32_t k = begin; k < end; k++) if (o->diff[k]) {
+            int32_t loc = k - begin;
+            bits += uleb_proxy_bits((uint32_t)(loc - prev), L0);
+            bits += L0[o->diff[k]];
+            prev = loc;
+        }
+    } else {
+        int32_t prev = dl;
+        for (int32_t k = end; k-- > begin;) if (o->diff[k]) {
+            int32_t loc = k - begin;
+            bits += uleb_proxy_bits((uint32_t)(prev - loc), L0);
+            bits += L0[o->diff[k]];
+            prev = loc;
+        }
+    }
+    return bits;
+}
+
+static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
+                                 const uint8_t L0[256], const uint8_t L1[256]) {
+    uint64_t bits = 0;
+    for (int32_t i = 0; i < len; i++) {
+        const uint8_t *L = ((abs_begin + i) & 1) ? L1 : L0;
+        bits += L[to->d[(size_t)abs_begin + (size_t)i]];
+    }
+    return bits;
+}
+
+static uint64_t op_proxy_bits(const Op *o, const Buf *to, int32_t tp0,
+                              int32_t begin, int32_t end, int32_t extra_begin,
+                              int32_t extra_len, int32_t adj, int FWD,
+                              const uint8_t L0[256], const uint8_t L1[256]) {
+    uint64_t bits = dz_bits_u32((uint32_t)(end - begin)) +
+                    dz_bits_u32((uint32_t)extra_len) +
+                    dz_bits_u32(zz32(adj));
+    bits += 2; /* zero preserve-count and correction-count symbols. */
+    bits += diff_proxy_bits(o, begin, end, FWD, L0);
+    bits += extra_proxy_bits(to, tp0 + extra_begin, extra_len, L0, L1);
+    return bits;
+}
+
+typedef struct { int32_t begin, end; } Run;
+
+static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
+
+
+
+/* Dense diff runs can be represented either as literal diff bytes or as an
+ * extra span plus an equal source skip. Choose the subset analytically per op:
+ * dynamic programming minimizes the modeled cost of the resulting op sequence
+ * using the same seeded literal bit-length proxy used by LZ planning, plus the
+ * exact raw geometry code lengths. */
+enum { SPLIT_GAIN_MARGIN_BITS = 8 };
+
+static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
+    uint8_t L0[256], L1[256];
+    from_huff_lengths(from->d, from->n, L0, L1);
+    OpVec out = {0};
+    int32_t tp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        Op *o = &ops->v[oi];
+        Run *runs = NULL;
+        size_t nr = 0, rcap = 0;
+        for (int32_t scan = 0; scan < o->diff_len;) {
+            while (scan < o->diff_len && o->diff[scan] == 0) scan++;
+            if (scan >= o->diff_len) break;
+            int32_t begin = scan++;
+            while (scan < o->diff_len && o->diff[scan] != 0) scan++;
+            if (nr == rcap) {
+                rcap = rcap ? rcap * 2 : 16;
+                runs = (Run *)xrealloc(runs, rcap * sizeof(runs[0]));
+            }
+            runs[nr++] = (Run){ begin, scan };
+        }
+        if (!nr) {
+            opvec_push(&out, *o);
+            tp += o->diff_len + o->extra_len;
+            free(runs);
+            continue;
+        }
+        size_t states = (nr + 1) * (nr + 1);
+        uint64_t *dp = (uint64_t *)xmalloc(states * sizeof(dp[0]));
+        uint8_t *take = (uint8_t *)xcalloc(states, 1);
+#define DP(I, P) dp[(I) * (nr + 1) + (P)]
+#define TAKE(I, P) take[(I) * (nr + 1) + (P)]
+        for (size_t p = 0; p <= nr; p++) {
+            int32_t seg = p ? runs[p - 1].end : 0;
+            DP(nr, p) = op_proxy_bits(o, to, tp, seg, o->diff_len,
+                                      o->diff_len, o->extra_len, o->adj,
+                                      g_enc_fwd, L0, L1);
+        }
+        for (size_t ri = nr; ri-- > 0;) {
+            for (size_t p = 0; p <= ri; p++) {
+                int32_t seg = p ? runs[p - 1].end : 0;
+                int32_t len = runs[ri].end - runs[ri].begin;
+                uint64_t skip = DP(ri + 1, p);
+                uint64_t split = op_proxy_bits(o, to, tp, seg, runs[ri].begin,
+                                               runs[ri].begin, len, len,
+                                               g_enc_fwd, L0, L1) +
+                                 DP(ri + 1, ri + 1);
+                if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
+                    DP(ri, p) = split;
+                    TAKE(ri, p) = 1;
+                } else {
+                    DP(ri, p) = skip;
+                }
+            }
+        }
+        size_t ri = 0, p = 0;
+        int32_t seg = 0;
+        int split_any = 0;
+        while (ri < nr) {
+            if (TAKE(ri, p)) {
+                int32_t len = runs[ri].end - runs[ri].begin;
+                int32_t pre = runs[ri].begin - seg;
+                opvec_push(&out, op_copy(pre, o->diff + seg, len,
+                                         to->d + (size_t)tp + (size_t)runs[ri].begin, len));
+                seg = runs[ri].end;
+                p = ri + 1;
+                split_any = 1;
+            }
+            ri++;
+        }
+        if (split_any) {
+            int32_t tail = o->diff_len - seg;
+            if (tail || o->extra_len || o->adj)
+                opvec_push(&out, op_copy(tail, o->diff + seg, o->extra_len, o->extra, o->adj));
+            free(o->diff);
+            free(o->extra);
+        } else {
+            opvec_push(&out, *o);
+        }
+        free(dp);
+        free(take);
+        free(runs);
+#undef DP
+#undef TAKE
+        tp += o->diff_len + o->extra_len;
+    }
+    free(ops->v);
+    *ops = out;
+}
+
+static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t to_size) {
+    int FWD = g_enc_fwd;
+    int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
+    for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        for (int32_t k = 0; k < o->diff_len; k++) {
+            int32_t a = fp + k;
+            if (0 <= a && (uint32_t)a < from_size) {
+                int32_t t = tp + k;
+                /* a read behind the frontier that the row window covers reads OLD flash
+                 * directly — it must not force a journal entry. */
+                if ((FWD ? a < t : a > t) && a1_row_covered(a, t)) continue;
+                if (FWD) { if (readarr[a] < t) readarr[a] = t; }
+                else { if (readarr[a] > t) readarr[a] = t; }
+            }
+        }
+        tp += o->diff_len + o->extra_len;
+        fp += o->diff_len + o->adj;
+    }
+    uint8_t *pres = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    int32_t wi = 0;
+    if (FWD) {
+        tp = fp = 0;
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            const Op *o = &ops->v[oi];
+            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
+                int32_t tpw = tp + k;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
+            }
+            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
+                int32_t tpw = tp + o->diff_len + e;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
+            }
+            tp += o->diff_len + o->extra_len;
+            fp += o->diff_len + o->adj;
+        }
+    } else {
+        typedef struct { int32_t tp, fp; const Op *o; } M;
+        M *m = (M *)xmalloc(ops->n * sizeof(*m));
+        tp = fp = 0;
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            m[oi] = (M){tp, fp, &ops->v[oi]};
+            tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+            fp += ops->v[oi].diff_len + ops->v[oi].adj;
+        }
+        for (size_t rr = ops->n; rr-- > 0;) {
+            const Op *o = m[rr].o;
+            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
+                int32_t tpw = m[rr].tp + o->diff_len + e;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
+            }
+            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
+                int32_t tpw = m[rr].tp + k;
+                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
+            }
+        }
+        free(m);
+    }
+    free(readarr);
+    return pres;
+}
+
+static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+                                   const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                                   const uint8_t *presset) {
+    int FWD = g_enc_fwd;
+    size_t span = from_size > to_size ? from_size : to_size;
+    uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
+    typedef struct { int32_t tp, fp; const Op *o; } M;
+    M *m = (M *)xmalloc(ops->n * sizeof(*m));
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        m[oi] = (M){tp, fp, &ops->v[oi]};
+        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+        fp += ops->v[oi].diff_len + ops->v[oi].adj;
+    }
+    for (size_t idx = 0; idx < ops->n; idx++) {
+        size_t oi = FWD ? idx : ops->n - 1 - idx;
+        const Op *o = m[oi].o;
+        IVec ldr = op_ldr_set(frm, m[oi].fp, o->diff_len, from_size);
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len;) {
+                if (k + 4 <= o->diff_len) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, m[oi].fp, k);
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        uint8_t packed[4];
+                        uint32_t fpk = (uint32_t)(m[oi].fp + k);
+                        if (ev.type == EV_BL) {
+                            uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+                            pack_bl_local(unpack_bl_local(up, lo) - ev.delta, packed);
+                        } else {
+                            uint32_t val = u32le_at(frm + fpk);
+                            wr32le(packed, val - (uint32_t)ev.delta);
+                        }
+                        for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
+                        k += 4; continue;
+                    } else if (ev.type == EV_SBL) { k += 4; continue; }
+                }
+                k++;
+            }
+        } else {
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, m[oi].fp, k);
+                    if (ev.type == EV_BL || ev.type == EV_EX) {
+                        uint8_t packed[4];
+                        uint32_t fpk = (uint32_t)(m[oi].fp + k);
+                        if (ev.type == EV_BL) {
+                            uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
+                            pack_bl_local(unpack_bl_local(up, lo) - ev.delta, packed);
+                        } else {
+                            uint32_t val = u32le_at(frm + fpk);
+                            wr32le(packed, val - (uint32_t)ev.delta);
+                        }
+                        for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
+                        top -= 4; continue;
+                    } else if (ev.type == EV_SBL) { top -= 4; continue; }
+                }
+                top--;
+            }
+        }
+        free(ldr.v);
+    }
+    uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
+    memcpy(buf, frm, from_size);
+    uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
+    uint8_t *corr = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    uint8_t *chas = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    int32_t wi = 0;
+#define SIM_WRITE(TP, FP, ISD, DB) do { \
+        int32_t _tp = (TP), _fp = (FP); \
+        if (presset[wi] && 0 <= _tp && (uint32_t)_tp < from_size && !jhas[_tp]) { jhas[_tp] = 1; jval[_tp] = buf[_tp]; } \
+        uint8_t produced; \
+        if (ohas[_tp]) produced = oval[_tp]; \
+        else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) { \
+                 int _beh = FWD ? (_fp < _tp) : (_fp > _tp); \
+                 src = jhas[_fp] ? jval[_fp] \
+                     : ((_beh && a1_row_covered(_fp, _tp)) ? frm[_fp] : buf[_fp]); } \
+               produced = (uint8_t)((DB) + src); } \
+        uint8_t want = true_to[_tp]; \
+        uint8_t c = (uint8_t)(want - produced); \
+        if (c) { corr[_tp] = c; chas[_tp] = 1; } \
+        buf[_tp] = want; wi++; \
+    } while (0)
+    if (FWD) {
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            const Op *o = m[oi].o;
+            for (int32_t k = 0; k < o->diff_len; k++) SIM_WRITE(m[oi].tp + k, m[oi].fp + k, 1, o->diff[k]);
+            for (int32_t e = 0; e < o->extra_len; e++) SIM_WRITE(m[oi].tp + o->diff_len + e, -1, 0, o->extra[e]);
+        }
+    } else {
+        for (size_t rr = ops->n; rr-- > 0;) {
+            const Op *o = m[rr].o;
+            for (int32_t e = o->extra_len - 1; e >= 0; e--) SIM_WRITE(m[rr].tp + o->diff_len + e, -1, 0, o->extra[e]);
+            for (int32_t k = o->diff_len - 1; k >= 0; k--) SIM_WRITE(m[rr].tp + k, m[rr].fp + k, 1, o->diff[k]);
+        }
+    }
+#undef SIM_WRITE
+    for (uint32_t i = 0; i < to_size; i++) if (!chas[i]) corr[i] = 0;
+    free(chas); free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
+    return corr;
+}
+
+static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                                  const uint8_t *presset, const uint8_t *corr) {
+    int FWD = g_enc_fwd; (void)from_size; (void)to_size;
+    OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
+    typedef struct { int32_t tp, fp; const Op *o; size_t orig; } M;
+    M *m = (M *)xmalloc(ops->n * sizeof(*m));
+    int32_t tp = 0, fp = 0;
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        m[oi] = (M){tp, fp, &ops->v[oi], oi};
+        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
+        fp += ops->v[oi].diff_len + ops->v[oi].adj;
+    }
+    int32_t wi = 0;
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        const Op *o = m[oi].o;
+        OpPC *pc = &out[step];
+        if (FWD) {
+            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
+                if (presset[wi]) ivec_push(&pc->pres, k);
+                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+            }
+            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
+                int32_t off = o->diff_len + e;
+                if (presset[wi]) ivec_push(&pc->pres, off);
+                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+            }
+        } else {
+            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
+                int32_t off = o->diff_len + e;
+                if (presset[wi]) ivec_push(&pc->pres, off);
+                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+            }
+            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
+                if (presset[wi]) ivec_push(&pc->pres, k);
+                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+            }
+            if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+        }
+    }
+    free(m);
+    return out;
+}
+
+static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+                              uint32_t to_size, const FieldDeltaVec *fd, const OpPC *pc) {
+    (void)to_size;
+    EncStats st = {0};
+    int32_t fp0 = 0;
+    st.ops = ops->n;
+    for (size_t i = 0; i < ops->n; i++) {
+        st.preserves += pc[i].pres.n;
+        st.corrections += pc[i].corr.n;
+    }
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const Op *o = &ops->v[oi];
+        st.diff_bytes += (size_t)o->diff_len;
+        st.extra_bytes += (size_t)o->extra_len;
+        for (int32_t k = 0; k < o->diff_len; k++) st.literals += o->diff[k] != 0;
+        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= o->diff_len;) {
+            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+            if (ev.type == EV_BL) { st.bl_fields++; k += 4; continue; }
+            if (ev.type == EV_EX) { st.ex_fields++; k += 4; continue; }
+            if (ev.type == EV_SBL) { st.suppressed_bl++; k += 4; continue; }
+            k++;
+        }
+        free(ldr.v);
+        fp0 += o->diff_len + o->adj;
+    }
+    return st;
+}
+

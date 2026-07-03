@@ -1,0 +1,145 @@
+/*
+ * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * A1 host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl/bv, raw bits, gamma).
+ * Part of the single translation unit rooted at src/patch_generate.c, which
+ * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
+ * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
+ * wire and model_diff.c's #include "patch_generate.c".
+ */
+/* ------------------------------------------------------------------------------------- */
+/* Binary range encoder and models.                                                        */
+/* ------------------------------------------------------------------------------------- */
+typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
+typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
+typedef struct { uint16_t p[256]; } BTE;   /* rate is NOT stored per-tree; passed per call (see rc_models.h) */
+typedef struct { uint16_t m[4]; int h; } FLE;
+typedef struct { BTE t; } BVE;
+typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
+
+static void re_shift_low(REnc *r) {
+    if (r->low < 0xff000000ull || r->low > 0xffffffffull) {
+        uint8_t c = r->cache;
+        for (;;) {
+            buf_put(&r->out, (uint8_t)(c + (uint8_t)(r->low >> 32)));
+            c = 0xff;
+            r->csz--;
+            if (r->csz == 0) break;
+        }
+        r->cache = (uint8_t)(r->low >> 24);
+    }
+    r->csz++;
+    r->low = (r->low << 8) & 0xffffffffull;
+}
+
+static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz = 1; }
+
+/* RC_S_BIT_RATE (Golomb / order-2 flag / MTF rep+hit adaptation rate) and RC_REP0_INIT (rep0 prior)
+ * are single-sourced in rc_models.h, shared verbatim with the decoder. */
+
+static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
+    uint32_t p = *prob, bound = (r->range >> 12) * p;
+    if (bit == 0) { r->range = bound; *prob = (uint16_t)(p + ((RC_PBIT - p) >> rate)); }
+    else { r->low += bound; r->range -= bound; *prob = (uint16_t)(p - (p >> rate)); }
+    while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
+}
+
+static void re_raw(REnc *r, int bit) {
+    uint32_t bound = r->range >> 1;
+    if (bit == 0) r->range = bound;
+    else { r->low += bound; r->range -= bound; }
+    while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
+}
+
+static Buf re_flush_opt(REnc *r) {
+    int t = bitlen32(r->range) - 1;
+    uint64_t mask = (1ull << t) - 1ull;
+    if (r->low & mask) r->low = (r->low + (1ull << t)) & ~mask;
+    size_t base = r->out.n;
+    for (int i = 0; i < 5; i++) re_shift_low(r);
+    while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
+    Buf b = r->out;
+    r->out = (Buf){0};
+    return b;
+}
+
+static void put_raw_bits(REnc *r, uint32_t v, int nb) {
+    for (int sh = nb - 1; sh >= 0; sh--) re_raw(r, (int)((v >> sh) & 1u));
+}
+
+static void w_gamma(REnc *r, uint32_t m) {
+    int n = bitlen32(m) - 1;
+    for (int i = 0; i < n; i++) re_raw(r, 0);
+    for (int i = n; i >= 0; i--) re_raw(r, (int)((m >> i) & 1u));
+}
+
+static void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
+
+static void bt_init_e(BTE *t) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; }
+
+static void bt_encode(BTE *t, REnc *r, uint8_t byte, int rate) {
+    int m = 1;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        re_bit(r, &t->p[m], bit, rate);
+        m = (m << 1) | bit;
+    }
+}
+
+static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t) {
+    uint32_t hist[256], w[512];
+    for (int i = 0; i < 256; i++) hist[i] = 1;
+    for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
+    for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
+    for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
+    t->p[0] = RC_PHALF;
+    for (int m = 1; m < 256; m++) {
+        uint32_t num = w[2*m], den = w[m];
+        uint32_t pr = den ? (2u * RC_PBIT * num + den) / (2u * den) : RC_PHALF;
+        t->p[m] = (uint16_t)(pr < 1 ? 1 : (pr > RC_PBIT - 1 ? RC_PBIT - 1 : pr));
+    }
+}
+
+static void ug_init_e(UGE *g, char code, int k) {
+    g->code = (uint8_t)code; g->k = (uint8_t)k;
+    for (int i = 0; i <= UG_CTX; i++) { g->u[i] = RC_PHALF; for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF; }
+}
+
+static int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
+
+/* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
+static void ug_seed_cont_e(UGE *g, int depth) {
+    for (int i = 0; i < depth && i <= UG_CTX; i++) g->u[i] = (uint16_t)(RC_PBIT / 16);
+}
+
+static void ug_encode(UGE *g, REnc *r, uint32_t v) {
+    uint32_t cl;
+    if (g->code == 'r') {
+        cl = v >> g->k;
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, RC_S_BIT_RATE);
+        re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
+        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c(pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);
+    } else {
+        uint32_t mm = v + 1u;
+        cl = (uint32_t)bitlen32(mm) - 1u;
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, RC_S_BIT_RATE);
+        re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
+    }
+}
+
+/* MTF dict-index model (mirror of decoder IdxUnary/s_idx): a lean adaptive UNARY code. The encoded
+ * index value v is ~54% zero; unary fits that concentration and drops the per-stream UGGamma. */
+#define IDX_CTX 5
+typedef struct { uint16_t u[IDX_CTX]; } IDXE;
+static void idx_init_e(IDXE *g, uint16_t seed) { for (int i = 0; i < IDX_CTX; i++) g->u[i] = seed; }
+static void idx_encode(IDXE *g, REnc *r, uint32_t v) {
+    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
+    re_bit(r, &g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
+}
+
+static void fl_init_e(FLE *f) { for (int i = 0; i < 4; i++) f->m[i] = RC_PHALF; f->h = 0; }
+static void fl_encode(FLE *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
+

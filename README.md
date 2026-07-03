@@ -9,7 +9,14 @@ Production code lives under `src/`, with third-party code under `vendor/`:
   (ISR push) producers; not part of the device decoder artifact.
 - `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`,
   including the host NVM emulator.
-- `src/patch_generate.c`: host-side C encoder.
+- `src/patch_generate.c`: host-side C encoder. It is a single translation unit
+  assembled as a thin umbrella: a shared prologue (typedefs + file-scope state)
+  followed by an ordered `#include` of the `src/enc_*.inc` subsystem modules
+  (`enc_util`, `enc_elf`, `enc_bsdiff`, `enc_field`, `enc_rc`, `enc_lz`,
+  `enc_emit`, `enc_plan`, `enc_cli`). The single-TU shape preserves whole-program
+  optimization and the byte-exact wire; the modules are not standalone TUs and
+  must stay in include order. `test/model_diff.c` reaches the file-static models
+  by `#include`-ing `patch_generate.c` directly.
 - `src/patch_selfcheck.c`: reference-decoder self-verification built into
   `hy_enc` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
