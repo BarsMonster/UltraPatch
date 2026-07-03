@@ -117,6 +117,31 @@ Depth benchmark for the record: D=1 -14.5% / D=2 -20.5% / D=4 -20.9% / D=8
 -21.2% on degraded-blob bytes; D=8 exceeds the 12 KiB SRAM cap; D=2 is the
 knee and was chosen.
 
+### Final verified D=1 vs D=2 (both with the landed v2 encoding, same baseline)
+
+| metric                          | baseline  | v2 D=1            | v2 D=2 (landed)   |
+|---------------------------------|-----------|-------------------|-------------------|
+| home corpus total               | 4,199,788 | 4,199,732 (-56)   | 4,199,637 (-151)  |
+| home split better/worse/equal   | —         | 14 / 1 / 241      | 36 / 1 / 219      |
+| one-face grow/revert            | 589/305   | 589/305           | 589/305           |
+| home journal peak / total slots | 478 / 5,012 | 478 / 4,593     | 453 / 4,023       |
+| foreign total (34 pair-dirs)    | 1,744,004 (degradation-only) | 1,327,495 | 1,234,665 |
+| ARM .text / .bss                | 6184 / 10648 | 6244 / 10648   | 6324 / 10904      |
+
+Why D=2 is the knee and not an artifact: D=1's window is SAME-ROW only — a
+lag-δ read is covered just when `(t mod ROW) >= δ`, so it is partial even for
+tiny lags and zero past 256 B. D=2 is the smallest depth with an UNCONDITIONAL
+previous-row guarantee: every sub-row lag is fully covered regardless of row
+phase; each further depth merely extends a partial band by another 256 B.
+Home journal lags are function-scale (>=256 B, from code displaced by whole
+inserted/removed functions between distant releases — the measured peak pair
+sheds nothing at D=1 and 25 slots at D=2), while the foreign small-lag mass is
+relinker micro-drift (<256 B) that D=2 covers completely. A deployment whose
+firmware drifts in the 512 B–2 KB band can retune with `-DOUTROW_DEPTH=4` +
+`-DA1_ROW_DEPTH=4` on its own blobs; compatibility toward deeper decoders is
+monotone, and the degradation logger's lag histogram re-derives the right
+depth for any new corpus.
+
 ## Permanent gate asset — decision: NO
 
 The foreign binaries stay out of the repo: they are third-party build
