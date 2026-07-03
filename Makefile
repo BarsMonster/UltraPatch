@@ -53,7 +53,7 @@ BASE_ARM_SOFT_DIV ?= 1
 # which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
-.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-edge check-degrade check-golden check-models golden-update gate gate-full fuzz check-encfuzz check-analyze
+.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
 
 all: hy_enc hy_dec
 
@@ -260,38 +260,21 @@ check-corpus: all check-assets
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
-# The gate comes in TWO sizes (same consolidated summary block, same failure semantics):
-#
-#  - `make gate` — the FAST dev gate (hard budget: <= 60 s wall on the reference machine).
-#    Builds up-front, then runs the independent fast legs CONCURRENTLY: check-assets, check
-#    (one-face grow/revert round-trip + BASE_ONEFACE_* size gates), check-malformed,
-#    check-edge, check-degrade, check-golden, check-models, check-arm (sizes + divide
-#    policy), and check-stack. Wall time ~= the slowest leg, not the sum.
-#
-#  - `make gate-full` — the RELEASE gate, a STRICT SUPERSET of `gate`: every leg above plus
-#    the FULL 256-pair corpus matrix (corpus full_total vs BASE_FULL_TOTAL, NVM write-safety,
-#    journal peak — check-corpus), launched after the fast legs so wall time ~= check-corpus.
-#    MANDATORY before release and after any wire-affecting or encoder-output-affecting
-#    change (see AGENTS.md; the 256-pair better/worse judging rule lives here).
-#
-# Both print the single consolidated summary with every metric their legs track — ARM
-# .text/.data/.bss + divide policy, caller-stack bound, one-face grow/revert, golden wire,
-# model diff, degradation paths, and (gate-full) corpus full total,
-# matrix round-trips, NVM write-safety, journal peak. Exits nonzero if ANY gate fails, and
-# on failure dumps the raw blocks so the offending metric is visible. Binaries are built
-# BEFORE the legs fork, so concurrent sub-makes never race on a compile; legs run
-# undisturbed even if sources change mid-gate.
-gate:      GATE_MODE = dev
-gate-full: GATE_MODE = full
-gate gate-full: all model_diff
+# THE gate — one target, everything, hard budget <= 60 s wall on the reference machine
+# (measured ~34 s at 32 jobs). Builds up-front, then runs every leg CONCURRENTLY:
+# check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
+# check-malformed, check-edge, check-degrade, check-golden, check-models, check-arm
+# (sizes + divide policy), check-stack, and the FULL 256-pair corpus matrix (corpus
+# full_total vs BASE_FULL_TOTAL, NVM write-safety, journal peak — check-corpus; the
+# 256-pair better/worse judging rule lives here). Wall time ~= the slowest leg
+# (check-corpus), not the sum. Prints one consolidated summary with every tracked
+# metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
+# metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes
+# never race on a compile; legs run undisturbed even if sources change mid-gate.
+gate: all model_diff
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	: > "$$tmp/m.txt"; \
-	if [ "$(GATE_MODE)" = full ]; then \
-		echo "running RELEASE gate (strict superset of dev gate): concurrent fast legs + full 256-pair corpus matrix..."; \
-	else \
-		echo "running DEV gate (fast legs, concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack (full matrix: make gate-full)..."; \
-	fi; \
+	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack + check-corpus..."; \
 	$(MAKE) --no-print-directory check-assets    >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
 	$(MAKE) --no-print-directory check           >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
 	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
@@ -301,17 +284,11 @@ gate gate-full: all model_diff
 	$(MAKE) --no-print-directory check-models    >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
 	$(MAKE) --no-print-directory check-arm       >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
 	$(MAKE) --no-print-directory check-stack     >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
-	if [ "$(GATE_MODE)" = full ]; then \
-		$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
-	fi; \
-	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st; do \
+	$(MAKE) --no-print-directory check-corpus    >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
+	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st $$p_m; do \
 		wait $$p || rc=1; \
 	done; \
-	if [ "$(GATE_MODE)" = full ]; then \
-		echo "==================== A1 FULL GATE ===================="; \
-	else \
-		echo "==================== A1 DEV GATE ====================="; \
-	fi; \
+	echo "==================== A1 GATE ========================="; \
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \

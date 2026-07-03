@@ -52,12 +52,12 @@ suite for malformed envelopes, truncations, appended garbage, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
 random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
 representative blobs — any wire drift fails the gate), `make check-degrade`,
-`make check-models`, and the ARM size/divide/stack gates. The full 256-pair
-corpus matrix runs in `make gate-full` (the release gate). qemu-based decode
-validation was removed permanently (owner decision, 2026-07-03): too slow for
-its marginal value — a one-time 260-pair qemu-arm study found zero host-vs-ARM
-divergence, and the ARM cross-build gate still compiles the real Thumb-1
-decoder every cycle.
+`make check-models`, the ARM size/divide/stack gates, and the full 256-pair
+corpus matrix — all legs run concurrently, ~34 s wall on the reference machine.
+qemu-based decode validation was removed permanently (owner decision,
+2026-07-03): too slow for its marginal value — a one-time 260-pair qemu-arm
+study found zero host-vs-ARM divergence, and the ARM cross-build gate still
+compiles the real Thumb-1 decoder every cycle.
 
 Create a deterministic standalone corpus bundle, if needed, with:
 
