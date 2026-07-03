@@ -40,6 +40,33 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 #endif
 #define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
 
+/* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
+ * Direction is an ENCODER CHOICE signaled in the envelope (natural = canonical size-delta
+ * uLEB, unnatural = overlong marker) instead of being derived from the size relation;
+ * encode_a1 runs the plan sweep in both directions and ships the smaller total. Every
+ * pipeline stage reads this instead of comparing sizes. */
+static int g_enc_fwd = 1;
+
+/* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting
+ * build contract; compatibility is monotone toward larger decoder windows). */
+#ifndef A1_OUTROW
+#define A1_OUTROW 256
+#endif
+#ifndef A1_ROW_DEPTH
+#define A1_ROW_DEPTH 2
+#endif
+
+/* Row-window oracle: is source address a — already logically overwritten — still OLD in
+ * physical flash when the decoder produces output position t? The decoder keeps the last
+ * OUTROW_DEPTH rows uncommitted (direct-mapped FIFO); rows are touched in write order, so
+ * at read time the uncommitted set always includes rows within (depth-1) of row(t)
+ * (conservative by one extra row at row starts). Covered reads return the pristine old
+ * byte via plain flash_read — no journal slot, no [P] event, no conversion needed. */
+static int a1_row_covered(int64_t a, int64_t t) {
+    if (g_enc_fwd) return a / A1_OUTROW >= t / A1_OUTROW - (A1_ROW_DEPTH - 1);
+    return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
+}
+
 /* Decoder resource-cap mirrors — MUST match patch_apply JSLOTS / OPC_CAP (a deployment that
  * -D-retunes the decoder caps must retune these identically). A1_JSLOTS is also the journal
  * budget for plan degradation (degrade_ops_to_journal_budget). */
@@ -215,6 +242,18 @@ static int uleb_len(uint32_t v) {
     int n = 1;
     while (v >>= 7) n++;
     return n;
+}
+
+/* uLEB with one redundant trailing continuation byte — value-identical, non-canonical.
+ * The decoder reads the redundancy as a 1-bit flag (the unnatural apply direction). */
+static void put_uleb_overlong(Buf *b, uint32_t v) {
+    for (;;) {
+        uint8_t x = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        buf_put(b, (uint8_t)(x | 0x80u));
+        if (!v) break;
+    }
+    buf_put(b, 0);
 }
 
 static void put_pack_size(Buf *b, int64_t value) {
@@ -1182,7 +1221,7 @@ static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const
 
 static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                   uint32_t to_size, const FieldDeltaVec *fd) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd; (void)to_size;
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
@@ -1356,7 +1395,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
             int32_t seg = p ? runs[p - 1].end : 0;
             DP(nr, p) = op_proxy_bits(o, to, tp, seg, o->diff_len,
                                       o->diff_len, o->extra_len, o->adj,
-                                      to->n <= from->n, L0, L1);
+                                      g_enc_fwd, L0, L1);
         }
         for (size_t ri = nr; ri-- > 0;) {
             for (size_t p = 0; p <= ri; p++) {
@@ -1365,7 +1404,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
                 uint64_t skip = DP(ri + 1, p);
                 uint64_t split = op_proxy_bits(o, to, tp, seg, runs[ri].begin,
                                                runs[ri].begin, len, len,
-                                               to->n <= from->n, L0, L1) +
+                                               g_enc_fwd, L0, L1) +
                                  DP(ri + 1, ri + 1);
                 if (split + SPLIT_GAIN_MARGIN_BITS < skip) {
                     DP(ri, p) = split;
@@ -1411,7 +1450,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
 }
 
 static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t to_size) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
     for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
     int32_t tp = 0, fp = 0;
@@ -1421,6 +1460,9 @@ static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t 
             int32_t a = fp + k;
             if (0 <= a && (uint32_t)a < from_size) {
                 int32_t t = tp + k;
+                /* a read behind the frontier that the row window covers reads OLD flash
+                 * directly — it must not force a journal entry. */
+                if ((FWD ? a < t : a > t) && a1_row_covered(a, t)) continue;
                 if (FWD) { if (readarr[a] < t) readarr[a] = t; }
                 else { if (readarr[a] > t) readarr[a] = t; }
             }
@@ -1474,7 +1516,7 @@ static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t 
 static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
                                    const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
                                    const uint8_t *presset) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
     typedef struct { int32_t tp, fp; const Op *o; } M;
@@ -1544,7 +1586,11 @@ static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const u
         if (presset[wi] && 0 <= _tp && (uint32_t)_tp < from_size && !jhas[_tp]) { jhas[_tp] = 1; jval[_tp] = buf[_tp]; } \
         uint8_t produced; \
         if (ohas[_tp]) produced = oval[_tp]; \
-        else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) src = jhas[_fp] ? jval[_fp] : buf[_fp]; produced = (uint8_t)((DB) + src); } \
+        else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) { \
+                 int _beh = FWD ? (_fp < _tp) : (_fp > _tp); \
+                 src = jhas[_fp] ? jval[_fp] \
+                     : ((_beh && a1_row_covered(_fp, _tp)) ? frm[_fp] : buf[_fp]); } \
+               produced = (uint8_t)((DB) + src); } \
         uint8_t want = true_to[_tp]; \
         uint8_t c = (uint8_t)(want - produced); \
         if (c) { corr[_tp] = c; chas[_tp] = 1; } \
@@ -1571,7 +1617,7 @@ static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const u
 
 static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                                   const uint8_t *presset, const uint8_t *corr) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd; (void)from_size; (void)to_size;
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
     typedef struct { int32_t tp, fp; const Op *o; size_t orig; } M;
     M *m = (M *)xmalloc(ops->n * sizeof(*m));
@@ -2507,7 +2553,7 @@ static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *l
 }
 
 static void build_content(const OpVec *ops, uint32_t from_size, uint32_t to_size, Buf *content, Buf *tags, size_t **ends_out) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd; (void)from_size; (void)to_size;
     size_t nops = ops->n;
     size_t *ends = (size_t *)xmalloc((nops ? nops : 1) * sizeof(size_t));
     int32_t *tp0 = (int32_t *)xmalloc((nops ? nops : 1) * sizeof(int32_t));
@@ -2823,7 +2869,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
 static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc, int W) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = NULL;
     build_content(ops, from_size, to_size, &content, &tags, &ends);
@@ -3019,7 +3065,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
  * still proven per blob by the reference-decoder self-verification. */
 static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t from_size,
                                           uint32_t to_size, size_t budget) {
-    int FWD = to_size <= from_size;
+    int FWD = g_enc_fwd;
     uint8_t *pres = preserve_indices(ops, from_size, to_size);
     size_t total = 0;
     for (uint32_t wi = 0; wi < to_size; wi++) total += pres[wi];
@@ -3038,29 +3084,39 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
     int32_t tp0 = 0, fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
-        int32_t dl = o->diff_len, ks = 0, ke = 0;
-        if (FWD ? (fp0 < tp0) : (fp0 > tp0)) {   /* op reads behind the write frontier */
-            if (FWD) {
-                /* unprotected overwritten reads: C <= a < to_size (a = fp0+k, a >= 0) */
-                if (fp0 < C) ks = C - fp0;
-                if (fp0 < 0 && ks < -fp0) ks = -fp0;
-                int64_t hi = (int64_t)to_size - fp0;
-                ke = hi < dl ? (hi < 0 ? 0 : (int32_t)hi) : dl;
-            } else {
-                /* unprotected overwritten reads: 0 <= a <= C and a < from_size */
-                if (fp0 < 0) ks = -fp0;
-                int64_t hi = (int64_t)C - fp0 + 1;
-                if ((int64_t)from_size - fp0 < hi) hi = (int64_t)from_size - fp0;
-                ke = hi < dl ? (hi < 0 ? 0 : (int32_t)hi) : dl;
+        int32_t dl = o->diff_len;
+        int behind = FWD ? (fp0 < tp0) : (fp0 > tp0);   /* op reads behind the write frontier */
+        int32_t seg = 0, k = 0;
+        int split_any = 0;
+        while (behind && k < dl) {
+            /* hazard = behind-frontier read of an UNPROTECTED overwritten position that the
+             * row window does NOT cover. Coverage is periodic within each output row, so
+             * hazard runs fragment; every maximal run becomes exact extra bytes (source
+             * skipped via adj), splitting the op into copy/extra alternations. */
+            int64_t a = (int64_t)fp0 + k, t = (int64_t)tp0 + k;
+            int hz = a >= 0 &&
+                     (FWD ? (a < (int64_t)to_size && a >= C)
+                          : (a < (int64_t)from_size && a <= C)) &&
+                     !a1_row_covered(a, t);
+            if (!hz) { k++; continue; }
+            int32_t rs = k;
+            while (k < dl) {
+                a = (int64_t)fp0 + k; t = (int64_t)tp0 + k;
+                hz = a >= 0 &&
+                     (FWD ? (a < (int64_t)to_size && a >= C)
+                          : (a < (int64_t)from_size && a <= C)) &&
+                     !a1_row_covered(a, t);
+                if (!hz) break;
+                k++;
             }
+            opvec_push(&out, op_copy(rs - seg, o->diff + seg, k - rs,
+                                     to->d + (size_t)tp0 + (size_t)rs, k - rs));
+            seg = k;
+            split_any = 1;
         }
-        if (ks < ke) {
-            /* split: [0,ks) stays a copy; [ks,ke) ships as exact extras with the source
-             * skipped via adj; [ke,dl) plus the original extras/adj continue in a second
-             * op. tp/fp walk totals are preserved exactly. */
-            opvec_push(&out, op_copy(ks, o->diff, ke - ks, to->d + (size_t)tp0 + (size_t)ks, ke - ks));
-            if ((dl - ke) || o->extra_len || o->adj)
-                opvec_push(&out, op_copy(dl - ke, o->diff + ke, o->extra_len, o->extra, o->adj));
+        if (split_any) {
+            if ((dl - seg) || o->extra_len || o->adj)
+                opvec_push(&out, op_copy(dl - seg, o->diff + seg, o->extra_len, o->extra, o->adj));
             free(o->diff); free(o->extra);
         } else {
             opvec_push(&out, *o);
@@ -3106,7 +3162,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
         size_t old_n = ops.n;                               /* pc[] is sized for THIS op count */
         int split_any = 0;
         if (pass < 12) {
-            int FWDD = to_size <= from_size;
+            int FWDD = g_enc_fwd;
             int32_t *cut = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
             for (size_t i = 0; i < ops.n; i++) cut[i] = -1;
             for (size_t step = 0; step < ops.n; step++) {
@@ -3196,29 +3252,41 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20}, {3, 11},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
-    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1;
-    for (int v = 0; v < NPLANS; v++) {
-        int32_t fpe = 0; EncStats stv = {0};
-        Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
-        if (b.n == 0) { buf_free(&b); continue; }            /* config infeasible on the wire */
-        if (bestv < 0 || b.n < body.n) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; }
-        else buf_free(&b);
+    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
+    size_t best_tot = 0;
+    for (int dir = 0; dir < 2; dir++) {              /* 0 = ascending (FWD), 1 = descending */
+        g_enc_fwd = (dir == 0);
+        for (int v = 0; v < NPLANS; v++) {
+            int32_t fpe = 0; EncStats stv = {0};
+            Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
+            if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
+            /* judge by SHIPPED total: descending additionally pays the fp_end envelope
+             * varint, and the UNNATURAL direction pays the 1-byte overlong marker */
+            size_t tot = b.n + (dir ? (size_t)uleb_len(zz32(fpe - (int32_t)from_size)) : 0u)
+                             + (((to_size > from_size) ? 1 : 0) != dir ? 1u : 0u);
+            if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
+            else buf_free(&b);
+        }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
-    if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d\n", bestv);
+    if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d desc=%d\n", bestv, best_desc);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);
     /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
      * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
-     * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB. The
-     * decoder reconstructs the absolutes (and thence the direction) before reading anything else. */
-    put_uleb(&blob, zz32((int32_t)to_size - (int32_t)from_size));
+     * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB.
+     * The apply direction rides the same field: the NATURAL direction (descending iff growing)
+     * is the canonical encoding — byte-identical to the historical envelope — and the unnatural
+     * direction is one redundant continuation byte (overlong uLEB, value-neutral). */
+    { uint32_t zd = zz32((int32_t)to_size - (int32_t)from_size);
+      if (best_desc == (to_size > from_size ? 1 : 0)) put_uleb(&blob, zd);
+      else put_uleb_overlong(&blob, zd); }
     /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
      * grow (!FWD) direction. For FWD the decoder computes s->fp incrementally from 0, so fp_end is
      * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
      * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
-    if (to_size > from_size) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
+    if (best_desc) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
      * information, so it is dropped from the wire.

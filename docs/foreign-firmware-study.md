@@ -87,6 +87,36 @@ slots) ships at 408 B. Whole-relink pairs ship working 23-175 KB blobs on
 refused only if every plan variant still exceeds a cap after both
 degradations (none observed in this study).
 
+## Addendum 2: direction choice + row-window oracle landed (2026-07-03)
+
+Two wire-affecting features landed after prototype measurement, closing most of
+the remaining degradation cost:
+
+1. **Apply direction is an encoder choice.** The direction-from-size rule is
+   optimal for the home corpus (measured: no home pair prefers the flip) but
+   catastrophic for equal-size images with internal insertions. The encoder now
+   sweeps both directions and signals the unnatural one via an overlong
+   size-delta uLEB (+1 byte, only when flipping wins). Insertion-shift pairs
+   collapsed: 10.0.0->10.0.1 145,057 -> 1,722 B.
+2. **Row-window oracle, OUTROW_DEPTH=2.** The decoder keeps its last two
+   output rows uncommitted; their OLD flash content is still physically
+   readable, so the encoder treats reads within that window as journal-free
+   pristine reads (no [P] events, no conversion). Mixed-small-lag pairs
+   collapsed: 10.0.1<->10.0.2 75-76 KB -> 2.2-2.4 KB; 3.0.1<->3.0.2 64-65 KB ->
+   ~6.2 KB. Costs +256 B decoder .bss and makes OUTROW x OUTROW_DEPTH an
+   encoding-affecting build contract (monotone-compatible toward larger
+   decoder windows; see device-integration.md).
+
+Home corpus impact of the combined landing: 36 pairs better / 1 worse (+1 B) /
+219 equal, full total 4,199,788 -> 4,199,637 (-151 B), one-face unchanged
+589/305 — the window's [P]-event elimination outweighs the direction plumbing.
+All 34 foreign pair-directions still round-trip; the residual heavily-degraded
+pairs (2.2.x, cross-major) are genuine bidirectional whole-image churn, out of
+reach of any direction or window (measured lags in the tens of KB).
+Depth benchmark for the record: D=1 -14.5% / D=2 -20.5% / D=4 -20.9% / D=8
+-21.2% on degraded-blob bytes; D=8 exceeds the 12 KiB SRAM cap; D=2 is the
+knee and was chosen.
+
 ## Permanent gate asset — decision: NO
 
 The foreign binaries stay out of the repo: they are third-party build

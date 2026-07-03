@@ -117,6 +117,16 @@ static int env_uleb(uint32_t*out){
     do{ if(sh>28||!env_byte(&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; }while(b&0x80u);
     *out=v; return 1;
 }
+/* uLEB with a NON-CANONICAL-encoding flag: a canonical multi-byte uLEB never ends in a 0x00
+ * byte (emission stops once the remaining value is zero; a lone 0x00 is the value 0), so one
+ * redundant trailing continuation byte is a legal, value-neutral 1-bit side channel. The
+ * envelope reads it on the size-delta field as the UNNATURAL-apply-direction marker. */
+static int env_uleb_ov(uint32_t*out, uint8_t*ov){
+    uint32_t v=0; int sh=0, n=0; uint8_t b;
+    do{ if(sh>28||!env_byte(&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
+    *ov=(uint8_t)(n>1 && b==0u);
+    *out=v; return 1;
+}
 /* zigzag-uLEB absolute around `base` (to_size and fp_end are delta-coded vs from_size). */
 static int env_zz_abs(uint32_t base, uint32_t*out){
     uint32_t z; if(!env_uleb(&z)) return 0;
@@ -447,43 +457,73 @@ static int32_t smap_at(uint32_t x){
 #define OUTROW 256u
 #endif
 #endif
-static uint8_t  g_orow_buf[OUTROW];
+/* Row-window depth — keep the last OUTROW_DEPTH rows uncommitted. Monotonic writes touch
+ * rows in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (row_number % D) is an
+ * exact FIFO: the slot's previous occupant is always the row exactly D rows behind,
+ * committed on eviction. The point: OLD flash content of uncommitted rows stays physically
+ * readable through hy_src_peek's plain flash_read, and the ENCODER's a1_row_covered oracle
+ * exploits exactly that window (journal-free old reads behind the frontier).
+ * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH must match the encoder's
+ * A1_OUTROW x A1_ROW_DEPTH assumption. Compatibility is monotone: a decoder whose
+ * uncommitted window is a superset (larger aligned rows and/or a deeper ring) still decodes
+ * correctly — old bytes survive strictly longer than the encoder assumed; a smaller window
+ * rejects via CRC32(to), never silent-wrong. */
+#ifndef OUTROW_DEPTH
+#define OUTROW_DEPTH 2u
+#endif
+static uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
 #define OROW_NONE UINT32_MAX
-static uint32_t g_orow_base;   /* current resident output row base, or OROW_NONE */
-static uint8_t  g_orow_dirty;
-static void orow_commit(void){
-    if(g_orow_base!=OROW_NONE && g_orow_dirty){
-        uint32_t base=g_orow_base, end=base+OUTROW; if(end>g_image_span) end=g_image_span;
+static uint32_t g_orow_base[OUTROW_DEPTH];   /* resident row base per slot, or OROW_NONE */
+static uint8_t  g_orow_dirty[OUTROW_DEPTH];
+#define OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
+static void orow_commit_slot(uint32_t s){
+    if(g_orow_base[s]!=OROW_NONE && g_orow_dirty[s]){
+        uint32_t base=g_orow_base[s], end=base+OUTROW; if(end>g_image_span) end=g_image_span;
         /* force the (at most one) row erase up front, then program from the RAM buffer so every
          * byte is a pure 1->0 program (no further erase). All bytes of the row were produced by the
          * monotonic output, so the buffer holds the exact final content. */
         for(uint32_t a=base;a<end;a++){ if(flash_read(a)!=0xFFu){ flash_write(a,0xFFu); break; } }
-        for(uint32_t a=base;a<end;a++) flash_write(a, g_orow_buf[a-base]);
+        for(uint32_t a=base;a<end;a++) flash_write(a, g_orow_buf[s][a-base]);
     }
-    g_orow_dirty=0; g_orow_base=OROW_NONE;
+    g_orow_dirty[s]=0; g_orow_base[s]=OROW_NONE;
 }
-static void orow_reset(void){ g_orow_base=OROW_NONE; g_orow_dirty=0; }
-/* read one byte of ALREADY-PRODUCED output at absolute position a: the resident row from RAM,
- * anything else from flash (rows below/above the resident row are committed by monotonicity).
- * Valid streams only reference written positions; a corrupt position yields stale flash bytes,
- * which the CRC32(to) gate rejects. */
+/* final flush: commit remaining slots in WRITE order (frontier monotonicity holds on NVM). */
+static void orow_commit_all(void){
+    for(uint32_t i=0;i<OUTROW_DEPTH;i++){
+        uint32_t best=OROW_NONE, bs=0;
+        for(uint32_t s=0;s<OUTROW_DEPTH;s++){
+            uint32_t b=g_orow_base[s];
+            if(b==OROW_NONE) continue;
+            if(best==OROW_NONE || (g_FWD ? b<best : b>best)){ best=b; bs=s; }
+        }
+        if(best==OROW_NONE) break;
+        orow_commit_slot(bs);
+    }
+}
+static void orow_reset(void){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){ g_orow_base[s]=OROW_NONE; g_orow_dirty[s]=0; } }
+/* read one byte of ALREADY-PRODUCED output at absolute position a: an uncommitted row from
+ * its RAM slot, anything else from flash. Valid streams only reference written positions; a
+ * corrupt position yields stale flash bytes, which the CRC32(to) gate rejects. */
 static uint8_t out_read(uint32_t a){
     if(a>=g_image_span) return 0;
-    if(g_orow_base!=OROW_NONE && a>=g_orow_base && a<g_orow_base+OUTROW) return g_orow_buf[a-g_orow_base];
+    { uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
+      if(g_orow_base[s]==base) return g_orow_buf[s][a-base]; }
     return flash_read(a);
 }
-/* OUTPUT write: buffer in the resident row, committing the previous row on a row change. */
+/* OUTPUT write: buffer in the row's slot, committing the slot's previous occupant (the row
+ * exactly OUTROW_DEPTH rows behind) on a row change. */
 static void out_write(uint32_t a, uint8_t v){
     if(a>=g_image_span) return;
-    uint32_t base=(a/OUTROW)*OUTROW;
-    if(base!=g_orow_base){
-        orow_commit();
-        uint32_t end=base+OUTROW; if(end>g_image_span) end=g_image_span;
-        for(uint32_t x=base;x<end;x++) g_orow_buf[x-base]=flash_read(x); /* preload (source not yet erased) */
-        g_orow_base=base;   /* orow_commit() above already cleared g_orow_dirty */
+    uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
+    if(base!=g_orow_base[s]){
+        orow_commit_slot(s);
+        { uint32_t end=base+OUTROW;
+          if(end>g_image_span) end=g_image_span;
+          for(uint32_t x=base;x<end;x++) g_orow_buf[s][x-base]=flash_read(x); } /* preload (source not yet erased) */
+        g_orow_base[s]=base;   /* orow_commit_slot() above already cleared the dirty flag */
     }
-    uint32_t off=a-g_orow_base;
-    if(g_orow_buf[off]!=v){ g_orow_buf[off]=v; g_orow_dirty=1; }
+    { uint32_t off=a-base;
+      if(g_orow_buf[s][off]!=v){ g_orow_buf[s][off]=v; g_orow_dirty[s]=1; } }
 }
 /* ===================================================================================== */
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
@@ -976,11 +1016,21 @@ static void sa_apply_op(SA*s){
  * noinline: this runs ONCE at the top of decode_body, and keeping its locals out of
  * decode_body's frame keeps the deep apply call chain off them (coroutine-stack budget). */
 static int __attribute__((noinline)) decode_header(void){
-    uint32_t want_from, fs, ts, fpe;
-    if(!env_u32le(&want_from) || !env_uleb(&fs) || fs>A1_MAX_IMAGE || !env_zz_abs(fs,&ts)) return 0;
-    fpe=fs;   /* fp_end is only read for grow; harmless default otherwise */
-    if(ts>fs && !env_zz_abs(fs,&fpe)) return 0;
-    g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_FWD=(ts<=fs);
+    uint32_t want_from, fs, ts, fpe, z; uint8_t ov;
+    if(!env_u32le(&want_from) || !env_uleb(&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(&z,&ov)) return 0;
+    if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
+    else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
+    /* Apply direction is an ENCODER CHOICE. The NATURAL direction (descending iff the image
+     * grows — the historical derived rule, so a canonically-coded envelope decodes exactly
+     * as before) ships as a canonical size-delta uLEB; the UNNATURAL direction is signaled
+     * by the overlong marker above and costs one byte (chosen only when it wins by more).
+     * fp_end ships iff the apply is DESCENDING (it seeds the descending source walk; the
+     * ascending walk derives fp from 0). */
+    fpe=fs;
+    { int desc=(ts>fs)!=(int)ov;
+      if(desc && !env_zz_abs(fs,&fpe)) return 0;
+      g_FWD=!desc; }
+    g_from_size=fs; g_to_size=ts; g_fp_end=fpe;
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
     { u32_a *hist0=(u32_a*)(void*)ARENA;           /* [0..256)   */
@@ -1055,7 +1105,7 @@ static void decode_body(void){
       if(!s->err && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
       if(s->err||g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
-      orow_commit();                       /* flush the last resident output row */
+      orow_commit_all();                   /* flush the remaining uncommitted rows */
     }
 done:
     /* body complete: the caller (patch_apply_run) verifies the withheld

@@ -68,6 +68,17 @@ static int sc_uleb(const uint8_t *d, size_t n, size_t *p, uint32_t *out) {
     } while (b & 0x80);
     *out = v; return 0;
 }
+/* uLEB + overlong flag (mirror of patch_apply env_uleb_ov: a redundant trailing 0x00
+ * continuation byte marks the unnatural apply direction). */
+static int sc_uleb_ov(const uint8_t *d, size_t n, size_t *p, uint32_t *out, int *ov) {
+    uint32_t v = 0; int sh = 0, cnt = 0; uint8_t b;
+    do {
+        if (*p >= n || sh > 28) return -1;
+        b = d[(*p)++]; v |= (uint32_t)(b & 0x7f) << sh; sh += 7; cnt++;
+    } while (b & 0x80);
+    *ov = (cnt > 1 && b == 0);
+    *out = v; return 0;
+}
 static int32_t sc_unzz(uint32_t z) { return (z & 1u) ? -(int32_t)((z >> 1) + 1u) : (int32_t)(z >> 1); }
 
 /* Verify that `blob` applies from -> to on the reference decoder.
@@ -83,11 +94,13 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     uint32_t from_size, zz;
     if (sc_uleb(blob, blob_n, &p, &from_size)) return "bad from_size uleb";
     if (from_size != (uint32_t)from_n) return "header from_size != actual from size";
-    if (sc_uleb(blob, blob_n, &p, &zz)) return "bad to_size delta uleb";
+    int ov = 0;
+    if (sc_uleb_ov(blob, blob_n, &p, &zz, &ov)) return "bad to_size delta uleb";
     int64_t to_size_s = (int64_t)from_size + sc_unzz(zz);
     if (to_size_s < 0 || to_size_s != (int64_t)to_n) return "header to_size != actual to size";
     uint32_t to_size = (uint32_t)to_size_s;
-    if (to_size > from_size) {
+    int desc = (to_size_s > (int64_t)from_size) != ov;   /* natural direction XOR overlong marker */
+    if (desc) {
         if (sc_uleb(blob, blob_n, &p, &zz)) return "bad fp_end delta uleb";
         int64_t fpe = (int64_t)from_size + sc_unzz(zz);
         if (fpe < 0) return "header fp_end out of range";

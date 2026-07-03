@@ -35,11 +35,18 @@ The blob layout (all of it is pushed through the decoder):
 ```text
 CRC32(from)[4]
 from_size uLEB
-zigzag(to_size - from_size) uLEB
-zigzag(fp_end - from_size) uLEB   # present only when to_size > from_size
+zigzag(to_size - from_size) uLEB  # overlong encoding = unnatural apply direction
+zigzag(fp_end - from_size) uLEB   # present only when the apply is DESCENDING
 range-coded body bytes
 CRC32(to)[4]
 ```
+
+The apply direction is an encoder choice. The NATURAL direction (descending iff
+the image grows — the historical derived rule) ships the size-delta as a
+canonical uLEB; the unnatural direction is signaled by an overlong encoding
+(one redundant trailing continuation byte, value-neutral) and is chosen only
+when it wins by more than that byte. `fp_end` is present exactly when the
+apply is descending.
 
 The decoder verifies `CRC32(from)` against the current flash content BEFORE
 its first flash write (wrong or dirty current image rejects with flash
@@ -117,6 +124,19 @@ and is currently rejected at compile time.
 
 The encoder `W` argument must match decoder `SA_W`. The production default is
 `W=10` / `SA_W=10`, and this is what `make gate` verifies.
+
+**NVM row window (encoding-affecting).** The decoder keeps its last
+`OUTROW_DEPTH` output rows (of `OUTROW` bytes) uncommitted in RAM, and the
+encoder's plans exploit the fact that the OLD flash content of uncommitted
+rows is still physically readable (journal-free reads behind the write
+frontier). `OUTROW x OUTROW_DEPTH` must therefore match the encoder's
+`A1_OUTROW x A1_ROW_DEPTH` assumption — production default 256 x 2 (512 B of
+row buffers in `.bss`). Compatibility is monotone: a decoder whose uncommitted
+window is a superset (larger aligned rows and/or a deeper ring, e.g. a
+1024-byte-row part) decodes such blobs correctly, because old bytes survive
+strictly longer than the encoder assumed; a smaller window rejects at the
+`CRC32(to)` gate — safe, never silent-wrong. Encode for the smallest window
+among deployment targets.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
 intentional reject limits on the decoder. The ENCODER mirrors them
