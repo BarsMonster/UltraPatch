@@ -42,7 +42,7 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10904
 BASE_ARM_SOFT_DIV ?= 1
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-golden golden-update gate fuzz
+.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden golden-update gate fuzz
 
 all: hy_enc hy_dec
 
@@ -152,7 +152,15 @@ check-malformed: all
 check-edge: all
 	@scripts/check_edge.sh 10
 
-# Golden-wire regression: sha256 of six representative blobs pinned in test-bench/golden.sha256.
+# Degradation / direction / row-window / refusal gate: synthetic pairs that FORCE each encoder
+# path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP
+# op-split, unnatural apply direction, row-window-oracle reliance, and clean refusal), asserting
+# the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
+# to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
+check-degrade: all
+	@scripts/check_degrade.sh 10
+
+# Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
 # `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
 check-golden: hy_enc
@@ -201,6 +209,7 @@ gate: all
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-edge   >"$$tmp/e.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-degrade >"$$tmp/dg.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-golden >"$$tmp/g.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
@@ -210,6 +219,7 @@ gate: all
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
+	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_refusal=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s refuse=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
@@ -230,6 +240,7 @@ gate: all
 		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
 		echo "------------------ check-malformed ------------------"; cat "$$tmp/malformed.txt"; \
 		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
+		echo "------------------ check-degrade ------------------"; cat "$$tmp/dg.txt"; \
 		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \

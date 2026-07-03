@@ -49,6 +49,15 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
  * pipeline stage reads this instead of comparing sizes. */
 static int g_enc_fwd = 1;
 
+/* Degradation instrumentation (host-side, WIRE-NEUTRAL: these never touch emitted bytes).
+ * plan_encode resets them per plan attempt; the two degradation passes bump them; encode_a1
+ * snapshots the WINNING plan's values into EncStats and prints one deterministic line under
+ * A1_DEGRADE_STATS. No effect on the blob — verified by the golden gate. */
+static int    g_deg_engaged;      /* journal-budget degradation converted >=1 over-budget read */
+static size_t g_deg_pres_needed;  /* preserves the ideal (pre-degradation) plan required */
+static size_t g_deg_converted;    /* source bytes converted from journal reads to plain extras */
+static size_t g_opc_splits;       /* ops split because per-op corrections exceeded A1_OPC_CAP */
+
 /* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting build
  * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in rc_models.h;
  * kept SEPARATELY overridable from the decoder knobs (a decoder window may legitimately be a superset). */
@@ -97,6 +106,9 @@ typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, co
 typedef struct {
     size_t ops, diff_bytes, extra_bytes, literals, preserves, corrections;
     size_t bl_fields, ex_fields, suppressed_bl;
+    /* degradation snapshot (filled unconditionally by plan_encode, not just under A1_ENC_STATS) */
+    int    deg_engaged;
+    size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 
 static void die(const char *msg) {
@@ -3068,6 +3080,7 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
     uint8_t *pres = preserve_indices(ops, from_size, to_size);
     size_t total = 0;
     for (uint32_t wi = 0; wi < to_size; wi++) total += pres[wi];
+    g_deg_pres_needed = total;
     if (total <= budget) { free(pres); return; }
     /* cutoff C = position of the first preserve past the budget, in apply order. pres[] is
      * indexed by apply-order write index: wi == position for FWD, to_size-1-wi for grow. */
@@ -3110,6 +3123,8 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
             }
             opvec_push(&out, op_copy(rs - seg, o->diff + seg, k - rs,
                                      to->d + (size_t)tp0 + (size_t)rs, k - rs));
+            g_deg_engaged = 1;
+            g_deg_converted += (size_t)(k - rs);
             seg = k;
             split_any = 1;
         }
@@ -3136,6 +3151,7 @@ typedef struct { int variant, fuzz; } PlanCfg;
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                        int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
     int variant = cfg.variant;
+    g_deg_engaged = 0; g_deg_pres_needed = 0; g_deg_converted = 0; g_opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks,
@@ -3173,6 +3189,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
                 if (m <= 0 || m >= dl) m = dl / 2;
                 if (m <= 0 || m >= dl) continue;
                 cut[oi] = m;
+                g_opc_splits++;
                 split_any = 1;
             }
             if (split_any) {
@@ -3200,6 +3217,11 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
     if (stats_on) *st_out = collect_stats(&ops, from->d, from_size, to_size, &fd, pc);
+    /* degradation snapshot rides EncStats unconditionally (needed even without A1_ENC_STATS) */
+    st_out->deg_engaged = g_deg_engaged;
+    st_out->deg_pres_needed = g_deg_pres_needed;
+    st_out->deg_converted = g_deg_converted;
+    st_out->opc_splits = g_opc_splits;
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
     int feasible = 1;
@@ -3253,11 +3275,13 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
     size_t best_tot = 0;
+    size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     for (int dir = 0; dir < 2; dir++) {              /* 0 = ascending (FWD), 1 = descending */
         g_enc_fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0; EncStats stv = {0};
             Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
+            if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
              * varint, and the UNNATURAL direction pays the 1-byte overlong marker */
@@ -3269,6 +3293,15 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
     if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d desc=%d\n", bestv, best_desc);
+    /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
+     * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
+    if (getenv("A1_DEGRADE_STATS"))
+        fprintf(stderr,
+                "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
+                best_desc ? "bwd" : "fwd",
+                best_desc == (to_size > from_size ? 1 : 0),
+                st.deg_engaged, st.deg_pres_needed, st.deg_converted, st.opc_splits, sweep_opc_splits,
+                (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
     Buf blob = {0};
     buf_put_u32le(&blob, crc32_buf(from.d, from.n));
     put_uleb(&blob, from_size);
