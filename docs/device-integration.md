@@ -50,9 +50,10 @@ apply is descending.
 
 The decoder verifies `CRC32(from)` against the current flash content BEFORE
 its first flash write (wrong or dirty current image rejects with flash
-untouched) and verifies `CRC32(to)` over the final image inside
-`patch_apply_finish()` — `PATCH_APPLY_DONE` is returned only after both gates
-pass. Header sizes above 64 MiB are rejected as implausible.
+untouched) and verifies `CRC32(to)` over the final image at the end of the
+same `patch_apply_run()` call (against the withheld 4-byte trailer) —
+`PATCH_APPLY_DONE` is returned only after both gates pass. Header sizes above
+64 MiB are rejected as implausible.
 
 CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
@@ -85,6 +86,13 @@ int rc = patch_apply_run(next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
 `src/patch_apply_demo.c` (`PullCtx` / `pull_next`) is a minimal reference
 implementation of the callback.
 
+**`patch_apply_run` blocks the caller for the whole decode** — two full-image
+CRC passes (`CRC32(from)` before the first write and `CRC32(to)` at the end)
+plus the entire apply — and never returns partway, with no internal watchdog
+hook. Pet the watchdog INSIDE the integrator's byte callback and flash
+primitives (the per-byte and per-row call-outs the decode already makes), not
+around the single `patch_apply_run` call.
+
 **Event-driven producers (ISR push)** adapt through the optional
 single-producer/single-consumer byte ring in `src/patch_apply_push_adapter.h`:
 the RX interrupt calls `patch_ring_push(&ring, byte)` (then `patch_ring_eof()`
@@ -103,9 +111,9 @@ gets sized without it.
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
    image was written and both `CRC32(from)` and `CRC32(to)` verified.
 
-On `ERROR`, `g_reject` distinguishes `REJ_RESOURCE` (a decoder resource cap was
-exceeded — this firmware needs a larger-sized build) from `REJ_CORRUPT`
-(malformed, truncated, or wrong-image patch).
+On `ERROR`, the `patch_apply_reject()` accessor distinguishes `REJ_RESOURCE` (a
+decoder resource cap was exceeded — this firmware needs a larger-sized build)
+from `REJ_CORRUPT` (malformed, truncated, or wrong-image patch).
 
 The API is single-instance, non-reentrant, and not thread-safe. Do not run two
 decoders concurrently in one image. Do not start a new patch until the previous

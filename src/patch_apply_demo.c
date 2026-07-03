@@ -129,8 +129,8 @@ int main(int argc,char**argv){
     } else {
         PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(pull_next,&pc);
     }
-    if(rc==PATCH_APPLY_ERROR){ uint8_t rj=g_reject?g_reject:REJ_CORRUPT;
-        fprintf(stderr,"decode error - rejected (reason=%u: %s)\n", rj,
+    if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(); if(!rj) rj=REJ_CORRUPT;
+        fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         fclose(mf); free(g_flash); free(blob); return 1; }
 #ifdef RC_V3_BAKEDUMP

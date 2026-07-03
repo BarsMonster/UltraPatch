@@ -112,21 +112,18 @@ static int env_u32le(uint32_t*out){
     for(int i=0;i<4;i++){ if(!env_byte(&b)) return 0; v|=(uint32_t)b<<(8*i); }
     *out=v; return 1;
 }
-static int env_uleb(uint32_t*out){
-    uint32_t v=0; int sh=0; uint8_t b;
-    do{ if(sh>28||!env_byte(&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; }while(b&0x80u);
-    *out=v; return 1;
-}
 /* uLEB with a NON-CANONICAL-encoding flag: a canonical multi-byte uLEB never ends in a 0x00
  * byte (emission stops once the remaining value is zero; a lone 0x00 is the value 0), so one
  * redundant trailing continuation byte is a legal, value-neutral 1-bit side channel. The
- * envelope reads it on the size-delta field as the UNNATURAL-apply-direction marker. */
+ * envelope reads it on the size-delta field as the UNNATURAL-apply-direction marker. This is
+ * the ONE uLEB reader; env_uleb below is the plain wrapper (discards the flag into a dummy). */
 static int env_uleb_ov(uint32_t*out, uint8_t*ov){
     uint32_t v=0; int sh=0, n=0; uint8_t b;
     do{ if(sh>28||!env_byte(&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
     *ov=(uint8_t)(n>1 && b==0u);
     *out=v; return 1;
 }
+static int env_uleb(uint32_t*out){ uint8_t ov; return env_uleb_ov(out, &ov); }
 /* zigzag-uLEB absolute around `base` (to_size and fp_end are delta-coded vs from_size). */
 static int env_zz_abs(uint32_t base, uint32_t*out){
     uint32_t z; if(!env_uleb(&z)) return 0;
@@ -472,6 +469,11 @@ static uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
 static uint32_t g_orow_base[OUTROW_DEPTH];   /* resident row base per slot, or OROW_NONE */
 static uint8_t  g_orow_dirty[OUTROW_DEPTH];
 #define OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
+/* OROW_SLOT / out_read / out_write use /OUTROW and %OUTROW_DEPTH; both must stay powers of two so
+ * they lower to shift/mask — a non-pow2 -D retune would pull libgcc divide helpers into the
+ * Cortex-M0+ build (the gate tracks divide policy) and break the encoder's pow2-aligned-row contract. */
+_Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
+_Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
 static void orow_commit_slot(uint32_t s){
     if(g_orow_base[s]!=OROW_NONE && g_orow_dirty[s]){
         uint32_t base=g_orow_base[s], end=base+OUTROW; if(end>g_image_span) end=g_image_span;
@@ -992,8 +994,9 @@ static void sa_apply_op(SA*s){
 }
 
 /* ===================================================================================== */
-/* the decode coroutine entry: runs the whole single-stream decode start-to-finish.        */
-/* Shared state passed via globals (set by decoder_run before swapcontext).                 */
+/* the decode entry: runs the whole single-stream decode start-to-finish on the CALLER's    */
+/* stack (plain calls, no coroutine/fiber). Shared state is passed via the file-scope globals*/
+/* that patch_apply_run primes before invoking decode_body.                                  */
 /* ===================================================================================== */
 /* ---- envelope header (strict reads): CRC32(from)[4] | from_size uLEB |
  * zz(to_size-from_size) | [zz(fp_end-from_size) iff to_size>from_size]. The decoder derives
@@ -1001,8 +1004,9 @@ static void sa_apply_op(SA*s){
  * the first flash write — a truncated header, implausible sizes, or a wrong/dirty current
  * image all reject cleanly with flash untouched. Then the literal bit-trees are seeded from
  * flash parity histograms (hist0/hist1/w borrow 4 KiB of ARENA before the apply overlays it).
- * noinline: this runs ONCE at the top of decode_body, and keeping its locals out of
- * decode_body's frame keeps the deep apply call chain off them (coroutine-stack budget). */
+ * noinline: this runs ONCE at the top of decode_body, so keeping its locals in their own
+ * frame (not merged into decode_body's) keeps them off the deep apply call chain that runs
+ * afterward — it trims the decode's peak CALLER-stack usage. */
 static int __attribute__((noinline)) decode_header(void){
     uint32_t want_from, fs, ts, fpe, z; uint8_t ov;
     if(!env_u32le(&want_from) || !env_uleb(&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(&z,&ov)) return 0;
@@ -1135,6 +1139,12 @@ static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
     g_dec_status=DEC_DONE;
     return PATCH_APPLY_DONE;
 }
+
+/* After PATCH_APPLY_ERROR, the reject reason: REJ_RESOURCE (a decoder cap was exceeded — this
+ * firmware needs a larger build) vs REJ_CORRUPT (malformed/truncated/wrong-image). Prefer this
+ * accessor over reading g_reject directly; it is unused-static-inline and compiles out when the
+ * integrator does not call it (no ARM .text cost). */
+static inline int patch_apply_reject(void){ return g_reject; }
 
 /* ===================================================================================== */
 /* DEVICE static measurement: exported entry point so arm-none-eabi-size sees the real      */
