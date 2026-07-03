@@ -104,6 +104,34 @@ transport poll) — the hook must allow the producer to run; never call
 not part of the device decoder artifact: `patch_apply.h` compiles, fuzzes, and
 gets sized without it.
 
+## Stack Budget
+
+The whole decode runs on the caller's stack (no fiber since commit 44eee88), so the
+integrator must reserve stack for it on top of the interrupt/RTOS frames. The worst-case
+caller-stack cost of `patch_apply_run()` on Cortex-M0+, measured statically:
+
+| Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
+| --------------------------------- | ----------------------- |
+| **gcc -O2 (gated ceiling: 480 B)** | **368 B** |
+| gcc -Os                            | 304 B |
+| clang (armv6m) -O2                 | 360 B |
+| clang (armv6m) -Os                 | 336 B |
+
+Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
+`arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
+the decoder has no recursion and no indirect call that can reach internal code — the script
+fails loudly if any of those, or a dynamic/VLA frame, appears. Each `.su` frame already
+includes that function's own pushed LR and callee-saved registers, so the sum accounts for
+every on-stack return address; no per-call addend is added.
+
+The number **includes** all first-party decoder frames. It **excludes** the integrator's own
+externs — `flash_read`, `flash_write`, and the byte callback (their stack is the integrator's
+cost) — and the small toolchain leaves (`memmove`/`memset`/`__aeabi_uidiv`); budget those plus
+your worst-case interrupt-nesting frame on top. `make gate` re-baselines the gcc -O2 bound via
+`check-stack` and fails if it exceeds the pinned ceiling. A hosted-Thumb runtime high-water
+cross-check (`make check-stack-qemu`, ~316/380 B at -Os/-O2 under qemu-arm) confirms the order
+of magnitude; the static bound above is authoritative for the device.
+
 ## Call Sequence
 
 1. Authenticate the update envelope and reject rollback or wrong-target updates.

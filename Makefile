@@ -41,8 +41,13 @@ BASE_ARM_TEXT ?= 6324
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10904
 BASE_ARM_SOFT_DIV ?= 1
+# Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
+# decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
+# derives the exact static bound from -fstack-usage frames + the call graph. Measured 368 B;
+# pinned = round-up-to-64 (384) + ~25% headroom. check-stack re-baselines and fails above this.
+BASE_STACK_CEIL_O2 ?= 480
 
-.PHONY: all clean check check-arm check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
+.PHONY: all clean check check-arm check-stack check-stack-qemu check-assets check-malformed check-corpus check-qemu check-edge check-degrade check-golden check-models golden-update gate fuzz check-encfuzz check-analyze
 
 all: hy_enc hy_dec
 
@@ -121,6 +126,28 @@ check-arm:
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 
+# Worst-case caller-stack bound for patch_apply_run(). Since the fiber was deleted (44eee88)
+# the whole decode runs on the CALLER's stack; docs/device-integration.md pins the budget an
+# integrator must reserve. Builds the RC_V3_ARM decoder standalone with -fstack-usage (gcc -O2,
+# the pessimistic level — deeper than -Os here) and runs scripts/stack_bound.py, which sums the
+# per-function .su frames (each already includes its own pushed LR/regs) along the deepest path
+# of the static call graph extracted from the disassembly. It fails loudly on recursion, an
+# indirect call that could reach internal code, or a dynamic/VLA frame — any of which would
+# invalidate the static method. The bound EXCLUDES the integrator's externs (flash_read/
+# flash_write/byte-callback) and toolchain leaves (memmove/memset/__aeabi_uidiv); the ceiling's
+# headroom absorbs those + interrupt-frame slack. Same cross-gcc as check-arm.
+check-stack:
+	@set -e; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O2 -DCORTEX_M0 -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
+	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack.txt"; \
+	cat "$$tmp/stack.txt"; \
+	echo "stack_ceiling_o2=$(BASE_STACK_CEIL_O2)"; \
+	bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack.txt"); \
+	test -n "$$bound"; \
+	test "$$bound" -le "$(BASE_STACK_CEIL_O2)"
+
 check-assets:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 
@@ -151,6 +178,34 @@ check-qemu: hy_enc
 		echo "qemu: corrupt body accepted"; exit 1; fi; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	echo "qemu_thumb_roundtrip=OK"
+
+# Runtime cross-check for the static caller-stack bound (check-stack / scripts/stack_bound.py).
+# Runs a REAL decode under qemu-arm with the stack painted with a sentinel, then reports the
+# measured high-water mark (test/stack_probe.c). This is hosted ARMv7 Thumb, not Cortex-M0+
+# -O2, so the number differs from the pinned static bound by codegen; it exists to confirm a
+# full decode costs a few HUNDRED bytes of caller stack (same order as the static bound), never
+# thousands -- i.e. the static call-graph method missed no deep/unbounded path. Informational
+# and STANDALONE (not in `make gate`, which pins the authoritative static bound); auto-skips
+# without the cross-gcc / qemu-user, like check-qemu.
+check-stack-qemu: hy_enc
+	@set -e; \
+	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
+		echo "stack_probe=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	for o in Os O2; do \
+		arm-linux-gnueabi-gcc -static -mthumb -$$o -std=c99 -Wall -Wextra -Werror \
+			-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L -Isrc test/stack_probe.c -o "$$tmp/probe_$$o"; \
+	done; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
+	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
+	for o in Os O2; do \
+		out=$$(qemu-arm "$$tmp/probe_$$o" "$$tmp/mem.bin" "$$tmp/grow.blob"); \
+		rc=$$(printf '%s\n' "$$out" | sed -n 's/^stack_probe_rc=//p'); \
+		hw=$$(printf '%s\n' "$$out" | sed -n 's/^stack_probe_highwater_bytes=//p'); \
+		test "$$rc" = "1"; \
+		echo "stack_probe_highwater_$$o=$$hw (hosted ARMv7 Thumb -$$o, decode=DONE)"; \
+	done
 
 check-malformed: all
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh 10
@@ -229,7 +284,7 @@ check-corpus: all check-assets
 gate: all
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running full gate: check-assets + check + check-malformed + check-arm + check-corpus..."; \
+	echo "running full gate: check-assets + check + check-malformed + check-arm + check-stack + check-corpus..."; \
 	$(MAKE) --no-print-directory check-assets >"$$tmp/assets.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check       >"$$tmp/c.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-malformed >"$$tmp/malformed.txt" 2>&1 || rc=1; \
@@ -238,6 +293,7 @@ gate: all
 	$(MAKE) --no-print-directory check-golden >"$$tmp/g.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-models >"$$tmp/mdl.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-arm    >"$$tmp/a.txt" 2>&1 || rc=1; \
+	$(MAKE) --no-print-directory check-stack  >"$$tmp/st.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-qemu   >"$$tmp/q.txt" 2>&1 || rc=1; \
 	$(MAKE) --no-print-directory check-corpus >"$$tmp/m.txt" 2>&1 || rc=1; \
 	echo "==================== A1 FULL GATE ===================="; \
@@ -249,6 +305,7 @@ gate: all
 	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_refusal=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s refuse=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
+	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \
 	sed -n 's/^qemu_thumb_roundtrip=/QEMU  Thumb round-trip  : /p' "$$tmp/q.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
@@ -271,6 +328,7 @@ gate: all
 		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
 		echo "------------------ check-models ------------------"; cat "$$tmp/mdl.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
+		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
 		echo "------------------ check-qemu ------------------";   cat "$$tmp/q.txt"; \
 		echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
 	fi; \
