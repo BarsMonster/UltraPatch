@@ -29,16 +29,18 @@ extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
 
 int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 
+/* PATHE_W: compile-time window-log default mirror. The LIVE encoder window is the CLI W argument
+ * (which must equal the decoder SA_W); PATHE_W just single-sources the default value. */
 #ifndef PATHE_W
-#define PATHE_W 10
+#define PATHE_W RC_WINDOW_LOG_DEFAULT
 #endif
 #ifndef DR_KCAP_BL
-#define DR_KCAP_BL 208
+#define DR_KCAP_BL RC_DR_KCAP_BL_DEFAULT   /* mirrors decoder DR_KCAP_BL (default value in rc_models.h) */
 #endif
 #ifndef DR_KCAP_EX
-#define DR_KCAP_EX 128
+#define DR_KCAP_EX RC_DR_KCAP_EX_DEFAULT   /* mirrors decoder DR_KCAP_EX (default value in rc_models.h) */
 #endif
-#define DR_HIT_INIT 576u   /* tuned corpus optimum; must match patch_apply (bit-exact wire) */
+/* DR_HIT_INIT is single-sourced in rc_models.h (shared by decoder dr_init and encoder dr_init_e). */
 
 /* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
  * Direction is an ENCODER CHOICE signaled in the envelope (natural = canonical size-delta
@@ -47,13 +49,14 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
  * pipeline stage reads this instead of comparing sizes. */
 static int g_enc_fwd = 1;
 
-/* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting
- * build contract; compatibility is monotone toward larger decoder windows). */
+/* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting build
+ * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in rc_models.h;
+ * kept SEPARATELY overridable from the decoder knobs (a decoder window may legitimately be a superset). */
 #ifndef A1_OUTROW
-#define A1_OUTROW 256
+#define A1_OUTROW RC_OUTROW_DEFAULT
 #endif
 #ifndef A1_ROW_DEPTH
-#define A1_ROW_DEPTH 2
+#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
 #endif
 
 /* Row-window oracle: is source address a — already logically overwritten — still OLD in
@@ -68,13 +71,13 @@ static int a1_row_covered(int64_t a, int64_t t) {
 }
 
 /* Decoder resource-cap mirrors — MUST match patch_apply JSLOTS / OPC_CAP (a deployment that
- * -D-retunes the decoder caps must retune these identically). A1_JSLOTS is also the journal
- * budget for plan degradation (degrade_ops_to_journal_budget). */
+ * -D-retunes the decoder caps must retune these identically). Shared DEFAULT in rc_models.h.
+ * A1_JSLOTS is also the journal budget for plan degradation (degrade_ops_to_journal_budget). */
 #ifndef A1_JSLOTS
-#define A1_JSLOTS 1024
+#define A1_JSLOTS RC_JSLOTS_DEFAULT
 #endif
 #ifndef A1_OPC_CAP
-#define A1_OPC_CAP 80
+#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
 #endif
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
@@ -1716,12 +1719,8 @@ static void re_shift_low(REnc *r) {
 
 static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz = 1; }
 
-/* Default adaptive-bit rate for Golomb (unary+mantissa), order-2 flag, and MTF rep/hit
- * streams. MUST equal RC_S_BIT_RATE in patch_apply — the wire is bit-exact. */
-#define RC_S_BIT_RATE 4
-
-/* Mirrors patch_apply RC_REP0_INIT: rep0 prior toward 0 (P(reuse)~1/4), 3072. */
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
+/* RC_S_BIT_RATE (Golomb / order-2 flag / MTF rep+hit adaptation rate) and RC_REP0_INIT (rep0 prior)
+ * are single-sourced in rc_models.h, shared verbatim with the decoder. */
 
 static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
     uint32_t p = *prob, bound = (r->range >> 12) * p;
@@ -2098,9 +2097,9 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &lit1);
     fl_init_e(&flag);
-    ug_init_e(&gd, 'r', 11);
+    ug_init_e(&gd, 'r', RC_GD_INIT_K);
     ug_init_e(&gl, 'g', 0);
-    ug_seed_cont_e(&gl, 1);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
+    ug_seed_cont_e(&gl, RC_SEED_DEPTH_GL);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
     UGE go, glo;
     ug_init_e(&go, 'r', ko);
@@ -2141,7 +2140,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
               ug_encode(&go, &r, zv);
               oexp = pt->fwd ? (uint32_t)t.dist + (uint32_t)t.len
                              : (uint32_t)t.dist - (uint32_t)t.len; }
-            ug_encode(&glo, &r, (uint32_t)t.len - 4u);
+            ug_encode(&glo, &r, (uint32_t)t.len - RC_OUTMATCH_MIN);
         } else {
             if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
             else fl_encode(&flag, &r, 1);
@@ -2274,7 +2273,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     for (size_t L = 1; L <= maxlen; L++) {
         slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
-        olen[L] = L >= 4 ? ug_price(&pt->glo, (uint32_t)L - 4u) : 0;
+        olen[L] = L >= RC_OUTMATCH_MIN ? ug_price(&pt->glo, (uint32_t)L - RC_OUTMATCH_MIN) : 0;
     }
     for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
     /* For a span, only the first literal's tag0 context depends on the incoming prevlit.
@@ -2765,9 +2764,9 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init_e(&M.flag);
     bt_init_e(&M.dval.t);
-    ug_init_e(&M.gd, 'r', 11);
+    ug_init_e(&M.gd, 'r', RC_GD_INIT_K);
     ug_init_e(&M.gl, 'g', 0);
-    ug_seed_cont_e(&M.gl, 1);   /* matches len>=3 => M_gl first unary bit always continue; mirror patch_apply */
+    ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */
     ug_init_e(&M.gs, 'g', 0);
     ug_init_e(&M.go, 'r', ko);
     ug_init_e(&M.glo, 'g', 0);
@@ -2775,15 +2774,15 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     ug_init_e(&M.pg, 'g', 0);
     ug_init_e(&M.pgn, 'g', 0);
     ug_init_e(&M.pg2, 'g', 0);
-    ug_seed_cont_e(&M.pg2, 1);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct offsets) =>
-                                  * M_pg2 first unary bit always continue; seed cheap. Mirror patch_apply. */
+    ug_seed_cont_e(&M.pg2, RC_SEED_DEPTH_PG2);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct
+                                  * offsets) => M_pg2 first unary bit always continue; depth in rc_models.h. */
     ug_init_e(&M.gdl, 'g', 0);
     ug_init_e(&M.gel, 'g', 0);
     ug_init_e(&M.gadj, 'g', 0);
-    ug_seed_cont_e(&M.gdl, 6);
-    ug_seed_cont_e(&M.gadj, 3);
-    idx_init_e(&M.dibl, (uint16_t)2816u);   /* tuned corpus optimum; match patch_apply */
-    idx_init_e(&M.diex, (uint16_t)2816u);
+    ug_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
+    ug_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
+    idx_init_e(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
+    idx_init_e(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
@@ -2807,8 +2806,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     ug_encode(&M.gd, &rc, (uint32_t)seq->n);
     M.gd.k = (uint8_t)kd;
-    put_raw_bits(&rc, (uint32_t)kd, 4);
-    if (out_en) put_raw_bits(&rc, (uint32_t)ko, 4);
+    put_raw_bits(&rc, (uint32_t)kd, RC_KFIELD_BITS);
+    if (out_en) put_raw_bits(&rc, (uint32_t)ko, RC_KFIELD_BITS);
     w_gz(&rc, (uint32_t)ops->n);
     size_t tok_i = 0, pos = 0, span_pos = 0;
     int tok_mode = 0;
@@ -2826,7 +2825,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
             re_bit(&rc, &M.outb, 1, RC_S_BIT_RATE); \
             ug_encode(&M.go, &rc, zz32((int32_t)((uint32_t)cur.dist - oexp))); \
             oexp = FWD ? (uint32_t)cur.dist + (uint32_t)cur.len : (uint32_t)cur.dist - (uint32_t)cur.len; \
-            ug_encode(&M.glo, &rc, (uint32_t)cur.len - 4u); tok_mode = 'R'; tok_left = cur.len; } \
+            ug_encode(&M.glo, &rc, (uint32_t)cur.len - RC_OUTMATCH_MIN); tok_mode = 'R'; tok_left = cur.len; } \
         else { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
             if ((int32_t)cur.dist == M.last_dist) { re_bit(&rc, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1; } \
             else { re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; if (out_en) re_bit(&rc, &M.outb, 0, RC_S_BIT_RATE); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \

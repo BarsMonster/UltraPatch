@@ -161,11 +161,8 @@ static int s_bit_r(uint16_t*prob,int rate){
     *prob=(uint16_t)(b? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
     return b;
 }
-/* Default adaptive-bit rate for the Golomb (unary+mantissa), order-2 flag, and MTF
- * rep/hit streams. Tuned to 4 (1/16) — these low-cardinality, fast-drifting contexts
- * track better at 4 than the LZMA-classic 5; literal/dval bit-trees keep their own
- * per-tree rate via s_bit_r. Must match RC_S_BIT_RATE in patch_generate (bit-exact wire). */
-#define RC_S_BIT_RATE 4
+/* RC_S_BIT_RATE (rc_models.h): shared Golomb / order-2 flag / MTF rep+hit adaptation rate.
+ * literal/dval bit-trees keep their own per-tree rate via s_bit_r. */
 static int s_bit(uint16_t*prob){ return s_bit_r(prob,RC_S_BIT_RATE); }
 static int s_raw(void){ return rc_decode(RC.range>>1); }
 /* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
@@ -319,13 +316,13 @@ static uint32_t crc32_flash(uint32_t n){
  * applied. All -D overridable (#ifndef) so a deployment with a known firmware family can re-tune
  * them; raising a cap costs SRAM and must be followed by the release gate. */
 #ifndef DR_KCAP_BL
-#define DR_KCAP_BL  208        /* max distinct bl delta values (corpus peak 180; +28 margin) */
+#define DR_KCAP_BL  RC_DR_KCAP_BL_DEFAULT   /* default value in rc_models.h (encoder mirror: same default) */
 #endif
 #ifndef DR_KCAP_EX
-#define DR_KCAP_EX  128        /* max distinct ex delta values (corpus peak 106; +22 margin) */
+#define DR_KCAP_EX  RC_DR_KCAP_EX_DEFAULT   /* default value in rc_models.h (encoder mirror: same default) */
 #endif
 #ifndef OPC_CAP
-#define OPC_CAP 80            /* per-op correction cap (corpus peak 68; +12 margin) */
+#define OPC_CAP RC_OPC_CAP_DEFAULT          /* default value in rc_models.h (encoder mirror: A1_OPC_CAP) */
 #endif
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
@@ -340,8 +337,7 @@ typedef struct {
 } DRStream;
 
 #ifndef JSLOTS
-#define JSLOTS 1024u                         /* packed journal capacity (home-corpus peak 478; sized with
-                                              * out-of-corpus headroom). The ENCODER mirrors this budget
+#define JSLOTS RC_JSLOTS_DEFAULT             /* default value in rc_models.h. The ENCODER mirrors this budget
                                               * (A1_JSLOTS in patch_generate) and DEGRADES over-budget
                                               * plans host-side (over-budget reads ship as extra bytes),
                                               * so a valid blob never exceeds it; an over-cap stream
@@ -349,10 +345,10 @@ typedef struct {
 #endif
 #define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (3072, 8-aligned) */
 #define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
-/* LZSS window W (defined here so SA_ARENA can size the apply phase). W=10 (ring 1024) is the
- * default that keeps the decoder within the 12 KiB SRAM cap; MUST match the encoder W. */
+/* LZSS window W (defined here so SA_ARENA can size the apply phase). Default value in rc_models.h
+ * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder W arg MUST match this SA_W. */
 #ifndef SA_W
-#define SA_W 10
+#define SA_W RC_WINDOW_LOG_DEFAULT
 #endif
 /* HYBRID ARENA layout (apply phase): [journal JREGION][SA apply SA_ARENA]. The STREAMED-DELTA wire
  * holds NO resident per-detection store; the small MTF-dict streams (DR_BL/DR_EX), the M_dval
@@ -454,7 +450,7 @@ static int32_t smap_at(uint32_t x){
 #ifdef NVM_ROW
 #define OUTROW NVM_ROW
 #else
-#define OUTROW 256u
+#define OUTROW RC_OUTROW_DEFAULT   /* shared default in rc_models.h (encoder mirror: A1_OUTROW) */
 #endif
 #endif
 /* Row-window depth — keep the last OUTROW_DEPTH rows uncommitted. Monotonic writes touch
@@ -469,7 +465,7 @@ static int32_t smap_at(uint32_t x){
  * correctly — old bytes survive strictly longer than the encoder assumed; a smaller window
  * rejects via CRC32(to), never silent-wrong. */
 #ifndef OUTROW_DEPTH
-#define OUTROW_DEPTH 2u
+#define OUTROW_DEPTH RC_ROW_DEPTH_DEFAULT   /* shared default in rc_models.h (encoder mirror: A1_ROW_DEPTH) */
 #endif
 static uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
 #define OROW_NONE UINT32_MAX
@@ -557,16 +553,8 @@ static uint8_t g_litprev;
 static BitTree M_dval;             /* shared byte tree for DEREL escape bytes and [C] correction bytes */
 static Flag1   M_flag;
 /* rep0: adaptive flag before a match distance. =1 reuses the immediately-previous match distance
- * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT, P(reuse)~1/4)
- * because exact distance reuse is the minority case: a low prior keeps the dominant =0 flag near-free
- * on small patches while corpus-scale streams adapt up. g_lastdist holds the last match distance.
- * Mirrors patch_generate Models.rep0/last_dist (bit-exact wire). */
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))   /* 3072: P(rep0=1) prior ~ 1/4. rep0=1 reuses the
-                                                   * previous match distance; corpus tuning (paired
-                                                   * min-over-N sweep) puts the optimum that does NOT
-                                                   * regress the one-face product patch at ~1/4 (3/8
-                                                   * helps corpus more but regresses the real one-face
-                                                   * update by +1/+1). */
+ * (distance value omitted); =0 codes a fresh distance. Seeded toward 0 (RC_REP0_INIT from
+ * rc_models.h, P(reuse)~1/4). g_lastdist holds the last match distance. */
 static uint16_t M_rep0[2];   /* order-1 on previous rep0 outcome: rep0 runs cluster */
 static int g_rep0h;          /* last rep0 bit (context) */
 static uint32_t g_lastdist;
@@ -737,7 +725,7 @@ static uint8_t sa_next_content(SA*s, int tag){
             else if(g_out_en && s_bit(&M_outb)){            /* fresh + out-bit: long-range OUTPUT match */
                 int32_t dpos=bb_unzz(s_ug_rice(&M_go));     /* position as zigzag delta vs expected */
                 uint32_t p=g_oexp+(uint32_t)dpos;
-                uint32_t ln=s_ug_gamma(&M_glo)+4u;
+                uint32_t ln=s_ug_gamma(&M_glo)+RC_OUTMATCH_MIN;
                 /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
                  * grow content (whose extras are byte-reversed) still matches produced output. */
                 if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
@@ -1069,31 +1057,29 @@ static void decode_body(void){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, 576u); dr_init(&DR_EX, DR_DIC_EX, 576u);
-                                       /* hit seed 576: zero-seeded MTF dict makes hit-bit==1 likely */
-    idx_init(&M_dibl, 2816u); idx_init(&M_diex, 2816u);  /* seed toward STOP (idx 0); corpus optimum.
-                                                          * Mirror in patch_generate (bit-exact wire). */
+    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
+    idx_init(&M_dibl, RC_IDX_SEED); idx_init(&M_diex, RC_IDX_SEED);   /* dict-hit/index seeds from rc_models.h */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
     jr_reset();
     ugg_init(&M_pg); ugg_init(&M_pgn);
     ugg_init(&M_pg2);
-    ugg_seed_cont(&M_pg2,1);  /* rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1
-                               * => M_pg2's first unary-prefix bit is ALWAYS continue (a format invariant,
-                               * like M_gl): seed it cheap from symbol 1. Mirror ug_seed_cont_e in patch_generate. */
+    ugg_seed_cont(&M_pg2,RC_SEED_DEPTH_PG2);  /* rest preserve/corr gaps are strictly-increasing distinct offsets
+                               * => gap>=1 => M_pg2's first unary-prefix bit is ALWAYS continue (a format
+                               * invariant, like M_gl): seed it cheap from symbol 1. Depth in rc_models.h. */
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
-    ugg_seed_cont(&M_gdl,6); ugg_seed_cont(&M_gadj,3);
+    ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
     { SA*s=&SAst; memset(s,0,sizeof*s);
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
-      ugr_init(&M_gd,11); uint32_t nseq=s_ug_rice(&M_gd);
-      int kd=(int)s_raw_bits(4);
-      int ko=g_out_en?(int)s_raw_bits(4):0;
+      ugr_init(&M_gd,RC_GD_INIT_K); uint32_t nseq=s_ug_rice(&M_gd);
+      int kd=(int)s_raw_bits(RC_KFIELD_BITS);
+      int ko=g_out_en?(int)s_raw_bits(RC_KFIELD_BITS):0;
       M_gd.k=(uint8_t)kd; ugg_init(&M_gl); ugg_init(&M_gs);
       ugr_init(&M_go,ko); ugg_init(&M_glo); M_outb=RC_PHALF;
       g_oexp=g_FWD?0u:g_to_size;
-      ugg_seed_cont(&M_gl,1);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first unary
-                                 * prefix bit is ALWAYS continue, so seed it cheap from symbol 1. */
+      ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first
+                                 * unary prefix bit is ALWAYS continue, so seed it cheap. Depth in rc_models.h. */
       fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
