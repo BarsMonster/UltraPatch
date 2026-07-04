@@ -182,8 +182,8 @@ compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
 is reserved for a future Thumb-2 wire revision; it may change the wire format
 and is currently rejected at compile time.
 
-The encoder `W` argument must match decoder `SA_W`. The production default is
-`W=10` / `SA_W=10`, and this is what `make gate` verifies.
+The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
+`PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.
 
 **NVM row window (encoding-affecting).** The decoder keeps its last
 `OUTROW_DEPTH` output rows (of `OUTROW` bytes) uncommitted in RAM, and the

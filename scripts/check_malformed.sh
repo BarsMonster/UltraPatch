@@ -5,7 +5,6 @@
 
 set -eu
 
-W="${1:-10}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 base="$FIX/v0_base"
 one="$FIX/v1_one_face"
@@ -13,7 +12,7 @@ one="$FIX/v1_one_face"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-./hy_enc "$base" "$one" "$tmp/grow.blob" "$W" >/dev/null 2>&1
+./hy_enc "$base" "$one" "$tmp/grow.blob" >/dev/null 2>&1
 
 rejects=0
 

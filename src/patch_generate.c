@@ -10,7 +10,6 @@
  * This is intentionally a host-side encoder: compression-side memory/CPU are
  * allowed to be large. It emits the final A1 blob consumed by patch_apply.h.
  */
-#include <errno.h>
 #include <unistd.h>
 #include <limits.h>
 #include <stdint.h>
@@ -29,8 +28,8 @@ extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
 
 int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 
-/* PATHE_W: compile-time window-log default mirror. The LIVE encoder window is the CLI W argument
- * (which must equal the decoder SA_W); PATHE_W just single-sources the default value. */
+/* PATHE_W: compile-time window-log mirror -- the encoder window. MUST equal the decoder SA_W;
+ * -D-overridable exactly like every other mirror knob and single-sources the default value. */
 #ifndef PATHE_W
 #define PATHE_W RC_WINDOW_LOG_DEFAULT
 #endif

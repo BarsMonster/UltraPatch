@@ -318,7 +318,7 @@ typedef struct {
 #endif
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
 /* LZSS window W (defined here so SA can size the apply phase). Default value in rc_models.h
- * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder W arg MUST match this SA_W. */
+ * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder PATHE_W MUST match this SA_W. */
 #ifndef SA_W
 #define SA_W RC_WINDOW_LOG_DEFAULT
 #endif

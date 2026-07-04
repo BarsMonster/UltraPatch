@@ -442,8 +442,8 @@ static inline void relax2(uint64_t *cost, int32_t *rep, uint8_t *pl, Token *via,
 static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
-                                const PriceTab *pt, int W) {
-    uint32_t maxrun = 1024, win = 1u << W;
+                                const PriceTab *pt) {
+    uint32_t maxrun = 1024, win = 1u << PATHE_W;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. */
     size_t maxlen = n + 1;
@@ -683,9 +683,9 @@ static int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
  * and an initial rice-DP parse. The caller owns *cands_out / *ncand_out and frees them after the
  * price-feedback loop (which it runs with its own, full-body acceptance gate). */
 static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
-                                int W, int *k_out,
+                                int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
-    int32_t win = 1 << W, maxm = 2048;
+    int32_t win = 1 << PATHE_W, maxm = 2048;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
     int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
@@ -724,7 +724,7 @@ static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *l
         }
     }
     free(head); free(prev);
-    TokenVec seq = lz_parse_once(n, litbits, cands, ncand, fixed_dist_bits, W);
+    TokenVec seq = lz_parse_once(n, litbits, cands, ncand, fixed_dist_bits, PATHE_W);
     int k = fit_k_tokens(&seq);
     int parsed_k = -1;
     for (int pass = 0; pass < 8; pass++) {

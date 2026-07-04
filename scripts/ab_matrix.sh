@@ -12,15 +12,14 @@
 # project rule (AGENTS.md): corpus total must improve WITHOUT an overfit split
 # and WITHOUT regressing the one-face product patch beyond the tracked gates.
 #
-# Usage: scripts/ab_matrix.sh <enc_baseline> <enc_candidate> <dec_candidate> [W] [jobs]
+# Usage: scripts/ab_matrix.sh <enc_baseline> <enc_candidate> <dec_candidate> [jobs]
 # Env:   IMAGES, FIXTURES (as for check_corpus.sh),
 #        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face gates; default: the Makefile pins).
 # Exit:  0 on a structurally sound run (the accept decision is the caller's),
 #        3 on structural error or any candidate round-trip failure.
 set -u
 ENC_A="${1:?baseline encoder}"; ENC_B="${2:?candidate encoder}"; DEC_B="${3:?candidate decoder}"
-W="${4:-10}"
-JOBS="${5:-$(nproc 2>/dev/null || echo 4)}"
+JOBS="${4:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 # One-face gate defaults track the authoritative Makefile pins (env still overrides).
@@ -37,8 +36,8 @@ GATE_R=$(gate BASE_ONEFACE_REVERT "${BASE_ONEFACE_REVERT:-}") || exit 2
 ab_work() {
   from=$1; to=$2
   d=$(mktemp -d)
-  "$AB_ENC_A" "$from" "$to" "$d/a.blob" "$AB_W" >/dev/null 2>&1
-  "$AB_ENC_B" "$from" "$to" "$d/b.blob" "$AB_W" >/dev/null 2>&1
+  "$AB_ENC_A" "$from" "$to" "$d/a.blob" >/dev/null 2>&1
+  "$AB_ENC_B" "$from" "$to" "$d/b.blob" >/dev/null 2>&1
   sa=$(wc -c < "$d/a.blob" 2>/dev/null || echo 0)
   sb=$(wc -c < "$d/b.blob" 2>/dev/null || echo 0)
   cp "$from/watch.bin" "$d/mem.bin"
@@ -49,7 +48,7 @@ ab_work() {
   rm -rf "$d"
 }
 export -f ab_work
-export AB_ENC_A="$ENC_A" AB_ENC_B="$ENC_B" AB_DEC_B="$DEC_B" AB_W="$W"
+export AB_ENC_A="$ENC_A" AB_ENC_B="$ENC_B" AB_DEC_B="$DEC_B"
 
 lines=$(
   for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf '%s\t%s\n' "$from" "$to"; done; done \
@@ -73,10 +72,10 @@ printf '%s\n' "$lines" | awk '
 
 # one-face product patch, both encoders (serial; candidate blobs round-tripped)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
-"$ENC_A" "$FIX/v0_base" "$FIX/v1_one_face" "$d/ga.blob" "$W" >/dev/null 2>&1
-"$ENC_A" "$FIX/v1_one_face" "$FIX/v0_base" "$d/ra.blob" "$W" >/dev/null 2>&1
-"$ENC_B" "$FIX/v0_base" "$FIX/v1_one_face" "$d/gb.blob" "$W" >/dev/null 2>&1
-"$ENC_B" "$FIX/v1_one_face" "$FIX/v0_base" "$d/rb.blob" "$W" >/dev/null 2>&1
+"$ENC_A" "$FIX/v0_base" "$FIX/v1_one_face" "$d/ga.blob" >/dev/null 2>&1
+"$ENC_A" "$FIX/v1_one_face" "$FIX/v0_base" "$d/ra.blob" >/dev/null 2>&1
+"$ENC_B" "$FIX/v0_base" "$FIX/v1_one_face" "$d/gb.blob" >/dev/null 2>&1
+"$ENC_B" "$FIX/v1_one_face" "$FIX/v0_base" "$d/rb.blob" >/dev/null 2>&1
 for p in g r; do
   from="$FIX/v0_base"; to="$FIX/v1_one_face"
   [ "$p" = r ] && { from="$FIX/v1_one_face"; to="$FIX/v0_base"; }

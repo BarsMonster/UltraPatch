@@ -16,7 +16,7 @@ UF2-unpacked (app base 0x2000) for 10.0.x–10.2.1, fetched from
 
 16 sequential upgrade pairs plus one cross-major pair (3.0.3 -> 10.0.0), each
 encoded and applied in BOTH directions (34 pair-directions total). Per
-direction: `hy_enc from to blob 10` (self-verification included), then
+direction: `hy_enc from to blob` (self-verification included), then
 `hy_dec` apply on the host NVM emulator + byte-exact `cmp`, with the NVM
 write-safety gate active.
 

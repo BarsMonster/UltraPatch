@@ -9,7 +9,7 @@
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
-static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out, int W) {
+static void encode_a1(const char *from_dir, const char *to_dir, const char *blob_out) {
     char *fbin = join2(from_dir, "watch.bin"), *tbin = join2(to_dir, "watch.bin");
     char *felf = join2(from_dir, "watch.elf"), *telf = join2(to_dir, "watch.elf");
     Buf from = slurp(fbin), to = slurp(tbin);
@@ -51,7 +51,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         g_enc_fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0; EncStats stv = {0};
-            Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv);
+            Buf b = plan_encode(&from, &to, &fr, &tr, PLANS[v], &fpe, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
@@ -116,17 +116,11 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
 
 #ifdef RC_V3_ENC_MAIN
 int main(int argc, char **argv) {
-    if (argc != 5) {
-        fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out> <W>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <from_dir> <to_dir> <blob_out>\n", argv[0]);
         return 2;
     }
-    char *end = NULL;
-    errno = 0;
-    long Wl = strtol(argv[4], &end, 10);
-    if (errno || end == argv[4] || *end || Wl <= 0 || Wl > 15)
-        die("W must be an integer in 1..15 and must match decoder SA_W");
-    int W = (int)Wl;
-    encode_a1(argv[1], argv[2], argv[3], W);
+    encode_a1(argv[1], argv[2], argv[3]);
     return 0;
 }
 #endif

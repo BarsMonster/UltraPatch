@@ -86,11 +86,11 @@ check-internal: all-internal
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob"; \
 	./hy_dec "$$tmp/mem.bin" "$$tmp/grow.blob" 1 >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
 	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
-	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10; \
+	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob"; \
 	./hy_dec "$$tmp/mem.bin" "$$tmp/revert.blob" 1 >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
@@ -189,7 +189,7 @@ check-stack-qemu-internal: hy_enc
 		arm-linux-gnueabi-gcc -static -mthumb -$$o -std=c99 -Wall -Wextra -Werror \
 			-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L -Isrc test/stack_probe.c -o "$$tmp/probe_$$o"; \
 	done; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" 10 >/dev/null; \
+	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" >/dev/null; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	for o in Os O2; do \
 		out=$$(qemu-arm "$$tmp/probe_$$o" "$$tmp/mem.bin" "$$tmp/grow.blob"); \
@@ -200,13 +200,13 @@ check-stack-qemu-internal: hy_enc
 	done
 
 check-malformed-internal: all-internal
-	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh 10
+	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
 # page-boundary/>384KiB-span pairs). hy_enc self-verifies every blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
 check-edge-internal: all-internal
-	@scripts/check_edge.sh 10
+	@scripts/check_edge.sh
 
 # Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
 # path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP
@@ -214,16 +214,16 @@ check-edge-internal: all-internal
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: all-internal
-	@scripts/check_degrade.sh 10
+	@scripts/check_degrade.sh
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
 # `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
 check-golden-internal: hy_enc
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check 10
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check
 
 golden-update-internal: hy_enc
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update 10
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update
 
 # Model-LEVEL encoder/decoder differential test. The golden gate proves the WHOLE wire is bit-exact
 # for the corpus-exercised symbol values; this proves each entropy-model PAIR is bit-exact across its
@@ -249,7 +249,7 @@ check-corpus-internal: all-internal check-assets-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" ./check_corpus.sh 10 $(JOBS) > "$$tmp/m.txt"; \
+	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
 	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \

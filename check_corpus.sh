@@ -11,11 +11,10 @@
 # parallel across all cores; each worker uses its OWN mktemp dir, which keeps the
 # deterministic encoder free of cross-run contamination from shared output paths.
 #
-# Usage: check_corpus.sh [W] [jobs]      (W defaults to 10, jobs to nproc)
+# Usage: check_corpus.sh [jobs]      (jobs defaults to nproc)
 # Exit 3 on a structural error (not 256 pairs, or a decode produced no parseable NVM metrics).
 set -u
-W="${1:-10}"
-JOBS="${2:-$(nproc 2>/dev/null || echo 4)}"
+JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 
@@ -25,7 +24,7 @@ FIX="${FIXTURES:-test-bench/fixtures}"
 cm_work() {
   from=$1; to=$2
   d=$(mktemp -d)
-  ./hy_enc "$from" "$to" "$d/p.blob" "$CM_W" >/dev/null 2>&1
+  ./hy_enc "$from" "$to" "$d/p.blob" >/dev/null 2>&1
   sz=$(wc -c < "$d/p.blob")
   cp "$from/watch.bin" "$d/mem.bin"
   ./hy_dec "$d/mem.bin" "$d/p.blob" 1 >/dev/null 2>"$d/log"
@@ -36,7 +35,6 @@ cm_work() {
   rm -rf "$d"
 }
 export -f cm_work
-export CM_W="$W"
 
 agg=$(
   for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf '%s\t%s\n' "$from" "$to"; done; done \
@@ -55,8 +53,8 @@ fi
 
 # real one-face firmware update (grow + revert) — two encodes, serial (negligible).
 d=$(mktemp -d)
-./hy_enc "$FIX/v0_base" "$FIX/v1_one_face" "$d/grow.blob" "$W" >/dev/null 2>&1
-./hy_enc "$FIX/v1_one_face" "$FIX/v0_base" "$d/revert.blob" "$W" >/dev/null 2>&1
+./hy_enc "$FIX/v0_base" "$FIX/v1_one_face" "$d/grow.blob" >/dev/null 2>&1
+./hy_enc "$FIX/v1_one_face" "$FIX/v0_base" "$d/revert.blob" >/dev/null 2>&1
 og=$(wc -c < "$d/grow.blob"); orv=$(wc -c < "$d/revert.blob")
 rm -rf "$d"
 

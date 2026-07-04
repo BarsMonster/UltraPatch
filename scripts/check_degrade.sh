@@ -33,10 +33,9 @@
 # All fixtures are generated deterministically (fixed-seed LCG, the check_edge.sh technique) —
 # no committed binaries.
 #
-# Usage: check_degrade.sh [W]     (needs ./hy_enc and ./hy_dec already built)
+# Usage: check_degrade.sh     (needs ./hy_enc and ./hy_dec already built)
 set -u
 
-W="${1:-10}"
 CC_HOST="${CC:-cc}"
 IMG="${IMAGES:-test-bench/images}"
 tmp="$(mktemp -d)"
@@ -95,7 +94,7 @@ dpair() {
 # enc <name> -> writes $tmp/<name>.blob, captures A1_DEGRADE line in $tmp/<name>.deg; returns hy_enc rc
 enc() {
   name=$1
-  A1_DEGRADE_STATS=1 ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$tmp/$name.blob" "$W" \
+  A1_DEGRADE_STATS=1 ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$tmp/$name.blob" \
     >/dev/null 2>"$tmp/$name.encerr"
   rc=$?
   grep '^A1_DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
@@ -167,7 +166,7 @@ fi
 # runs (opc_splits_sweep). Assert the split machinery engaged and that the blob round-trips. The
 # corpus round-trip gate only checks round-trips (never asserts the split) and no WINNING plan
 # here ships a split (a cleaner variant wins) — this gate is what actually pins the op-split path.
-if A1_DEGRADE_STATS=1 ./hy_enc "$IMG/img_00_n3" "$IMG/img_15_n83" "$tmp/opc.blob" "$W" \
+if A1_DEGRADE_STATS=1 ./hy_enc "$IMG/img_00_n3" "$IMG/img_15_n83" "$tmp/opc.blob" \
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")

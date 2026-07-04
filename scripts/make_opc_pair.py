@@ -6,7 +6,7 @@ forces the A1 encoder's OPC_CAP op-split fixpoint (opc_splits_sweep>=1) in the p
 Usage:  python3 make_opc_pair.py OUTDIR
         -> writes OUTDIR/from/{watch.bin,watch.elf} and OUTDIR/to/{watch.bin,watch.elf}
 
-Then:   A1_DEGRADE_STATS=1 ./hy_enc OUTDIR/from OUTDIR/to blob 10   # prints opc_splits_sweep>=1
+Then:   A1_DEGRADE_STATS=1 ./hy_enc OUTDIR/from OUTDIR/to blob   # prints opc_splits_sweep>=1
         cp OUTDIR/from/watch.bin mem.bin
         ./hy_dec mem.bin blob 1                                     # rc 0, mem == to/watch.bin
 

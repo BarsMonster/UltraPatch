@@ -269,7 +269,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
 
 static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc, int W) {
+                       const FieldDeltaVec *fd, const OpPC *pc) {
     int FWD = g_enc_fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
@@ -298,7 +298,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     int kd = 0;
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
-    TokenVec seq = lz_candidates_c(content.d, content.n, litbits, W, &kd, &cands, &ncand);
+    TokenVec seq = lz_candidates_c(content.d, content.n, litbits, &kd, &cands, &ncand);
     /* ---- D1 shift map: fit from the op walk, build the residual-space injection variant. The
      * LZ parse is map-independent (inj values never touch content bytes), so the pipeline below
      * runs on the plain-delta inj; the map variant competes under the exact byte gate at the end. */
@@ -364,7 +364,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 PriceTab pt;
                 pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD;
                 measure_prices(&seq, content.d, tags.d, frm, from_size, kd, ko, &pt);
-                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, ocands, noc, &pt, W);
+                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, ocands, noc, &pt);
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);

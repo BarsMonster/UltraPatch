@@ -15,10 +15,9 @@
 #
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
-# Usage: check_edge.sh [W]   (needs ./hy_enc and ./hy_dec already built)
+# Usage: check_edge.sh   (needs ./hy_enc and ./hy_dec already built)
 set -u
 
-W="${1:-10}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -68,7 +67,7 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
   cases=$((cases + 1))
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
-  if ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$blob" "$W" >/dev/null 2>"$tmp/$name.encerr"; then
+  if ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
     ok=1
     for mode in "" "1"; do   # direct pull, then byte-at-a-time via the push adapter
       cp "$from" "$tmp/$name.mem"

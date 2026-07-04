@@ -98,7 +98,7 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
 typedef struct { int variant, fuzz; } PlanCfg;
 
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                       int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out) {
+                       PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out) {
     int variant = cfg.variant;
     g_deg_engaged = 0; g_deg_pres_needed = 0; g_deg_converted = 0; g_opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
@@ -178,7 +178,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
       if (tpres > A1_JSLOTS) feasible = 0; }
     Buf body = {0};
     if (feasible) {
-        body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc, W);
+        body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc);
         if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
