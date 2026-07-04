@@ -28,6 +28,27 @@ erasing its row first when a 0-to-1 transition requires it). The decoder writes
 rows monotonically through its resident row buffer, so each row is erased and
 programmed at most once for valid A1 patches.
 
+Beyond that, the decoder relies on three contract properties of the pair:
+
+1. **Read-back coherence.** `flash_read` must observe every prior `flash_write`
+   immediately. The decoder reads its own writes back — on the committed-row
+   path of `out_read` (a row already flushed out of the RAM buffer is re-read
+   through `flash_read`) and during the final `CRC32(to)` pass over the whole
+   image. A driver with a page-write buffer must flush before returning from
+   `flash_write`, or the read-back sees stale bytes and the patch fails at
+   `CRC32(to)`.
+2. **Erase-trigger handling.** `flash_write` must treat programming `0xFF` over
+   a non-`0xFF` byte as a potential erase trigger. Before programming a row
+   (`orow_commit_slot`) the decoder deliberately pokes `0xFF` over the first
+   non-`0xFF` byte to force the row erase, then programs the final bytes as pure
+   1->0 transitions. A driver that special-cases `0xFF`-programming as a no-op
+   never erases, so every real update then fails at `CRC32(to)`.
+3. **Write-failure surfacing.** `flash_write` returns `void`, so a hardware
+   program failure is not reported at the call site — it surfaces only at the
+   final `CRC32(to)` pass, as `REJ_CORRUPT`, indistinguishable from a corrupt
+   blob. Integrators whose flash can fail silently should verify writes inside
+   the driver.
+
 ## Patch Envelope
 
 The blob layout (all of it is pushed through the decoder):
@@ -165,7 +186,11 @@ larger-capped build fixes the cap, but only a recovered or still-intact image
 can accept the retried patch (retrying the same patch on the half-written
 image rejects cleanly at `CRC32(from)`). `REJ_CORRUPT` means a malformed,
 truncated, or wrong-image patch; with flash untouched it is safe to re-request
-the transfer and retry.
+the transfer and retry. A silent hardware write failure lands in the same
+`REJ_CORRUPT` bucket but with flash TOUCHED — a fully-written, wrong image
+caught at the final `CRC32(to)` gate (the last matrix row) — so a `REJ_CORRUPT`
+with flash touched warrants a driver-level write check (see the flash-primitive
+contract above), not just a re-transfer.
 
 The API is single-instance, non-reentrant, and not thread-safe. Do not run two
 decoders concurrently in one image. Do not start a new patch until the previous
