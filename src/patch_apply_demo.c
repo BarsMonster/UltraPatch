@@ -13,56 +13,16 @@
 #include <string.h>
 #include <unistd.h>
 
-/* SAML22-shaped NVM emulator for the host demo/gate. The reusable decoder only
- * needs flash_read() and flash_write(); all emulation and safety counters live
- * here, outside the production header artifact. */
-#ifndef NVM_PAGE
-#define NVM_PAGE 64u
-#endif
-#ifndef NVM_ROW
-#define NVM_ROW 256u
-#endif
-static uint8_t *g_flash, *g_erasecnt;
-static uint32_t g_flash_n, g_nrows;
-static long g_erases, g_programs, g_finv;
-static uint32_t g_last_erow;
-static int g_edir, g_ecount;
-
-static void nvm_init(const uint8_t *from, uint32_t from_size, uint32_t span){
-    g_flash_n = span;
-    free(g_flash); g_flash = (uint8_t*)malloc(span?span:1);
-    memcpy(g_flash, from, from_size);
-    /* beyond-`from` span: deterministic pseudo-random pad, NOT 0xFF, so the gate legs catch the same
-     * blind spot as patch_selfcheck.c (a decode that reads not-yet-written output can't coast on the
-     * 0xFF that both this emulator and 0xFF-erased firmware would return). LCG seeded from from_size. */
-    if(span>from_size){ uint32_t r=from_size;
-        for(uint32_t a=from_size;a<span;a++){ r=r*1664525u+1013904223u; g_flash[a]=(uint8_t)(r>>24); } }
-    g_erases = g_programs = 0; g_nrows = (span+NVM_ROW-1)/NVM_ROW;
-    g_finv = 0; g_last_erow = 0; g_edir = 0; g_ecount = 0;
-    free(g_erasecnt); g_erasecnt = (uint8_t*)calloc(g_nrows?g_nrows:1, 1);
-}
-uint8_t flash_read(uint32_t a){ return a<g_flash_n ? g_flash[a] : 0xFF; }
-void flash_write(uint32_t a, uint8_t v){
-    if(a>=g_flash_n) return;
-    uint8_t cur = g_flash[a];
-    if(cur == v) return;
-    if((uint8_t)(cur & v) != v){
-        uint32_t row = (a/NVM_ROW)*NVM_ROW, end = row+NVM_ROW; if(end>g_flash_n) end=g_flash_n;
-        memset(g_flash+row, 0xFF, end-row);
-        g_erases++; if(g_erasecnt[a/NVM_ROW]<255) g_erasecnt[a/NVM_ROW]++;
-        uint32_t er = a/NVM_ROW;
-        if(g_ecount){ int d = (er>g_last_erow) ? 1 : (er<g_last_erow ? -1 : 0);
-            if(d){ if(g_edir==0) g_edir=d; else if(d!=g_edir) g_finv++; } }
-        g_last_erow = er; g_ecount++;
-    }
-    g_flash[a] = v; g_programs++;
-}
-static long nvm_erases(void){ return g_erases; }
-static long nvm_programs(void){ return g_programs; }
-static uint32_t nvm_rows(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>0); return n; }
-static uint32_t nvm_rows_amplified(void){ uint32_t n=0; for(uint32_t i=0;i<g_nrows;i++) n+=(g_erasecnt[i]>1); return n; }
-static uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<g_nrows;i++) if(g_erasecnt[i]>m) m=g_erasecnt[i]; return m; }
-static long nvm_frontier_inversions(void){ return g_finv; }
+/* SAML22-shaped NVM emulator, shared with patch_selfcheck.c (the ship/no-ship oracle)
+ * through nvm_emu.inc; it must be #included BEFORE patch_apply.h. On top of the shared
+ * state this file keeps the extra reporting accessors the gate output line needs. */
+#include "nvm_emu.inc"
+static long nvm_erases(void){ return sc_erases; }
+static long nvm_programs(void){ return sc_programs; }
+static uint32_t nvm_rows(void){ uint32_t n=0; for(uint32_t i=0;i<sc_nrows;i++) n+=(sc_erasecnt[i]>0); return n; }
+static uint32_t nvm_rows_amplified(void){ uint32_t n=0; for(uint32_t i=0;i<sc_nrows;i++) n+=(sc_erasecnt[i]>1); return n; }
+static uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<sc_nrows;i++) if(sc_erasecnt[i]>m) m=sc_erasecnt[i]; return m; }
+static long nvm_frontier_inversions(void){ return sc_finv; }
 
 #include "patch_apply.h"
 #include "patch_apply_push_adapter.h"
@@ -114,7 +74,7 @@ int main(int argc,char**argv){
     { uint32_t span = from_size>to_size? from_size:to_size;
       uint8_t*tmp=(uint8_t*)malloc(from_size?from_size:1);
       if(fread(tmp,1,from_size,mf)!=from_size){ fclose(mf); free(tmp); free(blob); return 2; }
-      nvm_init(tmp,from_size,span); free(tmp); }
+      nvm_init(tmp,from_size,span,from_size); free(tmp); }
 
     /* the decoder drives; the callback serves blob bytes. byte_mode routes through the
      * push adapter (tiny ring, one byte fed per wait) as the streaming proof. */
@@ -126,7 +86,7 @@ int main(int argc,char**argv){
         if(rc==PATCH_APPLY_DONE){
             if(fc.feeds!=(long)bsz){
                 fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes\n",fc.feeds,bsz);
-                fclose(mf); free(g_flash); free(blob); return 1;
+                fclose(mf); free(sc_flash); free(blob); return 1;
             }
             fprintf(stderr,"adapter streaming OK: %ld single-byte feeds over %ld blob bytes\n",fc.feeds,bsz);
         }
@@ -136,22 +96,22 @@ int main(int argc,char**argv){
     if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(); if(!rj) rj=REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
-        fclose(mf); free(g_flash); free(blob); return 1; }
+        fclose(mf); free(sc_flash); free(blob); return 1; }
 #ifdef RC_V3_BAKEDUMP
-    { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(g_flash,1,to_size,f); fclose(f); } }
+    { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(sc_flash,1,to_size,f); fclose(f); } }
 #endif
     if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
                 nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
-        fclose(mf); free(g_flash); free(blob); return 1;
+        fclose(mf); free(sc_flash); free(blob); return 1;
     }
     fseek(mf,0,SEEK_SET);
-    if(fwrite(g_flash,1,to_size,mf)!=to_size){ fclose(mf); free(g_flash); free(blob); return 1; }
+    if(fwrite(sc_flash,1,to_size,mf)!=to_size){ fclose(mf); free(sc_flash); free(blob); return 1; }
     fflush(mf);
     if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,g_FWD?"fwd":"bwd",(unsigned)g_jcount,(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
-            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),g_flash_n,(g_flash_n+255)/256);
+            nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),sc_flash_n,(sc_flash_n+255)/256);
     fclose(mf); free(blob);
     return 0;
 }

@@ -26,6 +26,9 @@ CFLAGS += $(CFLAGS_EXTRA)
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 APPLY_HDR := src/patch_apply.h src/rc_models.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
+# Shared host-side NVM emulator, #included by patch_selfcheck.c (in hy_enc) and
+# patch_apply_demo.c (hy_dec) before their patch_apply.h.
+NVM_EMU := src/nvm_emu.inc
 # patch_generate.c is a thin umbrella TU that #includes the ordered enc_*.inc modules
 # (the host encoder is one translation unit -- see the include block in patch_generate.c).
 # Listed here so editing any module re-triggers every target that compiles the encoder.
@@ -72,13 +75,13 @@ $(CAPPED): %:
 
 all-internal: hy_enc hy_dec
 
-hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
+hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 # The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
 # the stricter bar; the host-side encoder does not). Single decode mode: patch_apply_run()
 # + integrator callback; byte_mode (arg3) streams through the optional push adapter.
-hy_dec: $(DEC_SRCS) $(APPLY_HDR) $(ADAPTER_HDR)
+hy_dec: $(DEC_SRCS) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
 
 check-internal: all-internal

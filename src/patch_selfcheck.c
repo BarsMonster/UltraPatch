@@ -20,34 +20,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef NVM_ROW
-#define NVM_ROW 256u
-#endif
-static uint8_t *sc_flash, *sc_erasecnt;
-static uint32_t sc_flash_n, sc_nrows;
-static uint32_t sc_last_erow;
-static int sc_edir, sc_ecount;
-static long sc_finv;
-
-uint8_t flash_read(uint32_t a) { return a < sc_flash_n ? sc_flash[a] : 0xFF; }
-void flash_write(uint32_t a, uint8_t v) {
-    if (a >= sc_flash_n) return;
-    uint8_t cur = sc_flash[a];
-    if (cur == v) return;
-    if ((uint8_t)(cur & v) != v) {          /* 0->1 needed: erase the whole row */
-        uint32_t row = (a / NVM_ROW) * NVM_ROW, end = row + NVM_ROW;
-        if (end > sc_flash_n) end = sc_flash_n;
-        memset(sc_flash + row, 0xFF, end - row);
-        uint32_t er = a / NVM_ROW;
-        if (sc_erasecnt[er] < 255) sc_erasecnt[er]++;
-        if (sc_ecount) {
-            int d = (er > sc_last_erow) ? 1 : (er < sc_last_erow ? -1 : 0);
-            if (d) { if (sc_edir == 0) sc_edir = d; else if (d != sc_edir) sc_finv++; }
-        }
-        sc_last_erow = er; sc_ecount++;
-    }
-    sc_flash[a] = v;
-}
+/* SAML22 NVM row emulator + write-safety counters, shared byte-for-byte with the gate
+ * emulator in patch_apply_demo.c. Provides flash_read()/flash_write()/nvm_init(); must
+ * be #included BEFORE patch_apply.h. */
+#include "nvm_emu.inc"
 
 #include "patch_apply.h"
 
@@ -109,26 +85,16 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     }
     if (blob_n < p) return "header runs past end of blob";
 
-    /* ---- fresh emulator: flash = from image, padded to span with 0xFF ---- */
+    /* ---- fresh emulator: flash = from image, the beyond-`from` span filled with a per-blob
+     * deterministic pseudo-random pad (NOT 0xFF). An encoder out-match that reads not-yet-written
+     * output falls through to raw flash_read: with a 0xFF pad it returns 0xFF on the emulator AND on
+     * 0xFF-erased firmware, so a broken blob passes here yet bricks the device once real flash
+     * diverges; random bytes corrupt such a read so the decoder's CRC32(to) rejects it. LCG seeded
+     * from the two header CRCs (blob[0..7]) -> reproducible. ---- */
     uint32_t span = from_size > to_size ? from_size : to_size;
-    free(sc_flash); free(sc_erasecnt);
-    sc_nrows = (span + NVM_ROW - 1) / NVM_ROW;
-    sc_flash = (uint8_t *)malloc(span ? span : 1);
-    sc_erasecnt = (uint8_t *)calloc(sc_nrows ? sc_nrows : 1, 1);
-    if (!sc_flash || !sc_erasecnt) return "selfcheck out of memory";
-    if (from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
-    /* Fill the beyond-`from` span with a per-blob deterministic pseudo-random pattern, NOT 0xFF.
-     * An encoder out-match that reads not-yet-written output falls through to raw flash_read: with
-     * 0xFF pad it returns 0xFF on the emulator AND on 0xFF-erased firmware, so a broken blob passes
-     * here yet bricks the device once real flash diverges. Random bytes corrupt such a read so the
-     * decoder's CRC32(to) rejects it. LCG seeded from the two header CRCs (blob[0..7]) -> reproducible. */
-    if (span > from_n) {
-        uint32_t r = 0;
-        for (int k = 0; k < 8; k++) r = r * 1664525u + 1013904223u + blob[k];
-        for (uint32_t a = from_n; a < span; a++) { r = r * 1664525u + 1013904223u; sc_flash[a] = (uint8_t)(r >> 24); }
-    }
-    sc_flash_n = span;
-    sc_last_erow = 0; sc_edir = 0; sc_ecount = 0; sc_finv = 0;
+    uint32_t pad_seed = 0;
+    for (int k = 0; k < 8; k++) pad_seed = pad_seed * 1664525u + 1013904223u + blob[k];
+    if (nvm_init(from, (uint32_t)from_n, span, pad_seed)) return "selfcheck out of memory";
 
     /* ---- run the reference decoder over the WHOLE blob (it parses the envelope and
      * gates on both CRCs itself; DONE implies CRC32(from) and CRC32(to) both verified) ---- */
