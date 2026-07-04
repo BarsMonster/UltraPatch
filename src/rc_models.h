@@ -36,8 +36,8 @@
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
  * 12 bits/node instead of a full uint16_t; this struct + accessors are the ONE byte-tree
  * implementation, used by both patch_apply and patch_generate. The adaptation-shift rate is NOT
- * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5,
- * lit1=4, dval=4) — kept identical on both sides for wire-exactness. */
+ * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (RC_LIT0_RATE,
+ * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
 #define BT_PROBS 255u
 #define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
 typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;  /* +1 lets accessors read/write 3 bytes */
@@ -161,6 +161,15 @@ static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++
  * track better at 4 than the LZMA-classic 5. The literal/dval bit-trees keep their OWN per-tree
  * rate, passed per call (see the BitTree note above), so only this shared default lives here. */
 #define RC_S_BIT_RATE 4
+
+/* Per-tree adaptation-shift rates for the literal + dval byte-trees. These bit-trees carry their
+ * OWN rate (not stored per-tree — see the BitTree note above — but passed at every s_bt/bt_encode
+ * call site), single-sourced here so encoder and decoder move together. RC_LIT0_RATE (tag0 span
+ * literals, order-1 context) adapts slower (1/32); RC_LIT1_RATE (tag1 literals) + RC_DVAL_RATE
+ * (MTF escape + [C] correction bytes) track at 1/16. */
+#define RC_LIT0_RATE 5
+#define RC_LIT1_RATE 4
+#define RC_DVAL_RATE 4
 
 /* rep0 prior: adaptive flag before a match distance. =1 reuses the immediately-previous match
  * distance (value omitted); =0 codes a fresh distance. Seeded toward 0 (P(reuse)~1/4) because

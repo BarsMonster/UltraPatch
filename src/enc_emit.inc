@@ -77,7 +77,7 @@ static void bv_encode(BitTree *t, REnc *r, int64_t x) {
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
         v >>= 7;
-        bt_encode(t, r, v ? (uint8_t)(b | 0x80u) : b, 4);
+        bt_encode(t, r, v ? (uint8_t)(b | 0x80u) : b, RC_DVAL_RATE);
         if (!v) break;
     }
 }
@@ -148,7 +148,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     for (size_t i = 0; i < pc->corr.n; i++) {
         ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
         prev = pc->corr.v[i].off;
-        bt_encode(&M->dval, r, pc->corr.v[i].byte, 4);
+        bt_encode(&M->dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
     }
 }
 
@@ -242,7 +242,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
             if (tok_mode == 'S') { \
                 for (size_t _em_i = 0; _em_i < nn; _em_i++) { \
                     uint8_t byte = content->d[(size_t)cur.start + span_pos + _em_i]; \
-                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte, tags->d[pos] ? 4 : 5); \
+                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte, tags->d[pos] ? RC_LIT1_RATE : RC_LIT0_RATE); \
                     prevlit = byte; pos++; \
                 } \
                 span_pos += nn; \

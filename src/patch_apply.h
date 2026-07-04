@@ -580,7 +580,7 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
         v=dic[j];
         if(j){ int32_t t=dic[j]; memmove(&dic[1], &dic[0], (size_t)j * sizeof(dic[0])); dic[0]=t; }
     } else {
-        v=s_bv(&M_dval, 4);
+        v=s_bv(&M_dval, RC_DVAL_RATE);
         if((uint32_t)d->K>=cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
         memmove(&dic[1], &dic[0], (size_t)d->K * sizeof(dic[0]));
         dic[0]=v; d->K++;
@@ -651,7 +651,7 @@ static uint8_t sa_next_content(SA*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
-            int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?4:5);
+            int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
             g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
             if(s->span_left==0) s->tok_mode=0;
@@ -909,7 +909,7 @@ static void sa_apply_op(SA*s){
             if(gap>UINT32_MAX-coff){ g_rcerr=1; return; }
             coff+=gap;
             if(coff>=nwu){ g_rcerr=1; return; }
-            int cbyte=s_bt(&M_dval, 4);
+            int cbyte=s_bt(&M_dval, RC_DVAL_RATE);
             s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
     if(g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions

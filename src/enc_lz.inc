@@ -307,7 +307,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
             for (int32_t j = 0; j < t.len; j++) {
                 size_t cp = (size_t)t.start + (size_t)j;
                 uint8_t byte = content[cp];
-                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte, tags[cp] ? 4 : 5);
+                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte, tags[cp] ? RC_LIT1_RATE : RC_LIT0_RATE);
                 prevlit = byte;
             }
         } else if (t.type == 'O') {
