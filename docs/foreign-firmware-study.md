@@ -158,11 +158,13 @@ joined by one cross-major jump, under `test-bench/foreign/<ver>/watch.bin`:
   10.1.1 10.1.2 10.1.3`
 
 17 adjacent pairs (the `3.0.3 -> 10.0.0` boundary is the cross-major one), each
-applied in both directions = 34. Bytes are pinned by `test-bench/foreign.sha256`;
-`scripts/fetch_foreign.sh [--verify]` regenerates/checks them from the S3 path
-above (`scripts/uf2_unpack.py` does the UF2 -> flat-image conversion). The new
-family stops at 10.1.3 (not 10.2.1) to land exactly 18 images; extend both lists
-and re-pin the manifest + `BASE_FOREIGN_TOTAL` to grow the set.
+applied in both directions = 34. The images are committed and final; their bytes
+are pinned by `test-bench/foreign.sha256` (verified by `make check-assets`). The
+new-family images were UF2-unpacked to app base 0x2000 to match the raw-`.bin`
+layout of the old family; the S3 source path above plus the `## Method` recipe
+document their origin. The new family stops at 10.1.3 (not 10.2.1) to land exactly
+18 images; extend both lists and re-pin the manifest + `BASE_FOREIGN_TOTAL` to
+grow the set.
 
 **Gate integration (cost kept near-zero).** The 34 foreign pair-directions run
 in the SAME parallel pool as the 256-pair home matrix (`check_corpus.sh`), not a

@@ -14,13 +14,6 @@ every `foreign/<ver>/watch.bin`. Both are verified by:
 make check-assets
 ```
 
-Regenerate the foreign images from their upstream S3 source (and re-verify
-against the manifest) with:
-
-```sh
-scripts/fetch_foreign.sh --verify
-```
-
 Create a deterministic standalone bundle, if needed, with:
 
 ```sh
