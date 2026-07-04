@@ -385,12 +385,10 @@ static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const
     FieldDeltaVec out = {0};
     m4_stream_t st[M4_NSTREAMS];
     if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                          fr->code_begin, fr->code_end, 0, 0, st)) die("M0 disassemble failed");
-    int active[STREAM_N] = {1, 1, 0, 1, 1, 0};
-    int mapidx[STREAM_N] = {M4_DATA, M4_CODE, M4_BW, M4_BL, M4_LDR, M4_LDRW};
+                          fr->code_begin, fr->code_end, st)) die("M0 disassemble failed");
+    /* STREAM_* and M4_* share the same order, so blocks[s] pairs with st[s] directly. */
     for (int s = 0; s < STREAM_N; s++) {
-        if (!active[s]) continue;
-        const m4_stream_t *ms = &st[mapidx[s]];
+        const m4_stream_t *ms = &st[s];
         for (size_t bi = 0; bi < blocks[s].n; bi++) {
             const Block *b = &blocks[s].v[bi];
             for (int32_t k = 0; k < b->n; k++) {

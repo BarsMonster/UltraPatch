@@ -82,7 +82,7 @@ static uint32_t rd32(const uint8_t *p){ return (uint32_t)(p[0]|(p[1]<<8)|(p[2]<<
 static void wr16(uint8_t *p, uint16_t v){ p[0]=v&0xff; p[1]=(v>>8)&0xff; }
 static void wr32(uint8_t *p, uint32_t v){ p[0]=v&0xff;p[1]=(v>>8)&0xff;p[2]=(v>>16)&0xff;p[3]=(v>>24)&0xff; }
 
-/* ---------- bl/bw (re)encoders (inverse of py unpack_bl/unpack_bw) ---------- */
+/* ---------- bl (re)encoder (inverse of py unpack_bl) ---------- */
 static int32_t unpack_bl(uint16_t up, uint16_t lo) {
     int32_t s=(up>>10)&1, imm10=up&0x3ff, imm11=lo&0x7ff;
     int32_t j1=(lo>>13)&1, j2=(lo>>11)&1;
@@ -91,17 +91,6 @@ static int32_t unpack_bl(uint16_t up, uint16_t lo) {
     if (s) v -= (1<<24);
     return v;
 }
-#ifndef CORTEX_M0
-/* B.W (un)packers: Thumb-2 only. Compiled out for the CORTEX_M0 (Thumb-1) family,
- * where the encoding cannot occur in real code. */
-static int32_t unpack_bw(uint16_t up, uint16_t lo) {
-    int32_t s=(up>>10)&1, cond=(up>>6)&0xf, imm6=up&0x3f;
-    int32_t imm11=lo&0x7ff, j1=(lo>>13)&1, t=(lo>>12)&1, j2=(lo>>11)&1;
-    int32_t v=(s<<24)|(j2<<23)|(j1<<22)|(imm6<<16)|(imm11<<5)|(cond<<1)|t;
-    if (s) v -= (1<<25);
-    return v;
-}
-#endif
 static void pack_bl(int32_t imm32, uint8_t out[4]) {
     if (imm32 < 0) imm32 += (1<<24);
     int32_t s=(imm32>>23)&1, i1=(imm32>>22)&1, i2=(imm32>>21)&1;
@@ -111,21 +100,10 @@ static void pack_bl(int32_t imm32, uint8_t out[4]) {
     uint16_t lo = 0xD000 | (j1<<13) | (j2<<11) | imm11;
     wr16(out, up); wr16(out+2, lo);
 }
-#ifndef CORTEX_M0
-static void pack_bw(int32_t value, uint8_t out[4]) {
-    if (value < 0) value += (1<<25);
-    int32_t t=value&1, cond=(value>>1)&0xf, imm32=value>>5;
-    int32_t s=(imm32>>19)&1, j2=(imm32>>18)&1, j1=(imm32>>17)&1;
-    int32_t imm6=(imm32>>11)&0x3f, imm11=imm32&0x7ff;
-    uint16_t up = 0xF000 | (s<<10) | (cond<<6) | imm6;
-    uint16_t lo = 0x8000 | (j1<<13) | (t<<12) | (j2<<11) | imm11;
-    wr16(out, up); wr16(out+2, lo);
-}
-#endif
 
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
 typedef struct {
-    map_t bw, bl, ldr, ldr_w, data_ptr, code_ptr;
+    map_t bl, ldr, ldr_w, data_ptr, code_ptr;
     uset_t lit;   /* every addr pushed to ldr/ldr_w — for O(1) literal-pool skip during the scan */
 } dis_t;
 
@@ -141,22 +119,15 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
 /* The scanner records literal-pool target addresses as it finds them, then skips
    those words later in the same pass. */
 
-/* emit_bw/emit_ldr_w default-on (Cortex-M4/Thumb-2). Off for Thumb-1/ARMv6-M (M0+),
- * where B.W and LDR.W cannot occur, so any match is a spurious decode of data. Byte
- * consumption is unchanged either way, so bl/ldr/data/code detection stays identical. */
+/* Thumb-2 B.W / LDR.W *recognition* stays in the walk (the ldr.w pool membership and the 32-bit
+ * instruction skips below): B.W and LDR.W cannot occur in real Thumb-1/ARMv6-M (M0+) code, but
+ * byte consumption defines field classification and the CORTEX_M0 wire is frozen against it. No
+ * wide stream is emitted — bl/ldr/data/code are the only returned streams. */
 static void disassemble(const uint8_t *f, size_t fsize,
                         uint32_t data_off_begin, uint32_t data_off_end,
                         uint32_t data_begin, uint32_t data_end,
                         uint32_t code_begin, uint32_t code_end,
-                        int emit_bw, int emit_ldr_w,
                         dis_t *d) {
-    /* CORTEX_M0 NOTE: Thumb-2 *recognition* (the ldr.w pool membership and the 32-bit
-     * instruction skips below) must stay in the walk even when nothing wide is emitted —
-     * byte consumption defines field classification, and the wire is frozen against it.
-     * Only stream EMISSION is family-gated. */
-#ifdef CORTEX_M0
-    (void)emit_bw;
-#endif
     memset(d, 0, sizeof(*d));
     uint32_t addr = 0;
     while (addr < fsize) {
@@ -177,12 +148,8 @@ static void disassemble(const uint8_t *f, size_t fsize,
                 if ((size_t)addr + 2 > fsize) continue;
                 uint16_t lo = rd16(f + addr); addr += 2;
                 if ((lo & 0xd000) == 0xd000) map_push(&d->bl, ins, unpack_bl(up, lo));
-#ifndef CORTEX_M0
-                else if (emit_bw && (lo & 0xc000) == 0x8000 &&
-                         ((lo & 0x1000) || ((up >> 6) & 0xf) < 0xe))
-                    map_push(&d->bw, ins, unpack_bw(up, lo));
-                /* bw is never used for in-scan membership, so gating the push here is exact */
-#endif
+                /* B.W (lo & 0xc000)==0x8000 is recognized structurally by consuming the second
+                 * halfword above, but never emitted on CORTEX_M0. */
             } else if ((up & 0xf800) == 0x4800) {     /* ldr (literal) */
                 ldr_common(f, fsize, ins, 4 * (up & 0xff) + 4, &d->ldr, &d->lit);
             } else if (up == 0xf8df) {                /* ldr.w */
@@ -199,25 +166,22 @@ static void disassemble(const uint8_t *f, size_t fsize,
             }
         }
     }
-    /* ldr_w is used for in-scan literal-pool membership even when it is not
-     * returned to the caller. */
-    if (!emit_ldr_w) d->ldr_w.n = 0;
+    /* ldr.w targets feed the in-scan literal-pool membership set (d->lit) only; the ldr_w map
+     * itself is never returned, so it is not finalized. */
     uset_free(&d->lit);   /* only needed during the scan */
-    map_finalize(&d->bw); map_finalize(&d->bl);
-    map_finalize(&d->ldr); map_finalize(&d->ldr_w);
+    map_finalize(&d->bl); map_finalize(&d->ldr);
     map_finalize(&d->data_ptr); map_finalize(&d->code_ptr);
 }
 
 int a1_m4_disassemble(const uint8_t *from, size_t from_size,
                       uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
                       uint32_t code_begin, uint32_t code_end,
-                      int emit_bw, int emit_ldr_w,
                       m4_stream_t streams[M4_NSTREAMS]) {
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
     disassemble(from, from_size, data_offset, data_off_end, data_begin, data_end,
-                code_begin, code_end, emit_bw, emit_ldr_w, &d);
-    map_t *src[M4_NSTREAMS] = { &d.data_ptr, &d.code_ptr, &d.bw, &d.bl, &d.ldr, &d.ldr_w };
+                code_begin, code_end, &d);
+    map_t *src[M4_NSTREAMS] = { &d.data_ptr, &d.code_ptr, &d.bl, &d.ldr };
     for (int s = 0; s < M4_NSTREAMS; s++) { streams[s].a = NULL; streams[s].n = 0; }
     int rc = 0;
     for (int s = 0; s < M4_NSTREAMS && !rc; s++) {
@@ -231,7 +195,7 @@ int a1_m4_disassemble(const uint8_t *from, size_t from_size,
         }
     }
     if (rc) a1_m4_free_streams(streams);   /* release any partial allocation on OOM */
-    map_free(&d.bw); map_free(&d.bl); map_free(&d.ldr); map_free(&d.ldr_w);
+    map_free(&d.bl); map_free(&d.ldr); map_free(&d.ldr_w);
     map_free(&d.data_ptr); map_free(&d.code_ptr);
     return rc;
 }
@@ -240,8 +204,5 @@ void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
 }
 void a1_m4_pack(int pk, int32_t value, uint8_t out[4]) {
     if (pk == M4_PK_BL) pack_bl(value, out);
-#ifndef CORTEX_M0
-    else if (pk == M4_PK_BW) pack_bw(value, out);
-#endif
     else wr32(out, (uint32_t)value);
 }

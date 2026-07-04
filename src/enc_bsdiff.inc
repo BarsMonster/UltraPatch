@@ -185,17 +185,6 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
 
 static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 
-/* Family gate for the Thumb-2 WIDE streams (B.W / LDR.W). On CORTEX_M0 these encodings
- * cannot occur in real code — any disassembler match is a spurious decode of data — so
- * their emission and block-matching are compiled out. The disassembler's Thumb-2 walk
- * recognition stays ON regardless (byte consumption defines field classification; the
- * CORTEX_M0 wire is frozen against it). */
-#ifdef CORTEX_M0
-enum { A1_EMIT_WIDE = 0 };
-#else
-enum { A1_EMIT_WIDE = 1 };
-#endif
-
 static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                                Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
@@ -204,15 +193,13 @@ static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr,
     if (to->n) memcpy(to_mut->d, to->d, to->n);
     m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
     if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                          fr->code_begin, fr->code_end, A1_EMIT_WIDE, A1_EMIT_WIDE, fs)) die("from disassemble failed");
+                          fr->code_begin, fr->code_end, fs)) die("from disassemble failed");
     if (a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                          tr->code_begin, tr->code_end, A1_EMIT_WIDE, A1_EMIT_WIDE, ts)) die("to disassemble failed");
+                          tr->code_begin, tr->code_end, ts)) die("to disassemble failed");
     create_patch_block(from_mut, to_mut, &fs[M4_DATA], &ts[M4_DATA], &blocks[STREAM_DATA]);
     create_patch_block(from_mut, to_mut, &fs[M4_CODE], &ts[M4_CODE], &blocks[STREAM_CODE]);
-    if (A1_EMIT_WIDE) create_patch_block(from_mut, to_mut, &fs[M4_BW], &ts[M4_BW], &blocks[STREAM_BW]);
     create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
-    if (A1_EMIT_WIDE) create_patch_block(from_mut, to_mut, &fs[M4_LDRW], &ts[M4_LDRW], &blocks[STREAM_LDRW]);
     if (mask_bl & 1) {
         mask_bl_imms(from->d, from_mut->d, from->n);
         mask_bl_imms(to->d, to_mut->d, to->n);

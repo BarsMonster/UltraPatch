@@ -11,17 +11,16 @@
 #include <stddef.h>
 
 /* Sorted (addr, val) field list for one relocation stream.
- * val = unpacked bl/bw imm, or the s32 word for ldr/ldr.w/data-ptr/code-ptr. */
+ * val = unpacked bl imm, or the s32 word for ldr/data-ptr/code-ptr. */
 typedef struct { uint32_t addr; int32_t val; } m4_field_t;
 typedef struct { m4_field_t *a; size_t n; } m4_stream_t;
-/* streams order: [0]=data-ptr [1]=code-ptr [2]=bw [3]=bl [4]=ldr [5]=ldr.w  */
-enum { M4_DATA, M4_CODE, M4_BW, M4_BL, M4_LDR, M4_LDRW, M4_NSTREAMS };
+/* streams order: [0]=data-ptr [1]=code-ptr [2]=bl [3]=ldr  */
+enum { M4_DATA, M4_CODE, M4_BL, M4_LDR, M4_NSTREAMS };
 /* pack kind per stream, for re-encoding a relocated value into 4 bytes */
-enum { M4_PK_S32, M4_PK_BL, M4_PK_BW };
+enum { M4_PK_S32, M4_PK_BL };
 int  a1_m4_disassemble(const uint8_t *from, size_t from_size,
                        uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
                        uint32_t code_begin, uint32_t code_end,
-                       int emit_bw, int emit_ldr_w,
                        m4_stream_t streams[M4_NSTREAMS]);
 void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]);
 /* re-encode a relocated 32-bit field value into out[4] per pack kind */

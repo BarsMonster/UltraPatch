@@ -89,7 +89,7 @@ static int a1_row_covered(int64_t a, int64_t t) {
 #define A1_OPC_CAP RC_OPC_CAP_DEFAULT
 #endif
 
-enum { STREAM_DATA, STREAM_CODE, STREAM_BW, STREAM_BL, STREAM_LDR, STREAM_LDRW, STREAM_N };
+enum { STREAM_DATA, STREAM_CODE, STREAM_BL, STREAM_LDR, STREAM_N };
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
