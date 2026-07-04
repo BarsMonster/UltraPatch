@@ -14,7 +14,7 @@
 #
 # Usage: scripts/ab_matrix.sh <enc_baseline> <enc_candidate> <dec_candidate> [W] [jobs]
 # Env:   IMAGES, FIXTURES (as for check_corpus.sh),
-#        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face gates; default 871/581).
+#        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face gates; default: the Makefile pins).
 # Exit:  0 on a structurally sound run (the accept decision is the caller's),
 #        3 on structural error or any candidate round-trip failure.
 set -u
@@ -23,8 +23,16 @@ W="${4:-10}"
 JOBS="${5:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
-GATE_G="${BASE_ONEFACE_GROW:-871}"
-GATE_R="${BASE_ONEFACE_REVERT:-581}"
+# One-face gate defaults track the authoritative Makefile pins (env still overrides).
+MK="$(dirname "$0")/../Makefile"
+gate() {  # <make-var> <env-value> -> its ?= default from the Makefile unless overridden
+  [ -n "$2" ] && { echo "$2"; return; }
+  v=$(sed -n "s/^$1[[:space:]]*?=[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$MK" | head -1)
+  [ -n "$v" ] || { echo "ab_matrix.sh: $1 not found in $MK (stale gate?)" >&2; exit 2; }
+  echo "$v"
+}
+GATE_G=$(gate BASE_ONEFACE_GROW "${BASE_ONEFACE_GROW:-}") || exit 2
+GATE_R=$(gate BASE_ONEFACE_REVERT "${BASE_ONEFACE_REVERT:-}") || exit 2
 
 ab_work() {
   from=$1; to=$2

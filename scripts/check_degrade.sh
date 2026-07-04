@@ -116,8 +116,11 @@ fail=0
 note() { echo "check_degrade: $*" >&2; }
 bad()  { echo "DEGRADE FAILURE: $*" >&2; fail=$((fail+1)); }
 
-# The decoder mirrors these; keep the asserts self-documenting.
-JBUDGET=1024   # JSLOTS (rc_models.h RC_JSLOTS_DEFAULT) — the journal-degradation budget.
+# The decoder mirrors these; keep the asserts self-documenting. Derive the journal-degradation
+# budget from the decoder's RC_JSLOTS_DEFAULT rather than hand-mirroring it.
+JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0-9]*\)u\?.*/\1/p' \
+  "$(dirname "$0")/../src/rc_models.h" | head -1)
+[ -n "$JBUDGET" ] || { echo "check_degrade: RC_JSLOTS_DEFAULT not found in src/rc_models.h" >&2; exit 2; }
 
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
 # production D=2 build. Same source (patch_apply_demo.c), its own binary. Used only to prove
@@ -134,7 +137,7 @@ j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; refusal=NA
 # =========================================================================================
 # (a) JOURNAL-BUDGET DEGRADATION — block swap: block A (first half) moves to the top and is
 # read H=2048 B behind the write frontier (well past the 512 B row window), so its reads want
-# H preserves — twice the budget. The encoder protects the first JBUDGET and converts the rest
+# H preserves — well past the budget. The encoder protects the first JBUDGET and converts the rest
 # to plain extras. Assert deg_journal=1 AND journal peak == the budget on the degraded blob.
 # =========================================================================================
 dpair jdeg swap 2048 88
