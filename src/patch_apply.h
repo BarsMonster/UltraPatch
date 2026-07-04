@@ -301,13 +301,11 @@ static uint32_t crc32_flash(uint32_t n){
 }
 
 /* ===================================================================================== */
-/* never-evict journal — PACKED 3-BYTE PAGED scheme. Each entry is (pos, byte). Storing the    */
-/* full pos (needs 18 bits for an image span up to ~256 KB) + the byte would be a 4 B slot. We  */
-/* store only the LOW 16 bits of pos + the byte = exactly 3 B/slot, and amortise the HIGH pos   */
-/* bits across a tiny PAGE TABLE: slots are kept sorted by full pos, so each 64 KB page is one  */
-/* contiguous run and its slots share the same high bits. NEVER-EVICT: the first write to a pos */
-/* wins; over-depth (would exceed JSLOTS) is REFUSED before any write. Lives in the apply phase */
-/* ONLY (overlaid in ARENA front).                                                             */
+/* never-evict journal — FLAT SORTED uint32 slots, each packed (pos<<8)|byte (the op_corr      */
+/* packing). Sorted by pos, so lookup is one binary search on slot>>8. 24-bit pos spans 16 MiB */
+/* — any realistic image. NEVER-EVICT: the first write to a pos wins; over-depth (would exceed */
+/* JSLOTS) is REFUSED before any write. Lives in the apply phase ONLY (overlaid in ARENA       */
+/* front).                                                                                     */
 /* ===================================================================================== */
 /* DEREL dict cap (corpus distinct-value peak ~179 per substream + margin). The STREAMED-DELTA wire
  * (12 KiB build) holds NO resident per-detection store — only a small MOVE-TO-FRONT dict of the
@@ -343,8 +341,7 @@ typedef struct {
                                               * so a valid blob never exceeds it; an over-cap stream
                                               * still refuses cleanly here (REJ_RESOURCE). */
 #endif
-#define JREGION (((JSLOTS*3u)+7u)&~7u)        /* journal byte region (3072, 8-aligned) */
-#define JPAGE_MAX 6                           /* page-table size (covers span up to 6*64 KB = 384 KB; corpus 216 KB = 4 pages) */
+#define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
 /* LZSS window W (defined here so SA can size the apply phase). Default value in rc_models.h
  * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder W arg MUST match this SA_W. */
 #ifndef SA_W
@@ -380,58 +377,46 @@ typedef struct {
 /* One ARENA, two DISJOINT phase lifetimes overlaid as a union (standard C, no pointer casts):
  *  - seed  (decode_header ONLY): the flash parity histograms hist0/hist1 + the 512-word scratch w
  *           that lit_tree_from_hist folds into the M_lit* trees. Exactly 4096 B.
- *  - apply (jr_reset onward): the packed journal jbuf (JREGION) then the SA working set.
+ *  - apply (jr_reset onward): the flat journal slots jbuf (JREGION) then the SA working set.
  * The seed phase completes INSIDE decode_header and its result is copied into the M_lit* statics
  * before rc_init/jr_reset ever touch the apply member, so the two lifetimes never overlap. sab
  * reserves SA_ARENA bytes (>= sizeof(SA)) so the union's size equals the old ARENA_BYTES exactly. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint8_t jbuf[JREGION]; union { SA sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
+    struct { uint32_t jbuf[JSLOTS]; union { SA sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
 } Arena;
 static Arena ARENA __attribute__((aligned(8)));
-#define Jbuf (ARENA.apply.jbuf)                      /* packed journal (apply phase): JSLOTS*3 bytes */
+#define Jbuf (ARENA.apply.jbuf)                      /* flat journal slots (apply phase): JSLOTS*4 bytes */
 #define SAst (ARENA.apply.sab.sa)                    /* SA apply state (apply phase) */
 _Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reservation");
 _Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
 _Static_assert(offsetof(Arena, apply.sab.sa) == JREGION && (offsetof(Arena, apply.sab.sa) & 3u)==0u,
                "SA must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
-/* page[p] = index of the first slot whose (pos>>16) >= p, for p in [0..JPAGE_MAX].  Since slots
- * are sorted by full pos, page p occupies the contiguous run [page[p], page[p+1]). Every journalled
- * pos is < g_image_span, so a pos with pos>>16 >= JPAGE_MAX exists only for out-of-corpus firmware
- * whose span overflows the page table — that page is unrepresentable and refused. No separate active-
- * page count is kept: pages above the live span never receive an insert, so their boundaries trail
- * the final sentinel and search empty. */
-static uint16_t g_jpage[JPAGE_MAX+1];
-static void jr_reset(void){
-    for(int p=0;p<=JPAGE_MAX;p++) g_jpage[p]=0; }
-/* Binary search for `pos` within its page (pos>>16), comparing the 16-bit low key. Returns the
- * slot index in *at: on a hit *at is the matching slot and the return is 1; on a miss *at is the
- * sorted insertion index (page-clamped) and the return is 0. `pos` is always inside the paged span
- * (callers gate on pg<JPAGE_MAX), so no out-of-range branch is needed here. */
+static uint16_t g_jcount;
+static void jr_reset(void){ g_jcount=0; }
+/* Binary search on slot>>8 over [0, g_jcount). On a hit *at is the matching slot and the return
+ * is 1; on a miss *at is the sorted insertion index and the return is 0. */
 static int jr_find(uint32_t pos, int*at){
-    uint32_t key=pos&0xFFFFu;
-    int lo=g_jpage[pos>>16], hi=g_jpage[(pos>>16)+1]-1;
+    int lo=0, hi=(int)g_jcount-1;
     while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1);
-        const uint8_t*s=Jbuf+(uint32_t)mid*3u; uint32_t k=(uint32_t)s[1]|((uint32_t)s[2]<<8);
-        if(k==key){ *at=mid; return 1; } if(k<key) lo=mid+1; else hi=mid-1; }
+        uint32_t k=Jbuf[mid]>>8;
+        if(k==pos){ *at=mid; return 1; } if(k<pos) lo=mid+1; else hi=mid-1; }
     *at=lo;
     return 0;
 }
 static int jr_put(uint32_t pos, uint8_t b){
-    uint32_t pg=pos>>16; if(pg>=(uint32_t)JPAGE_MAX) return -1;   /* outside paged span (also bounds pos) */
+    if(pos>=(1u<<24)) return -1;                     /* slot packs pos in 24 bits (16 MiB span) */
     int at;
     if(jr_find(pos,&at)) return 0;                   /* never-evict: keep the first write */
-    uint16_t jcount=g_jpage[JPAGE_MAX];
-    if((uint32_t)jcount>=JSLOTS) return -1;          /* over-depth: refuse BEFORE any write */
-    if(at<jcount) memmove(Jbuf+(uint32_t)(at+1)*3u, Jbuf+(uint32_t)at*3u, (size_t)(jcount-at)*3u);
-    uint8_t*s=Jbuf+(uint32_t)at*3u; s[0]=b; s[1]=(uint8_t)pos; s[2]=(uint8_t)(pos>>8);
-    for(uint32_t p=pg+1u;p<=(uint32_t)JPAGE_MAX;p++) g_jpage[p]++;  /* shift higher page boundaries */
+    if(g_jcount>=JSLOTS) return -1;                  /* over-depth: refuse BEFORE any write */
+    if(at<(int)g_jcount) memmove(Jbuf+at+1, Jbuf+at, (size_t)((int)g_jcount-at)*4u);
+    Jbuf[at]=(pos<<8)|b;
+    g_jcount++;
     return 0;
 }
 static int jr_get(uint32_t pos, uint8_t*out){
-    if(pos>>16>=(uint32_t)JPAGE_MAX) return 0;       /* outside paged span */
     int at;
-    if(jr_find(pos,&at)){ *out=Jbuf[(uint32_t)at*3u]; return 1; }
+    if(jr_find(pos,&at)){ *out=(uint8_t)Jbuf[at]; return 1; }
     return 0;
 }
 

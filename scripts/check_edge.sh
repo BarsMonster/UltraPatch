@@ -5,7 +5,7 @@
 
 # Edge-input gate: synthetic pairs the 256-pair firmware corpus never exercises —
 # empty/tiny/equal images, all-0xFF/all-0x00, incompressible random data, text, page-boundary
-# sizes, and a >384 KiB span that can overflow the journal page table (REJ_RESOURCE path).
+# sizes, and a >384 KiB span (well past the home-corpus 216 KiB maximum).
 #
 # Acceptance model: hy_enc SELF-VERIFIES every emitted patch on the reference decoder, so for
 # each pair either (a) hy_enc succeeds -> the host decoder MUST round-trip the blob
@@ -137,7 +137,7 @@ mkpair page64; gen "$tmp/page64_from/watch.bin" 65535 rand 77
 gen "$tmp/page64_to/watch.bin" 65537 insert "$tmp/page64_from/watch.bin" 2 78
 run_case page64
 
-# --- >384 KiB span: beyond the 6-page journal table; clean REJ_RESOURCE refusal is OK ---
+# --- >384 KiB span (the flat 24-bit journal spans 16 MiB) ---
 mkpair big_shift; gen "$tmp/big_shift_from/watch.bin" 409600 rand 88
 gen "$tmp/big_shift_to/watch.bin" 0 insert "$tmp/big_shift_from/watch.bin" 4096 89
 run_case big_shift

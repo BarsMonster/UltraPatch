@@ -3,7 +3,7 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# Degradation / direction / row-window / refusal gate: synthetic firmware-like pairs that
+# Degradation / direction / row-window / big-span gate: synthetic firmware-like pairs that
 # deterministically FORCE each encoder path the 6-blob golden set and the home corpus never
 # exercise, and ASSERT the path was actually taken (not merely that the blob round-trips):
 #
@@ -20,10 +20,10 @@
 #       on the production D=2 decoder with a ZERO journal peak, yet REJECTS (clean CRC(to)
 #       reject, no silent wrong image) on a D=1 decoder built here — the monotone-window
 #       compatibility contract.
-#   (e) encoder refusal              — a pair that exceeds a cap NO degradation can fix (a
-#       journal read behind the write frontier at a source position past the 6-page journal
-#       table, > 384 KiB) is REFUSED cleanly: nonzero hy_enc exit, no blob file, informative
-#       message. The encoder never ships a blob the decoder would reject.
+#   (e) big-span universality        — a >384 KiB-span pair with behind-frontier journal
+#       reads at source >= 393216 (the old 6-page journal table refused this late in
+#       selfcheck); the flat 24-bit journal spans 16 MiB, so it must encode and round-trip
+#       with the over-budget preserves degraded to extras.
 #
 # hy_enc self-verifies every emitted blob on the reference decoder, so a round-trip failure is
 # already impossible for an accepted blob; this gate additionally pins that the SPECIFIC path
@@ -132,7 +132,7 @@ if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -DOUTROW_DEPTH=1 -D_POSIX_C_SOURCE=200809
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
 fi
 
-j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; refusal=NA
+j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA
 
 # =========================================================================================
 # (a) JOURNAL-BUDGET DEGRADATION — block swap: block A (first half) moves to the top and is
@@ -239,25 +239,23 @@ else
 fi
 
 # =========================================================================================
-# (e) ENCODER REFUSAL — >384 KiB span with a behind-frontier journal read at a source position
-# past the 6-page (JPAGE_MAX) journal table: identity below 384 KiB, the top 4 KiB two halves
-# swapped so the read lands at source >= 393216. Degradation cannot relocate a within-budget
-# preserve, so the encoder REFUSES cleanly rather than ship a blob the decoder would reject.
+# (e) BIG-SPAN UNIVERSALITY — >384 KiB span with a behind-frontier journal read at a source
+# position >= 393216: identity below 384 KiB, the top 4 KiB two halves swapped. The old paged
+# journal could not represent those positions and the pair died late in selfcheck; the flat
+# 24-bit journal spans 16 MiB, so it must encode (over-budget preserves degraded to extras)
+# and round-trip.
 # =========================================================================================
-dpair refuse highswap 393216 4096 88
-if enc refuse; then
-  bad "refusal pair was ACCEPTED (blob=$(wc -c <"$tmp/refuse.blob")B) — expected a clean refusal"
+dpair bigspan highswap 393216 4096 88
+if enc bigspan; then
+  r=$(dec ./hy_dec bigspan 1)
+  bigspan="${r%% *}_j${r#* }"
+  [ "${r%% *}" = OK ] || bad "big-span blob did not round-trip ($r)"
+  note "(e) big span: roundtrip=${r%% *} journal_peak=${r#* }/$JBUDGET blob=$(wc -c <"$tmp/bigspan.blob")B"
 else
-  if [ -f "$tmp/refuse.blob" ]; then
-    bad "refusal pair left a blob file"
-  else
-    refusal=clean
-    msg=$(grep -iE 'resource|feasible|self-verify' "$tmp/refuse.encerr" | tail -1)
-    note "(e) refusal: clean (no blob) — $msg"
-  fi
+  bad "big-span pair was refused (rc=$?)"
 fi
 
 cases=5
-printf 'degrade_journal_peak=%s\ndegrade_opc_splits=%s\ndegrade_direction=%s\ndegrade_rowwindow=%s\ndegrade_refusal=%s\ndegrade_cases=%s\ndegrade_fail=%s\n' \
-  "$j_peak" "$opc_n" "$dir_flip" "$rw" "$refusal" "$cases" "$fail"
+printf 'degrade_journal_peak=%s\ndegrade_opc_splits=%s\ndegrade_direction=%s\ndegrade_rowwindow=%s\ndegrade_bigspan=%s\ndegrade_cases=%s\ndegrade_fail=%s\n' \
+  "$j_peak" "$opc_n" "$dir_flip" "$rw" "$bigspan" "$cases" "$fail"
 test "$fail" -eq 0

@@ -44,7 +44,7 @@ BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
 BASE_ARM_TEXT ?= 6212
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10904
+BASE_ARM_BSS ?= 10896
 BASE_ARM_SOFT_DIV ?= 1
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
@@ -208,9 +208,9 @@ check-malformed-internal: all-internal
 check-edge-internal: all-internal
 	@scripts/check_edge.sh 10
 
-# Degradation / direction / row-window / refusal gate: synthetic pairs that FORCE each encoder
+# Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
 # path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP
-# op-split, unnatural apply direction, row-window-oracle reliance, and clean refusal), asserting
+# op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: all-internal
@@ -300,7 +300,7 @@ gate-internal: all-internal model_diff
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
 	sed -n 's/^model_diff=/model diff              : /p' "$$tmp/mdl.txt"; \
-	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_refusal=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s refuse=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
+	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_bigspan=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \

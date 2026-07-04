@@ -146,7 +146,7 @@ static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h
  * that falls back to the value here. BUILD CONTRACT: a deployment that -D-retunes the decoder caps
  * must retune the encoder mirrors identically, or the round-trip breaks. Caps are corpus-peak +
  * margin; over-cap input is REJECTED on-device (CRC-gated, never silent-wrong), not applied. ---- */
-#define RC_JSLOTS_DEFAULT      1024u  /* packed journal capacity (home-corpus peak 478; out-of-corpus headroom) */
+#define RC_JSLOTS_DEFAULT      768u   /* journal slot capacity (home-corpus peak 478; out-of-corpus headroom) */
 #define RC_OPC_CAP_DEFAULT     80     /* per-op correction cap (corpus peak 68; +12 margin) */
 #define RC_DR_KCAP_BL_DEFAULT  208    /* max distinct bl delta values (corpus peak 180; +28 margin) */
 #define RC_DR_KCAP_EX_DEFAULT  128    /* max distinct ex delta values (corpus peak 106; +22 margin) */
