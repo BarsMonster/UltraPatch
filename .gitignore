@@ -12,6 +12,7 @@
 # Native and firmware build products.
 /detools
 /hy_dec
+/hy_dec_pull
 /hy_enc
 /hy_enc_asan
 /fuzz_apply
