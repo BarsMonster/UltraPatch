@@ -6,6 +6,7 @@
 set -eu
 
 manifest="${1:-test-bench/corpus.sha256}"
+label="${2:-corpus_assets}"
 
 if [ ! -f "$manifest" ]; then
   echo "missing corpus manifest: $manifest" >&2
@@ -33,4 +34,4 @@ if [ "$missing" -ne 0 ]; then
 fi
 
 sha256sum -c "$manifest" >/dev/null
-printf 'corpus_assets=verified %s files via %s\n' "$files" "$manifest"
+printf '%s=verified %s files via %s\n' "$label" "$files" "$manifest"

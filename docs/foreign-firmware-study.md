@@ -142,10 +142,43 @@ firmware drifts in the 512 B–2 KB band can retune with `-DOUTROW_DEPTH=4` +
 monotone, and the degradation logger's lag histogram re-derives the right
 depth for any new corpus.
 
-## Permanent gate asset — decision: NO
+## Permanent gate asset — decision: YES (2026-07-04, supersedes the prior NO)
 
-The foreign binaries stay out of the repo: they are third-party build
-artifacts (weight + provenance noise), a network-fetching gate would be flaky,
-and the wire is frozen — the in-family gates plus encoder self-verification
-already prevent regressions the foreign set could catch. This document plus
-the S3 path above make the study reproducible on demand.
+The foreign set is now a tracked, permanently-gated corpus. Owner decision
+reversing the earlier "keep it out of the repo" call: a second lineage that the
+encoder was never tuned on is worth a standing regression guard, and the cost
+turned out to be small enough to fold into the existing budget.
+
+**Pinned set (18 images, 34 pair-directions).** Two contiguous release families
+joined by one cross-major jump, under `test-bench/foreign/<ver>/watch.bin`:
+
+- old family, raw `.bin` (app already at 0x2000): `2.2.0 2.2.1 2.2.2 2.2.3
+  2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3`
+- new family, UF2 unpacked to app base 0x2000: `10.0.0 10.0.1 10.0.2 10.0.3
+  10.1.1 10.1.2 10.1.3`
+
+17 adjacent pairs (the `3.0.3 -> 10.0.0` boundary is the cross-major one), each
+applied in both directions = 34. Bytes are pinned by `test-bench/foreign.sha256`;
+`scripts/fetch_foreign.sh [--verify]` regenerates/checks them from the S3 path
+above (`scripts/uf2_unpack.py` does the UF2 -> flat-image conversion). The new
+family stops at 10.1.3 (not 10.2.1) to land exactly 18 images; extend both lists
+and re-pin the manifest + `BASE_FOREIGN_TOTAL` to grow the set.
+
+**Gate integration (cost kept near-zero).** The 34 foreign pair-directions run
+in the SAME parallel pool as the 256-pair home matrix (`check_corpus.sh`), not a
+second leg. The single slowest job in the whole gate is the foreign cross-major
+pair (`3.0.3 <-> 10.0.0`, effectively unrelated programs, ~13 s, 150-175 KB
+blob); it is emitted FIRST so it overlaps every other pair (longest-processing-
+time-first). Net effect on `make gate`: ~23 s -> ~29 s wall on the 32-core
+reference machine, comfortably under the 60 s budget, for ~154 CPU-s of added
+work. Reported metrics: `foreign round-trips` (must be 34/34) and
+`foreign full_total`, which ratchets against `BASE_FOREIGN_TOTAL` exactly like
+`BASE_FULL_TOTAL`. NVM write-safety maxima (amplified / erases-per-row /
+frontier inversions) cover the foreign pairs too — all clean, journal peak 768
+(the degradation budget), which is the gate's overall journal-peak driver.
+
+Current measurement with the landed encoder: 34/34 round-trip byte-exact,
+`foreign full_total = 1,373,186` B (this is the pinned `BASE_FOREIGN_TOTAL`; it
+differs from the historical 1,234,665 above because the encoder has moved on
+since 2026-07-03). Re-pin on any intentional wire change, same as the home
+baseline.

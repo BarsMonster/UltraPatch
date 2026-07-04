@@ -40,9 +40,15 @@ DEC_SRCS := src/patch_apply_demo.c
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
+FOREIGN ?= test-bench/foreign
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
+FOREIGN_MANIFEST ?= test-bench/foreign.sha256
 
 BASE_FULL_TOTAL ?= 4201454
+# Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
+# Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
+# Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
+BASE_FOREIGN_TOTAL ?= 1373186
 BASE_ONEFACE_GROW ?= 588
 BASE_ONEFACE_REVERT ?= 306
 BASE_ARM_TEXT ?= 5996
@@ -147,6 +153,7 @@ check-stack-internal:
 
 check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
+	@scripts/verify_corpus.sh "$(FOREIGN_MANIFEST)" foreign_assets
 
 # qemu-based decode validation REMOVED — permanent decision (owner, 2026-07-03): too slow
 # for its marginal value (the 260-pair matrix re-encoded every corpus pair just to apply it
@@ -225,37 +232,47 @@ model_diff: $(MODEL_DIFF_SRCS) test/model_diff.h src/patch_generate.c $(APPLY_HD
 check-models-internal: model_diff
 	@./model_diff
 
-# The 256 (from,to) pairs are independent, so the matrix runs in parallel across all cores via
-# check_corpus.sh (each worker gets its own mktemp dir — no shared blob path, contamination-safe).
-# It prints the same nine metric lines the old serial loop did; the BASE_* size/safety gates stay
-# asserted here. Override parallelism with JOBS=N (defaults to nproc).
+# The 256 home (from,to) pairs PLUS 34 foreign pair-directions (a second, unrelated Cortex-M0+
+# lineage — CircuitPython feather_m0_express; see docs/foreign-firmware-study.md) are independent,
+# so they run in ONE parallel pool across all cores via check_corpus.sh (each worker gets its own
+# mktemp dir — no shared blob path, contamination-safe). The foreign set's cross-major pair is the
+# single slowest job and is scheduled first so it overlaps everything (LPT), keeping the leg near
+# its home-only wall. matrix_ok/full_total gate the home set; foreign_ok(=34)/foreign_total gate
+# the foreign set (foreign_total ratchets vs BASE_FOREIGN_TOTAL); NVM write-safety maxima cover
+# BOTH. Override parallelism with JOBS=N (defaults to nproc).
 check-corpus-internal: all-internal check-assets-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
+	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" FOREIGN="$(FOREIGN)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
 	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \
+	fok=$$(sed -n 's#^foreign_ok=\([0-9][0-9]*\)/34#\1#p' "$$tmp/m.txt"); \
+	fforeign=$$(sed -n 's/^foreign_total=//p' "$$tmp/m.txt"); \
 	max_amp=$$(sed -n 's/^max_amplified=//p' "$$tmp/m.txt"); \
 	max_row=$$(sed -n 's/^max_maxrowerase=//p' "$$tmp/m.txt"); \
 	max_inv=$$(sed -n 's/^max_inversions=//p' "$$tmp/m.txt"); \
 	one_g=$$(sed -n 's/^oneface_grow=//p' "$$tmp/m.txt"); \
 	one_r=$$(sed -n 's/^oneface_revert=//p' "$$tmp/m.txt"); \
 	test "$$ok" -eq 256; \
+	test "$$fok" -eq 34; \
 	test "$$max_amp" -eq 0; \
 	test "$$max_row" -le 1; \
 	test "$$max_inv" -eq 0; \
 	test "$$full" -le "$(BASE_FULL_TOTAL)"; \
+	test "$$fforeign" -le "$(BASE_FOREIGN_TOTAL)"; \
 	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
 
 # THE gate — one target, everything, hard budget <= 60 s wall on the reference machine
-# (measured ~34 s at 32 jobs). Builds up-front, then runs every leg CONCURRENTLY:
+# (measured ~29 s at 32 jobs, incl. the folded-in foreign lineage). Builds up-front, then runs
+# every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
 # check-malformed, check-edge, check-degrade, check-golden, check-models, check-arm
-# (sizes + divide policy), check-stack, and the FULL 256-pair corpus matrix (corpus
-# full_total vs BASE_FULL_TOTAL, NVM write-safety, journal peak — check-corpus; the
+# (sizes + divide policy), check-stack, and the FULL 256-pair corpus matrix + 34 foreign
+# pair-directions (corpus full_total vs BASE_FULL_TOTAL, foreign_total vs BASE_FOREIGN_TOTAL,
+# foreign 34/34 round-trips, NVM write-safety, journal peak — check-corpus; the
 # 256-pair better/worse judging rule lives here). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
@@ -280,6 +297,7 @@ gate-internal: all-internal model_diff
 	done; \
 	echo "==================== A1 GATE ========================="; \
 	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
+	sed -n 's/^foreign_assets=/foreign assets         : /p' "$$tmp/assets.txt"; \
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
@@ -290,6 +308,8 @@ gate-internal: all-internal model_diff
 	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
+	sed -n 's/^foreign_ok=/foreign round-trips     : /p' "$$tmp/m.txt"; \
+	sed -n 's/^foreign_total=/foreign full_total      : /p' "$$tmp/m.txt"; \
 	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/c.txt"; \
 	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/c.txt"; \
 	sed -n 's/^max_amplified=/NVM rows amplified       : /p' "$$tmp/m.txt"; \

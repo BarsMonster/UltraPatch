@@ -36,3 +36,7 @@
 !/test-bench/fixtures/**/
 !/test-bench/fixtures/**/*.bin
 !/test-bench/fixtures/**/*.elf
+# Foreign lineage (third-party CircuitPython images) — tracked, provenance in foreign.sha256.
+!/test-bench/foreign/
+!/test-bench/foreign/**/
+!/test-bench/foreign/**/*.bin

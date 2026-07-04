@@ -10,10 +10,11 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 scripts/verify_corpus.sh test-bench/corpus.sha256 >/dev/null
+scripts/verify_corpus.sh test-bench/foreign.sha256 foreign_assets >/dev/null
 mkdir -p "$(dirname "$out")"
 
-find test-bench/fixtures test-bench/images -type f | sort > "$tmp/files"
-printf '%s\n' test-bench/corpus.sha256 >> "$tmp/files"
+find test-bench/fixtures test-bench/images test-bench/foreign -type f | sort > "$tmp/files"
+printf '%s\n' test-bench/corpus.sha256 test-bench/foreign.sha256 >> "$tmp/files"
 
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - -T "$tmp/files" \
   | gzip -n > "$out"
