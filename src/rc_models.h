@@ -129,10 +129,6 @@ static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h
 #define RC_SEED_DEPTH_PG2  1
 #define RC_SEED_DEPTH_GL   1
 
-/* Initial rice k for the distance model M_gd, used ONLY to code the leading token count (nseq)
- * before k is reset from the header kd field. (Decoder ugr_init(&M_gd,.) / encoder ug_init_e(&gd,'r',.).) */
-#define RC_GD_INIT_K 11
-
 /* Out-match minimum length: out-match lengths ship as (len - RC_OUTMATCH_MIN) via the M_glo gamma,
  * so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
 #define RC_OUTMATCH_MIN 4u

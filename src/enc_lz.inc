@@ -280,7 +280,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &lit1);
     fl_init_e(&flag);
-    ug_init_e(&gd, 'r', RC_GD_INIT_K);
+    ug_init_e(&gd, 'r', dk);
     ug_init_e(&gl, 'g', 0);
     ug_seed_cont_e(&gl, RC_SEED_DEPTH_GL);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
     ug_init_e(&gs, 'g', 0);
@@ -292,8 +292,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     uint32_t oexp = pt->oexp0;                    /* caller pre-sets oexp0 (FWD ? 0 : to_size) */
     uint64_t op_cost = 0; uint32_t op_n = 0;
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
-    ug_encode(&gd, &r, (uint32_t)seq->n);
-    gd.k = (uint8_t)dk;
+    w_gz(&r, (uint32_t)seq->n);
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;

@@ -175,8 +175,8 @@ static uint8_t g_reject;
 static uint8_t g_flash_touched;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(); return v; }
-/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. The only raw-gamma site
- * is the header op count, so the gamma reader and its -1 wrapper are one function. */
+/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. Raw gamma codes only
+ * pre-model header fields (shift map, token/op counts), so the reader and its -1 wrapper are one function. */
 static uint32_t s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits */
@@ -527,7 +527,7 @@ static void out_write(uint32_t a, uint8_t v){
 /* entropy models (all live through the single streamed apply): tc/gd/gl/gs (content) +          */
 /* pg/pgn/pg2 (preserve+correction, SHARED) + dibl/diex (streamed-delta MTF dict-index Golombs). M_dval */
 /* (escape values) + DR_BL/DR_EX (MTF dicts) are separate statics. */
-static UGRice  M_gd;             /* token_count first, then k-switched for backref_dist */
+static UGRice  M_gd;             /* backref_dist (rice k from the header kd field) */
 static UGGamma M_gl, M_gs;       /* backref_len_v3 (len-1), span_len */
 static UGRice  M_go;             /* out-match absolute output position (k from header) */
 static UGGamma M_glo;            /* out-match length - 4 */
@@ -1052,10 +1052,10 @@ static int decode_body(void){
     ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
     { SA*s=&SAst; memset(s,0,sizeof*s);
       s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
-      ugr_init(&M_gd,RC_GD_INIT_K); uint32_t nseq=s_ug_rice(&M_gd);
+      uint32_t nseq=s_raw_gz();
       int kd=(int)s_raw_bits(RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(RC_KFIELD_BITS):0;
-      M_gd.k=(uint8_t)kd; ugg_init(&M_gl); ugg_init(&M_gs);
+      ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
       ugr_init(&M_go,ko); ugg_init(&M_glo); M_outb=RC_PHALF;
       g_oexp=g_FWD?0u:g_to_size;
       ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first

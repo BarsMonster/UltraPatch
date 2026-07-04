@@ -222,7 +222,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init_e(&M.flag);
     bt_init_e(&M.dval.t);
-    ug_init_e(&M.gd, 'r', RC_GD_INIT_K);
+    ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */
     ug_init_e(&M.gs, 'g', 0);
@@ -262,8 +262,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
           w_gz(&rc, zz32(mv[i]));
       } }
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
-    ug_encode(&M.gd, &rc, (uint32_t)seq->n);
-    M.gd.k = (uint8_t)kd;
+    w_gz(&rc, (uint32_t)seq->n);
     put_raw_bits(&rc, (uint32_t)kd, RC_KFIELD_BITS);
     if (out_en) put_raw_bits(&rc, (uint32_t)ko, RC_KFIELD_BITS);
     w_gz(&rc, (uint32_t)ops->n);

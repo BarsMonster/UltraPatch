@@ -218,7 +218,7 @@ static void test_bv(void) {
 }
 static void test_ugr(void) {
     g_models++;
-    int ks[3] = { 0, RC_GD_INIT_K, 15 };   /* k=0, 11, 15 */
+    int ks[3] = { 0, 11, 15 };
     for (int ki = 0; ki < 3; ki++) {
         int k = ks[ki];
         for (int si = 0; si < NSEED; si++) for (int li = 0; li < NLEN; li++) {
