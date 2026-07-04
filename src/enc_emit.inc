@@ -396,12 +396,6 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
       free(tp0s); }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
-    if (getenv("A1_OUT_DBG")) {
-        size_t np = 0, nc = 0, maxl = 0;
-        for (size_t i = 0; i < content.n; i++) { if (nocand[i]) np++; nc += nocand[i];
-            for (int q = 0; q < nocand[i]; q++) if ((size_t)ocands[i][q].len > maxl) maxl = (size_t)ocands[i][q].len; }
-        fprintf(stderr, "A1_OCAND pos_with_cand=%zu/%zu total=%zu maxlen=%zu FWD=%d\n", np, content.n, nc, maxl, FWD);
-    }
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -471,15 +465,6 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
         }
     }
     free(cands); free(ncand);
-    if (getenv("A1_OUT_DBG")) {
-        size_t no = 0, ob = 0, nr = 0, rb = 0, ns = 0, sb = 0;
-        for (size_t i = 0; i < seq.n; i++) {
-            if (seq.v[i].type == 'O') { no++; ob += (size_t)seq.v[i].len; }
-            else if (seq.v[i].type == 'R') { nr++; rb += (size_t)seq.v[i].len; }
-            else { ns++; sb += (size_t)seq.v[i].len; }
-        }
-        fprintf(stderr, "A1_OUT O=%zu(%zuB) R=%zu(%zuB) S=%zu(%zuB) content=%zu\n", no, ob, nr, rb, ns, sb, content.n);
-    }
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          use_map ? inj_m : inj,
                          use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);

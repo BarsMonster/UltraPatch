@@ -23,7 +23,6 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     { FILE *te = fopen(telf, "rb");
       if (te) { fclose(te); tr = elf_ranges(telf, &to, "to"); } }
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
-    int stats_on = getenv("A1_ENC_STATS") != NULL;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
      * ties keep the earliest entry, so added configs can never regress. A config whose plan
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
@@ -53,7 +52,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         g_enc_fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0; EncStats stv = {0};
-            Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv, stats_on);
+            Buf b = plan_encode(&from, &to, &fr, &tr, W, PLANS[v], &fpe, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
@@ -65,7 +64,6 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
-    if (getenv("A1_PLAN_DBG")) fprintf(stderr, "A1_PLAN variant=%d desc=%d\n", bestv, best_desc);
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
     if (getenv("A1_DEGRADE_STATS"))
@@ -113,12 +111,6 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
       if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(blob_out, blob.d, blob.n);
-    if (stats_on) {
-        fprintf(stderr,
-                "A1_STATS from=%s to=%s bytes=%zu ops=%zu diff=%zu extra=%zu lit=%zu pres=%zu corr=%zu bl=%zu ex=%zu sbl=%zu\n",
-                from_dir, to_dir, blob.n, st.ops, st.diff_bytes, st.extra_bytes, st.literals,
-                st.preserves, st.corrections, st.bl_fields, st.ex_fields, st.suppressed_bl);
-    }
     buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to);
     free(fbin); free(tbin); free(felf); free(telf);
 }

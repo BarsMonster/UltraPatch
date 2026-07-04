@@ -104,9 +104,7 @@ typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
 typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
 typedef struct {
-    size_t ops, diff_bytes, extra_bytes, literals, preserves, corrections;
-    size_t bl_fields, ex_fields, suppressed_bl;
-    /* degradation snapshot (filled unconditionally by plan_encode, not just under A1_ENC_STATS) */
+    /* degradation snapshot (filled unconditionally by plan_encode) */
     int    deg_engaged;
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;

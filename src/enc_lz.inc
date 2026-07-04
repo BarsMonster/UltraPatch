@@ -478,13 +478,9 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
         out_extra[h]   = mflag + pt->rep0_no + pt->outb_yes;
     }
     const uint64_t INF = UINT64_MAX / 4;
-    /* Two arrival-variants per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1.
-     * Variant r=0 is the absolute cheapest arrival; r=1 is the cheapest arrival that carries a
-     * DIFFERENT rep distance than r=0. The wire's rep0 reuse makes a match at distance == the
-     * incoming rep cheap (reuse flag, no fresh-distance value), so a slightly-costlier path that
-     * arrives with the rep a downstream match wants can beat the cheapest-cost path that does not.
-     * Keeping the two cheapest distinct-rep arrivals lets the forward DP exploit that. State index
-     * s = (i*4 + h)*2 + r. Encoder-only; the chosen parse is re-checked by the exact byte gate. */
+    /* One state per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1, keeping only
+     * the cheapest arrival. State index s = i*4 + h; ns = (n+1)*4. Encoder-only; the chosen parse
+     * is re-checked by the exact byte gate. */
     /* span ends only matter where a token can START (or at the content end): spans ending in a
      * literal desert fold into a longer span (merge_adjacent_spans keeps the wire identical, the
      * DP merely prices long spans as several). next_tok[j] = first j' >= j with candidates. */
@@ -496,7 +492,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
     uint8_t  *pl   = (uint8_t *)xmalloc(ns * sizeof(uint8_t)); /* prevlit byte arriving at state */
     Token *via = (Token *)xcalloc(ns, sizeof(Token));         /* token that arrives at state */
-    uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor (h<<1|r) for backtrack */
+    uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor flag-history h for backtrack */
     for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; pl[s] = 0; }
     cost[0] = 0; rep[0] = 0; pl[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, prevlit=0, flag.h=0 */
     int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections, collect_stats.
+ * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections.
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
  * it relies on the shared prologue (typedefs, file-scope state) and on symbols
@@ -333,24 +333,18 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     uint32_t *b2 = (uint32_t *)xmalloc((mn ? mn : 1) * sizeof(*b2));
     int32_t *v2 = (int32_t *)xmalloc((mn ? mn : 1) * sizeof(*v2));
     for (int round = 0; round < 8 && mn > 1; round++) {
-        int kept = 0, removed = 0;
+        int removed = 0;
         for (int i = 0; i < mn; i++) {                    /* per-segment loss in full-map context */
             memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
             memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
             memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
             size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
             if (h + SMAP_MAX_LOSS >= cur) { removed++; tv[i] = INT32_MIN; }  /* mark */
-            else kept++;
         }
         if (!removed) break;
         int w = 0;
         for (int i = 0; i < mn; i++) if (tv[i] != INT32_MIN) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
-        size_t h = smap_hits(tb, tv, w, fk, nfr);
-        if (h + SMAP_MAX_LOSS * (size_t)removed >= cur || h >= cur) { mn = w; cur = h; continue; }
-        /* batch interaction lost too much: rebuild is impossible (marks destroyed values), so
-         * re-derive the union and stop batching. In practice this path is never taken; guard it. */
-        mn = w; cur = h; break;
-        (void)kept;
+        mn = w; cur = smap_hits(tb, tv, w, fk, nfr);
     }
     /* cap enforcement: cheapest-loss removal one at a time */
     while (mn > SMAP_CAP) {
@@ -372,11 +366,6 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
       mn = w; }
     if (mn == 1 && tv[0] == 0) mn = 0;
     for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
-    if (getenv("A1_MAP_DBG")) {
-        size_t h = smap_hits(mb, mv, mn, fk, nfr);
-        fprintf(stderr, "A1_MAP fields=%zu segs=%d hits=%zu (%.1f%%)\n",
-                nfr, mn, h, nfr ? 100.0 * (double)h / (double)nfr : 0.0);
-    }
     free(fk); free(pool); free(pw); free(tb); free(tv); free(b2); free(v2);
     return mn;
 }
@@ -832,48 +821,5 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
     }
     free(m);
     return out;
-}
-
-static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                              uint32_t to_size, const FieldDeltaVec *fd, const OpPC *pc) {
-    (void)to_size;
-    int FWD = g_enc_fwd;
-    EncStats st = {0};
-    int32_t fp0 = 0;
-    st.ops = ops->n;
-    for (size_t i = 0; i < ops->n; i++) {
-        st.preserves += pc[i].pres.n;
-        st.corrections += pc[i].corr.n;
-    }
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        const Op *o = &ops->v[oi];
-        st.diff_bytes += (size_t)o->diff_len;
-        st.extra_bytes += (size_t)o->extra_len;
-        for (int32_t k = 0; k < o->diff_len; k++) st.literals += o->diff[k] != 0;
-        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
-        if (FWD) {
-            for (int32_t k = 0; k + 4 <= o->diff_len;) {
-                Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
-                if (ev.type == EV_BL) { st.bl_fields++; k += 4; continue; }
-                if (ev.type == EV_EX) { st.ex_fields++; k += 4; continue; }
-                if (ev.type == EV_SBL) { st.suppressed_bl++; k += 4; continue; }
-                k++;
-            }
-        } else {
-            for (int32_t top = o->diff_len - 1; top >= 0;) {
-                int32_t k = top - 3;
-                if (k >= 0) {
-                    Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
-                    if (ev.type == EV_BL) { st.bl_fields++; top -= 4; continue; }
-                    if (ev.type == EV_EX) { st.ex_fields++; top -= 4; continue; }
-                    if (ev.type == EV_SBL) { st.suppressed_bl++; top -= 4; continue; }
-                }
-                top--;
-            }
-        }
-        free(ldr.v);
-        fp0 += o->diff_len + o->adj;
-    }
-    return st;
 }
 

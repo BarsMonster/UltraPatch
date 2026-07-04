@@ -98,7 +98,7 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
 typedef struct { int variant, fuzz; } PlanCfg;
 
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                       int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out, int stats_on) {
+                       int W, PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out) {
     int variant = cfg.variant;
     g_deg_engaged = 0; g_deg_pres_needed = 0; g_deg_converted = 0; g_opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
@@ -165,8 +165,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     }
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
-    if (stats_on) *st_out = collect_stats(&ops, from->d, from_size, to_size, &fd, pc);
-    /* degradation snapshot rides EncStats unconditionally (needed even without A1_ENC_STATS) */
+    /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     st_out->deg_engaged = g_deg_engaged;
     st_out->deg_pres_needed = g_deg_pres_needed;
     st_out->deg_converted = g_deg_converted;
