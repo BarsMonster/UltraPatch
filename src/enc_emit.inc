@@ -292,7 +292,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     }
     free(tp0e);
     uint8_t L0[256], L1[256];
-    from_huff_lengths(frm, from_size, L0, L1);
+    from_lit_proxy_bits(frm, from_size, L0, L1);
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
     for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
     int kd = 0;

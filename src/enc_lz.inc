@@ -31,39 +31,6 @@ static void tok_push(TokenVec *v, Token t) {
     v->v[v->n++] = t;
 }
 
-static void huff_lengths(const uint32_t freq[256], uint8_t L[256]) {
-    int parent[512], active[512], an = 256, m = 256;
-    uint32_t wt[512];
-    for (int i = 0; i < 512; i++) parent[i] = -1, wt[i] = 0;
-    for (int i = 0; i < 256; i++) { wt[i] = freq[i]; active[i] = i; }
-    while (an > 1) {
-        int a = -1, b = -1;
-        for (int ii = 0; ii < an; ii++) {
-            int nid = active[ii];
-            if (a < 0 || wt[nid] < wt[a] || (wt[nid] == wt[a] && nid < a)) { b = a; a = nid; }
-            else if (b < 0 || wt[nid] < wt[b] || (wt[nid] == wt[b] && nid < b)) b = nid;
-        }
-        wt[m] = wt[a] + wt[b]; parent[a] = m; parent[b] = m;
-        int wn = 0;
-        for (int ii = 0; ii < an; ii++) if (active[ii] != a && active[ii] != b) active[wn++] = active[ii];
-        active[wn++] = m++;
-        an = wn;
-    }
-    for (int s = 0; s < 256; s++) {
-        int d = 0, p = s;
-        while (parent[p] != -1) { p = parent[p]; d++; }
-        L[s] = (uint8_t)d;
-    }
-}
-
-static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
-    uint32_t f0[256], f1[256];
-    for (int i = 0; i < 256; i++) f0[i] = f1[i] = 1;
-    for (size_t i = 0; i < n; i++) { if (i & 1) f1[frm[i]]++; else f0[frm[i]]++; }
-    huff_lengths(f0, L0);
-    huff_lengths(f1, L1);
-}
-
 static uint64_t gammalen_u32(uint32_t x) { return (uint64_t)(2 * bitlen32(x) - 1); }
 
 static int cand_value(Cand c) {
@@ -192,9 +159,9 @@ static void out_candidates(const uint8_t *content, size_t n, const uint32_t *oli
 }
 
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
- * The DP proxy (1-bit flag + gamma/rice bit-length + static-Huffman litbits) systematically
+ * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-BitTree litbits) systematically
  * mis-prices tokens because the wire uses *adaptive* range-coder models whose steady-state
- * probabilities diverge from the from-image Huffman seed and from a flat 1-bit flag. We run a
+ * probabilities diverge from the time-0 literal-tree seed and from a flat 1-bit flag. We run a
  * trial encode of the previous-pass token stream, read off the resulting model probabilities,
  * and turn them into static per-symbol prices (PR_SCALE-ths of a bit) for the next DP pass.
  * Encoder-only: the wire bytes are unchanged; only token *selection* improves. */
@@ -268,6 +235,27 @@ static uint32_t bt_price(const BitTree *t, uint8_t byte) {
         m = (m << 1) | bit;
     }
     return cost;
+}
+
+/* Per-byte integer bit-length literal proxy from the wire's time-0 seeded literal BitTrees -- the
+ * exact model the real emit uses at seed (lit_tree_seed_e), replacing the from-image static-Huffman
+ * code that used to feed the pre-parse and the diff-run splitter. Context policy: tag0 bytes price
+ * under the parity-0 seed tree, tag1 under parity-1; at seed every LIT0_SEL context shares one seed,
+ * so no previous-byte context need be chosen here -- adaptation (and the real pricing refinement)
+ * happen later in the price-feedback loop, which this proxy only bootstraps. Units: bt_price is
+ * 1/64-bit fixed point (PR_SCALE); round to nearest integer bit (floor 1, like a Huffman length) so
+ * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in lz_parse_once and the
+ * split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
+static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
+    BitTree t0, t1;
+    lit_tree_seed_e(frm, n, 0, &t0);
+    lit_tree_seed_e(frm, n, 1, &t1);
+    for (int b = 0; b < 256; b++) {
+        uint32_t p0 = (bt_price(&t0, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        uint32_t p1 = (bt_price(&t1, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        L0[b] = (uint8_t)(p0 < 1 ? 1 : (p0 > 255 ? 255 : p0));
+        L1[b] = (uint8_t)(p1 < 1 ? 1 : (p1 > 255 ? 255 : p1));
+    }
 }
 
 /* Simulate the real adaptive content models over a token sequence to obtain steady-state
