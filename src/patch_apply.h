@@ -151,7 +151,7 @@ static int rc_decode(uint32_t bound){
 static int s_bit_r(uint16_t*prob,int rate){
     uint32_t p=*prob;
     int b=rc_decode((RC.range>>12)*p);
-    *prob=(uint16_t)(b? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
+    *prob=rc_adapt(p,b,rate);
     return b;
 }
 /* RC_S_BIT_RATE (rc_models.h): shared Golomb / order-2 flag / MTF rep+hit adaptation rate.
@@ -258,15 +258,10 @@ static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_unary(g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant(g->m[UG_C(cl)],cl)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code.
- * The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one, ~10% two, with a thin tail
- * to ~140 worst case. Unary fits this concentration: emit v continue-bits then a stop-bit, each on
- * the per-position prior idx[min(pos,IDX_CTX-1)]; tail positions share the last prior so the model
- * stays tiny. IDX_CTX=5 is the corpus optimum (4/6/8/16 all code worse: too few distinct head priors
- * or too-sparse tail priors). `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
-#define IDX_CTX 5
-typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
-static void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / IdxUnary / idx_init are single-sourced
+ * in rc_models.h (encoder mirror). The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
+ * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
+ * prior u[min(pos,IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
 static int s_flag(Flag1*f){ int b=s_bit(&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
 
@@ -406,20 +401,11 @@ static int jr_get(uint32_t pos, uint8_t*out){
 /* relocation unpack/pack (Thumb bl + s32) — de-relocation override only (no flash write).      */
 /* The journal-aware pristine reads + the bl/ldr predicates live with the apply state below.    */
 /* ===================================================================================== */
-/* unpack the 24-bit BL immediate (halfword units, two's-complement in 24 bits). */
-static uint32_t bl_imm24(uint16_t up, uint16_t lo){
-    uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
-    return ((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21);
-}
 /* de-relocate a Thumb BL halfword pair (imm24 = imm - delta), repacked into 4 bytes (no flash write).
- * The subtract is mod 2^24 (masked & repacked immediately) so no sign-extension is needed. */
+ * The subtract is mod 2^24 (masked & repacked immediately) so no sign-extension is needed.
+ * rc_bl_imm24 / rc_bl_pack (rc_models.h) are the encoder-mirrored unpack/pack primitives. */
 static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
-    uint32_t imm24=(bl_imm24(up,lo) - delta) & 0x00ffffffu;
-    uint32_t s=(imm24>>23)&1u;
-    uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
-    uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
-    uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
-    out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
+    rc_bl_pack((rc_bl_imm24(up,lo) - delta) & 0x00ffffffu, out);
 }
 
 /* ---- piecewise shift map (D1): predicts BL/EX de-reloc deltas from addresses/values the
@@ -430,11 +416,7 @@ static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4])
 static uint32_t g_smap_b[SMAP_CAP];
 static int32_t  g_smap_v[SMAP_CAP];
 static uint16_t g_smap_n;
-static int32_t smap_at(uint32_t x){
-    int lo=0, hi=(int)g_smap_n-1, r=-1;
-    while(lo<=hi){ int mid=(lo+hi)>>1; if(g_smap_b[mid]<=x){ r=mid; lo=mid+1; } else hi=mid-1; }
-    return r<0 ? 0 : g_smap_v[r];
-}
+static int32_t smap_at(uint32_t x){ return rc_smap_at(g_smap_b, g_smap_v, (int)g_smap_n, x); }
 
 /* ===================================================================================== */
 /* HYBRID: monotonic output ROW write-back cache (real flash = row-erase 256 B).            */
@@ -659,7 +641,7 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
             if(!(g_psrc_ldr[i>>3]&(uint8_t)(1u<<(i&7u)))) continue;
             imm=(int32_t)g_psrc_imm[i];
         }
-        if((a&~3)+4*imm+4==(int32_t)fpk) return 1;
+        if(rc_ldr_target(a,imm)==(int32_t)fpk) return 1;
     }
     return 0;
 }
@@ -803,10 +785,10 @@ static int field_at(SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, 
     uint32_t w=hy_word4_peek(fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
-    if((up&0xf800)==0xf000 && (lo&0xd000)==0xd000){
+    if(rc_bl_pattern(up,lo)){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t res=pull_delta(&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
-        uint32_t imm24=bl_imm24(up,lo);
+        uint32_t imm24=rc_bl_imm24(up,lo);
         int32_t off=(int32_t)(imm24<<8)>>8;                 /* sign-extend the 24-bit imm */
         uint32_t T=fpk+4u+(uint32_t)(2*off);                /* BL target byte address (mod 2^32) */
         /* byte shift -> imm24 halfword units. The subtract is done mod 2^32 (a corrupt map can
@@ -1082,8 +1064,7 @@ static int decode_body(void){
 static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++){ uint32_t num=w[2*m],den=w[m]; uint32_t pr=den?(2u*RC_PBIT*num+den)/(2u*den):RC_PHALF;
-        bt_set(t,m-1,(uint16_t)(pr<1?1:(pr>RC_PBIT-1?RC_PBIT-1:pr))); }
+    for(int m=1;m<256;m++) bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
 }
 
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob

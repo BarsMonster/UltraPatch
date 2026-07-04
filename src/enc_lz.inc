@@ -275,11 +275,11 @@ static uint32_t bt_price(const BTE *t, uint8_t byte) {
 static void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                            const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
     BTE lit0[LIT0_CTX], lit1;            /* mirror the wire's order-1 tag0 trees + single tag1 tree */
-    FLE flag;
+    Flag1 flag;
     UGE gs, gl, gd;
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &lit1);
-    fl_init_e(&flag);
+    fl_init(&flag);
     ug_init_e(&gd, 'r', dk);
     ug_init_e(&gl, 'g', 0);
     ug_seed_cont_e(&gl, RC_SEED_DEPTH_GL);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */

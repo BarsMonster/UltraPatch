@@ -15,7 +15,6 @@
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
 typedef struct { uint16_t p[256]; } BTE;   /* rate is NOT stored per-tree; passed per call (see rc_models.h) */
-typedef struct { uint16_t m[4]; int h; } FLE;
 typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
 
 static void re_shift_low(REnc *r) {
@@ -40,8 +39,9 @@ static void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu;
 
 static void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
     uint32_t p = *prob, bound = (r->range >> 12) * p;
-    if (bit == 0) { r->range = bound; *prob = (uint16_t)(p + ((RC_PBIT - p) >> rate)); }
-    else { r->low += bound; r->range -= bound; *prob = (uint16_t)(p - (p >> rate)); }
+    if (bit == 0) r->range = bound;
+    else { r->low += bound; r->range -= bound; }
+    *prob = rc_adapt(p, bit, rate);   /* shared update rule (rc_models.h), mirror of decoder s_bit_r */
     while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
 }
 
@@ -94,11 +94,7 @@ static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t) {
     for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
     for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
     t->p[0] = RC_PHALF;
-    for (int m = 1; m < 256; m++) {
-        uint32_t num = w[2*m], den = w[m];
-        uint32_t pr = den ? (2u * RC_PBIT * num + den) / (2u * den) : RC_PHALF;
-        t->p[m] = (uint16_t)(pr < 1 ? 1 : (pr > RC_PBIT - 1 ? RC_PBIT - 1 : pr));
-    }
+    for (int m = 1; m < 256; m++) t->p[m] = rc_lit_seed_prob(w[2*m], w[m]);
 }
 
 static void ug_init_e(UGE *g, char code, int k) {
@@ -129,16 +125,13 @@ static void ug_encode(UGE *g, REnc *r, uint32_t v) {
     }
 }
 
-/* MTF dict-index model (mirror of decoder IdxUnary/s_idx): a lean adaptive UNARY code. The encoded
- * index value v is ~54% zero; unary fits that concentration and drops the per-stream UGGamma. */
-#define IDX_CTX 5
-typedef struct { uint16_t u[IDX_CTX]; } IDXE;
-static void idx_init_e(IDXE *g, uint16_t seed) { for (int i = 0; i < IDX_CTX; i++) g->u[i] = seed; }
-static void idx_encode(IDXE *g, REnc *r, uint32_t v) {
+/* MTF dict-index model: IDX_CTX / IdxUnary / idx_init single-sourced in rc_models.h (decoder mirror).
+ * The encoded index value v is ~54% zero; unary fits that concentration and drops the per-stream UGGamma. */
+static void idx_encode(IdxUnary *g, REnc *r, uint32_t v) {
     for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
     re_bit(r, &g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
 }
 
-static void fl_init_e(FLE *f) { for (int i = 0; i < 4; i++) f->m[i] = RC_PHALF; f->h = 0; }
-static void fl_encode(FLE *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
+/* order-2 token flag: the Flag1 struct + fl_init are single-sourced in rc_models.h (decoder mirror). */
+static void fl_encode(Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
 

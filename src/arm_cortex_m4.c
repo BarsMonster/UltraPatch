@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "arm_cortex_m4.h"
+#include "rc_models.h"   /* rc_bl_imm24 / rc_bl_pack: single-sourced BL unpack/pack (decoder mirror) */
 
 /* ---------- address->value maps ---------- */
 typedef struct { uint32_t addr; int32_t val; } kv_t;
@@ -79,26 +80,16 @@ static void uset_free(uset_t *s){ free(s->key); free(s->used); s->key=NULL; s->u
 /* ---------- little-endian helpers ---------- */
 static uint16_t rd16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1]<<8)); }
 static uint32_t rd32(const uint8_t *p){ return (uint32_t)(p[0]|(p[1]<<8)|(p[2]<<16)|((uint32_t)p[3]<<24)); }
-static void wr16(uint8_t *p, uint16_t v){ p[0]=v&0xff; p[1]=(v>>8)&0xff; }
 static void wr32(uint8_t *p, uint32_t v){ p[0]=v&0xff;p[1]=(v>>8)&0xff;p[2]=(v>>16)&0xff;p[3]=(v>>24)&0xff; }
 
 /* ---------- bl (re)encoder (inverse of py unpack_bl) ---------- */
 static int32_t unpack_bl(uint16_t up, uint16_t lo) {
-    int32_t s=(up>>10)&1, imm10=up&0x3ff, imm11=lo&0x7ff;
-    int32_t j1=(lo>>13)&1, j2=(lo>>11)&1;
-    int32_t i1=1-(j1^s), i2=1-(j2^s);
-    int32_t v=(s<<23)|(i1<<22)|(i2<<21)|(imm10<<11)|imm11;
-    if (s) v -= (1<<24);
-    return v;
+    uint32_t imm24 = rc_bl_imm24(up, lo);
+    return (int32_t)(imm24 << 8) >> 8;   /* sign-extend the 24-bit immediate */
 }
 static void pack_bl(int32_t imm32, uint8_t out[4]) {
     if (imm32 < 0) imm32 += (1<<24);
-    int32_t s=(imm32>>23)&1, i1=(imm32>>22)&1, i2=(imm32>>21)&1;
-    int32_t j1=1-(i1^s), j2=1-(i2^s);
-    int32_t imm10=(imm32>>11)&0x3ff, imm11=imm32&0x7ff;
-    uint16_t up = 0xF000 | (s<<10) | imm10;
-    uint16_t lo = 0xD000 | (j1<<13) | (j2<<11) | imm11;
-    wr16(out, up); wr16(out+2, lo);
+    rc_bl_pack((uint32_t)imm32, out);
 }
 
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */

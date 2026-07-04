@@ -15,13 +15,12 @@
 static uint16_t u16le_at(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t u32le_at(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
+/* rc_bl_imm24 / rc_bl_pack / rc_bl_pattern (rc_models.h) single-source the decoder-mirrored BL
+ * unpack/pack/predicate. unpack_bl_local sign-extends the raw 24-bit immediate (same idiom the
+ * decoder uses); the pack path routes through a1_m4_pack -> pack_bl (also rc_bl_pack-based). */
 static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
-    int32_t s = (up >> 10) & 1, imm10 = up & 0x3ff, imm11 = lo & 0x7ff;
-    int32_t j1 = (lo >> 13) & 1, j2 = (lo >> 11) & 1;
-    int32_t i1 = 1 - (j1 ^ s), i2 = 1 - (j2 ^ s);
-    int32_t v = (s << 23) | (i1 << 22) | (i2 << 21) | (imm10 << 11) | imm11;
-    if (s) v -= (1 << 24);
-    return v;
+    uint32_t imm24 = rc_bl_imm24(up, lo);
+    return (int32_t)(imm24 << 8) >> 8;
 }
 
 static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
@@ -31,8 +30,7 @@ static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
     if (fpk & 1u) return 0;
     if (fpk > from_size || from_size - fpk < 4u) return 0;
-    uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
-    return ((up & 0xf800u) == 0xf000u) && ((lo & 0xd000u) == 0xd000u);
+    return rc_bl_pattern(u16le_at(frm + fpk), u16le_at(frm + fpk + 2));
 }
 
 static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out) {
@@ -49,7 +47,7 @@ static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t fro
     while (a + 2 <= hi && a + 2 <= (int32_t)from_size) {
         uint16_t up = u16le_at(frm + a);
         if ((up & 0xf800u) == 0x4800u) {
-            int32_t t = (a & ~3) + 4 * (int32_t)(up & 0xffu) + 4;
+            int32_t t = rc_ldr_target(a, (int32_t)(up & 0xffu));
             if (lo <= t && t + 4 <= hi && t + 4 <= (int32_t)from_size) ivec_push(&s, t);
         }
         a += 2;
@@ -115,7 +113,7 @@ static Event classify_field_assume_pure(const uint8_t *frm, uint32_t from_size, 
 static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
     for (size_t a = 0; a + 4 <= n;) {
         uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
-        if ((up & 0xf800u) == 0xf000u && (lo & 0xd000u) == 0xd000u) {
+        if (rc_bl_pattern(up, lo)) {
             mut[a] = 0x00; mut[a + 1] = 0xf0; mut[a + 2] = 0x00; mut[a + 3] = 0xd0;
             a += 4;
         } else a += 2;
@@ -139,7 +137,7 @@ static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uin
             if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
             if (is_local_bl(frm, from_size, fpk)) {
                 uint16_t tu = u16le_at(tob + (size_t)tpk), tl = u16le_at(tob + (size_t)tpk + 2);
-                if ((tu & 0xf800u) == 0xf000u && (tl & 0xd000u) == 0xd000u) {
+                if (rc_bl_pattern(tu, tl)) {
                     uint16_t fu = u16le_at(frm + fpk), fl2 = u16le_at(frm + fpk + 2);
                     fd_put(&add, fpk, STREAM_BL,
                            (int64_t)unpack_bl_local(fu, fl2) - unpack_bl_local(tu, tl));
@@ -164,12 +162,8 @@ static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uin
     *fd = out;
 }
 
-/* ---- piecewise shift map (D1) — encoder mirror of patch_apply smap_at ---- */
-static int32_t smap_at_e(const uint32_t *mb, const int32_t *mv, int mn, uint32_t x) {
-    int lo = 0, hi = mn - 1, r = -1;
-    while (lo <= hi) { int mid = (lo + hi) >> 1; if (mb[mid] <= x) { r = mid; lo = mid + 1; } else hi = mid - 1; }
-    return r < 0 ? 0 : mv[r];
-}
+/* ---- piecewise shift map (D1): lookups go through rc_smap_at (rc_models.h), the single-sourced
+ * mirror of patch_apply smap_at. ---- */
 
 /* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
  * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
@@ -183,9 +177,9 @@ static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_
         /* mod-2^32 subtract then /2, bit-identical to the decoder's smap_at recombination
          * (patch_apply.h): a corrupt/degenerate map can make a shift INT32_MIN, so the signed
          * form would be UB — the unsigned wrap is both defined and the exact wire semantics. */
-        pred = (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fpk) - (uint32_t)smap_at_e(mb, mv, mn, T)) / 2;
+        pred = (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fpk) - (uint32_t)rc_smap_at(mb, mv, mn, T)) / 2;
     } else {
-        pred = (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, u32le_at(frm + fpk)));
+        pred = (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, u32le_at(frm + fpk)));
     }
     return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
 }
@@ -253,8 +247,8 @@ static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const Fie
          * map value can be INT32_MIN; the signed subtract/negate would be UB, the unsigned
          * wrap is defined and is the exact wire semantics). */
         int32_t pred = fk[i].kind == EV_BL
-            ? (int32_t)((uint32_t)smap_at_e(mb, mv, mn, fk[i].k1) - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2)) / 2
-            : (int32_t)(0u - (uint32_t)smap_at_e(mb, mv, mn, fk[i].k2));
+            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2)) / 2
+            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2));
         if (pred == fk[i].need) hits++;
     }
     return hits;

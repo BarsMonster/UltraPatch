@@ -87,6 +87,68 @@ typedef struct { uint16_t m[4]; int h; } Flag1;
 static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
 
 /* =====================================================================================
+ * Shared PURE wire semantics — hand-mirrored decoder<->encoder helpers single-sourced here so
+ * the COMPILER (not a "must match" comment) enforces the mirror, exactly as bt_/fl_ above already
+ * do. Each is used verbatim by BOTH src/patch_apply.h (device decoder) and the host encoder; all
+ * are 64-bit-free and (the one-time literal-seed rounding divide aside) divide-free, and preserve
+ * the exact dataflow so the Cortex-M0+ decoder codegen does not shift.
+ * ===================================================================================== */
+
+/* adaptive-bit probability update: nudge p toward 0 (bit=1) or RC_PBIT (bit=0) by 1/2^rate.
+ * Shared by decoder s_bit_r and encoder re_bit. */
+static inline uint16_t rc_adapt(uint32_t p, int bit, int rate){
+    return (uint16_t)(bit ? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
+}
+
+/* histogram-seeded literal-tree node prob: rounded (2*RC_PBIT*num)/(2*den) clamped to 1..RC_PBIT-1
+ * (an empty context degenerates to RC_PHALF). The rounding divide is one-time header init (software-
+ * divided on M0+; the ARM gate pins exactly one soft-divide call). Shared by decoder
+ * lit_tree_from_hist and encoder lit_tree_seed_e. */
+static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
+    uint32_t pr = den ? (2u*RC_PBIT*num+den)/(2u*den) : RC_PHALF;
+    return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
+}
+
+/* Thumb BL/BLX local-branch halfword pattern (F000 / D000), tested on pristine source bytes. */
+static inline int rc_bl_pattern(uint16_t up, uint16_t lo){
+    return ((up&0xf800u)==0xf000u) && ((lo&0xd000u)==0xd000u);
+}
+/* unpack the 24-bit BL immediate (halfword units), RAW (unsigned, not yet sign-extended). */
+static inline uint32_t rc_bl_imm24(uint16_t up, uint16_t lo){
+    uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
+    return ((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21);
+}
+/* pack a 24-bit BL immediate back into the F000/D000 halfword pair -> 4 little-endian bytes. */
+static inline void rc_bl_pack(uint32_t imm24, uint8_t out[4]){
+    uint32_t s=(imm24>>23)&1u;
+    uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
+    uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
+    uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
+    out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
+}
+
+/* Thumb LDR-literal target byte address from the instruction address (halfword-scanned, rounded
+ * back to 4-alignment) + imm8 word field: (addr & ~3) + 4*imm8 + 4. Signed to match the op-local
+ * field cursors. */
+static inline int32_t rc_ldr_target(int32_t addr, int32_t imm8){
+    return (addr & ~3) + 4*imm8 + 4;
+}
+
+/* piecewise shift-map lookup: value of the last boundary <= x, else 0 (also 0 for an empty map). */
+static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint32_t x){
+    int lo=0, hi=n-1, r=-1;
+    while(lo<=hi){ int mid=(lo+hi)>>1; if(b[mid]<=x){ r=mid; lo=mid+1; } else hi=mid-1; }
+    return r<0 ? 0 : v[r];
+}
+
+/* MTF dict-index UNARY model: IDX_CTX per-position priors (min(pos,IDX_CTX-1) clamp). The encoded
+ * index is ~54% zero, so unary fits the concentration; IDX_CTX=5 is the corpus optimum (4/6/8/16 all
+ * code worse). Shared struct + seed; the encode/decode loops live in each side. */
+#define IDX_CTX 5
+typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
+static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+
+/* =====================================================================================
  * Shared wire constants — single-sourced so the COMPILER (not a "must match" comment)
  * enforces the encoder/decoder mirror. Each macro below is used verbatim by BOTH
  * src/patch_apply.h (device decoder) and src/patch_generate.c (host encoder); changing a
@@ -114,7 +176,7 @@ static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h
 
 /* MTF dict-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
  * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
- * corpus optimum. (Decoder idx_init / encoder idx_init_e.) */
+ * corpus optimum. (Shared idx_init seeds both sides.) */
 #define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"

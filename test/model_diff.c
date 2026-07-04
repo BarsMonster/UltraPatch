@@ -122,14 +122,14 @@ static Buf enc_bt(int rate, const uint32_t *v, int ns) { REnc r; re_init(&r); BT
 static Buf enc_bv(const int32_t *v, int ns) { REnc r; re_init(&r); BTE t; bt_init_e(&t); for (int i = 0; i < ns; i++) bv_encode(&t, &r, (int64_t)v[i]); return flush_wire(&r); }
 static Buf enc_ugr(int k, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'r', k); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
 static Buf enc_ugg(int depth, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'g', 0); if (depth > 0) ug_seed_cont_e(&g, depth); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
-static Buf enc_idx(const uint32_t *v, int ns) { REnc r; re_init(&r); IDXE g; idx_init_e(&g, RC_IDX_SEED); for (int i = 0; i < ns; i++) idx_encode(&g, &r, v[i]); return flush_wire(&r); }
-static Buf enc_flag(const uint8_t *v, int ns) { REnc r; re_init(&r); FLE f; fl_init_e(&f); for (int i = 0; i < ns; i++) fl_encode(&f, &r, v[i] & 1); return flush_wire(&r); }
+static Buf enc_idx(const uint32_t *v, int ns) { REnc r; re_init(&r); IdxUnary g; idx_init(&g, RC_IDX_SEED); for (int i = 0; i < ns; i++) idx_encode(&g, &r, v[i]); return flush_wire(&r); }
+static Buf enc_flag(const uint8_t *v, int ns) { REnc r; re_init(&r); Flag1 f; fl_init(&f); for (int i = 0; i < ns; i++) fl_encode(&f, &r, v[i] & 1); return flush_wire(&r); }
 static Buf enc_rep0(const uint8_t *v, int ns) { REnc r; re_init(&r); uint16_t rep0[2]; rep0[0] = rep0[1] = RC_REP0_INIT; int h = 0; for (int i = 0; i < ns; i++) { re_bit(&r, &rep0[h], v[i] & 1, RC_S_BIT_RATE); h = v[i] & 1; } return flush_wire(&r); }
 static Buf enc_rawbits(int nb, const uint32_t *v, int ns) { REnc r; re_init(&r); for (int i = 0; i < ns; i++) put_raw_bits(&r, v[i], nb); return flush_wire(&r); }
 static Buf enc_rawgz(const uint32_t *v, int ns) { REnc r; re_init(&r); for (int i = 0; i < ns; i++) w_gz(&r, v[i]); return flush_wire(&r); }
 static Buf enc_mixed(const uint8_t *ops, const uint32_t *v, int ns) {
     REnc r; re_init(&r);
-    uint16_t p = RC_PHALF; BTE bt; bt_init_e(&bt); UGE gr; ug_init_e(&gr, 'r', MX_UGR_K); UGE gg; ug_init_e(&gg, 'g', 0); FLE f; fl_init_e(&f);
+    uint16_t p = RC_PHALF; BTE bt; bt_init_e(&bt); UGE gr; ug_init_e(&gr, 'r', MX_UGR_K); UGE gg; ug_init_e(&gg, 'g', 0); Flag1 f; fl_init(&f);
     for (int i = 0; i < ns; i++) switch (ops[i]) {
         case MX_RAW:  re_raw(&r, (int)(v[i] & 1u));                      break;
         case MX_BIT:  re_bit(&r, &p, (int)(v[i] & 1u), MX_BIT_RATE);     break;
@@ -150,8 +150,8 @@ static Buf enc_mtf(int kind, const int64_t *v, int m, int *of_during, int *of_af
     bt_init_e(&M->dval);
     dr_init_e(&M->dr_bl, M->dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M->dr_ex, M->dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    idx_init_e(&M->dibl, RC_IDX_SEED);
-    idx_init_e(&M->diex, RC_IDX_SEED);
+    idx_init(&M->dibl, RC_IDX_SEED);
+    idx_init(&M->diex, RC_IDX_SEED);
     g_emit_overflow = 0;
     for (int i = 0; i < m; i++) emit_delta(M, &r, kind, v[i]);
     *of_during = g_emit_overflow;

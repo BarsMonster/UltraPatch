@@ -149,11 +149,11 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
 /* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX); see definitions above. */
 typedef struct {
     BTE lit0[LIT0_CTX], lit1;
-    FLE flag;
+    Flag1 flag;
     BTE dval;
     UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
     uint16_t outb;
-    IDXE dibl, diex;
+    IdxUnary dibl, diex;
     DRE dr_bl, dr_ex;
     int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
     uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror patch_apply M_rep0/g_lastdist) */
@@ -166,7 +166,7 @@ static int g_emit_overflow;
 static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
     if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
-    IDXE *gix = kind == EV_BL ? &M->dibl : &M->diex;
+    IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
     int ri = D->rh | (D->last == 0 ? 2 : 0);
     if (delta == D->last) {
         re_bit(r, &D->rep[ri], 1, RC_S_BIT_RATE);
@@ -224,7 +224,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     memset(&M, 0, sizeof(M));
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
-    fl_init_e(&M.flag);
+    fl_init(&M.flag);
     bt_init_e(&M.dval);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
@@ -243,8 +243,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     ug_init_e(&M.gadj, 'g', 0);
     ug_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
     ug_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
-    idx_init_e(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
-    idx_init_e(&M.diex, RC_IDX_SEED);
+    idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
+    idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
