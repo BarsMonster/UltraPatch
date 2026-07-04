@@ -42,9 +42,9 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 BASE_FULL_TOTAL ?= 4199637
 BASE_ONEFACE_GROW ?= 589
 BASE_ONEFACE_REVERT ?= 305
-BASE_ARM_TEXT ?= 6060
+BASE_ARM_TEXT ?= 6056
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10896
+BASE_ARM_BSS ?= 11360
 BASE_ARM_SOFT_DIV ?= 1
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py

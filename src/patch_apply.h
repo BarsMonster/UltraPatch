@@ -208,24 +208,7 @@ static int32_t s_bv(BitTree*t,int rate){
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGRice;
-/* Packed gamma mantissa layout (a RAM win vs the encoder's square (UG_CTX+1)^2 array): the only
- * (cl_ctx, pos_ctx) pairs that ever occur are UG_C(pos) for pos in 0..cl-1 — a TRIANGLE, not a
- * square — so we pack one row per clamped cl level into a flat m[], using UG_GAMMA_BASE(c) as the
- * row offset. Row widths: c==0 reserves 1 slot (no mantissa bits, but keep row offsets distinct);
- * 1<=c<UG_CTX uses c slots (pos contexts 0..c-1, all distinct); c==UG_CTX uses UG_CTX+1 slots (the
- * catch-all top level, where pos clamps into 0..UG_CTX). The row start has the closed form
- *   UG_GAMMA_BASE(c) = (c==0) ? 0 : 1 + c*(c-1)/2
- * valid for ANY UG_CTX, and UG_GAMMA_M = top-row start + its width. These derive the layout from
- * UG_CTX (no hand-typed offsets in the size/total), and the _Static_assert below pins the runtime
- * base[] table to the same formula — so changing UG_CTX is caught at COMPILE time (a clear assert)
- * instead of being silently miscomputed. */
-#define UG_GAMMA_BASE(c) ((c)==0 ? 0 : 1 + ((c)*((c)-1))/2)
-#define UG_GAMMA_M (UG_GAMMA_BASE(UG_CTX) + (UG_CTX+1))
-typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_M]; } UGGamma;
-/* Compile-time guard for the default packed gamma layout. */
-_Static_assert(UG_GAMMA_BASE(0)==0 && UG_GAMMA_BASE(1)==1 && UG_GAMMA_BASE(2)==2 &&
-               UG_GAMMA_BASE(3)==4 && UG_GAMMA_BASE(4)==7 && UG_GAMMA_BASE(5)==11 &&
-               UG_GAMMA_BASE(6)==16, "UG_GAMMA_BASE formula drifted from the packed gamma layout");
+typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGGamma;
 static void ugr_init(UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
@@ -236,8 +219,7 @@ static void ugr_init(UGRice*g,int k){
  * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 is the
  * corpus optimum). Folding the u[] seed into the init avoids a second pass over u[]. */
 static void ugg_init_u(UGGamma*g,uint16_t useed){
-    for(int i=0;i<=UG_CTX;i++) g->u[i]=useed;
-    for(int i=0;i<UG_GAMMA_M;i++) g->m[i]=RC_PHALF;
+    for(int i=0;i<=UG_CTX;i++){ g->u[i]=useed; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
 static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
@@ -258,8 +240,7 @@ static uint32_t s_unary(uint16_t*u,uint32_t clampmax,uint32_t cap){
     return cl;
 }
 /* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
- * row already selected by caller (rice: m[UG_C(cl)] full square row; gamma: m[UG_GAMMA_BASE(UG_C(cl))]
- * packed-triangle row). */
+ * m[UG_C(cl)] row already selected by caller. */
 static uint32_t s_ug_mant(uint16_t*row,int cnt){
     uint32_t v=0; for(int pos=0;pos<cnt;pos++) v|=(uint32_t)s_bit(&row[UG_C(pos)])<<(cnt-1-pos);
     return v;
@@ -270,7 +251,7 @@ static uint32_t s_ug_rice(UGRice*g){
 }
 static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_unary(g->u,UG_CTX,RC_UNARY_MAX);
-    return ((1u<<cl) | s_ug_mant(&g->m[UG_GAMMA_BASE(UG_C(cl))],cl)) - 1u;
+    return ((1u<<cl) | s_ug_mant(g->m[UG_C(cl)],cl)) - 1u;
 }
 /* MTF dict-index model: a lean adaptive UNARY code.
  * The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one, ~10% two, with a thin tail
