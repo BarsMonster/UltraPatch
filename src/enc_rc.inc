@@ -68,13 +68,17 @@ static void put_raw_bits(REnc *r, uint32_t v, int nb) {
     for (int sh = nb - 1; sh >= 0; sh--) re_raw(r, (int)((v >> sh) & 1u));
 }
 
-static void w_gamma(REnc *r, uint32_t m) {
+/* Raw (no-model) Elias-gamma writers. After Features 4+7 the main encoder no longer ships any
+ * raw-gamma header field (the shift map went adaptive-gamma; the token/op counts were dropped), so
+ * these are unused in the hy_enc build — but the model_diff test bench still drives them for its
+ * raw_gz mirror self-test (check-models), so keep them and silence the per-binary unused warning. */
+static __attribute__((unused)) void w_gamma(REnc *r, uint32_t m) {
     int n = bitlen32(m) - 1;
     for (int i = 0; i < n; i++) re_raw(r, 0);
     for (int i = n; i >= 0; i--) re_raw(r, (int)((m >> i) & 1u));
 }
 
-static void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
+static __attribute__((unused)) void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
 
 static void bt_encode(BitTree *t, REnc *r, uint8_t byte, int rate) {
     int m = 1;

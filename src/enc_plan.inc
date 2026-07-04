@@ -98,7 +98,7 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
 typedef struct { int variant, fuzz; } PlanCfg;
 
 static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                       PlanCfg cfg, int32_t *fp_end_out, EncStats *st_out) {
+                       PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
     int variant = cfg.variant;
     g_deg_engaged = 0; g_deg_pres_needed = 0; g_deg_converted = 0; g_opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
@@ -165,6 +165,14 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     }
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
+    /* Feature 7B initial source seek: leading zero-output ops fold into this shipped seed (see
+     * fold_zero_ops). Derived from the SAME final ops array emit_body folds, so envelope and body
+     * agree bit-for-bit. Sum(dl+adj) is fold-invariant, so fp_end_s above stays correct. */
+    int32_t fp_start_s;
+    { int32_t *ea = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
+      uint8_t *sk = (uint8_t *)xmalloc(ops.n ? ops.n : 1);
+      fp_start_s = fold_zero_ops(&ops, ea, sk);
+      free(ea); free(sk); }
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     st_out->deg_engaged = g_deg_engaged;
     st_out->deg_pres_needed = g_deg_pres_needed;
@@ -192,6 +200,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     for (int s2 = 0; s2 < STREAM_N; s2++) { for (size_t i = 0; i < blocks[s2].n; i++) free(blocks[s2].v[i].values); free(blocks[s2].v); }
     buf_free(&from_df); buf_free(&to_df);
     *fp_end_out = fp_end_s;
+    *fp_start_out = fp_start_s;
     return body;
 }
 

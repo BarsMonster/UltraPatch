@@ -34,6 +34,11 @@ static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t del
 static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd, const IVec *ldr,
                             Buf *content, Buf *tags, InjVec *out) {
+    /* Feature 7B: a zero-OUTPUT op (diff_len==0 && extra_len==0) is folded off the wire (its seek is
+     * carried by a neighbor / the initial fp_start), so it contributes NOTHING to the content stream.
+     * Return before emitting even the nl=0 literal-count uLEB — otherwise that stray byte would sit in
+     * content with no op to consume it on decode (emit_body skips the op entirely). */
+    if (o->diff_len == 0 && o->extra_len == 0) return;
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
     Buf tmp = {0};
@@ -156,6 +161,32 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
+/* Feature 7B: fold zero-OUTPUT ops (diff_len==0 && extra_len==0 — pure source seeks that write
+ * nothing) out of the wire so `nops` can be dropped and the decoder can frontier-terminate. Such an
+ * op only advances the source pointer by its `adj`; that seek is absorbed WITHOUT changing any kept
+ * op's source alignment: a LEADING (canonical-order) zero-op folds into the initial source-seek
+ * *fp_start* (shipped in the envelope; seeds the FWD walk / is the grow landing point), and every
+ * other zero-op folds its adj into the PREVIOUS kept op's effective adj (its post-copy seek grows to
+ * cover the skipped seek). Sum of (dl+adj) — hence fp_end — is invariant. skip[i]=1 marks a dropped
+ * op; eff_adj[i] is the adj to emit for a kept op. Returns fp_start. Pure function of `ops`, so the
+ * envelope writer (plan_encode) and every emit_body call derive the identical fold. */
+static int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
+    int32_t fp_start = 0;
+    int last_kept = -1;
+    for (size_t i = 0; i < ops->n; i++) {
+        eff_adj[i] = ops->v[i].adj;
+        skip[i] = 0;
+        if (ops->v[i].diff_len == 0 && ops->v[i].extra_len == 0) {
+            skip[i] = 1;
+            if (last_kept < 0) fp_start += ops->v[i].adj;      /* leading -> initial source seek */
+            else eff_adj[last_kept] += ops->v[i].adj;          /* interior/trailing -> previous kept op */
+        } else {
+            last_kept = (int)i;
+        }
+    }
+    return fp_start;
+}
+
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
@@ -179,11 +210,10 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     ug_init_e(&M.pg2, 'g', 0);
     ug_seed_cont_e(&M.pg2, RC_SEED_DEPTH_PG2);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct
                                   * offsets) => M_pg2 first unary bit always continue; depth in rc_models.h. */
-    ug_init_e(&M.gdl, 'g', 0);
+    ug_init_e(&M.gdl, 'g', 0);   /* neutral at top: BORROWED to code the map header below, then re-init'd
+                                  * with the seed_cont apply-phase priors after the map, before the token loop. */
     ug_init_e(&M.gel, 'g', 0);
     ug_init_e(&M.gadj, 'g', 0);
-    ug_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
-    ug_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
     idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
     idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
@@ -196,26 +226,38 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     if (!FWD) { for (size_t i = 0; i < ops->n; i++) oexp += (uint32_t)(ops->v[i].diff_len + ops->v[i].extra_len); }
     REnc rc;
     re_init(&rc);
-    /* piecewise shift map: gamma count, per entry gamma gap (first absolute, later -1) + zz value.
-     * Mirror of the patch_apply decode_body map reader (bit-exact wire). */
-    w_gz(&rc, (uint32_t)mn);
+    /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
+     * coded through the BORROWED M.gdl (count+gaps) / M.gadj (zz values) gamma models — mirror of the
+     * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ug_encode 'g'). */
+    ug_encode(&M.gdl, &rc, (uint32_t)mn);
     { uint32_t prev = 0;
       for (int i = 0; i < mn; i++) {
           uint32_t gap = mb[i] - prev;
-          w_gz(&rc, i ? gap - 1u : gap);
+          ug_encode(&M.gdl, &rc, i ? gap - 1u : gap);
           prev = mb[i];
-          w_gz(&rc, zz32(mv[i]));
+          ug_encode(&M.gadj, &rc, zz32(mv[i]));
       } }
+    /* re-init the borrowed models to their apply-phase state (clear map pollution + apply seed_cont),
+     * mirroring the ugg_init/ugg_seed_cont(&M_gdl,&M_gadj) in decode_body before its token loop. */
+    ug_init_e(&M.gdl, 'g', 0);  ug_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
+    ug_init_e(&M.gadj, 'g', 0); ug_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
-    w_gz(&rc, (uint32_t)seq->n);
+    /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
+     * op loop bounds it (Feature 7, part A). */
     put_raw_bits(&rc, (uint32_t)kd, RC_KFIELD_BITS);
     if (out_en) put_raw_bits(&rc, (uint32_t)ko, RC_KFIELD_BITS);
-    w_gz(&rc, (uint32_t)ops->n);
+    /* op count (ops->n) is NO LONGER shipped (Feature 7B): the decoder frontier-terminates the op
+     * loop (FWD tp==to_size / grow tp==0). Zero-output ops are folded out below so every emitted op
+     * advances the frontier by >=1 — which is exactly what makes the frontier loop bounded. */
+    int32_t *eff_adj = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    uint8_t *zskip = (uint8_t *)xmalloc(ops->n ? ops->n : 1);
+    fold_zero_ops(ops, eff_adj, zskip);
     size_t tok_i = 0, pos = 0, span_pos = 0;
     int tok_mode = 0;
     int32_t tok_left = 0;
     int last_span = 0;     /* previous token was a span: the match flag is implicit (mirror patch_apply) */
-    uint8_t prevlit = 0;   /* last literal byte emitted (any tag); seeds tag0 context. */
+    uint8_t prevlit = 0;   /* true previous content-stream byte (order-1 tag0 context): updated on
+                            * EVERY content byte -- span literal, backref, out-match copy. */
     Token cur = {0};
     #define START_TOKEN() do { \
         if (tok_i >= seq->n) die("content token underrun"); \
@@ -246,14 +288,16 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                     prevlit = byte; pos++; \
                 } \
                 span_pos += nn; \
-            } else pos += nn; \
+            } else { pos += nn; if (nn) prevlit = content->d[pos - 1]; } \
             tok_left -= (int32_t)nn; \
             if (tok_left == 0) tok_mode = 0; \
         } \
     } while (0)
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
-        emit_geom_pc(&rc, &M, &ops->v[oi], &pc[step]);
+        if (zskip[oi]) continue;                       /* zero-output op: folded out (adj carried) */
+        Op oe = ops->v[oi]; oe.adj = eff_adj[oi];      /* emit with the fold-adjusted seek */
+        emit_geom_pc(&rc, &M, &oe, &pc[step]);
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
             EMIT_TO(base + inj[step].v[ii].cc);
@@ -261,6 +305,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         }
         EMIT_TO(op_end);
     }
+    free(eff_adj); free(zskip);
     if (pos != content->n || tok_i != seq->n || tok_mode) die("content token cursor out of sync");
     #undef START_TOKEN
     #undef EMIT_TO

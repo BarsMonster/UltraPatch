@@ -64,6 +64,10 @@ extern void    flash_write(uint32_t addr, uint8_t val);
  * bounds every flash access. */
 static uint32_t g_image_span;
 static uint32_t g_from_size, g_to_size, g_fp_end;
+/* Feature 7B initial source seek: the source position where the ascending op walk BEGINS. Seeds
+ * s->fp for FWD (was implicitly 0) and is the exact grow LANDING point (grow's final s->fp must
+ * equal it). Carries a leading zero-output op's seek that was folded off the wire; almost always 0. */
+static int32_t  g_fp_start;
 static uint32_t g_want_to;     /* CRC32(to) read from the header; verified over the final image */
 static int      g_FWD;
 /* plausibility cap on header sizes (was the host wrapper's gate; now enforced in-decoder).
@@ -175,9 +179,11 @@ static uint8_t g_reject;
 static uint8_t g_flash_touched;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(); return v; }
-/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. Raw gamma codes only
- * pre-model header fields (shift map, token/op counts), so the reader and its -1 wrapper are one function. */
-static uint32_t s_raw_gz(void){
+/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. After Features 4+7 no
+ * raw-gamma header field remains on the wire (shift map is adaptive-gamma; token/op counts dropped),
+ * so this is unused in the decoder binary — but model_diff_dec.c still drives it for the raw_gz mirror
+ * self-test (check-models), so keep it and silence the per-binary unused-function warning. */
+static uint32_t __attribute__((unused)) s_raw_gz(void){
     int n=0; while(s_raw()==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     return ((1u<<n) | s_raw_bits(n)) - 1u; }   /* mantissa via s_raw_bits */
 /* ---- bit-tree byte ---- */
@@ -331,8 +337,12 @@ typedef struct {
  * through its own type, so it needs no may_alias. */
 typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
-    /* pauseable LZSS token replay state (pull-driven content producer) */
-    uint32_t tok_left;                            /* tokens remaining (token_count) */
+    /* pauseable LZSS token replay state (pull-driven content producer). The token COUNT is no
+     * longer shipped: content consumption is demand-driven and structurally bounded (the op loop
+     * bounds the number of content pulls, and every token yields >=1 content byte — spans/backrefs
+     * are len>=1, out-matches len>=RC_OUTMATCH_MIN — so a pull always makes progress or the geometry
+     * guards reject; a stream that under-supplies tokens decodes zero-fill garbage and is caught by
+     * CRC32(to)). No tok_left counter/underrun-count is needed. */
     uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
     uint32_t o_src, o_left;                       /* out-match replay: absolute OUTPUT position */
     int32_t tp, fp;                               /* running accumulators (apply order) */
@@ -530,9 +540,10 @@ static UGGamma M_gdl, M_gel, M_gadj; /* per-op geometry: diff_len, extra_len, zz
                                   * distributions are concentrated, so an adaptive gamma UGolomb beats a
                                   * fixed raw code. */
 static IdxUnary M_dibl, M_diex;  /* BL/EX MTF dict indices (lean unary code) */
-/* tag0 (diff-literal/even-extra) literal trees split by previous-literal range (LIT0_SEL);
- * tag1 (odd-parity extra) keeps a single tree. g_litprev = last literal byte emitted (any tag),
- * reset to 0 per blob; mirrors patch_generate encode_body prevlit. */
+/* tag0 (diff-literal/even-extra) literal trees split by previous CONTENT-byte range (LIT0_SEL);
+ * tag1 (odd-parity extra) keeps a single tree. g_litprev = the true previous content-stream byte
+ * (order-1 context: whatever token produced it -- span literal, backref, or out-match copy), updated
+ * in sa_emit_ring; reset to 0 per blob; mirrors patch_generate emit_body prevlit. */
 /* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 static BitTree M_lit0[LIT0_CTX], M_lit1;
 static uint8_t g_litprev;
@@ -645,14 +656,17 @@ static inline int ldr_targets(SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
     }
     return 0;
 }
-static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; }
+/* g_litprev = the actual previous CONTENT-stream byte (order-1 tag0 literal context): updated for
+ * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
+ * the next span selects M_lit0[LIT0_SEL(content[pos-1])] regardless of which token produced pos-1.
+ * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
+static void sa_emit_ring(SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
 static uint8_t sa_next_content(SA*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
             int b=s_bt(tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
-            g_litprev=(uint8_t)b;
             sa_emit_ring(s,(uint8_t)b); s->span_left--;
             if(s->span_left==0) s->tok_mode=0;
             return (uint8_t)b;
@@ -667,7 +681,6 @@ static uint8_t sa_next_content(SA*s, int tag){
             if(s->o_left==0) s->tok_mode=0;
             return b;
         }
-        if(s->tok_left==0) goto fail;   /* content underrun -> reject */
         /* adjacent spans never ship (the encoder merges them), so after a span the
          * span/match flag is IMPLICITLY "match": skip the coded bit but keep the order-2
          * flag history tracking the true token kinds (mirror emit_body last_span). */
@@ -690,7 +703,6 @@ static uint8_t sa_next_content(SA*s, int tag){
                 if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
                 g_oexp=g_FWD?p+ln:p-ln;                     /* sequential runs keep deltas tiny */
                 s->tok_mode=3; s->o_src=p; s->o_left=ln; s->last_span=0;
-                s->tok_left--;
                 continue;
             }
             else { d=s_ug_rice(&M_gd)+1u; g_lastdist=d; }
@@ -698,7 +710,6 @@ static uint8_t sa_next_content(SA*s, int tag){
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
             s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln; s->last_span=0;
         }
-        s->tok_left--;
     }
 fail:
     g_rcerr=1;
@@ -866,6 +877,10 @@ static void sa_apply_op(SA*s){
      * so the overflow guard is a pure 32-bit headroom test: check dl, then el against the rest of span. */
     if(dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ g_rcerr=1; return; }
     int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
+    /* Feature 7B termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
+     * writes >=1 byte. REJECT nw==0 here (do NOT trust the encoder): it is what guarantees the
+     * frontier-terminated op loop advances every iteration and cannot spin on a corrupt stream. */
+    if(nw==0){ g_rcerr=1; g_reject=REJ_CORRUPT; return; }
     int32_t tp0,fp0;
     if(g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
@@ -980,6 +995,10 @@ static int __attribute__((noinline)) decode_header(void){
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !env_zz_abs(fs,&fpe)) return 0;
       g_FWD=!desc; }
+    /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped for both directions right after
+     * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
+    { uint32_t z2; if(!env_uleb(&z2)) return 0;
+      g_fp_start=(z2&1u)? -(int32_t)((z2>>1)+1u) : (int32_t)(z2>>1); }
     g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_want_to=want_to;
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
@@ -999,15 +1018,20 @@ static int decode_body(void){
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
      * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
+    /* BORROW two apply-phase gamma statics (not yet live: the map is read before apply-model setup,
+     * and both are re-init'd fresh at ugg_init(&M_gdl)/ugg_init(&M_gadj) below before the token loop).
+     * Coding the skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits
+     * at ZERO extra SRAM. M_gdl carries the count + boundary gaps; M_gadj carries the zz shift values. */
+    ugg_init(&M_gdl); ugg_init(&M_gadj);
     g_smap_n=0;
-    { uint32_t mn=s_raw_gz();
+    { uint32_t mn=s_ug_gamma(&M_gdl);
       if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
       for(uint32_t i=0;i<mn && !g_rcerr;i++){
-          uint32_t gap=s_raw_gz(); if(i) gap+=1u;
+          uint32_t gap=s_ug_gamma(&M_gdl); if(i) gap+=1u;
           if(gap>UINT32_MAX-b){ g_rcerr=1; break; }
           b+=gap;
-          g_smap_b[i]=b; g_smap_v[i]=bb_unzz(s_raw_gz());
+          g_smap_b[i]=b; g_smap_v[i]=bb_unzz(s_ug_gamma(&M_gadj));
       }
       if(g_rcerr) return 0;
       g_smap_n=(uint16_t)mn; }
@@ -1031,8 +1055,7 @@ static int decode_body(void){
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
     { SA*s=&SAst; memset(s,0,sizeof*s);
-      s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?0:(int32_t)g_fp_end;
-      uint32_t nseq=s_raw_gz();
+      s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?g_fp_start:(int32_t)g_fp_end;
       int kd=(int)s_raw_bits(RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(RC_KFIELD_BITS):0;
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
@@ -1042,14 +1065,20 @@ static int decode_body(void){
                                  * unary prefix bit is ALWAYS continue, so seed it cheap. Depth in rc_models.h. */
       fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
-      uint32_t nops=s_raw_gz();
-      if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u) return 0;
-      s->tok_left=nseq; s->tok_mode=0;
-      for(uint32_t oi=0; oi<nops && !g_rcerr; oi++) sa_apply_op(s);
-      /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
-       * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
-      if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) g_rcerr=1;
-      if(!g_rcerr && (s->tok_mode!=0 || s->tok_left!=0)) g_rcerr=1;
+      if(g_rcerr) return 0;
+      s->tok_mode=0;
+      /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
+       * until tp reaches 0. This is SAFE because sa_apply_op REJECTS any zero-output op (nw==0), so
+       * every accepted op advances the frontier by >=1 and the overshoot/underrun guards cap it: the
+       * loop runs at most to_size times, then rejects (a corrupt stream cannot spin). A truncated
+       * stream decodes zero-fill garbage that trips a geometry/frontier guard or lands a wrong image
+       * that CRC32(to) rejects. */
+      while(!g_rcerr && (g_FWD ? s->tp!=(int32_t)g_to_size : s->tp!=0)) sa_apply_op(s);
+      /* tp must land exactly (the loop guarantees it on the clean path); grow additionally must land
+       * fp exactly on the initial source seek g_fp_start (was 0 pre-7B). FWD fp is unchecked (fp_end
+       * is not shipped for FWD — CRC32(to) validates). */
+      if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=g_fp_start))) g_rcerr=1;
+      if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
       if(g_rcerr) return 0;
       orow_commit_all();                   /* flush the remaining uncommitted rows */
     }

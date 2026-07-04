@@ -33,7 +33,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
-    Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
+    Buf body = {0}; int32_t fp_end_s = 0; int32_t fp_start_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
     size_t best_tot = 0;
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
@@ -50,15 +50,17 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         if (pass && bestv >= 0 && !st.deg_engaged) break;
         g_enc_fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
-            int32_t fpe = 0; EncStats stv = {0};
-            Buf b = plan_encode(&from, &to, &fr, &tr, PLANS[v], &fpe, &stv);
+            int32_t fpe = 0, fps = 0; EncStats stv = {0};
+            Buf b = plan_encode(&from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
-             * varint, and the UNNATURAL direction pays the 1-byte overlong marker */
+             * varint, and the UNNATURAL direction pays the 1-byte overlong marker. The 7B
+             * initial-seek varint (fp_start) rides both directions equally, so it does not
+             * shift the argmin — accounted in the emitted blob, omitted from this comparison. */
             size_t tot = b.n + (dir ? (size_t)uleb_len(zz32(fpe - (int32_t)from_size)) : 0u)
                              + (((to_size > from_size) ? 1 : 0) != dir ? 1u : 0u);
-            if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
+            if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
             else buf_free(&b);
         }
     }
@@ -94,6 +96,12 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
      * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
     if (best_desc) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
+    /* Feature 7B: initial source seek (fp_start). Zero-output pure-seek ops are folded off the wire
+     * (so `nops` can go and the decoder frontier-terminates); a LEADING zero-op's seek is carried
+     * here instead. Seeds the FWD source walk (was implicitly 0) and is the grow landing point
+     * (grow's final fp must equal it). Almost always 0 (1 byte) — a leading zero-op is rare. Shipped
+     * for BOTH directions, right after the (grow-only) fp_end field. */
+    put_uleb(&blob, zz32(fp_start_s));
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
      * information, so it is dropped from the wire.
