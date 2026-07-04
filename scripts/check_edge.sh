@@ -21,40 +21,9 @@ set -u
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# gen <path> <size> <mode>: deterministic image generator.
+# gen <path> <size> <mode> [args...]: deterministic image generator (shared scripts/synth_gen.py).
 #   modes: rand <seed> | const <byte> | text | mutate <src> <seed> <permille> | insert <src> <size> <seed>
-gen() {
-  python3 - "$@" <<'EOF'
-import sys
-path, size, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-def lcg(seed):
-    s = seed & 0xffffffff
-    while True:
-        s = (s * 1664525 + 1013904223) & 0xffffffff
-        yield (s >> 16) & 0xff
-if mode == "rand":
-    r = lcg(int(sys.argv[4])); data = bytes(next(r) for _ in range(size))
-elif mode == "const":
-    data = bytes([int(sys.argv[4], 0)]) * size
-elif mode == "text":
-    line = b"The quick brown fox jumps over the lazy dog %d.\n"
-    data = b"".join(line % i for i in range(size))[:size]
-elif mode == "mutate":
-    src = bytearray(open(sys.argv[4], "rb").read())
-    r = lcg(int(sys.argv[5])); permille = int(sys.argv[6])
-    for i in range(len(src)):
-        if (next(r) * 4) % 1000 < permille:
-            src[i] ^= next(r) or 1
-    data = bytes(src[:size]) if size else bytes(src)
-elif mode == "insert":
-    src = open(sys.argv[4], "rb").read()
-    r = lcg(int(sys.argv[6])); pre = bytes(next(r) for _ in range(int(sys.argv[5])))
-    data = (pre + src)[:size] if size else pre + src
-else:
-    sys.exit("bad mode")
-open(path, "wb").write(data)
-EOF
-}
+gen() { python3 "$(dirname "$0")/synth_gen.py" img "$@"; }
 
 mkpair() { # mkpair <name> -> creates $tmp/<name>_from/ and $tmp/<name>_to/ dirs
   mkdir -p "$tmp/$1_from" "$tmp/$1_to"

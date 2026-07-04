@@ -24,11 +24,11 @@ trap 'rm -rf "$tmp"' EXIT
 # Two SYNTHETIC wire-surface pins the six in-repo blobs never exercise: a journal-BUDGET-degraded
 # blob (over-budget read-after-overwrite shipped as plain extras) and an UNNATURAL-DIRECTION blob
 # (apply direction flipped, signaled by an overlong size-delta uLEB). Generated deterministically
-# by the shared gen_synth_pins.py (fixed-seed LCG; also used by the qemu-arm matrix leg, so both
-# legs see identical pairs) — no committed binaries. Purely additive: the six in-repo hash lines
-# stay byte-identical (verify in the git diff on any manifest update).
+# by the shared scripts/synth_gen.py (fixed-seed LCG; check_degrade.sh requests the SAME two named
+# pins, so both gates see identical pairs) — no committed binaries. Purely additive: the six
+# in-repo hash lines stay byte-identical (verify in the git diff on any manifest update).
 SFIX="$tmp/synthfix"
-python3 "$(dirname "$0")/gen_synth_pins.py" "$SFIX"
+python3 "$(dirname "$0")/synth_gen.py" pins "$SFIX"
 
 # name / from / to — one-face product patches both ways + small/large corpus pairs both ways,
 # then the two synthetic degradation pins (appended -> they sort last; existing lines untouched).

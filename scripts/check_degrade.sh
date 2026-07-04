@@ -30,8 +30,9 @@
 # engaged, using the wire-neutral A1_DEGRADE_STATS stderr line (blob bytes unaffected — the
 # golden gate proves it) and the decoder's existing journal-peak metric.
 #
-# All fixtures are generated deterministically (fixed-seed LCG, the check_edge.sh technique) —
-# no committed binaries.
+# All fixtures are generated deterministically by the shared scripts/synth_gen.py (fixed-seed
+# LCG) — no committed binaries. Cases (a) and (c) request its two NAMED golden pins, so they are
+# byte-identical to the check_golden manifest entries by construction.
 #
 # Usage: check_degrade.sh     (needs ./hy_enc and ./hy_dec already built)
 set -u
@@ -41,47 +42,14 @@ IMG="${IMAGES:-test-bench/images}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Deterministic image generator shared by every case. Roles 'from' and 'to' are derived from
-# the SAME seed so a pair is reproducible from its parameters alone.
+# Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
+# 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>
 #     rand     n seed                 : n random bytes
 #     swap     H seed                 : from=base(2H); to=second-half ++ first-half (lag H)
 #     rshift   n seed a b k           : region [a,b) shifted RIGHT by k (insert k at a, drop k at b)
 #     highswap lo M seed              : identity below lo, top-M two halves swapped (read past lo)
-gen() {
-  python3 - "$@" <<'EOF'
-import sys
-out, role, mode = sys.argv[1], sys.argv[2], sys.argv[3]
-def lcg(seed):
-    s = seed & 0xffffffff
-    while True:
-        s = (s * 1664525 + 1013904223) & 0xffffffff
-        yield (s >> 16) & 0xff
-def rnd(n, seed):
-    r = lcg(seed); return bytes(next(r) for _ in range(n))
-a = sys.argv[4:]
-if mode == "rand":
-    n, seed = int(a[0]), int(a[1]); data = rnd(n, seed)
-elif mode == "swap":
-    H, seed = int(a[0]), int(a[1]); base = rnd(2*H, seed)
-    data = base if role == "from" else base[H:] + base[:H]
-elif mode == "rshift":
-    n, seed, p, q, k = (int(x) for x in a[:5]); base = rnd(n, seed)
-    if role == "from":
-        data = base
-    else:
-        ins = rnd(k, seed ^ 0x5a5a5a5a)
-        data = base[:p] + ins + base[p:q] + base[q+k:]
-    assert len(data) == n, (len(data), n)
-elif mode == "highswap":
-    lo, M, seed = (int(x) for x in a[:3]); base = rnd(lo+M, seed); H = M // 2
-    data = base if role == "from" else base[:lo] + base[lo+H:lo+M] + base[lo:lo+H]
-    assert len(data) == lo+M
-else:
-    sys.exit("bad mode " + mode)
-open(out, "wb").write(data)
-EOF
-}
+gen() { python3 "$(dirname "$0")/synth_gen.py" role "$@"; }
 
 # dpair <name> <mode> <args...> : build $tmp/<name>_{from,to}/watch.bin
 dpair() {
@@ -89,6 +57,15 @@ dpair() {
   mkdir -p "$tmp/${name}_from" "$tmp/${name}_to"
   gen "$tmp/${name}_from/watch.bin" from "$@"
   gen "$tmp/${name}_to/watch.bin"   to   "$@"
+}
+
+# dpin <name> <pinname> : like dpair but from a NAMED golden pin in synth_gen.py, so this fixture
+# is byte-identical to the check_golden manifest entry BY CONSTRUCTION (no parameter copy to drift).
+dpin() {
+  name=$1; pin=$2
+  mkdir -p "$tmp/${name}_from" "$tmp/${name}_to"
+  python3 "$(dirname "$0")/synth_gen.py" pin "$tmp/${name}_from/watch.bin" from "$pin"
+  python3 "$(dirname "$0")/synth_gen.py" pin "$tmp/${name}_to/watch.bin"   to   "$pin"
 }
 
 # enc <name> -> writes $tmp/<name>.blob, captures A1_DEGRADE line in $tmp/<name>.deg; returns hy_enc rc
@@ -139,7 +116,7 @@ j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA
 # H preserves — well past the budget. The encoder protects the first JBUDGET and converts the rest
 # to plain extras. Assert deg_journal=1 AND journal peak == the budget on the degraded blob.
 # =========================================================================================
-dpair jdeg swap 2048 88
+dpin jdeg synth_journal_degrade            # == golden pin (swap 2048 88); fixture==pin by construction
 if enc jdeg; then
   dj=$(sed -n 's/.*deg_journal=\([0-9]\).*/\1/p' "$tmp/jdeg.deg")
   pn=$(sed -n 's/.*pres_needed=\([0-9]*\).*/\1/p' "$tmp/jdeg.deg")
@@ -186,7 +163,7 @@ fi
 # encoder flips to descending and signals it with an OVERLONG size-delta uLEB. Assert the
 # emitted envelope really carries the overlong marker, and that it round-trips.
 # =========================================================================================
-dpair dir rshift 4096 444 256 3400 600
+dpin dir synth_unnatural_dir               # == golden pin (rshift 4096 444 256 3400 600)
 if enc dir; then
   ov=$(python3 - "$tmp/dir.blob" <<'EOF'
 import sys
