@@ -21,8 +21,6 @@ Production code lives under `src/`, with third-party code under `vendor/`:
   `hy_enc` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
 - `src/rc_models.h`: shared wire-model constants and packed model helpers.
-- `fuzz/fuzz_apply.c`: libFuzzer + ASan/UBSan harness over the decoder
-  (`make fuzz`).
 
 Build and smoke-test:
 

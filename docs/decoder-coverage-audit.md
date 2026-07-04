@@ -4,8 +4,8 @@
 > deleted the trailer-withhold ring and the `trailer_ok` short-ring guard, and shifted
 > every `src/patch_apply.h` line number cited below. The campaign result (0 findings) and
 > the branch-classification reasoning still hold; the specific `trailer_ok`/ring entries and
-> line pins predate that change. Re-run `make fuzz` for a current campaign (the harness now
-> force-fixes only `CRC32(from)` and cross-checks the header `CRC32(to)` field at bytes 4..7).
+> line pins predate that change. The fuzz harness has since been retired (2026-07-04, owner
+> decision — the campaign is concluded); this document stands as its historical record.
 
 Run against the post-robustness-sweep decoder (single pull-mode core, mandatory
 `CORTEX_M0`, wire frozen at golden). The libFuzzer+ASan+UBSan harness
@@ -50,7 +50,7 @@ encoder/decoder differential tests (`make check-models`), and the deterministic
 suites. Cost/benefit negative — do not retry. Any future formal-methods attempt
 must run under a hard memory cap + timeout from the first invocation.
 
-Reproduce: `make fuzz` (smoke) or
+How the campaign was run (harness retired 2026-07-04): `make fuzz` (smoke) or
 `./fuzz_apply -jobs=$(nproc) -max_total_time=3600 fuzz-corpus`; coverage via a
 clang `-fprofile-instr-generate -fcoverage-mapping` build of `hy_dec` +
 `fuzz_apply`, replaying `fuzz-corpus` and the check suites, merged with

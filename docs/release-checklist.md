@@ -40,9 +40,6 @@ Record the complete output in the release notes. The gate must report:
 
 Also run before release (not part of `make gate`):
 
-- `make fuzz` — libFuzzer + ASan/UBSan smoke over the decoder; a longer
-  campaign (`./fuzz_apply -jobs=N -max_total_time=3600 fuzz-corpus`) is
-  recommended after any decoder change.
 - A clang leg (`make CC=clang -B all && make check check-malformed check-golden`)
   — CI runs this on every push; the golden check proves the clang-built encoder
   emits byte-identical blobs.

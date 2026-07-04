@@ -107,8 +107,8 @@ after the last byte), and the update task calls
 invokes an integrator wait hook (typically WFI/WFE, an RTOS yield, or a
 transport poll) — the hook must allow the producer to run; never call
 `patch_apply_run` from the producer's own context. The adapter is deliberately
-not part of the device decoder artifact: `patch_apply.h` compiles, fuzzes, and
-gets sized without it.
+not part of the device decoder artifact: `patch_apply.h` compiles and gets sized
+without it.
 
 ## Stack Budget
 

@@ -63,7 +63,7 @@ BASE_STACK_CEIL_O2 ?= 480
 A1_TIMEOUT ?= 60
 CAPPED := all check check-arm check-stack check-stack-qemu check-assets \
           check-malformed check-corpus check-edge check-degrade check-golden \
-          check-models golden-update gate fuzz check-encfuzz check-analyze clean
+          check-models golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
 $(CAPPED): %:
 	@timeout $(A1_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
@@ -74,15 +74,6 @@ all-internal: hy_enc hy_dec
 
 hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
 	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
-
-# ASan+UBSan host encoder for the adversarial encoder-fuzz campaign (scripts/fuzz_encoder.py).
-# clang matches the decoder fuzz harness toolchain; -fno-sanitize-recover=all aborts on the first
-# memory/UB error so a finding is unmissable. The encoder self-verifies every emitted blob on the
-# reference decoder (src/patch_selfcheck.c), so a clean run == provably-applicable patches.
-SAN_CC ?= clang
-hy_enc_asan: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR)
-	$(SAN_CC) -DCORTEX_M0 -g -O1 -std=c99 -Wall -Wextra -Werror -I. -Isrc -Ivendor/libdivsufsort \
-	  -fsanitize=address,undefined -fno-sanitize-recover=all -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
 
 # The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
 # the stricter bar; the host-side encoder does not). Single decode mode: patch_apply_run()
@@ -322,7 +313,7 @@ gate-internal: all-internal model_diff
 	sed -n 's/^max_inversions=/NVM frontier inversions  : /p' "$$tmp/m.txt"; \
 	sed -n 's/^max_journal=/journal peak slots      : /p' "$$tmp/m.txt"; \
 	if [ $$rc = 0 ]; then \
-		echo "correctness fuzz         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"; \
+		echo "robustness check         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"; \
 		echo "RESULT                   : ALL GATES PASS"; \
 	else \
 		echo "RESULT                   : *** GATE FAILED (rc=$$rc) ***"; \
@@ -342,34 +333,6 @@ gate-internal: all-internal model_diff
 	echo "====================================================="; \
 	exit $$rc
 
-# libFuzzer + ASan + UBSan harness over the decoder (fuzz/fuzz_apply.c).
-# `make fuzz` seeds the corpus with real encoded blobs and runs a short smoke; for a real
-# campaign run the binary directly, e.g.: ./fuzz_apply -jobs=8 -max_total_time=3600 fuzz-corpus
-# 50, not 60: the smoke campaign + corpus seeding run inside the public `fuzz` cap
-# (A1_TIMEOUT, 60 s wall) — the campaign must leave build/seeding headroom.
-FUZZ_TIME ?= 50
-fuzz_apply: fuzz/fuzz_apply.c $(APPLY_HDR)
-	clang -g -O1 -std=c99 -Wall -Wextra -Werror -DCORTEX_M0 \
-	  -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
-	  -Isrc fuzz/fuzz_apply.c -o $@
-
-fuzz-internal: fuzz_apply hy_enc
-	@mkdir -p fuzz-corpus; \
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" fuzz-corpus/seed_grow.blob 10 >/dev/null; \
-	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob" 10 >/dev/null; \
-	cp "$$tmp/revert.blob" fuzz-corpus/seed_revert.blob; \
-	./fuzz_apply -max_total_time=$(FUZZ_TIME) -max_len=4096 -print_final_stats=1 fuzz-corpus
-
-# Short (~30 s) deterministic smoke subset of the adversarial ENCODER campaign
-# (scripts/fuzz_encoder.py) over the ASan+UBSan encoder: one representative case per class
-# (random/degenerate/thumb/ELF/empty), each round-tripped through hy_dec or cleanly refused.
-# STANDALONE (needs clang + sanitizer runtime), so it is NOT wired into `make gate` — same policy
-# as `make fuzz`. Full campaign: `python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec`
-# (add `--large` for the 64K..300K scale/round-trip pass against the plain self-checking hy_enc).
-check-encfuzz-internal: hy_enc_asan hy_dec
-	@python3 scripts/fuzz_encoder.py --enc ./hy_enc_asan --dec ./hy_dec --smoke --timeout 30
-
 # Static-analysis leg: gcc -fanalyzer over BOTH first-party TUs (encoder + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
@@ -377,4 +340,4 @@ check-analyze-internal:
 	@scripts/check_analyze.sh
 
 clean-internal:
-	rm -f hy_enc hy_enc_asan hy_dec fuzz_apply model_diff
+	rm -f hy_enc hy_dec model_diff
