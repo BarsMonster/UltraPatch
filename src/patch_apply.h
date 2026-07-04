@@ -191,17 +191,19 @@ static int s_bt(BitTree*t,int rate){
     }
     return m-256;
 }
-/* ---- ByteVarint (pack_size) ---- */
+static int32_t bb_unzz(uint32_t u){
+    if(u==0xffffffffu){ g_rcerr=1; return 0; }
+    return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
+}
+/* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
 static int32_t s_bv(BitTree*t,int rate){
-    int b0=s_bt(t,rate); int sgn=b0&0x40; uint32_t val=b0&0x3f; int off=6;
-    while(b0&0x80){
-        if(off>28){ g_rcerr=1; return 0; }
-        b0=s_bt(t,rate);
-        uint32_t chunk=(uint32_t)(b0&0x7f);
-        if(off>=32 || chunk>=(1u<<(32-off))){ g_rcerr=1; return 0; }
-        val|=chunk<<off; off+=7;
-    }
-    return sgn? (int32_t)(0u-val) : (int32_t)val;
+    uint32_t acc=0; int sh=0, b;
+    do{
+        if(sh>28){ g_rcerr=1; return 0; }            /* cap shift (uLEB <=32-bit) */
+        b=s_bt(t,rate);
+        acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
+    }while(b&0x80);
+    return bb_unzz(acc);
 }
 /* ---- UGolomb (uses UG_CTX from rc_models.h) ----
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
@@ -304,8 +306,8 @@ static uint32_t crc32_flash(uint32_t n){
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
  * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. Each delta on the wire: rep-bit (==last?)
- * | else hit-bit (in dict? -> MTF index via the index UGolomb | else escape value via M_dval, MTF-
- * inserted at front). The dict array is outside the struct so bl/ex get separate caps
+ * | else hit-bit (in dict? -> MTF index via the index UGolomb | else escape value as zigzag uLEB
+ * via M_dval, MTF-inserted at front). The dict array is outside the struct so bl/ex get separate caps
  * (distinct-value peaks: bl 180, ex 106). */
 typedef struct {
     uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
@@ -584,7 +586,7 @@ static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
 /* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
- *     hit==0 -> escape value via M_dval; insert v at MTF front.
+ *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
  *   then last=v. */
 static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=d->rh | (dic[0]==0 ? 2 : 0);
@@ -615,10 +617,6 @@ static int32_t pull_delta(DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
 /* ===================================================================================== */
 /* SA type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
  * union (near JREGION), since the union embeds SA and reserves SA_ARENA bytes for it. */
-static int32_t bb_unzz(uint32_t u){
-    if(u==0xffffffffu){ g_rcerr=1; return 0; }
-    return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
-}
 /* correction lookup by op-local write-offset (small array; unique offsets => linear scan) */
 static int32_t corr_at(SA*s, int32_t off){
     for(int32_t i=0;i<s->op_nc;i++){

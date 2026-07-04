@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl/bv, raw bits, gamma).
+ * A1 host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl, raw bits, gamma).
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
  * it relies on the shared prologue (typedefs, file-scope state) and on symbols
@@ -16,7 +16,6 @@ typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf 
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
 typedef struct { uint16_t p[256]; } BTE;   /* rate is NOT stored per-tree; passed per call (see rc_models.h) */
 typedef struct { uint16_t m[4]; int h; } FLE;
-typedef struct { BTE t; } BVE;
 typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
 
 static void re_shift_low(REnc *r) {

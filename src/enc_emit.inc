@@ -130,11 +130,15 @@ static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uin
     return out;
 }
 
-static void bv_encode(BVE *v, REnc *r, int64_t x) {
-    Buf tmp = {0};
-    put_pack_size(&tmp, x);
-    for (size_t i = 0; i < tmp.n; i++) bt_encode(&v->t, r, tmp.d[i], 4);
-    buf_free(&tmp);
+/* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
+static void bv_encode(BTE *t, REnc *r, int64_t x) {
+    uint32_t v = zz32((int32_t)x);
+    for (;;) {
+        uint8_t b = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        bt_encode(t, r, v ? (uint8_t)(b | 0x80u) : b, 4);
+        if (!v) break;
+    }
 }
 
 static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
@@ -146,7 +150,7 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
 typedef struct {
     BTE lit0[LIT0_CTX], lit1;
     FLE flag;
-    BVE dval;
+    BTE dval;
     UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
     uint16_t outb;
     IDXE dibl, diex;
@@ -203,7 +207,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     for (size_t i = 0; i < pc->corr.n; i++) {
         ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
         prev = pc->corr.v[i].off;
-        bt_encode(&M->dval.t, r, pc->corr.v[i].byte, 4);
+        bt_encode(&M->dval, r, pc->corr.v[i].byte, 4);
     }
 }
 
@@ -221,7 +225,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init_e(&M.flag);
-    bt_init_e(&M.dval.t);
+    bt_init_e(&M.dval);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */

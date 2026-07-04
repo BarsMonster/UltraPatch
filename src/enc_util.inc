@@ -174,31 +174,6 @@ static void put_uleb_overlong(Buf *b, uint32_t v) {
     buf_put(b, 0);
 }
 
-static void put_pack_size(Buf *b, int64_t value) {
-    uint8_t tmp[10];
-    int n = 0;
-    if (value == 0) {
-        tmp[n++] = 0;
-    } else {
-        uint64_t u;
-        if (value > 0) {
-            tmp[n] = 0;
-            u = (uint64_t)value;
-        } else {
-            tmp[n] = 0x40;
-            u = (uint64_t)(-value);
-        }
-        tmp[n++] |= (uint8_t)(0x80u | (u & 0x3fu));
-        u >>= 6;
-        while (u > 0) {
-            tmp[n++] = (uint8_t)(0x80u | (u & 0x7fu));
-            u >>= 7;
-        }
-        tmp[n - 1] &= 0x7fu;
-    }
-    buf_write(b, tmp, (size_t)n);
-}
-
 static void ivec_push(IVec *v, int32_t x) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 16;

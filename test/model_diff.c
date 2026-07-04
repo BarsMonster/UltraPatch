@@ -86,7 +86,8 @@ static void fill_rawgz(uint32_t *v, int ns) {
     for (int i = 0; i < ns; i++) { int b = (i / 64) % 3; uint32_t r = lcg32(); v[i] = b == 0 ? (r % 4u) : b == 1 ? (r % 65536u) : (r & 0x7ffffffeu); }
 }
 static void fill_bv(int32_t *v, int ns) {
-    for (int i = 0; i < ns; i++) { int b = (i / 64) % 3; uint32_t r = lcg32(); v[i] = b == 0 ? (int32_t)(r % 128u) - 64 : b == 1 ? ((int32_t)r >> 8) : (int32_t)r; }
+    /* INT32_MIN excluded: the zigzag-32 escape domain is [-0x7fffffff, 0x7fffffff] */
+    for (int i = 0; i < ns; i++) { int b = (i / 64) % 3; uint32_t r = lcg32(); if (r == 0x80000000u) r = 0; v[i] = b == 0 ? (int32_t)(r % 128u) - 64 : b == 1 ? ((int32_t)r >> 8) : (int32_t)r; }
 }
 static void fill_mixed(uint8_t *ops, uint32_t *v, int ns) {
     for (int i = 0; i < ns; i++) {
@@ -118,7 +119,7 @@ static Buf flush_wire(REnc *r) {
 }
 static Buf enc_bits(int rate, const uint8_t *v, int ns) { REnc r; re_init(&r); uint16_t p = RC_PHALF; for (int i = 0; i < ns; i++) re_bit(&r, &p, v[i] & 1, rate); return flush_wire(&r); }
 static Buf enc_bt(int rate, const uint32_t *v, int ns) { REnc r; re_init(&r); BTE t; bt_init_e(&t); for (int i = 0; i < ns; i++) bt_encode(&t, &r, (uint8_t)v[i], rate); return flush_wire(&r); }
-static Buf enc_bv(const int32_t *v, int ns) { REnc r; re_init(&r); BVE bv; bt_init_e(&bv.t); for (int i = 0; i < ns; i++) bv_encode(&bv, &r, (int64_t)v[i]); return flush_wire(&r); }
+static Buf enc_bv(const int32_t *v, int ns) { REnc r; re_init(&r); BTE t; bt_init_e(&t); for (int i = 0; i < ns; i++) bv_encode(&t, &r, (int64_t)v[i]); return flush_wire(&r); }
 static Buf enc_ugr(int k, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'r', k); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
 static Buf enc_ugg(int depth, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'g', 0); if (depth > 0) ug_seed_cont_e(&g, depth); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
 static Buf enc_idx(const uint32_t *v, int ns) { REnc r; re_init(&r); IDXE g; idx_init_e(&g, RC_IDX_SEED); for (int i = 0; i < ns; i++) idx_encode(&g, &r, v[i]); return flush_wire(&r); }
@@ -146,7 +147,7 @@ static Buf enc_mixed(const uint8_t *ops, const uint32_t *v, int ns) {
 static Buf enc_mtf(int kind, const int64_t *v, int m, int *of_during, int *of_after, int64_t extra) {
     Models *M = (Models *)calloc(1, sizeof *M);
     REnc r; re_init(&r);
-    bt_init_e(&M->dval.t);
+    bt_init_e(&M->dval);
     dr_init_e(&M->dr_bl, M->dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M->dr_ex, M->dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     idx_init_e(&M->dibl, RC_IDX_SEED);
@@ -200,7 +201,7 @@ static void test_bt(void) {
 static void test_bv(void) {
     g_models++;
     static const int32_t edge[] = { 0,1,-1,63,64,-63,-64,65,-65,8191,8192,-8192,
-        0x7fffffff, -0x7fffffff, (int32_t)0x80000000, 0x3fffffff, (int32_t)0xc0000000, 100, -100 };
+        0x7fffffff, -0x7fffffff, 0x3fffffff, (int32_t)0xc0000000, 100, -100 };
     int en = (int)(sizeof edge / sizeof edge[0]);
     for (int si = 0; si < NSEED; si++) for (int li = 0; li < NLEN; li++) {
         unsigned seed = SEEDS[si]; int ns = LENS[li];
