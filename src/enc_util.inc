@@ -103,6 +103,9 @@ static Buf slurp(const char *path) {
     if (fseek(f, 0, SEEK_END)) die("seek failed");
     long sz = ftell(f);
     if (sz < 0) die("tell failed");
+    /* 1 GiB ceiling: bsdiff_ops casts image sizes to int32_t for the suffix array and every
+     * signed cursor, and the wire size fields are u32 — a >=2 GiB image would go negative. */
+    if ((uint64_t)sz > (1u << 30)) die("image too large");
     if (fseek(f, 0, SEEK_SET)) die("seek failed");
     Buf b = {0};
     buf_reserve(&b, sz ? (size_t)sz : 1);   /* never leave b.d NULL: an empty image is a valid
