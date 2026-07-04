@@ -33,10 +33,11 @@
 #define RC_PHALF 2048u
 
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
- * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so the decoder
- * packs them instead of spending a full uint16_t per node. The adaptation-shift rate is NOT stored
- * per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5, lit1=4,
- * dval=4) — kept identical in patch_apply and patch_generate for wire-exactness. */
+ * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
+ * 12 bits/node instead of a full uint16_t; this struct + accessors are the ONE byte-tree
+ * implementation, used by both patch_apply and patch_generate. The adaptation-shift rate is NOT
+ * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (lit0=5,
+ * lit1=4, dval=4) — kept identical on both sides for wire-exactness. */
 #define BT_PROBS 255u
 #define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
 typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;  /* +1 lets accessors read/write 3 bytes */

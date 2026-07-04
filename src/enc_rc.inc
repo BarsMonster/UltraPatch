@@ -14,7 +14,7 @@
 /* ------------------------------------------------------------------------------------- */
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
-typedef struct { uint16_t p[256]; } BTE;   /* rate is NOT stored per-tree; passed per call (see rc_models.h) */
+/* byte trees use the shared packed BitTree + bt_get/bt_set/bt_init from rc_models.h (decoder-identical) */
 typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
 
 static void re_shift_low(REnc *r) {
@@ -76,25 +76,25 @@ static void w_gamma(REnc *r, uint32_t m) {
 
 static void w_gz(REnc *r, uint32_t x) { w_gamma(r, x + 1u); }
 
-static void bt_init_e(BTE *t) { for (int i = 0; i < 256; i++) t->p[i] = RC_PHALF; }
-
-static void bt_encode(BTE *t, REnc *r, uint8_t byte, int rate) {
+static void bt_encode(BitTree *t, REnc *r, uint8_t byte, int rate) {
     int m = 1;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        re_bit(r, &t->p[m], bit, rate);
+        uint16_t p = bt_get(t, m - 1);
+        re_bit(r, &p, bit, rate);
+        bt_set(t, m - 1, p);
         m = (m << 1) | bit;
     }
 }
 
-static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BTE *t) {
+static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t) {
     uint32_t hist[256], w[512];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
     for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
     for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
-    t->p[0] = RC_PHALF;
-    for (int m = 1; m < 256; m++) t->p[m] = rc_lit_seed_prob(w[2*m], w[m]);
+    memset(t->p, 0, sizeof t->p);
+    for (int m = 1; m < 256; m++) bt_set(t, m - 1, rc_lit_seed_prob(w[2*m], w[m]));   /* mirror of decoder lit_tree_from_hist */
 }
 
 static void ug_init_e(UGE *g, char code, int k) {

@@ -260,11 +260,11 @@ static uint32_t ug_price(const UGE *g, uint32_t v) {
 }
 
 /* per-byte literal price under a frozen bit-tree snapshot */
-static uint32_t bt_price(const BTE *t, uint8_t byte) {
+static uint32_t bt_price(const BitTree *t, uint8_t byte) {
     int m = 1; uint32_t cost = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        cost += bit_price(t->p[m], bit);
+        cost += bit_price(bt_get(t, m - 1), bit);
         m = (m << 1) | bit;
     }
     return cost;
@@ -274,7 +274,7 @@ static uint32_t bt_price(const BTE *t, uint8_t byte) {
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
 static void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                            const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
-    BTE lit0[LIT0_CTX], lit1;            /* mirror the wire's order-1 tag0 trees + single tag1 tree */
+    BitTree lit0[LIT0_CTX], lit1;        /* mirror the wire's order-1 tag0 trees + single tag1 tree */
     Flag1 flag;
     UGE gs, gl, gd;
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);

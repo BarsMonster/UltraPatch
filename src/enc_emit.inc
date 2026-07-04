@@ -72,7 +72,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-static void bv_encode(BTE *t, REnc *r, int64_t x) {
+static void bv_encode(BitTree *t, REnc *r, int64_t x) {
     uint32_t v = zz32((int32_t)x);
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
@@ -89,9 +89,9 @@ static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
 
 /* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX); see definitions above. */
 typedef struct {
-    BTE lit0[LIT0_CTX], lit1;
+    BitTree lit0[LIT0_CTX], lit1;
     Flag1 flag;
-    BTE dval;
+    BitTree dval;
     UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
     uint16_t outb;
     IdxUnary dibl, diex;
@@ -166,7 +166,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
     fl_init(&M.flag);
-    bt_init_e(&M.dval);
+    bt_init(&M.dval);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */
