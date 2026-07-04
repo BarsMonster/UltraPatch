@@ -267,6 +267,189 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     return re_flush_opt(&rc);
 }
 
+/* ---- bits-based shift-map fit (D1, C6). The hit-count fit above scores a candidate map by the
+ * COUNT of residuals it drives to zero, but hits have wildly different wire VALUE (a residual
+ * absorbed into a rep0 run costs ~1 bit; a fresh escape costs a whole zigzag-uLEB through the dval
+ * byte tree). This fit instead prices, in fractional bits, the exact map header PLUS the BL/EX
+ * residual streams under a candidate map, and eliminates segments by NET bits (segment wire cost
+ * vs the residual-bit increase from dropping it). The price is a PROXY (residuals are priced in
+ * collect_fields order and the shared dval tree ignores the interleaved corrections, both
+ * second-order); the final map choice is always settled by encode_body's exact full-body byte
+ * gate, which competes this map against the hit-count map and the no-map body. ---- */
+
+/* one adaptive range-coder bit, priced (-log2 prob, PR_SCALE units) with the real update rule */
+static uint64_t px_bit(uint16_t *prob, int bit) {
+    uint64_t c = bit_price(*prob, bit);
+    *prob = rc_adapt(*prob, bit, RC_S_BIT_RATE);
+    return c;
+}
+/* MTF dict-index unary (mirror idx_encode) */
+static uint64_t px_idx(IdxUnary *g, uint32_t v) {
+    uint64_t c = 0;
+    for (uint32_t pos = 0; pos < v; pos++) c += px_bit(&g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1);
+    return c + px_bit(&g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0);
+}
+/* one byte through the adaptive dval bit-tree (mirror bt_encode, dval rate = 4) */
+static uint64_t px_bt(BitTree *t, uint8_t byte) {
+    int m = 1; uint64_t c = 0;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        uint16_t p = bt_get(t, m - 1);
+        c += bit_price(p, bit);
+        bt_set(t, m - 1, rc_adapt(p, bit, 4));
+        m = (m << 1) | bit;
+    }
+    return c;
+}
+/* zigzag-uLEB escape value through dval (mirror bv_encode) */
+static uint64_t px_bv(BitTree *t, int64_t x) {
+    uint32_t v = zz32((int32_t)x);
+    uint64_t c = 0;
+    for (;;) {
+        uint8_t b = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        c += px_bt(t, v ? (uint8_t)(b | 0x80u) : b);
+        if (!v) break;
+    }
+    return c;
+}
+/* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
+ * decoder dict cap prices +infinity so an infeasible map can never win. */
+static uint64_t px_delta(DRE *D, IdxUnary *gix, BitTree *dval, int64_t delta, int *overflow) {
+    int ri = D->rh | (D->last == 0 ? 2 : 0);
+    if (delta == D->last) { uint64_t c = px_bit(&D->rep[ri], 1); D->rh = 1; return c; }
+    uint64_t c = px_bit(&D->rep[ri], 0);
+    D->rh = 0; D->last = delta;
+    int j = -1;
+    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
+    if (j > 0) {
+        c += px_bit(&D->hit, 1);
+        c += px_idx(gix, (uint32_t)(j - 1));
+        int64_t t = D->dic[j];
+        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = t;
+    } else {
+        if (D->K >= D->cap) { *overflow = 1; return c; }
+        c += px_bit(&D->hit, 0);
+        c += px_bv(dval, delta);
+        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = delta;
+        D->K++;
+    }
+    return c;
+}
+
+/* map header bits (raw gamma, 1 bit each): count + per entry (gap gamma + zz value gamma), scaled
+ * to PR_SCALE units so it adds to the residual price. Mirrors the emit_body map-header writer. */
+static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
+    uint64_t bits = gammalen_u32((uint32_t)mn + 1u);   /* w_gz(mn) => gamma(mn+1) */
+    uint32_t prev = 0;
+    for (int i = 0; i < mn; i++) {
+        uint32_t gap = mb[i] - prev;
+        bits += gammalen_u32((i ? gap - 1u : gap) + 1u);
+        prev = mb[i];
+        bits += gammalen_u32(zz32(mv[i]) + 1u);
+    }
+    return bits * PR_SCALE;
+}
+
+/* total priced bits (header + BL/EX residual streams) of a candidate map over the field keys */
+static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
+                             const FieldKey *fk, size_t nfr, int64_t *dic_bl, int64_t *dic_ex) {
+    DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
+    IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
+    BitTree dval; bt_init(&dval);
+    uint64_t c = px_hdr_bits(mb, mv, mn);
+    int overflow = 0;
+    for (size_t i = 0; i < nfr; i++) {
+        int32_t pred = fk[i].kind == EV_BL
+            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2)) / 2
+            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2));
+        int64_t resid = (int64_t)(int32_t)((uint32_t)fk[i].need - (uint32_t)pred);
+        c += px_delta(fk[i].kind == EV_BL ? &bl : &ex, fk[i].kind == EV_BL ? &di_bl : &di_ex,
+                      &dval, resid, &overflow);
+        if (overflow) return UINT64_MAX / 2;
+    }
+    return c;
+}
+
+/* Bits-based shift-map fit: from the full candidate map (smap_build_full), backward-eliminate any
+ * segment whose removal STRICTLY reduces the total priced bits (header saved > residual increase =>
+ * the segment is not paying for its own wire cost), batched per round with recompute, then enforce
+ * SMAP_CAP by least-cost removal. Same buffer/round discipline as fit_shift_map; each per-segment
+ * probe is one px_map_total pass, bounded by the SMAP_POOL_MAX pool and <=8 rounds. Over-removal is
+ * harmless: encode_body ships the smallest of {no map, hit-count map, this map} by exact bytes. */
+static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                              const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                              uint32_t *mb, int32_t *mv) {
+    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
+    int64_t *dic_bl = (int64_t *)xmalloc(DR_KCAP_BL * sizeof(int64_t));
+    int64_t *dic_ex = (int64_t *)xmalloc(DR_KCAP_EX * sizeof(int64_t));
+    uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
+    uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
+    int mark[SMAP_POOL_MAX];
+    int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
+    #define PX_WITHOUT(I) do { int _w = 0; for (int _a = 0; _a < mn; _a++) if (_a != (I)) { b2[_w] = tb[_a]; v2[_w] = tv[_a]; _w++; } } while (0)
+    uint64_t cur = px_map_total(tb, tv, mn, fk, nfr, dic_bl, dic_ex);
+    /* backward elimination by net bits: mark every segment whose removal strictly reduces total */
+    for (int round = 0; round < 8 && mn > 1; round++) {
+        int removed = 0;
+        for (int i = 0; i < mn; i++) {
+            PX_WITHOUT(i);
+            uint64_t t = px_map_total(b2, v2, mn - 1, fk, nfr, dic_bl, dic_ex);
+            mark[i] = (t < cur);
+            if (mark[i]) removed++;
+        }
+        if (!removed) break;
+        int w = 0;
+        for (int i = 0; i < mn; i++) if (!mark[i]) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+        mn = w; cur = px_map_total(tb, tv, mn, fk, nfr, dic_bl, dic_ex);
+    }
+    /* cap enforcement: drop the segment whose removal costs the fewest bits, one at a time */
+    while (mn > SMAP_CAP) {
+        int drop = 0; uint64_t best = UINT64_MAX;
+        for (int i = 0; i < mn; i++) {
+            PX_WITHOUT(i);
+            uint64_t t = px_map_total(b2, v2, mn - 1, fk, nfr, dic_bl, dic_ex);
+            if (t < best) { best = t; drop = i; }
+        }
+        memmove(tb + drop, tb + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tb));
+        memmove(tv + drop, tv + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tv));
+        mn--;
+    }
+    #undef PX_WITHOUT
+    /* merge adjacent equal values (pure wire savings; lookups unchanged) */
+    { int w = 0;
+      for (int i = 0; i < mn; i++) { if (w && tv[w - 1] == tv[i]) continue; tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+      mn = w; }
+    if (mn == 1 && tv[0] == 0) mn = 0;
+    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
+    free(fk); free(dic_bl); free(dic_ex);
+    return mn;
+}
+
+/* Residual-space injection variant for a candidate map: re-price each plain-delta inj through the
+ * map (no content re-walk — the cursors are map-independent). Per-op InjVec array; caller frees. */
+static InjVec *build_inj_map(const InjVec *inj, size_t nops, const uint8_t *frm,
+                             const uint32_t *mb, const int32_t *mv, int mn) {
+    InjVec *out = (InjVec *)xcalloc(nops ? nops : 1, sizeof(*out));
+    for (size_t step = 0; step < nops; step++) {
+        const InjVec *s = &inj[step];
+        for (size_t ii = 0; ii < s->n; ii++)
+            inj_push(&out[step], s->v[ii].cc, s->v[ii].kind, s->v[ii].fpk,
+                     field_residual(s->v[ii].kind, frm, s->v[ii].fpk, s->v[ii].delta, mb, mv, mn));
+    }
+    return out;
+}
+
+/* Is candidate map A identical (boundaries + values) to map B? */
+static int smap_eq(const uint32_t *ab, const int32_t *av, int an,
+                   const uint32_t *bb, const int32_t *bv, int bn) {
+    if (an != bn) return 0;
+    for (int i = 0; i < an; i++) if (ab[i] != bb[i] || av[i] != bv[i]) return 0;
+    return 1;
+}
+
 static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc) {
@@ -299,25 +482,26 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, content.n, litbits, &kd, &cands, &ncand);
-    /* ---- D1 shift map: fit from the op walk, build the residual-space injection variant. The
-     * LZ parse is map-independent (inj values never touch content bytes), so the pipeline below
-     * runs on the plain-delta inj; the map variant competes under the exact byte gate at the end. */
-    uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;
-    InjVec *inj_m = NULL;
-    int use_map = 0;
+    /* ---- D1 shift map: fit TWO candidate maps from the op walk — the hit-count fit and the
+     * bits-based fit (C6) — and build each one's residual-space injection variant. The LZ parse is
+     * map-independent (inj values never touch content bytes), so the pipeline below runs on the
+     * plain-delta inj; both maps then compete against the no-map body under the exact byte gate at
+     * the end (ship-smallest => improve-or-tie per pair by construction). The bits fit is skipped
+     * when it lands on the same map as the hit fit (no second emit_body needed). */
+    uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;      /* hit-count fit */
+    uint32_t map_b2[SMAP_CAP]; int32_t map_v2[SMAP_CAP]; int map_n2 = 0;   /* bits fit */
+    InjVec *inj_m = NULL, *inj_m2 = NULL;
+    int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
     { size_t nfr = 0;
       FieldRef *frs = collect_fields(ops, frm, from_size, fd, &nfr);
-      if (nfr) map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
+      if (nfr) {
+          map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
+          map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
+          if (smap_eq(map_b2, map_v2, map_n2, map_b, map_v, map_n)) map_n2 = 0;   /* duplicate */
+      }
       free(frs); }
-    if (map_n > 0) {
-        inj_m = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj_m));
-        for (size_t step = 0; step < ops->n; step++) {   /* residual-space variant: re-map each plain inj delta, no re-walk */
-            const InjVec *s = &inj[step];
-            for (size_t ii = 0; ii < s->n; ii++)
-                inj_push(&inj_m[step], s->v[ii].cc, s->v[ii].kind, s->v[ii].fpk,
-                         field_residual(s->v[ii].kind, frm, s->v[ii].fpk, s->v[ii].delta, map_b, map_v, map_n));
-        }
-    }
+    if (map_n > 0) inj_m = build_inj_map(inj, ops->n, frm, map_b, map_v, map_n);
+    if (map_n2 > 0) inj_m2 = build_inj_map(inj, ops->n, frm, map_b2, map_v2, map_n2);
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
      * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
     uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
@@ -404,18 +588,26 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 else break;
             }
         }
-        /* map variant: same fixed parse, residual-space inj + shipped map. Ships only if the
-         * exact emitted body beats the no-map body. */
+        /* map variants: same fixed parse, residual-space inj + shipped map. Each ships only if its
+         * exact emitted body beats the current best (no-map, then whichever map already won). */
         if (map_n > 0) {
             Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, map_b, map_v, map_n);
             size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; }
         }
+        if (map_n2 > 0) {
+            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m2, map_b2, map_v2, map_n2);
+            size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
+            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 2; }
+        }
     }
     free(cands); free(ncand);
+    const InjVec *sel_inj = use_map == 2 ? inj_m2 : use_map == 1 ? inj_m : inj;
+    const uint32_t *sel_b = use_map == 2 ? map_b2 : use_map == 1 ? map_b : NULL;
+    const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
+    int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         use_map ? inj_m : inj,
-                         use_map ? map_b : NULL, use_map ? map_v : NULL, use_map ? map_n : 0);
+                         sel_inj, sel_b, sel_v, sel_n);
     { const char *ldp = getenv("A1_LITDUMP");   /* scaffold: surviving span literals in wire order */
       if (ldp) {
         char fn[4096]; snprintf(fn, sizeof fn, "%s.%d.bin", ldp, (int)getpid());
@@ -437,6 +629,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
       } }
     for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
     if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
+    if (inj_m2) { for (size_t i = 0; i < ops->n; i++) free(inj_m2[i].v); free(inj_m2); }
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;

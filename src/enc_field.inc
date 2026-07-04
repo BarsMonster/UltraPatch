@@ -254,18 +254,16 @@ static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const Fie
     return hits;
 }
 
-/* Fit the piecewise shift map: build the UNION of all structural candidates (bsdiff op-walk
- * boundaries, a span-end terminator, and the exact EX value-run boundaries over sorted word
- * values), then prune by BACKWARD elimination — remove segments whose removal costs at most
- * SMAP_MAX_LOSS exact hits (their wire cost outweighs the few residuals they fix), batched per
- * round with a verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only
- * ships when the exact byte gate says the whole body got smaller, so the fit needs to be good,
- * not perfect. */
+/* Build the per-field key table (BL: k1,k2,need; EX: k2=word value, need) and the FULL deduped
+ * candidate map (bsdiff op-walk boundaries + span terminator + exact EX value runs, an oversized
+ * pool weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping the later
+ * EX-derived value). Shared front half of both fits: the hit-count fit_shift_map (below) and the
+ * bits-based fit_shift_map_bits (enc_emit.inc). tb/tv are caller buffers of >= SMAP_POOL_MAX
+ * entries, fk of >= nfr; returns the full-map entry count. */
 enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
-static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
-                         const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                         uint32_t *mb, int32_t *mv) {
-    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
+static int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                           const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                           uint32_t *tb, int32_t *tv, FieldKey *fk) {
     size_t nex = 0;
     for (size_t i = 0; i < nfr; i++) {
         fk[i].kind = fr[i].kind;
@@ -315,17 +313,29 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     }
     /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
     a1_sort(pool, pn, sizeof(*pool), cmp_seg);
-    uint32_t *tb = (uint32_t *)xmalloc((pn ? pn : 1) * sizeof(*tb));
-    int32_t *tv = (int32_t *)xmalloc((pn ? pn : 1) * sizeof(*tv));
     int mn = 0;
     for (size_t i = 0; i < pn; i++) {
         if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
         tb[mn] = pool[i].b; tv[mn] = pool[i].v; mn++;
     }
+    free(pool); free(pw);
+    return mn;
+}
+
+/* Fit the piecewise shift map by EXACT-HIT count: from the full candidate map (smap_build_full),
+ * prune by BACKWARD elimination — remove segments whose removal costs at most SMAP_MAX_LOSS exact
+ * hits (their wire cost outweighs the few residuals they fix), batched per round with a
+ * verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only ships when the
+ * exact byte gate says the whole body got smaller, so the fit needs to be good, not perfect. */
+static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                         const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                         uint32_t *mb, int32_t *mv) {
+    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
+    uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
+    uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
+    int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
     size_t cur = smap_hits(tb, tv, mn, fk, nfr);
     /* backward elimination: batch-remove <=SMAP_MAX_LOSS-loss segments, verify, fall back */
-    uint32_t *b2 = (uint32_t *)xmalloc((mn ? mn : 1) * sizeof(*b2));
-    int32_t *v2 = (int32_t *)xmalloc((mn ? mn : 1) * sizeof(*v2));
     for (int round = 0; round < 8 && mn > 1; round++) {
         int removed = 0;
         for (int i = 0; i < mn; i++) {                    /* per-segment loss in full-map context */
@@ -360,7 +370,7 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
       mn = w; }
     if (mn == 1 && tv[0] == 0) mn = 0;
     for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
-    free(fk); free(pool); free(pw); free(tb); free(tv); free(b2); free(v2);
+    free(fk);
     return mn;
 }
 
