@@ -448,7 +448,7 @@ static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
 
 typedef struct { int32_t begin, end; } Run;
 
-static void from_huff_lengths(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
+static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 
 
 
@@ -461,7 +461,7 @@ enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
 static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
-    from_huff_lengths(from->d, from->n, L0, L1);
+    from_lit_proxy_bits(from->d, from->n, L0, L1);
     OpVec out = {0};
     int32_t tp = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
