@@ -27,13 +27,11 @@ Verification commands, run from the repository root:
 make
 make check
 make check-assets
+make check-arm
 make gate
-arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o patch_apply_arm.o
-arm-none-eabi-size patch_apply_arm.o
 ```
 
-Known-good ARM object size at `SA_W=10`:
-
-```text
-text=4748 data=0 bss=10272
-```
+`make check-arm` cross-builds the Cortex-M0+ decoder object and prints and
+gates the authoritative ARM `text`/`data`/`bss` sizes against the Makefile
+pins (the raw command needs `-DCORTEX_M0` or `rc_models.h` #errors out); it
+also runs as one leg of `make gate`.
