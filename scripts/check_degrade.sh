@@ -161,15 +161,12 @@ fi
 # model predicts any CLEAN transform EXACTLY (op-derived deltas are tautologically exact at the
 # bsdiff op-walk position), so purely synthetic (fixed-seed LCG) pairs cannot concentrate >80
 # residuals in one op — only the dense field churn of a real recompiled image makes the MASKING
-# plan variants (mask BL immediates / mask literal pools) copy through mixed-size Thumb code and
-# generate hundreds of corrections in one op. This drives it deterministically with a committed
-# corpus firmware pair (no new binary): a masking variant hits >80 corrections in one op, so the
-# fixpoint split loop runs (opc_splits_sweep). Assert the split machinery engaged and that the
-# blob round-trips. The corpus round-trip gate only checks round-trips (never asserts the split)
-# and no WINNING plan here ships a split (a cleaner variant wins) — this gate is what actually
-# pins the op-split path. (A shipped/WINNING split is reachable end-to-end on maximally-churned
-# arm-none-eabi-gcc firmware, opc_splits=13; kept out of the gate as its win margin is
-# toolchain-version-sensitive, whereas this sweep assertion is toolchain-independent.)
+# plan variant (mask BL immediates) copy through mixed-size Thumb code and generate hundreds of
+# corrections in one op. This drives it deterministically with a committed corpus firmware pair
+# (no new binary): the masking variant hits >80 corrections in one op, so the fixpoint split loop
+# runs (opc_splits_sweep). Assert the split machinery engaged and that the blob round-trips. The
+# corpus round-trip gate only checks round-trips (never asserts the split) and no WINNING plan
+# here ships a split (a cleaner variant wins) — this gate is what actually pins the op-split path.
 if A1_DEGRADE_STATS=1 ./hy_enc "$IMG/img_00_n3" "$IMG/img_15_n83" "$tmp/opc.blob" "$W" \
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")

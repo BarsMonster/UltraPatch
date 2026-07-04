@@ -28,10 +28,9 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
      * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
      * in-family firmware. Every config below won pairs in the corpus sweep (the bsdiff fuzz
-     * axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20); variant 3
-     * additionally masks literal-pool words (pointer churn) in the bsdiff inputs. */
+     * axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20). */
     static const PlanCfg PLANS[] = {
-        {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20}, {3, 11},
+        {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
     Buf body = {0}; int32_t fp_end_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;

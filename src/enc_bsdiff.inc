@@ -200,22 +200,9 @@ static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr,
     create_patch_block(from_mut, to_mut, &fs[M4_CODE], &ts[M4_CODE], &blocks[STREAM_CODE]);
     create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
-    if (mask_bl & 1) {
+    if (mask_bl) {
         mask_bl_imms(from->d, from_mut->d, from->n);
         mask_bl_imms(to->d, to_mut->d, to->n);
-    }
-    if (mask_bl & 2) {
-        /* zero ALL literal-pool words (each side's own disassembly, proper pool-skip logic) so
-         * copies extend through pointer churn; the decoder-side EX mechanism + op-derived deltas
-         * supply the values, and corrections absorb any mask-induced diff mismatch. */
-        for (size_t i = 0; i < fs[M4_LDR].n; i++) {
-            uint32_t a = fs[M4_LDR].a[i].addr;
-            if ((size_t)a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
-        }
-        for (size_t i = 0; i < ts[M4_LDR].n; i++) {
-            uint32_t a = ts[M4_LDR].a[i].addr;
-            if ((size_t)a + 4 <= to_mut->n) memset(to_mut->d + a, 0, 4);
-        }
     }
     a1_m4_free_streams(fs); a1_m4_free_streams(ts);
 }

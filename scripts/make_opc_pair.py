@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 make_opc_pair.py  --  deterministic generator of a from/to Cortex-M0+ firmware pair that
-forces the A1 encoder's OPC_CAP op-splitting path (opc_splits>=1) in the SHIPPED plan.
+forces the A1 encoder's OPC_CAP op-split fixpoint (opc_splits_sweep>=1) in the plan SWEEP.
 
 Usage:  python3 make_opc_pair.py OUTDIR
         -> writes OUTDIR/from/{watch.bin,watch.elf} and OUTDIR/to/{watch.bin,watch.elf}
 
-Then:   A1_DEGRADE_STATS=1 ./hy_enc OUTDIR/from OUTDIR/to blob 10   # prints opc_splits=10
+Then:   A1_DEGRADE_STATS=1 ./hy_enc OUTDIR/from OUTDIR/to blob 10   # prints opc_splits_sweep>=1
         cp OUTDIR/from/watch.bin mem.bin
         ./hy_dec mem.bin blob 1                                     # rc 0, mem == to/watch.bin
 
@@ -17,14 +17,15 @@ Mechanism (why it works):
   - `to` recompiles with (a) 38% of leaf BODIES perturbed (same call structure), (b) the dispatch
     call order permuted (callperm) so BL immediates churn densely, and (c) every global value
     scattered (gscatter) so the literal pool churns.  This dense field churn defeats plain bsdiff
-    anchoring, so the encoder's MASKED plan variant (mask BL + mask literal pools, PLANS idx 5)
-    becomes the SMALLEST feasible body and ships.
+    anchoring, so the encoder's masked plan variant (mask BL immediates, PLANS variant 2) copies
+    long spans through the recompiled code.
   - Masking forces long copies through mixed-size (2- and 4-byte Thumb) recompiled code.  Where a
     masked copy maps a from-field onto a to-position that is not a valid field, merge_op_field_deltas
     cannot supply an exact delta, so the residual becomes a correction.  These corrections
-    concentrate: one op reaches 143 corrections (pass 0), 10 ops exceed the OPC_CAP of 80, so
-    plan_encode splits them -> opc_splits=10 in the winning plan.  The split plan stays feasible
-    (corrections land in copy/diff regions, splittable; journal within JSLOTS) and round-trips.
+    concentrate enough that at least one op exceeds the OPC_CAP of 80, so plan_encode splits it to a
+    fixpoint -> opc_splits_sweep>=1.  The masked variant does not win here (a cleaner variant ships,
+    so opc_splits=0 in the shipped plan), but the sweep exercises the split machinery, which is what
+    check_degrade.sh case (b) asserts.  Every emitted blob round-trips.
 
 Requires arm-none-eabi-gcc (tested: 14.2.1).  gcc output is deterministic, so the pair is fixed.
 """

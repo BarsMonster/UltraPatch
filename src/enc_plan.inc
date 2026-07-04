@@ -104,7 +104,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks,
-                       variant >= 3 ? 3 : (variant >= 2 ? 1 : 0));
+                       variant >= 2 ? 1 : 0);
     OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
