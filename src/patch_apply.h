@@ -84,18 +84,11 @@ static int      g_FWD;
 /* the entire blob. patch_apply_run then drains the callback: any byte left over is appended  */
 /* garbage (strict reject). */
 /* ===================================================================================== */
-static void decode_body(void);
+static int decode_body(void);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
 static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
-enum {
-    PATCH_APPLY_NEED_MORE=0, PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2,
-    DEC_NEED_MORE=PATCH_APPLY_NEED_MORE, DEC_DONE=PATCH_APPLY_DONE, DEC_ERROR=PATCH_APPLY_ERROR,
-    DEC_BODYOK=3   /* INTERNAL: body decoded; the appended-garbage drain + CRC32(to) verdict
-                    * are still pending. Never returned to the caller — patch_apply_run
-                    * converts it to DONE (or ERROR). */
-};
-static uint8_t  g_dec_status;              /* DEC_NEED_MORE while running, then DONE/ERROR */
+enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 
 static int (*g_pull_fn)(void*, uint8_t*);
 static void *g_pull_ctx;
@@ -1030,9 +1023,9 @@ static int __attribute__((noinline)) decode_header(void){
       g_litprev=0; }
     return 1;
 }
-static void decode_body(void){
+static int decode_body(void){
     g_rcerr=0; g_reject=REJ_NONE;
-    if(!decode_header()){ g_reject=REJ_CORRUPT; g_dec_status=DEC_ERROR; goto done; }
+    if(!decode_header()){ g_reject=REJ_CORRUPT; return 0; }
     rc_init();
     orow_reset();
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
@@ -1040,7 +1033,7 @@ static void decode_body(void){
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
     g_smap_n=0;
     { uint32_t mn=s_raw_gz();
-      if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; g_dec_status=DEC_ERROR; goto done; }
+      if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
       for(uint32_t i=0;i<mn && !g_rcerr;i++){
           uint32_t gap=s_raw_gz(); if(i) gap+=1u;
@@ -1048,7 +1041,7 @@ static void decode_body(void){
           b+=gap;
           g_smap_b[i]=b; g_smap_v[i]=bb_unzz(s_raw_gz());
       }
-      if(g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
+      if(g_rcerr) return 0;
       g_smap_n=(uint16_t)mn; }
     /* out-match enable: 1 raw bit. 0 => no ko header field and no out-bit on any fresh match,
      * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
@@ -1082,20 +1075,19 @@ static void decode_body(void){
       fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       uint32_t nops=s_raw_gz();
-      if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u){ g_dec_status=DEC_ERROR; goto done; }
+      if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u) return 0;
       s->tok_left=nseq; s->tok_mode=0;
       for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
       /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
        * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
       if(!s->err && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) s->err=1;
       if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
-      if(s->err||g_rcerr){ g_dec_status=DEC_ERROR; goto done; }
+      if(s->err||g_rcerr) return 0;
       orow_commit_all();                   /* flush the remaining uncommitted rows */
     }
-done:
-    /* body complete: the caller (patch_apply_run) drains any appended garbage and verifies
-     * CRC32(to) (g_want_to) over the final image, converting BODYOK to DONE (or ERROR). */
-    if(g_dec_status!=DEC_ERROR) g_dec_status=DEC_BODYOK;
+    /* body complete: the caller (patch_apply_run) still drains any appended garbage and
+     * verifies CRC32(to) (g_want_to) over the final image before declaring DONE. */
+    return 1;
 }
 
 /* ===================================================================================== */
@@ -1114,9 +1106,7 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
  * both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds the reason). */
 static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
     g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0;
-    g_dec_status=DEC_NEED_MORE;
-    decode_body();
-    if(g_dec_status==DEC_ERROR) return PATCH_APPLY_ERROR;
+    if(!decode_body()) return PATCH_APPLY_ERROR;
     /* APPENDED-GARBAGE STRICT REJECT (flush-slack bound = 0). A valid blob is consumed
      * EXACTLY to EOF: the range decoder reads rc_init's 4 bytes + one byte per renorm, i.e.
      * the same byte count the encoder produced (its renorm count is identical) plus the 4
@@ -1127,11 +1117,10 @@ static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
      * any byte still available here is trailing garbage -> REJ_CORRUPT. (Proven by the gate:
      * hy_enc self-verifies every emitted blob on this decoder, so a false reject here would
      * fail the whole matrix + edge + degrade set.) */
-    { uint8_t b; if(pull_raw(&b)){ g_reject=REJ_CORRUPT; g_dec_status=DEC_ERROR; return PATCH_APPLY_ERROR; } }
+    { uint8_t b; if(pull_raw(&b)){ g_reject=REJ_CORRUPT; return PATCH_APPLY_ERROR; } }
     if(crc32_flash(g_to_size)!=g_want_to){
         if(!g_reject) g_reject=REJ_CORRUPT;
-        g_dec_status=DEC_ERROR; return PATCH_APPLY_ERROR; }
-    g_dec_status=DEC_DONE;
+        return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
 }
 
