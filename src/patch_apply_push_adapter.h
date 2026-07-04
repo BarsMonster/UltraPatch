@@ -22,9 +22,12 @@
  * on a device typically WFI/WFE, an RTOS yield, or a poll of the transport. The hook MUST
  * allow the producer to run (never call patch_apply_run from the producer's own context).
  *
- * Concurrency contract: exactly one producer and one consumer. `w` and `eof` are written
- * only by the producer; `r` only by the consumer; the indices are free-running uint32 so
- * empty is w==r and full is w-r==cap (cap MUST be a power of two). `volatile` is sufficient
+ * Concurrency contract: exactly one producer and one consumer. `w` is written only by the
+ * producer, `r` only by the consumer; `eof` is the producer's too, with one sanctioned
+ * exception — the consumer-side WAIT HOOK may call patch_ring_eof() on a transport timeout to
+ * abort a stalled decode (setting eof is the only exit from patch_ring_next's wait loop;
+ * benign, both contexts only ever store the constant 1). The indices are free-running uint32
+ * so empty is w==r and full is w-r==cap (cap MUST be a power of two). `volatile` is sufficient
  * on single-core Cortex-M (no store reordering visible to the other context); on an SMP
  * host test drive both sides from one thread via the wait hook, or add real fences.
  *
@@ -57,7 +60,9 @@ static inline int patch_ring_push(PatchRing *g, uint8_t b) {
     return 1;
 }
 
-/* producer: signal end-of-blob. Call AFTER the last successful push. */
+/* producer: signal end-of-blob. Call AFTER the last successful push. The consumer-side wait
+ * hook may also call this to abort a stalled decode on a transport timeout (see the
+ * concurrency contract above) — the store is idempotent, so either caller is safe. */
 static inline void patch_ring_eof(PatchRing *g) { g->eof = 1; }
 
 /* consumer: the patch_apply_run callback. Pass the PatchRing as ctx.

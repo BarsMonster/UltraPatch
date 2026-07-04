@@ -131,6 +131,18 @@ transport poll) — the hook must allow the producer to run; never call
 not part of the device decoder artifact: `patch_apply.h` compiles and gets sized
 without it.
 
+### Aborting a transfer
+
+To abandon a decode mid-blob — a lost link, a user cancel, a transport timeout —
+the byte callback simply returns 0. The decoder latches EOF, zero-fills the rest
+of the body, and terminates in BOUNDED time (an `O(to_size)` wind-down at worst,
+never an unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been
+modified when the abort lands, so recovery follows the same terminal-state matrix
+as any other mid-apply error (the Call Sequence table below). No special code
+path is needed: the abort return is the ordinary end-of-blob signal, so it is
+already load-bearing and gate-exercised — the truncated-blob cases in `make gate`
+drive exactly this wind-down and reject.
+
 ## Stack Budget
 
 The whole decode runs on the caller's stack (no fiber since commit 44eee88), so the
