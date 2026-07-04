@@ -145,9 +145,27 @@ of magnitude; the static bound above is authoritative for the device.
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
    image was written and both `CRC32(from)` and `CRC32(to)` verified.
 
-On `ERROR`, the `patch_apply_reject()` accessor distinguishes `REJ_RESOURCE` (a
-decoder resource cap was exceeded — this firmware needs a larger-sized build)
-from `REJ_CORRUPT` (malformed, truncated, or wrong-image patch).
+Two accessors classify the terminal state: `patch_apply_reject()` gives the
+reject reason, and `patch_apply_flash_touched()` reports whether any flash
+write happened during the run (like `patch_apply_reject`, it compiles out when
+unused). The terminal-state matrix:
+
+| Terminal state | Flash content | Recovery |
+| -------------- | ------------- | -------- |
+| `DONE` | new image fully written, both CRCs verified | boot the new image |
+| `ERROR`, flash untouched (`patch_apply_flash_touched() == 0`) | old image intact, still bootable | fix the cause, retry with a corrected patch |
+| `ERROR`, flash touched (`patch_apply_flash_touched() != 0`) | partially overwritten — image destroyed | bootloader recovery (e.g. full reflash) |
+| `ERROR` at the final `CRC32(to)` gate | fully written, wrong image | bootloader recovery (e.g. full reflash) |
+
+`REJ_RESOURCE` (a decoder resource cap was exceeded) can raise mid-apply, so
+it is NOT simply "rebuild with larger caps and retry": check
+`patch_apply_flash_touched()` first. If flash was touched, the device image is
+already partially overwritten and must be recovered before any retry — a
+larger-capped build fixes the cap, but only a recovered or still-intact image
+can accept the retried patch (retrying the same patch on the half-written
+image rejects cleanly at `CRC32(from)`). `REJ_CORRUPT` means a malformed,
+truncated, or wrong-image patch; with flash untouched it is safe to re-request
+the transfer and retry.
 
 The API is single-instance, non-reentrant, and not thread-safe. Do not run two
 decoders concurrently in one image. Do not start a new patch until the previous

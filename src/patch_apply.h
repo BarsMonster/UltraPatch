@@ -170,6 +170,9 @@ static uint8_t g_rcerr;
  * stream (bounds, underrun, range-coder overflow). 0 = none. Pure diagnostic; never affects decoding. */
 enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
 static uint8_t g_reject;
+/* terminal-state flag: set at the single flash_write site (orow_commit_slot's dirty branch);
+ * on ERROR it tells the integrator whether the old image is still intact. */
+static uint8_t g_flash_touched;
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(); return v; }
 /* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. The only raw-gamma site
@@ -473,6 +476,7 @@ _Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTRO
 static void orow_commit_slot(uint32_t s){
     if(g_orow_base[s]!=OROW_NONE && g_orow_dirty[s]){
         uint32_t base=g_orow_base[s], end=base+OUTROW; if(end>g_image_span) end=g_image_span;
+        g_flash_touched=1;
         /* force the (at most one) row erase up front, then program from the RAM buffer so every
          * byte is a pure 1->0 program (no further erase). All bytes of the row were produced by the
          * monotonic output, so the buffer holds the exact final content. */
@@ -1089,7 +1093,7 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
  * the decoder consumes bytes strictly in order). Returns PATCH_APPLY_DONE (image written,
  * both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds the reason). */
 static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
-    g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0;
+    g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0; g_flash_touched=0;
     if(!decode_body()) return PATCH_APPLY_ERROR;
     /* APPENDED-GARBAGE STRICT REJECT (flush-slack bound = 0). A valid blob is consumed
      * EXACTLY to EOF: the range decoder reads rc_init's 4 bytes + one byte per renorm, i.e.
@@ -1113,6 +1117,11 @@ static int patch_apply_run(int (*next)(void*, uint8_t*), void *ctx){
  * accessor over reading g_reject directly; it is unused-static-inline and compiles out when the
  * integrator does not call it (no ARM .text cost). */
 static inline int patch_apply_reject(void){ return g_reject; }
+
+/* After PATCH_APPLY_ERROR, whether any flash_write happened this run: 0 = old image intact
+ * (still bootable, safe to retry after fixing the cause), 1 = image partially overwritten
+ * (bootloader recovery required). Same unused-static-inline compile-out as patch_apply_reject. */
+static inline int patch_apply_flash_touched(void){ return g_flash_touched; }
 
 /* ===================================================================================== */
 /* DEVICE static measurement: exported entry point so arm-none-eabi-size sees the real      */
