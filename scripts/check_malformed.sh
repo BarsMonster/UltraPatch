@@ -98,6 +98,12 @@ cp "$tmp/grow.blob" "$tmp/corrupt_to_crc.blob"
 printf '\336\255\276\357' | dd of="$tmp/corrupt_to_crc.blob" bs=1 seek=4 count=4 conv=notrunc >/dev/null 2>&1
 expect_reject_unchanged corrupt_to_crc "$tmp/corrupt_to_crc.blob" "$base_bin"
 
+# A single interior range-body byte flip makes the decoder reconstruct a different image; the
+# post-apply CRC32(to) gate then rejects it (offset 40 lands well inside the body).
+cp "$tmp/grow.blob" "$tmp/body_flip.blob"
+printf '\377' | dd of="$tmp/body_flip.blob" bs=1 seek=40 count=1 conv=notrunc >/dev/null 2>&1
+expect_reject_unchanged body_flip "$tmp/body_flip.blob" "$base_bin"
+
 # Truncating real range-body bytes shifts the decoder's zero-fill boundary into significant
 # data -> wrong image -> CRC32(to) reject (drop 4 tail bytes).
 head -c "$(( $(wc -c < "$tmp/grow.blob") - 4 ))" "$tmp/grow.blob" > "$tmp/trunc_tail4.blob"
