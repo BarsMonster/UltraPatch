@@ -161,7 +161,8 @@ static int s_raw(void){ return rc_decode(RC.range>>1); }
 /* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
- * and bail (the apply checks err -> clean reject, never crash / never silent-wrong). */
+ * and bail. g_rcerr is the ONE decode error latch — RC-level and apply-level failures all set it
+ * (clean reject, never crash / never silent-wrong); g_reject still carries the reason. */
 static uint8_t g_rcerr;
 /* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
  * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
@@ -359,7 +360,6 @@ typedef struct {
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
-    uint8_t err;
 } SA;
 /* SA_ARENA: the hand-rounded byte RESERVATION for the apply-phase SA. Kept as the sab union's sized
  * alternative below so the arena's total .bss is byte-stable regardless of sizeof(SA)'s tail padding
@@ -733,21 +733,21 @@ static uint8_t sa_next_content(SA*s, int tag){
         s->tok_left--;
     }
 fail:
-    s->err=1;
+    g_rcerr=1;
     return 0;
 }
 /* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
 static uint32_t sa_read_uleb(SA*s){
     uint32_t acc=0; int sh=0;
-    for(;;){ if(s->err||g_rcerr) return 0;
+    for(;;){ if(g_rcerr) return 0;
         uint8_t b=sa_next_content(s,0);
-        if(sh>28){ s->err=1; return 0; }            /* cap shift (uLEB <=32-bit) */
+        if(sh>28){ g_rcerr=1; return 0; }            /* cap shift (uLEB <=32-bit) */
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
 }
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
-static void sa_journal(SA*s, int32_t tp){
-    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, flash_read((uint32_t)tp))){ s->err=1; g_reject=REJ_RESOURCE; }
+static void sa_journal(int32_t tp){
+    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put((uint32_t)tp, flash_read((uint32_t)tp))){ g_rcerr=1; g_reject=REJ_RESOURCE; }
     }
 }
 static uint8_t hy_src_peek(int32_t fp){
@@ -860,7 +860,7 @@ __attribute__((always_inline)) static inline void litcur_step(SA*s, LitCur*lc, i
          * bound the gap and the stepped position in pure uint32 (no wrap can slip through:
          * g<=lim and base<=lim keep base+g < 2^32; a backward underflow lands >lim). */
         uint32_t np=(lc->step>0)? (uint32_t)lc->nextpos+g : (uint32_t)lc->nextpos-g;
-        if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ s->err=1; lc->nextpos=-1; return; }
+        if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ g_rcerr=1; lc->nextpos=-1; return; }
         lc->nextpos=(int32_t)np; lc->litb=sa_next_content(s,0);
     }
     else lc->nextpos=-1;
@@ -875,7 +875,7 @@ __attribute__((always_inline)) static inline void litcur_next(SA*s, LitCur*lc, i
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
 __attribute__((always_inline)) static inline void wr_extras(SA*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
-    for(int32_t i=0;i<el && !s->err && !g_rcerr;i++){
+    for(int32_t i=0;i<el && !g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=sa_next_content(s,(int)((tp0+dl+e)&1));
         out_write((uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
@@ -892,11 +892,11 @@ __attribute__((always_inline)) static inline void wr_copy(SA*s, LitCur*lc, int32
 static void sa_apply_op(SA*s){
     uint32_t dl_u=s_ug_gamma(&M_gdl), el_u=s_ug_gamma(&M_gel), adj_u=s_ug_gamma(&M_gadj);
     int32_t adj=bb_unzz(adj_u);
-    if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ s->err=1; return; }
+    if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ g_rcerr=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
     /* nw = dl+el (op output bytes). dl,el in [0,2^31) and the image span is < 2^31 (design invariant),
      * so the overflow guard is a pure 32-bit headroom test: check dl, then el against the rest of span. */
-    if(dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ s->err=1; return; }
+    if(dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ g_rcerr=1; return; }
     int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
     int32_t tp0,fp0;
     if(g_FWD){
@@ -905,45 +905,45 @@ static void sa_apply_op(SA*s){
          * in-range position, so this never trips.) */
         int32_t nfp;
         if(nw>(int32_t)g_to_size || s->tp>(int32_t)g_to_size-nw ||
-           __builtin_add_overflow(s->fp,dl,&nfp) || __builtin_add_overflow(nfp,adj,&nfp)){ s->err=1; return; }
+           __builtin_add_overflow(s->fp,dl,&nfp) || __builtin_add_overflow(nfp,adj,&nfp)){ g_rcerr=1; return; }
         tp0=s->tp; fp0=s->fp; s->tp=s->tp+nw; s->fp=nfp;
     } else {
         int32_t nfp;
         if(s->tp<nw ||
-           __builtin_sub_overflow(s->fp,dl,&nfp) || __builtin_sub_overflow(nfp,adj,&nfp)){ s->err=1; return; }
+           __builtin_sub_overflow(s->fp,dl,&nfp) || __builtin_sub_overflow(nfp,adj,&nfp)){ g_rcerr=1; return; }
         s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
     /* fp headroom: the copy loop and the ldr back-scan form fp0+K for K<=dl, so fp0+dl must be
      * representable in int32. The overflow builtins above only guard fp0+dl+adj / fp0 itself —
      * a corrupt adj walk can park fp0 near INT32_MAX and make the bare fp0+dl overflow (UB).
      * Valid streams keep fp inside the image plus small overshoot, so this never fires there. */
-    if(fp0>(int32_t)0x7fffffff-dl){ s->err=1; return; }
+    if(fp0>(int32_t)0x7fffffff-dl){ g_rcerr=1; return; }
     /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
     uint32_t np=s_ug_gamma(&M_pgn);
-    if(np>(uint32_t)nw){ s->err=1; return; }
+    if(np>(uint32_t)nw){ g_rcerr=1; return; }
     uint32_t poff=0, nwu=(uint32_t)nw;
-    for(uint32_t i=0;i<np && !s->err && !g_rcerr;i++){
+    for(uint32_t i=0;i<np && !g_rcerr;i++){
         uint32_t gap=s_ug_gamma(i?&M_pg2:&M_pg);
-        if(gap>UINT32_MAX-poff){ s->err=1; return; }
+        if(gap>UINT32_MAX-poff){ g_rcerr=1; return; }
         poff+=gap;
-        if(poff>=nwu){ s->err=1; return; }
-        sa_journal(s, tp0+(int32_t)poff);
+        if(poff>=nwu){ g_rcerr=1; return; }
+        sa_journal(tp0+(int32_t)poff);
     }
-    if(s->err||g_rcerr) return;
+    if(g_rcerr) return;
     /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
      * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
     uint32_t nc=s_ug_gamma(&M_pgn);
-    if(nc>(uint32_t)OPC_CAP){ s->err=1; g_reject=REJ_RESOURCE; return; }
-    if(nc>(uint32_t)nw){ s->err=1; return; }
+    if(nc>(uint32_t)OPC_CAP){ g_rcerr=1; g_reject=REJ_RESOURCE; return; }
+    if(nc>(uint32_t)nw){ g_rcerr=1; return; }
     s->op_nc=(int32_t)nc; { uint32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){
             uint32_t gap=s_ug_gamma(i?&M_pg2:&M_pg);
-            if(gap>UINT32_MAX-coff){ s->err=1; return; }
+            if(gap>UINT32_MAX-coff){ g_rcerr=1; return; }
             coff+=gap;
-            if(coff>=nwu){ s->err=1; return; }
+            if(coff>=nwu){ g_rcerr=1; return; }
             int cbyte=s_bt(&M_dval, 4);
             s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
-    if(s->err||g_rcerr) return;
+    if(g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (ldr_targets). */
 #ifdef HY_DBG
@@ -957,14 +957,14 @@ static void sa_apply_op(SA*s){
      * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
      * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
     int32_t nl=(int32_t)sa_read_uleb(s);
-    if(nl<0||nl>dl){ s->err=1; return; }
+    if(nl<0||nl>dl){ g_rcerr=1; return; }
     uint8_t packed[4];
     int fwd=g_FWD; int32_t step=fwd?1:-1;
     LitCur lc;
     if(!fwd) wr_extras(s, fwd, tp0, dl, el);
     litcur_init(s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
-    while(k>=0 && k<dl && !s->err && !g_rcerr){
+    while(k>=0 && k<dl && !g_rcerr){
         int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
         if(a0>=0 && a0+4<=dl){
             int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
@@ -1077,12 +1077,12 @@ static int decode_body(void){
       uint32_t nops=s_raw_gz();
       if(g_rcerr || nseq > g_to_size + 1u || nops > g_to_size + 1u) return 0;
       s->tok_left=nseq; s->tok_mode=0;
-      for(uint32_t oi=0; oi<nops && !s->err && !g_rcerr; oi++) sa_apply_op(s);
+      for(uint32_t oi=0; oi<nops && !g_rcerr; oi++) sa_apply_op(s);
       /* tp must land exactly; fp must return to 0 for grow (started at the seed g_fp_end). For FWD
        * we did not receive fp_end (it is redundant — CRC32(to) validates), so fp is unchecked there. */
-      if(!s->err && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) s->err=1;
-      if(!s->err && (s->tok_mode!=0 || s->tok_left!=0)) s->err=1;
-      if(s->err||g_rcerr) return 0;
+      if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=0))) g_rcerr=1;
+      if(!g_rcerr && (s->tok_mode!=0 || s->tok_left!=0)) g_rcerr=1;
+      if(g_rcerr) return 0;
       orow_commit_all();                   /* flush the remaining uncommitted rows */
     }
     /* body complete: the caller (patch_apply_run) still drains any appended garbage and
