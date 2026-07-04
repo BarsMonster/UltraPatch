@@ -204,7 +204,7 @@ static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_
 typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
 
 /* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan,
- * walking each op in APPLY direction (mirror op_delta_content_pos / the decoder replay:
+ * walking each op in APPLY direction (mirror op_emit_content / the decoder replay:
  * adjacent windows <4 B apart resolve to a different field set per direction). Entries
  * stay in ascending-fpk order so an unchanged field set fits an identical map. */
 static FieldRef *collect_fields(const OpVec *ops, const uint8_t *frm, uint32_t from_size,

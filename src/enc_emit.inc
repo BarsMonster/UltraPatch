@@ -2,117 +2,73 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- body assembly / range-coder emit: build_content, op_delta_content_pos, emit_delta, emit_geom_pc, emit_body, encode_body.
+ * A1 host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
  * it relies on the shared prologue (typedefs, file-scope state) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
-static void build_content(const OpVec *ops, uint32_t from_size, uint32_t to_size, Buf *content, Buf *tags, size_t **ends_out) {
-    int FWD = g_enc_fwd; (void)from_size; (void)to_size;
-    size_t nops = ops->n;
-    size_t *ends = (size_t *)xmalloc((nops ? nops : 1) * sizeof(size_t));
-    int32_t *tp0 = (int32_t *)xmalloc((nops ? nops : 1) * sizeof(int32_t));
-    int32_t tp = 0;
-    for (size_t i = 0; i < nops; i++) { tp0[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len; }
-    for (size_t step = 0; step < nops; step++) {
-        size_t oi = FWD ? step : nops - 1 - step;
-        const Op *o = &ops->v[oi];
-        IVec lits = {0};
-        for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
-        Buf tmp = {0};
-        put_uleb(&tmp, (uint32_t)lits.n);
-        buf_write(content, tmp.d, tmp.n);
-        for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
-        tmp.n = 0;
-        if (FWD) {
-            int32_t prev = 0;
-            for (size_t li = 0; li < lits.n; li++) {
-                int32_t k = lits.v[li];
-                put_uleb(&tmp, (uint32_t)(k - prev));
-                buf_write(content, tmp.d, tmp.n);
-                for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
-                tmp.n = 0;
-                buf_put(content, o->diff[k]); buf_put(tags, 0);
-                prev = k;
-            }
-            int32_t exstart = tp0[oi] + o->diff_len;
-            for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-        } else {
-            int32_t exstart = tp0[oi] + o->diff_len;
-            for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-            int32_t prev = o->diff_len;
-            for (size_t r = lits.n; r-- > 0;) {
-                int32_t k = lits.v[r];
-                put_uleb(&tmp, (uint32_t)(prev - k));
-                buf_write(content, tmp.d, tmp.n);
-                for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
-                tmp.n = 0;
-                buf_put(content, o->diff[k]); buf_put(tags, 0);
-                prev = k;
-            }
-        }
-        ends[step] = content->n;
-        free(lits.v); buf_free(&tmp);
-    }
-    free(tp0);
-    *ends_out = ends;
-}
-
-typedef struct { uint32_t cc; int kind; int64_t delta; } Inj;
+/* One field injection (delta escaped into the LZ content stream): cc = byte cursor within its op's
+ * content slice, kind = EV_BL/EV_EX, fpk = from-image field address, delta = plain (no-map) wire
+ * residual. The map variant derives from delta+fpk (field_residual) without re-walking. */
+typedef struct { uint32_t cc; int kind; uint32_t fpk; int64_t delta; } Inj;
 typedef struct { Inj *v; size_t n, cap; } InjVec;
 
-static void inj_push(InjVec *v, uint32_t cc, int kind, int64_t delta) {
+static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t delta) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 16;
         v->v = (Inj *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
     }
-    v->v[v->n++] = (Inj){cc, kind, delta};
+    v->v[v->n++] = (Inj){cc, kind, fpk, delta};
 }
 
-/* Encoder literal-cost cursor: the single mirror of the decoder LitCur/litcur_step
- * (patch_apply.h), accumulating each literal's wire cost (uLEB gap + 1 flag byte) in the
- * decoder's consume order. Positions come from the ascending `lits` list; FWD walks it
- * front-to-back with gaps measured from 0, grow back-to-front with gaps measured from dl. */
-typedef struct { const IVec *lits; int fwd; int32_t nextpos, base; size_t li; } LitCost;
-static void litcost_step(LitCost *c, uint32_t *cc) {
-    if (c->li < c->lits->n) {
-        int32_t p = c->fwd ? c->lits->v[c->li] : c->lits->v[c->lits->n - 1 - c->li];
-        *cc += (uint32_t)uleb_len((uint32_t)(c->fwd ? p - c->base : c->base - p)) + 1u;
-        c->base = p; c->nextpos = p; c->li++;
-    } else c->nextpos = -1;
-}
-static void litcost_init(LitCost *c, const IVec *lits, int fwd, int32_t dl, uint32_t *cc) {
-    c->lits = lits; c->fwd = fwd; c->base = fwd ? 0 : dl; c->li = 0; c->nextpos = -1;
-    litcost_step(c, cc);
-}
-static void litcost_consume(LitCost *c, uint32_t *cc, int32_t kk) {
-    if (kk == c->nextpos) litcost_step(c, cc);
-}
-
-static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
-                                   int32_t fp0, const FieldDeltaVec *fd, const IVec *ldr,
-                                   const uint32_t *mb, const int32_t *mv, int mn) {
+/* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
+ * uLEB-gap+byte + extras) AND record the field-injection cursors (Inj.cc) in the same pass, so the
+ * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
+ * mirror of the decoder sa_apply_op window skeleton. FWD/descending asymmetry is preserved exactly:
+ * grow writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
+ * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
+ * cc is a READ-AHEAD cursor: like the decoder LitCur, the next literal's gap+byte is consumed before
+ * the field window that follows it, so cc leads content->n by the pending literal's cost. */
+static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
+                            int32_t fp0, int32_t tp0, const FieldDeltaVec *fd, const IVec *ldr,
+                            Buf *content, Buf *tags, InjVec *out) {
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
-    InjVec out = {0};
-    uint32_t cc = (uint32_t)uleb_len((uint32_t)lits.n);
-    LitCost lc;
-    litcost_init(&lc, &lits, FWD, o->diff_len, &cc);
-    if (!FWD) cc += (uint32_t)o->extra_len;   /* grow writes the el extras before the dl body */
+    Buf tmp = {0};
+    put_uleb(&tmp, (uint32_t)lits.n);
+    buf_write(content, tmp.d, tmp.n);
+    for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
+    int32_t exstart = tp0 + o->diff_len;
+    if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
+        for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+    uint32_t cc = (uint32_t)uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len);
+    int32_t base = FWD ? 0 : o->diff_len;   /* read-ahead gap base (next uncoded literal) */
+    int32_t cprev = FWD ? 0 : o->diff_len;  /* emitted-literal gap base */
+    size_t li = 0; int32_t nextpos = -1;
+    #define LC_STEP() do { if (li < lits.n) { int32_t p = FWD ? lits.v[li] : lits.v[lits.n - 1 - li]; \
+        cc += (uint32_t)uleb_len((uint32_t)(FWD ? p - base : base - p)) + 1u; base = p; nextpos = p; li++; } else nextpos = -1; } while (0)
+    #define EMIT_LIT(K) do { int32_t _k = (K); \
+        tmp.n = 0; put_uleb(&tmp, (uint32_t)(FWD ? _k - cprev : cprev - _k)); \
+        buf_write(content, tmp.d, tmp.n); for (size_t _i = 0; _i < tmp.n; _i++) buf_put(tags, 0); \
+        buf_put(content, o->diff[_k]); buf_put(tags, 0); cprev = _k; } while (0)
+    LC_STEP();   /* prime: read-ahead the first literal (mirror litcur_init) */
     FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, o, fp0, o->diff_len);
     while (fw_next(&w)) {
-        if (!w.is_field) { litcost_consume(&lc, &cc, w.pos); continue; }
-        if (w.ev.type == EV_SBL) {
-            if (FWD) for (int b = 0; b < 4; b++) litcost_consume(&lc, &cc, w.pos + b);
-            else     for (int b = 3; b >= 0; b--) litcost_consume(&lc, &cc, w.pos + b);
-        } else {
-            inj_push(&out, cc, w.ev.type, field_residual(w.ev.type, frm, (uint32_t)(fp0 + w.pos), w.ev.delta, mb, mv, mn));
-        }
+        if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
+            inj_push(out, cc, w.ev.type, (uint32_t)(fp0 + w.pos),
+                     field_residual(w.ev.type, frm, (uint32_t)(fp0 + w.pos), w.ev.delta, NULL, NULL, 0));
+        } else if (w.is_field) {   /* EV_SBL still-dirty window: its bytes ship as ordinary literals */
+            if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == nextpos) { EMIT_LIT(w.pos + b); LC_STEP(); } }
+            else     for (int b = 3; b >= 0; b--) { if (w.pos + b == nextpos) { EMIT_LIT(w.pos + b); LC_STEP(); } }
+        } else if (w.pos == nextpos) { EMIT_LIT(w.pos); LC_STEP(); }
     }
-    free(lits.v);
-    return out;
+    #undef LC_STEP
+    #undef EMIT_LIT
+    if (FWD)
+        for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+    free(lits.v); buf_free(&tmp);
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
@@ -316,8 +272,25 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const FieldDeltaVec *fd, const OpPC *pc, int W) {
     int FWD = g_enc_fwd;
     Buf content = {0}, tags = {0};
-    size_t *ends = NULL;
-    build_content(ops, from_size, to_size, &content, &tags, &ends);
+    size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
+    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
+    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    int32_t *tp0e = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));   /* to-image op starts (extras tag parity) */
+    { int32_t fp = 0, tp = 0;
+      for (size_t i = 0; i < ops->n; i++) {
+          fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj;
+          tp0e[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len;
+      } }
+    /* Fused build: one decoder-order walk per op emits content/tags AND records the field-injection
+     * cursors (Inj) in the same pass -- byte layout and cursors can never disagree by construction. */
+    for (size_t step = 0; step < ops->n; step++) {
+        size_t oi = FWD ? step : ops->n - 1 - step;
+        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
+        op_emit_content(&ops->v[oi], FWD, frm, from_size, fp0s[oi], tp0e[oi], fd, &ldr, &content, &tags, &inj[step]);
+        ends[step] = content.n;
+        free(ldr.v);
+    }
+    free(tp0e);
     uint8_t L0[256], L1[256];
     from_huff_lengths(frm, from_size, L0, L1);
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
@@ -326,16 +299,6 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, content.n, litbits, W, &kd, &cands, &ncand);
-    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
-    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    int32_t fp = 0;
-    for (size_t i = 0; i < ops->n; i++) { fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj; }
-    for (size_t step = 0; step < ops->n; step++) {
-        size_t oi = FWD ? step : ops->n - 1 - step;
-        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
-        inj[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr, NULL, NULL, 0);
-        free(ldr.v);
-    }
     /* ---- D1 shift map: fit from the op walk, build the residual-space injection variant. The
      * LZ parse is map-independent (inj values never touch content bytes), so the pipeline below
      * runs on the plain-delta inj; the map variant competes under the exact byte gate at the end. */
@@ -348,11 +311,11 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
       free(frs); }
     if (map_n > 0) {
         inj_m = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj_m));
-        for (size_t step = 0; step < ops->n; step++) {
-            size_t oi = FWD ? step : ops->n - 1 - step;
-            IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
-            inj_m[step] = op_delta_content_pos(&ops->v[oi], FWD, frm, from_size, fp0s[oi], fd, &ldr, map_b, map_v, map_n);
-            free(ldr.v);
+        for (size_t step = 0; step < ops->n; step++) {   /* residual-space variant: re-map each plain inj delta, no re-walk */
+            const InjVec *s = &inj[step];
+            for (size_t ii = 0; ii < s->n; ii++)
+                inj_push(&inj_m[step], s->v[ii].cc, s->v[ii].kind, s->v[ii].fpk,
+                         field_residual(s->v[ii].kind, frm, s->v[ii].fpk, s->v[ii].delta, map_b, map_v, map_n));
         }
     }
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
