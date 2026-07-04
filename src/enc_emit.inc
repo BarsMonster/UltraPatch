@@ -71,6 +71,26 @@ static void inj_push(InjVec *v, uint32_t cc, int kind, int64_t delta) {
     v->v[v->n++] = (Inj){cc, kind, delta};
 }
 
+/* Encoder literal-cost cursor: the single mirror of the decoder LitCur/litcur_step
+ * (patch_apply.h), accumulating each literal's wire cost (uLEB gap + 1 flag byte) in the
+ * decoder's consume order. Positions come from the ascending `lits` list; FWD walks it
+ * front-to-back with gaps measured from 0, grow back-to-front with gaps measured from dl. */
+typedef struct { const IVec *lits; int fwd; int32_t nextpos, base; size_t li; } LitCost;
+static void litcost_step(LitCost *c, uint32_t *cc) {
+    if (c->li < c->lits->n) {
+        int32_t p = c->fwd ? c->lits->v[c->li] : c->lits->v[c->lits->n - 1 - c->li];
+        *cc += (uint32_t)uleb_len((uint32_t)(c->fwd ? p - c->base : c->base - p)) + 1u;
+        c->base = p; c->nextpos = p; c->li++;
+    } else c->nextpos = -1;
+}
+static void litcost_init(LitCost *c, const IVec *lits, int fwd, int32_t dl, uint32_t *cc) {
+    c->lits = lits; c->fwd = fwd; c->base = fwd ? 0 : dl; c->li = 0; c->nextpos = -1;
+    litcost_step(c, cc);
+}
+static void litcost_consume(LitCost *c, uint32_t *cc, int32_t kk) {
+    if (kk == c->nextpos) litcost_step(c, cc);
+}
+
 static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
                                    int32_t fp0, const FieldDeltaVec *fd, const IVec *ldr,
                                    const uint32_t *mb, const int32_t *mv, int mn) {
@@ -78,53 +98,18 @@ static InjVec op_delta_content_pos(const Op *o, int FWD, const uint8_t *frm, uin
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
     InjVec out = {0};
     uint32_t cc = (uint32_t)uleb_len((uint32_t)lits.n);
-    if (FWD) {
-        size_t li_pf = 0;
-        int32_t nextpos = -1;
-        if (lits.n) {
-            cc += (uint32_t)uleb_len((uint32_t)lits.v[0]) + 1u;
-            nextpos = lits.v[0];
-            li_pf = 1;
+    LitCost lc;
+    litcost_init(&lc, &lits, FWD, o->diff_len, &cc);
+    if (!FWD) cc += (uint32_t)o->extra_len;   /* grow writes the el extras before the dl body */
+    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, o, fp0, o->diff_len);
+    while (fw_next(&w)) {
+        if (!w.is_field) { litcost_consume(&lc, &cc, w.pos); continue; }
+        if (w.ev.type == EV_SBL) {
+            if (FWD) for (int b = 0; b < 4; b++) litcost_consume(&lc, &cc, w.pos + b);
+            else     for (int b = 3; b >= 0; b--) litcost_consume(&lc, &cc, w.pos + b);
+        } else {
+            inj_push(&out, cc, w.ev.type, field_residual(w.ev.type, frm, (uint32_t)(fp0 + w.pos), w.ev.delta, mb, mv, mn));
         }
-#define CONSUME_F(KK) do { if ((KK) == nextpos) { if (li_pf < lits.n) { \
-            cc += (uint32_t)uleb_len((uint32_t)(lits.v[li_pf] - lits.v[li_pf - 1])) + 1u; \
-            nextpos = lits.v[li_pf++]; } else nextpos = -1; } } while (0)
-        for (int32_t k = 0; k < o->diff_len;) {
-            if (k + 4 <= o->diff_len) {
-                Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, k);
-                if (ev.type == EV_BL || ev.type == EV_EX) {
-                    inj_push(&out, cc, ev.type, field_residual(ev.type, frm, (uint32_t)(fp0 + k), ev.delta, mb, mv, mn));
-                    k += 4; continue; }
-                if (ev.type == EV_SBL) { for (int b = 0; b < 4; b++) CONSUME_F(k + b); k += 4; continue; }
-            }
-            CONSUME_F(k); k++;
-        }
-#undef CONSUME_F
-    } else {
-        size_t li_pf = 0;
-        int32_t nextpos = -1;
-        if (lits.n) {
-            cc += (uint32_t)uleb_len((uint32_t)(o->diff_len - lits.v[lits.n - 1])) + 1u;
-            nextpos = lits.v[lits.n - 1];
-            li_pf = 1;
-        }
-#define CONSUME_D(KK) do { if ((KK) == nextpos) { if (li_pf < lits.n) { \
-            size_t idx = lits.n - 1 - li_pf; \
-            cc += (uint32_t)uleb_len((uint32_t)(lits.v[idx + 1] - lits.v[idx])) + 1u; \
-            nextpos = lits.v[idx]; li_pf++; } else nextpos = -1; } } while (0)
-        cc += (uint32_t)o->extra_len;
-        for (int32_t k = o->diff_len - 1; k >= 0;) {
-            int32_t ks = k - 3;
-            if (ks >= 0) {
-                Event ev = classify_field(frm, from_size, fd, ldr, o, fp0, ks);
-                if (ev.type == EV_BL || ev.type == EV_EX) {
-                    inj_push(&out, cc, ev.type, field_residual(ev.type, frm, (uint32_t)(fp0 + ks), ev.delta, mb, mv, mn));
-                    k -= 4; continue; }
-                if (ev.type == EV_SBL) { for (int b = 3; b >= 0; b--) CONSUME_D(ks + b); k -= 4; continue; }
-            }
-            CONSUME_D(k); k--;
-        }
-#undef CONSUME_D
     }
     free(lits.v);
     return out;
