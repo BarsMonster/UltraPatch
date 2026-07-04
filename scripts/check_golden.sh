@@ -46,9 +46,13 @@ synth_journal_degrade $SFIX/synth_journal_degrade_from $SFIX/synth_journal_degra
 synth_unnatural_dir $SFIX/synth_unnatural_dir_from $SFIX/synth_unnatural_dir_to
 EOF
 
-(cd "$tmp" && sha256sum -- *.blob | sort -k2) > "$tmp/actual"
+(cd "$tmp" && for f in *.blob; do
+  printf '%s %s %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$(wc -c < "$f")" "$f"
+done | sort -k3) > "$tmp/actual"
 
 if [ "$MODE" = update ]; then
+  # Surface the wire delta before overwriting: identical => size/format-only change.
+  if diff -u "$MANIFEST" "$tmp/actual"; then echo "no wire change"; fi
   cp "$tmp/actual" "$MANIFEST"
   echo "golden manifest updated: $MANIFEST"
 elif diff -u "$MANIFEST" "$tmp/actual" >&2; then
