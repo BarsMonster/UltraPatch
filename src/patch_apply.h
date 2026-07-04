@@ -385,6 +385,9 @@ _Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reserva
 _Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
 _Static_assert(offsetof(Arena, apply.sab.sa) == JREGION && (offsetof(Arena, apply.sab.sa) & 3u)==0u,
                "SA must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
+_Static_assert(A1_MAX_IMAGE <= 0x7fffffffu, "A1_MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
+_Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
+_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 DRStream.K (else the REJ_RESOURCE refuse wraps)");
 static uint16_t g_jcount;
 static void jr_reset(void){ g_jcount=0; }
 /* Binary search on slot>>8 over [0, g_jcount). On a hit *at is the matching slot and the return
