@@ -117,7 +117,16 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     sc_erasecnt = (uint8_t *)calloc(sc_nrows ? sc_nrows : 1, 1);
     if (!sc_flash || !sc_erasecnt) return "selfcheck out of memory";
     if (from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
-    if (span > from_n) memset(sc_flash + from_n, 0xFF, span - from_n);
+    /* Fill the beyond-`from` span with a per-blob deterministic pseudo-random pattern, NOT 0xFF.
+     * An encoder out-match that reads not-yet-written output falls through to raw flash_read: with
+     * 0xFF pad it returns 0xFF on the emulator AND on 0xFF-erased firmware, so a broken blob passes
+     * here yet bricks the device once real flash diverges. Random bytes corrupt such a read so the
+     * decoder's CRC32(to) rejects it. LCG seeded from the two header CRCs (blob[0..7]) -> reproducible. */
+    if (span > from_n) {
+        uint32_t r = 0;
+        for (int k = 0; k < 8; k++) r = r * 1664525u + 1013904223u + blob[k];
+        for (uint32_t a = from_n; a < span; a++) { r = r * 1664525u + 1013904223u; sc_flash[a] = (uint8_t)(r >> 24); }
+    }
     sc_flash_n = span;
     sc_last_erow = 0; sc_edir = 0; sc_ecount = 0; sc_finv = 0;
 

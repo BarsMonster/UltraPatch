@@ -32,7 +32,11 @@ static void nvm_init(const uint8_t *from, uint32_t from_size, uint32_t span){
     g_flash_n = span;
     free(g_flash); g_flash = (uint8_t*)malloc(span?span:1);
     memcpy(g_flash, from, from_size);
-    if(span>from_size) memset(g_flash+from_size, 0xFF, span-from_size);
+    /* beyond-`from` span: deterministic pseudo-random pad, NOT 0xFF, so the gate legs catch the same
+     * blind spot as patch_selfcheck.c (a decode that reads not-yet-written output can't coast on the
+     * 0xFF that both this emulator and 0xFF-erased firmware would return). LCG seeded from from_size. */
+    if(span>from_size){ uint32_t r=from_size;
+        for(uint32_t a=from_size;a<span;a++){ r=r*1664525u+1013904223u; g_flash[a]=(uint8_t)(r>>24); } }
     g_erases = g_programs = 0; g_nrows = (span+NVM_ROW-1)/NVM_ROW;
     g_finv = 0; g_last_erow = 0; g_edir = 0; g_ecount = 0;
     free(g_erasecnt); g_erasecnt = (uint8_t*)calloc(g_nrows?g_nrows:1, 1);
