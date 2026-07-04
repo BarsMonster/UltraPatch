@@ -192,24 +192,44 @@ static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_
 
 typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
 
-/* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan. */
+/* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan,
+ * walking each op in APPLY direction (mirror op_delta_content_pos / the decoder replay:
+ * adjacent windows <4 B apart resolve to a different field set per direction). Entries
+ * stay in ascending-fpk order so an unchanged field set fits an identical map. */
 static FieldRef *collect_fields(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                 const FieldDeltaVec *fd, size_t *nout) {
+    int FWD = g_enc_fwd;
     FieldRef *out = NULL; size_t n = 0, cap = 0;
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         const Op *o = &ops->v[oi];
         IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
-        for (int32_t k = 0; k + 4 <= o->diff_len;) {
-            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
-            if (ev.type == EV_BL || ev.type == EV_EX) {
-                if (n == cap) { cap = cap ? cap * 2 : 256; out = (FieldRef *)xrealloc(out, cap * sizeof(*out)); }
-                out[n].kind = ev.type; out[n].fpk = (uint32_t)(fp0 + k); out[n].delta = ev.delta; n++;
-                k += 4; continue;
+#define PUSH_FIELD(EV, K) do { \
+        if (n == cap) { cap = cap ? cap * 2 : 256; out = (FieldRef *)xrealloc(out, cap * sizeof(*out)); } \
+        out[n].kind = (EV).type; out[n].fpk = (uint32_t)(fp0 + (K)); out[n].delta = (EV).delta; n++; } while (0)
+        if (FWD) {
+            for (int32_t k = 0; k + 4 <= o->diff_len;) {
+                Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+                if (ev.type == EV_BL || ev.type == EV_EX) { PUSH_FIELD(ev, k); k += 4; continue; }
+                if (ev.type == EV_SBL) { k += 4; continue; }
+                k++;
             }
-            if (ev.type == EV_SBL) { k += 4; continue; }
-            k++;
+        } else {
+            size_t n0 = n;
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+                    if (ev.type == EV_BL || ev.type == EV_EX) { PUSH_FIELD(ev, k); top -= 4; continue; }
+                    if (ev.type == EV_SBL) { top -= 4; continue; }
+                }
+                top--;
+            }
+            for (size_t a = n0, b = n; a + 1 < b; a++, b--) {   /* restore ascending fpk */
+                FieldRef t = out[a]; out[a] = out[b - 1]; out[b - 1] = t;
+            }
         }
+#undef PUSH_FIELD
         free(ldr.v);
         fp0 += o->diff_len + o->adj;
     }
@@ -819,6 +839,7 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
 static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                               uint32_t to_size, const FieldDeltaVec *fd, const OpPC *pc) {
     (void)to_size;
+    int FWD = g_enc_fwd;
     EncStats st = {0};
     int32_t fp0 = 0;
     st.ops = ops->n;
@@ -832,12 +853,25 @@ static EncStats collect_stats(const OpVec *ops, const uint8_t *frm, uint32_t fro
         st.extra_bytes += (size_t)o->extra_len;
         for (int32_t k = 0; k < o->diff_len; k++) st.literals += o->diff[k] != 0;
         IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
-        for (int32_t k = 0; k + 4 <= o->diff_len;) {
-            Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
-            if (ev.type == EV_BL) { st.bl_fields++; k += 4; continue; }
-            if (ev.type == EV_EX) { st.ex_fields++; k += 4; continue; }
-            if (ev.type == EV_SBL) { st.suppressed_bl++; k += 4; continue; }
-            k++;
+        if (FWD) {
+            for (int32_t k = 0; k + 4 <= o->diff_len;) {
+                Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+                if (ev.type == EV_BL) { st.bl_fields++; k += 4; continue; }
+                if (ev.type == EV_EX) { st.ex_fields++; k += 4; continue; }
+                if (ev.type == EV_SBL) { st.suppressed_bl++; k += 4; continue; }
+                k++;
+            }
+        } else {
+            for (int32_t top = o->diff_len - 1; top >= 0;) {
+                int32_t k = top - 3;
+                if (k >= 0) {
+                    Event ev = classify_field(frm, from_size, fd, &ldr, o, fp0, k);
+                    if (ev.type == EV_BL) { st.bl_fields++; top -= 4; continue; }
+                    if (ev.type == EV_EX) { st.ex_fields++; top -= 4; continue; }
+                    if (ev.type == EV_SBL) { st.suppressed_bl++; top -= 4; continue; }
+                }
+                top--;
+            }
         }
         free(ldr.v);
         fp0 += o->diff_len + o->adj;
