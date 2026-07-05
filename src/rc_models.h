@@ -66,20 +66,24 @@ static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i
  * (REJ_RESOURCE) above SMAP_CAP, and the encoder never emits more entries than this. */
 #define SMAP_CAP 48
 
-/* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by
- * agglomerative clustering of conditional literal histograms over surviving span literals
- * (corpus + one-face fixtures). ENCODING-AFFECTING: patch_apply and patch_generate share this
- * table (bit-exact wire). LIT0_CTX must equal 1 + max entry. ---- */
+/* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by a
+ * CODER-FAITHFUL objective (tools/lit0map_faithful.c): greedy coordinate descent that replays the
+ * ACTUAL shipped adaptive coder -- 5 even-parity from-image histogram-seeded BitTrees adapting at
+ * RC_LIT0_RATE in wire order -- over the surviving tag0 span literals of the full home + foreign
+ * corpora, accepting a row move only when it strictly cuts home bits and never raises foreign bits.
+ * Supersedes the static agglomerative-clustering map (a measured dead end: a static-entropy objective
+ * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: patch_apply and
+ * patch_generate share this table (bit-exact wire). LIT0_CTX must equal 1 + max entry. ---- */
 #define LIT0_CTX 5
 static const uint8_t LIT0_MAP[256] = {
-    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,1,0,
-    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
-    3,1,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,3,1,3,1,3,0,3,1,
-    3,3,3,3,3,3,3,0,3,3,3,0,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,3,3,3,0,
-    3,3,3,3,0,1,1,1,3,3,3,1,1,0,0,1,2,2,2,2,1,1,2,1,2,2,2,2,1,1,2,1,
-    0,0,0,0,0,0,0,0,2,1,0,1,0,0,1,1,0,0,0,0,0,1,0,0,0,0,1,0,0,1,1,0,
-    0,1,0,0,0,0,0,1,0,0,0,0,0,1,1,0,1,1,1,1,1,1,0,0,1,1,1,3,1,1,0,0,
-    0,0,0,0,0,0,0,0,0,1,1,0,1,0,0,0,2,1,0,1,0,1,0,4,0,0,0,0,0,0,0,0,
+    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,3,1,0,
+    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    3,1,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,0,1,1,3,1,3,1,0,3,0,1,0,0,3,1,
+    3,3,3,3,3,3,3,3,3,3,3,0,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,
+    3,3,3,3,1,1,3,0,3,3,3,1,3,3,3,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+    0,0,0,0,0,0,0,0,2,2,1,2,2,1,2,1,0,0,0,0,0,1,0,0,1,0,1,0,1,1,1,0,
+    2,0,0,1,0,0,0,2,0,0,0,0,0,2,2,0,1,1,1,1,1,1,0,2,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,
 };
 #define LIT0_SEL(p) (LIT0_MAP[(uint8_t)(p)])
 

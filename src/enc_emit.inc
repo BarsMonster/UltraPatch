@@ -653,21 +653,37 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          sel_inj, sel_b, sel_v, sel_n);
-    { const char *ldp = getenv("A1_LITDUMP");   /* scaffold: surviving span literals in wire order */
+    { const char *ldp = g_litdump ? getenv("A1_LITDUMP") : NULL;   /* scaffold: surviving span literals, wire order */
       if (ldp) {
         char fn[4096]; snprintf(fn, sizeof fn, "%s.%d.bin", ldp, (int)getpid());
         FILE *lf = fopen(fn, "ab");
         if (lf) {
-            uint8_t prevlit = 0; size_t pos = 0;
+            /* Even-parity from-image seed histogram, EXACTLY mirroring lit_tree_seed_e(parity 0):
+             * all 5 lit0 trees share this seed. hist[b] = 1 + #{i even : frm[i]==b}. */
+            uint32_t hist[256]; for (int i = 0; i < 256; i++) hist[i] = 1u;
+            for (uint32_t i = 0; i < from_size; i += 2u) hist[frm[i]]++;
+            /* Record count = surviving span literals (both tags; tag filtering is the tool's job).
+             * prevlit is the TRUE previous content-stream byte -- updated on EVERY token (span byte,
+             * backref, out-match copy), mirroring emit_body's order-1 tag0 context exactly. */
+            uint32_t nrec = 0;
+            for (size_t t = 0; t < seq.n; t++) if (seq.v[t].type == 'S') nrec += (uint32_t)seq.v[t].len;
+            /* Self-delimiting segment header (magic, version, nrec, 256xu32 hist) so a simulator can
+             * parse multiple back-to-back segments should a pid ever be reused across encodes. */
+            uint32_t hdr[3] = { 0x4C304631u /* "L0F1" */, 1u, nrec };
+            fwrite(hdr, 4, 3, lf);
+            fwrite(hist, 4, 256, lf);
+            uint8_t prevlit = 0;
             for (size_t t = 0; t < seq.n; t++) {
                 Token tk = seq.v[t];
                 if (tk.type == 'S') {
                     for (int32_t j2 = 0; j2 < tk.len; j2++) {
-                        uint8_t rec[3] = { prevlit, content.d[pos], tags.d[pos] };
+                        size_t cp = (size_t)tk.start + (size_t)j2;
+                        uint8_t rec[3] = { prevlit, content.d[cp], tags.d[cp] };
                         fwrite(rec, 1, 3, lf);
-                        prevlit = content.d[pos]; pos++;
+                        prevlit = content.d[cp];
                     }
-                } else pos += (size_t)tk.len;
+                }
+                if (tk.len > 0) prevlit = content.d[(size_t)tk.start + (size_t)tk.len - 1u];
             }
             fclose(lf);
         }
