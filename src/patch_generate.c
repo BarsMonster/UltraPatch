@@ -31,28 +31,23 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 /* PATHE_W / A1_* encoder mirrors and DR_KCAP_* are configured in patch_config.h. */
 /* DR_HIT_INIT is single-sourced in rc_models.h (shared by decoder dr_init and encoder dr_init_e). */
 
-/* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
- * Direction is an ENCODER CHOICE signaled in the envelope (natural = canonical size-delta
- * uLEB, unnatural = overlong marker) instead of being derived from the size relation;
- * encode_a1 runs the plan sweep in both directions and ships the smaller total. Every
- * pipeline stage reads this instead of comparing sizes. */
-static int g_enc_fwd = 1;
+typedef struct {
+    /* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
+     * Direction is an ENCODER CHOICE signaled in the envelope (natural = canonical size-delta
+     * uLEB, unnatural = overlong marker) instead of being derived from the size relation. */
+    int fwd;
 
-/* WIRE-NEUTRAL scaffold gate: when set, encode_body appends the surviving tag0/tag1 span-literal
- * stream (with a 256xu32 even-parity from-image seed histogram header) to $A1_LITDUMP.<pid>.bin for
- * the coder-faithful LIT0_MAP re-derivation tool (tools/lit0map_faithful.c). Off during the plan
- * sweep; encode_a1 sets it only for a single replay of the WINNING plan, so the dump reflects exactly
- * the literals that ship. Never affects emitted bytes. */
-static int g_litdump = 0;
+    /* WIRE-NEUTRAL scaffold gate: when set, encode_body appends the surviving tag0/tag1
+     * span-literal stream to $A1_LITDUMP.<pid>.bin for tools/lit0map_faithful.c. */
+    int litdump;
 
-/* Degradation instrumentation (host-side, WIRE-NEUTRAL: these never touch emitted bytes).
- * plan_encode resets them per plan attempt; the two degradation passes bump them; encode_a1
- * snapshots the WINNING plan's values into EncStats and prints one deterministic line under
- * A1_DEGRADE_STATS. No effect on the blob — verified by the golden gate. */
-static int    g_deg_engaged;      /* journal-budget degradation converted >=1 over-budget read */
-static size_t g_deg_pres_needed;  /* preserves the ideal (pre-degradation) plan required */
-static size_t g_deg_converted;    /* source bytes converted from journal reads to plain extras */
-static size_t g_opc_splits;       /* ops split because per-op corrections exceeded A1_OPC_CAP */
+    /* Degradation instrumentation (host-side, WIRE-NEUTRAL: these never touch emitted bytes).
+     * plan_encode resets them per plan attempt; encode_a1 snapshots the winning plan. */
+    int    deg_engaged;      /* journal-budget degradation converted >=1 over-budget read */
+    size_t deg_pres_needed;  /* preserves the ideal (pre-degradation) plan required */
+    size_t deg_converted;    /* source bytes converted from journal reads to plain extras */
+    size_t opc_splits;       /* ops split because per-op corrections exceeded A1_OPC_CAP */
+} EncCtx;
 
 /* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting build
  * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in patch_config.h;
@@ -64,8 +59,8 @@ static size_t g_opc_splits;       /* ops split because per-op corrections exceed
  * at read time the uncommitted set always includes rows within (depth-1) of row(t)
  * (conservative by one extra row at row starts). Covered reads return the pristine old
  * byte via plain flash_read — no journal slot, no [P] event, no conversion needed. */
-static int a1_row_covered(int64_t a, int64_t t) {
-    if (g_enc_fwd) return a / A1_OUTROW >= t / A1_OUTROW - (A1_ROW_DEPTH - 1);
+static int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
+    if (ctx->fwd) return a / A1_OUTROW >= t / A1_OUTROW - (A1_ROW_DEPTH - 1);
     return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
 }
 
@@ -98,8 +93,8 @@ typedef struct {
 /* enc_*.inc modules included below. This keeps the single-TU whole-program optimization   */
 /* and byte-exact wire, keeps test/model_diff.c's `#include "patch_generate.c"` and         */
 /* scripts/check_analyze.sh working unchanged, and gives each subsystem its own file.       */
-/* The modules are NOT standalone TUs: they share the prologue above and reference each      */
-/* other, so the include ORDER is the historical top-to-bottom order and must be preserved.  */
+/* The modules are NOT standalone TUs: they share the prologue above, pass EncCtx for        */
+/* attempt-scoped encoder state, and reference each other in the preserved include order.    */
 /* ------------------------------------------------------------------------------------- */
 #include "enc_util.inc"     /* util/IO, allocators, a1_sort, Buf, crc32, varints           */
 #include "enc_elf.inc"      /* ELF32 range extraction                                      */

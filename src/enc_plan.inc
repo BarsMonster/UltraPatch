@@ -5,7 +5,7 @@
  * A1 host encoder module -- plan/degrade: degrade_ops_to_journal_budget, plan_encode.
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
@@ -23,13 +23,13 @@
  * overwritten read still goes through the journal — the invariant that keeps the wire
  * independent of the deployment's NVM row size. Correctness of the transformed plan is
  * still proven per blob by the reference-decoder self-verification. */
-static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t from_size,
+static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to, uint32_t from_size,
                                           uint32_t to_size, size_t budget) {
-    int FWD = g_enc_fwd;
-    uint8_t *pres = preserve_indices(ops, from_size, to_size);
+    int FWD = ctx->fwd;
+    uint8_t *pres = preserve_indices(ctx, ops, from_size, to_size);
     size_t total = 0;
     for (uint32_t wi = 0; wi < to_size; wi++) total += pres[wi];
-    g_deg_pres_needed = total;
+    ctx->deg_pres_needed = total;
     if (total <= budget) { free(pres); return; }
     /* cutoff C = position of the first preserve past the budget, in apply order. pres[] is
      * indexed by apply-order write index: wi == position for FWD, to_size-1-wi for grow. */
@@ -58,7 +58,7 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
             int hz = a >= 0 &&
                      (FWD ? (a < (int64_t)to_size && a >= C)
                           : (a < (int64_t)from_size && a <= C)) &&
-                     !a1_row_covered(a, t);
+                     !a1_row_covered(ctx, a, t);
             if (!hz) { k++; continue; }
             int32_t rs = k;
             while (k < dl) {
@@ -66,14 +66,14 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
                 hz = a >= 0 &&
                      (FWD ? (a < (int64_t)to_size && a >= C)
                           : (a < (int64_t)from_size && a <= C)) &&
-                     !a1_row_covered(a, t);
+                     !a1_row_covered(ctx, a, t);
                 if (!hz) break;
                 k++;
             }
             opvec_push(&out, op_copy(rs - seg, o->diff + seg, k - rs,
                                      to->d + (size_t)tp0 + (size_t)rs, k - rs));
-            g_deg_engaged = 1;
-            g_deg_converted += (size_t)(k - rs);
+            ctx->deg_engaged = 1;
+            ctx->deg_converted += (size_t)(k - rs);
             seg = k;
             split_any = 1;
         }
@@ -97,10 +97,10 @@ static void degrade_ops_to_journal_budget(OpVec *ops, const Buf *to, uint32_t fr
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
 typedef struct { int variant, fuzz; } PlanCfg;
 
-static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+static Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                        PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
     int variant = cfg.variant;
-    g_deg_engaged = 0; g_deg_pres_needed = 0; g_deg_converted = 0; g_opc_splits = 0;
+    ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks,
@@ -108,10 +108,10 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
-    split_nonzero_diff_runs(&ops, &from_df, &to_df);
+    split_nonzero_diff_runs(ctx, &ops, &from_df, &to_df);
     if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
-    coerce_reloc_literals(&ops, from->d, from_size, to_size, &fd);
-    degrade_ops_to_journal_budget(&ops, to, from_size, to_size, A1_JSLOTS);
+    coerce_reloc_literals(ctx, &ops, from->d, from_size, to_size, &fd);
+    degrade_ops_to_journal_budget(ctx, &ops, to, from_size, to_size, A1_JSLOTS);
     /* corrections-cap degradation (same philosophy as the journal budget): OPC_CAP bounds
      * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
      * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
@@ -120,13 +120,13 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
      * computes exactly the untransformed plan (bit-identical wire). */
     uint8_t *presset, *corr; OpPC *pc;
     for (int pass = 0;; pass++) {
-        presset = preserve_indices(&ops, from_size, to_size);
-        corr = corrections_hybrid(&ops, from->d, to->d, &fd, from_size, to_size, presset);
-        pc = preserve_corr_per_op(&ops, from_size, to_size, presset, corr);
+        presset = preserve_indices(ctx, &ops, from_size, to_size);
+        corr = corrections_hybrid(ctx, &ops, from->d, to->d, &fd, from_size, to_size, presset);
+        pc = preserve_corr_per_op(ctx, &ops, from_size, to_size, presset, corr);
         size_t old_n = ops.n;                               /* pc[] is sized for THIS op count */
         int split_any = 0;
         if (pass < 12) {
-            int FWDD = g_enc_fwd;
+            int FWDD = ctx->fwd;
             int32_t *cut = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
             for (size_t i = 0; i < ops.n; i++) cut[i] = -1;
             for (size_t step = 0; step < ops.n; step++) {
@@ -138,7 +138,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
                 if (m <= 0 || m >= dl) m = dl / 2;
                 if (m <= 0 || m >= dl) continue;
                 cut[oi] = m;
-                g_opc_splits++;
+                ctx->opc_splits++;
                 split_any = 1;
             }
             if (split_any) {
@@ -174,10 +174,10 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
       fp_start_s = fold_zero_ops(&ops, ea, sk);
       free(ea); free(sk); }
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
-    st_out->deg_engaged = g_deg_engaged;
-    st_out->deg_pres_needed = g_deg_pres_needed;
-    st_out->deg_converted = g_deg_converted;
-    st_out->opc_splits = g_opc_splits;
+    st_out->deg_engaged = ctx->deg_engaged;
+    st_out->deg_pres_needed = ctx->deg_pres_needed;
+    st_out->deg_converted = ctx->deg_converted;
+    st_out->opc_splits = ctx->opc_splits;
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
     int feasible = 1;
@@ -186,7 +186,7 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
       if (tpres > A1_JSLOTS) feasible = 0; }
     Buf body = {0};
     if (feasible) {
-        body = encode_body(&ops, from->d, from_size, to->d, to_size, &fd, pc);
+        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc);
         if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
@@ -203,4 +203,3 @@ static Buf plan_encode(const Buf *from, const Buf *to, const Ranges *fr, const R
     *fp_start_out = fp_start_s;
     return body;
 }
-

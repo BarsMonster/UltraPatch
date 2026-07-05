@@ -5,7 +5,7 @@
  * A1 host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl, raw bits, gamma).
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */

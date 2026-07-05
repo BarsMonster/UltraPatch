@@ -10,7 +10,7 @@ Production code lives under `src/`, with third-party code under `vendor/`:
 - `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`,
   including the host NVM emulator.
 - `src/patch_generate.c`: host-side C encoder. It is a single translation unit
-  assembled as a thin umbrella: a shared prologue (typedefs + file-scope state)
+  assembled as a thin umbrella: a shared prologue (typedefs + explicit `EncCtx`)
   followed by an ordered `#include` of the `src/enc_*.inc` subsystem modules
   (`enc_util`, `enc_elf`, `enc_bsdiff`, `enc_field`, `enc_rc`, `enc_lz`,
   `enc_emit`, `enc_plan`, `enc_cli`). The single-TU shape preserves whole-program

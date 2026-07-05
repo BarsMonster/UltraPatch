@@ -5,7 +5,7 @@
  * A1 host encoder module -- CLI: encode_a1, main (RC_V3_ENC_MAIN).
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
@@ -33,6 +33,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
+    EncCtx ctx = {0};
     Buf body = {0}; int32_t fp_end_s = 0; int32_t fp_start_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
     size_t best_tot = 0;
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
@@ -48,10 +49,11 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
         if (pass && bestv >= 0 && !st.deg_engaged) break;
-        g_enc_fwd = (dir == 0);
+        ctx.fwd = (dir == 0);
+        ctx.litdump = 0;
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0, fps = 0; EncStats stv = {0};
-            Buf b = plan_encode(&from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
+            Buf b = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
@@ -69,10 +71,10 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * file holds exactly the tag0/tag1 span literals that ship (the sweep above ran with dumping off,
      * so loser configs never pollute it). Deterministic replay reproduces the identical body. */
     if (getenv("A1_LITDUMP")) {
-        g_enc_fwd = (best_desc == 0); g_litdump = 1;
+        ctx.fwd = (best_desc == 0); ctx.litdump = 1;
         int32_t fpe = 0, fps = 0; EncStats stv = {0};
-        Buf rb = plan_encode(&from, &to, &fr, &tr, PLANS[bestv], &fpe, &fps, &stv);
-        buf_free(&rb); g_litdump = 0;
+        Buf rb = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[bestv], &fpe, &fps, &stv);
+        buf_free(&rb); ctx.litdump = 0;
     }
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */

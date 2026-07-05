@@ -5,7 +5,7 @@
  * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections.
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
@@ -207,9 +207,9 @@ typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
  * walking each op in APPLY direction (mirror op_emit_content / the decoder replay:
  * adjacent windows <4 B apart resolve to a different field set per direction). Entries
  * stay in ascending-fpk order so an unchanged field set fits an identical map. */
-static FieldRef *collect_fields(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+static FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                 const FieldDeltaVec *fd, size_t *nout) {
-    int FWD = g_enc_fwd;
+    int FWD = ctx->fwd;
     FieldRef *out = NULL; size_t n = 0, cap = 0;
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
@@ -395,9 +395,9 @@ static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const
     return out;
 }
 
-static void coerce_reloc_literals(OpVec *ops, const uint8_t *frm, uint32_t from_size,
+static void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                   uint32_t to_size, const FieldDeltaVec *fd) {
-    int FWD = g_enc_fwd; (void)to_size;
+    int FWD = ctx->fwd; (void)to_size;
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
@@ -469,7 +469,7 @@ static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], u
  * exact raw geometry code lengths. */
 enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
-static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) {
+static void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
     from_lit_proxy_bits(from->d, from->n, L0, L1);
     OpVec out = {0};
@@ -528,7 +528,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
                                     runs[j].end - runs[j].begin, L0, L1);
         }
         const uint64_t XF = extra_proxy_bits(to, tp + o->diff_len, o->extra_len, L0, L1);
-        const int FWD = g_enc_fwd;
+        const int FWD = ctx->fwd;
 #define DIFFBITS(P, E, ENDPOS, SEG) \
         (uleb_proxy_bits(CNT[E] - CNT[P], L0) + \
          ((E) > (P) ? (FWD ? uleb_proxy_bits((uint32_t)(runs[P].begin - (SEG)), L0) \
@@ -589,8 +589,8 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
     *ops = out;
 }
 
-static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t to_size) {
-    int FWD = g_enc_fwd;
+static uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size) {
+    int FWD = ctx->fwd;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
     for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
     int32_t tp = 0, fp = 0;
@@ -602,7 +602,7 @@ static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t 
                 int32_t t = tp + k;
                 /* a read behind the frontier that the row window covers reads OLD flash
                  * directly — it must not force a journal entry. */
-                if ((FWD ? a < t : a > t) && a1_row_covered(a, t)) continue;
+                if ((FWD ? a < t : a > t) && a1_row_covered(ctx, a, t)) continue;
                 if (FWD) { if (readarr[a] < t) readarr[a] = t; }
                 else { if (readarr[a] > t) readarr[a] = t; }
             }
@@ -653,10 +653,10 @@ static uint8_t *preserve_indices(const OpVec *ops, uint32_t from_size, uint32_t 
     return pres;
 }
 
-static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+static uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
                                    const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
                                    const uint8_t *presset) {
-    int FWD = g_enc_fwd;
+    int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
     typedef struct { int32_t tp, fp; const Op *o; } M;
@@ -702,7 +702,7 @@ static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const u
         else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) { \
                  int _beh = FWD ? (_fp < _tp) : (_fp > _tp); \
                  src = jhas[_fp] ? jval[_fp] \
-                     : ((_beh && a1_row_covered(_fp, _tp)) ? frm[_fp] : buf[_fp]); } \
+                     : ((_beh && a1_row_covered(ctx, _fp, _tp)) ? frm[_fp] : buf[_fp]); } \
                produced = (uint8_t)((DB) + src); } \
         uint8_t want = true_to[_tp]; \
         uint8_t c = (uint8_t)(want - produced); \
@@ -728,9 +728,9 @@ static uint8_t *corrections_hybrid(const OpVec *ops, const uint8_t *frm, const u
     return corr;
 }
 
-static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+static OpPC *preserve_corr_per_op(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size,
                                   const uint8_t *presset, const uint8_t *corr) {
-    int FWD = g_enc_fwd; (void)from_size; (void)to_size;
+    int FWD = ctx->fwd; (void)from_size; (void)to_size;
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
     typedef struct { int32_t tp, fp; const Op *o; size_t orig; } M;
     M *m = (M *)xmalloc(ops->n * sizeof(*m));
@@ -772,4 +772,3 @@ static OpPC *preserve_corr_per_op(const OpVec *ops, uint32_t from_size, uint32_t
     free(m);
     return out;
 }
-

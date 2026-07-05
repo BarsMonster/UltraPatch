@@ -5,7 +5,7 @@
  * A1 host encoder module -- minimal ELF32 range extraction (elf_ranges, largest_code_range/largest_data_range, find_data_offset_in_bin).
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
@@ -178,4 +178,3 @@ static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which
     free(sh); free(syms.v); free(funcs.v); free(objs.v); buf_free(&e);
     return r;
 }
-

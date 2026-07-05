@@ -5,7 +5,7 @@
  * A1 host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
  * Part of the single translation unit rooted at src/patch_generate.c, which
  * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, file-scope state) and on symbols
+ * it relies on the shared prologue (typedefs, EncCtx) and on symbols
  * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
  * wire and model_diff.c's #include "patch_generate.c".
  */
@@ -495,10 +495,10 @@ static int smap_eq(const uint32_t *ab, const int32_t *av, int an,
     return 1;
 }
 
-static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+static Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc) {
-    int FWD = g_enc_fwd;
+    int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
@@ -538,7 +538,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     InjVec *inj_m = NULL, *inj_m2 = NULL;
     int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
     { size_t nfr = 0;
-      FieldRef *frs = collect_fields(ops, frm, from_size, fd, &nfr);
+      FieldRef *frs = collect_fields(ctx, ops, frm, from_size, fd, &nfr);
       if (nfr) {
           map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
           map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
@@ -653,7 +653,7 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          sel_inj, sel_b, sel_v, sel_n);
-    { const char *ldp = g_litdump ? getenv("A1_LITDUMP") : NULL;   /* scaffold: surviving span literals, wire order */
+    { const char *ldp = ctx->litdump ? getenv("A1_LITDUMP") : NULL;   /* scaffold: surviving span literals, wire order */
       if (ldp) {
         char fn[4096]; snprintf(fn, sizeof fn, "%s.%d.bin", ldp, (int)getpid());
         FILE *lf = fopen(fn, "ab");
@@ -695,4 +695,3 @@ static Buf encode_body(const OpVec *ops, const uint8_t *frm, uint32_t from_size,
     free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
-
