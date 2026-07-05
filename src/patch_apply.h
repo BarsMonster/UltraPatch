@@ -250,19 +250,21 @@ static uint32_t s_unary(uint16_t*u,uint32_t clampmax,uint32_t cap){
     uint32_t cl=0; while(s_bit(&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
     return cl;
 }
-/* shared mantissa: read `cnt` adaptive bits MSB-first from the per-clamped-position priors row[], the
- * m[UG_C(cl)] row already selected by caller. */
-static uint32_t s_ug_mant(uint16_t*row,int cnt){
-    uint32_t v=0; for(int pos=0;pos<cnt;pos++) v|=(uint32_t)s_bit(&row[UG_C(pos)])<<(cnt-1-pos);
+/* shared mantissa: read `cnt` adaptive bits MSB-first (significance-descending) from priors row[],
+ * the m[UG_C(cl)] row already selected by caller. lsb!=0 (rice) anchors the ctx on significance from
+ * the LSB (UG_C(sig)) so the LSB gets ctx 0 and the wide MSBs share the clamp; lsb==0 (gamma) keeps
+ * MSB-anchored UG_C(cnt-1-sig)==UG_C(pos). Bit order on the wire stays MSB-first either way. */
+static uint32_t s_ug_mant(uint16_t*row,int cnt,int lsb){
+    uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(&row[UG_C(lsb?sig:cnt-1-sig)])<<sig;
     return v;
 }
 static uint32_t s_ug_rice(UGRice*g){
     uint32_t cl=s_unary(g->u,UG_CTX,RC_RICE_UNARY_MAX);
-    return (cl<<g->k) | s_ug_mant(g->m[UG_C((int)cl)],g->k);
+    return (cl<<g->k) | s_ug_mant(g->m[UG_C((int)cl)],g->k,1);
 }
 static uint32_t s_ug_gamma(UGGamma*g){
     int cl=(int)s_unary(g->u,UG_CTX,RC_UNARY_MAX);
-    return ((1u<<cl) | s_ug_mant(g->m[UG_C(cl)],cl)) - 1u;
+    return ((1u<<cl) | s_ug_mant(g->m[UG_C(cl)],cl,0)) - 1u;
 }
 /* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / IdxUnary / idx_init are single-sourced
  * in rc_models.h (encoder mirror). The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
