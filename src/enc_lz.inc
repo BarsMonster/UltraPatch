@@ -213,8 +213,8 @@ static uint32_t ug_price(const UGE *g, uint32_t v) {
         cl = v >> g->k;
         for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
         cost += bit_price(g->u[ug_c((int)cl)], 0);
-        for (int pos = 0; pos < g->k; pos++)
-            cost += bit_price(g->m[ug_c((int)cl)][ug_c(pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
+        for (int pos = 0; pos < g->k; pos++)  /* rice: LSB-anchored ctx, mirror ug_encode */
+            cost += bit_price(g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
     } else {
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;

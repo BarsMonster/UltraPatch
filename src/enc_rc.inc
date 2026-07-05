@@ -119,7 +119,7 @@ static void ug_encode(UGE *g, REnc *r, uint32_t v) {
         cl = v >> g->k;
         for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, RC_S_BIT_RATE);
         re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
-        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c(pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);
+        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);  /* rice: LSB-anchored ctx */
     } else {
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
