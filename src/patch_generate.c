@@ -48,6 +48,13 @@ int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
  * pipeline stage reads this instead of comparing sizes. */
 static int g_enc_fwd = 1;
 
+/* WIRE-NEUTRAL scaffold gate: when set, encode_body appends the surviving tag0/tag1 span-literal
+ * stream (with a 256xu32 even-parity from-image seed histogram header) to $A1_LITDUMP.<pid>.bin for
+ * the coder-faithful LIT0_MAP re-derivation tool (tools/lit0map_faithful.c). Off during the plan
+ * sweep; encode_a1 sets it only for a single replay of the WINNING plan, so the dump reflects exactly
+ * the literals that ship. Never affects emitted bytes. */
+static int g_litdump = 0;
+
 /* Degradation instrumentation (host-side, WIRE-NEUTRAL: these never touch emitted bytes).
  * plan_encode resets them per plan attempt; the two degradation passes bump them; encode_a1
  * snapshots the WINNING plan's values into EncStats and prints one deterministic line under

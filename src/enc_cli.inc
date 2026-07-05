@@ -65,6 +65,15 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
+    /* WIRE-NEUTRAL scaffold: re-run the WINNING plan once with the literal dump enabled so the dump
+     * file holds exactly the tag0/tag1 span literals that ship (the sweep above ran with dumping off,
+     * so loser configs never pollute it). Deterministic replay reproduces the identical body. */
+    if (getenv("A1_LITDUMP")) {
+        g_enc_fwd = (best_desc == 0); g_litdump = 1;
+        int32_t fpe = 0, fps = 0; EncStats stv = {0};
+        Buf rb = plan_encode(&from, &to, &fr, &tr, PLANS[bestv], &fpe, &fps, &stv);
+        buf_free(&rb); g_litdump = 0;
+    }
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
     if (getenv("A1_DEGRADE_STATS"))
