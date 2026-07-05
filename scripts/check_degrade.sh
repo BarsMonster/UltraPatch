@@ -95,8 +95,8 @@ bad()  { echo "DEGRADE FAILURE: $*" >&2; fail=$((fail+1)); }
 # The decoder mirrors these; keep the asserts self-documenting. Derive the journal-degradation
 # budget from the decoder's RC_JSLOTS_DEFAULT rather than hand-mirroring it.
 JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0-9]*\)u\?.*/\1/p' \
-  "$(dirname "$0")/../src/rc_models.h" | head -1)
-[ -n "$JBUDGET" ] || { echo "check_degrade: RC_JSLOTS_DEFAULT not found in src/rc_models.h" >&2; exit 2; }
+  "$(dirname "$0")/../src/patch_config.h" | head -1)
+[ -n "$JBUDGET" ] || { echo "check_degrade: RC_JSLOTS_DEFAULT not found in src/patch_config.h" >&2; exit 2; }
 
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
 # production D=2 build. Same source (patch_apply_demo.c), its own binary. Used only to prove

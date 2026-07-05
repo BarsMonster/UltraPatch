@@ -21,6 +21,8 @@ Production code lives under `src/`, with third-party code under `vendor/`:
   `hy_enc` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
 - `src/rc_models.h`: shared wire-model constants and packed model helpers.
+- `src/patch_config.h`: shared build-time configuration defaults and encoder/decoder
+  mirror knobs.
 
 Build and smoke-test:
 
@@ -68,7 +70,8 @@ CI verifies the tracked corpus with `make check-assets` before the same
 
 Device integration contract:
 
-- Include `src/patch_apply.h` in exactly one update module.
+- Include `src/patch_apply.h` in exactly one update module, with `src/rc_models.h`
+  and `src/patch_config.h` available on the include path.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write(uint32_t, uint8_t)`.
 - Authenticate the update, then run the WHOLE blob through

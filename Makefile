@@ -6,7 +6,7 @@ CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
 # Target-family wire contract: CORTEX_M0 must be defined for BOTH the encoder and the
-# decoder TU (rc_models.h #errors without it). CORTEX_M4 is reserved (future wire).
+# decoder TU (patch_config.h #errors without it). CORTEX_M4 is reserved (future wire).
 CFLAGS += -DCORTEX_M0
 CFLAGS += -g
 CFLAGS += -Wall
@@ -24,7 +24,8 @@ CFLAGS += -Ivendor/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
-APPLY_HDR := src/patch_apply.h src/rc_models.h
+CONFIG_HDR := src/patch_config.h
+APPLY_HDR := src/patch_apply.h src/rc_models.h $(CONFIG_HDR)
 ADAPTER_HDR := src/patch_apply_push_adapter.h
 # Shared host-side NVM emulator, #included by patch_selfcheck.c (in hy_enc) and
 # patch_apply_demo.c (hy_dec) before their patch_apply.h.
@@ -34,7 +35,7 @@ NVM_EMU := src/nvm_emu.inc
 # Listed here so editing any module re-triggers every target that compiles the encoder.
 ENC_MODULES := src/enc_util.inc src/enc_elf.inc src/enc_bsdiff.inc src/enc_field.inc \
                src/enc_rc.inc src/enc_lz.inc src/enc_emit.inc src/enc_plan.inc src/enc_cli.inc
-GEN_HDR := src/rc_models.h src/arm_cortex_m4.h $(ENC_MODULES)
+GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h $(ENC_MODULES)
 ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
 

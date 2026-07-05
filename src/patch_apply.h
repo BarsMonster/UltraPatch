@@ -70,12 +70,7 @@ static uint32_t g_from_size, g_to_size, g_fp_end;
 static int32_t  g_fp_start;
 static uint32_t g_want_to;     /* CRC32(to) read from the header; verified over the final image */
 static int      g_FWD;
-/* plausibility cap on header sizes (was the host wrapper's gate; now enforced in-decoder).
- * Also pins the "image sizes < 2^31" design invariant every 32-bit overflow guard relies on.
- * -D overridable: a deployment (or the fuzz harness) may tighten it to its real flash size. */
-#ifndef A1_MAX_IMAGE
-#define A1_MAX_IMAGE (64u<<20)
-#endif
+/* A1_MAX_IMAGE is configured in patch_config.h. */
 
 /* ===================================================================================== */
 /* byte source: the integrator supplies a (possibly blocking) callback and calls           */
@@ -294,15 +289,7 @@ static uint32_t crc32_flash(uint32_t n){
 /* Caps are corpus-peak + margin; over-cap input is REJECTED (CRC-gated, never silent-wrong), not
  * applied. All -D overridable (#ifndef) so a deployment with a known firmware family can re-tune
  * them; raising a cap costs SRAM and must be followed by the release gate. */
-#ifndef DR_KCAP_BL
-#define DR_KCAP_BL  RC_DR_KCAP_BL_DEFAULT   /* default value in rc_models.h (encoder mirror: same default) */
-#endif
-#ifndef DR_KCAP_EX
-#define DR_KCAP_EX  RC_DR_KCAP_EX_DEFAULT   /* default value in rc_models.h (encoder mirror: same default) */
-#endif
-#ifndef OPC_CAP
-#define OPC_CAP RC_OPC_CAP_DEFAULT          /* default value in rc_models.h (encoder mirror: A1_OPC_CAP) */
-#endif
+/* DR_KCAP_* and OPC_CAP are configured in patch_config.h. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
@@ -315,19 +302,14 @@ typedef struct {
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } DRStream;
 
-#ifndef JSLOTS
-#define JSLOTS RC_JSLOTS_DEFAULT             /* default value in rc_models.h. The ENCODER mirrors this budget
-                                              * (A1_JSLOTS in patch_generate) and DEGRADES over-budget
-                                              * plans host-side (over-budget reads ship as extra bytes),
-                                              * so a valid blob never exceeds it; an over-cap stream
-                                              * still refuses cleanly here (REJ_RESOURCE). */
-#endif
+/* JSLOTS is configured in patch_config.h. The ENCODER mirrors this budget
+ * (A1_JSLOTS in patch_generate) and DEGRADES over-budget plans host-side
+ * (over-budget reads ship as extra bytes), so a valid blob never exceeds it;
+ * an over-cap stream still refuses cleanly here (REJ_RESOURCE). */
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
-/* LZSS window W (defined here so SA can size the apply phase). Default value in rc_models.h
- * (RC_WINDOW_LOG_DEFAULT) keeps the decoder within the 12 KiB SRAM cap; the encoder PATHE_W MUST match this SA_W. */
-#ifndef SA_W
-#define SA_W RC_WINDOW_LOG_DEFAULT
-#endif
+/* LZSS window W (defined here so SA can size the apply phase). Default value in patch_config.h
+ * keeps the decoder within the 12 KiB SRAM cap; the encoder PATHE_W MUST match this SA_W. */
+/* SA_W is configured in patch_config.h. */
 #define SA_RING (1u<<SA_W)
 #define SA_MASK (SA_RING-1u)
 /* SA = the whole apply-phase working set (defined here so the ARENA union below can embed it as a
@@ -436,13 +418,7 @@ static int32_t smap_at(uint32_t x){ return rc_smap_at(g_smap_b, g_smap_v, (int)g
 /* nvm_rows_amplified=0); reads of the dirty buffered row are served from RAM. Source reads of */
 /* not-yet-overwritten flash go straight to physical flash (free). 256 B SRAM.                */
 /* ===================================================================================== */
-#ifndef OUTROW
-#ifdef NVM_ROW
-#define OUTROW NVM_ROW
-#else
-#define OUTROW RC_OUTROW_DEFAULT   /* shared default in rc_models.h (encoder mirror: A1_OUTROW) */
-#endif
-#endif
+/* OUTROW is configured in patch_config.h (encoder mirror: A1_OUTROW). */
 /* Row-window depth — keep the last OUTROW_DEPTH rows uncommitted. Monotonic writes touch
  * rows in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (row_number % D) is an
  * exact FIFO: the slot's previous occupant is always the row exactly D rows behind,
@@ -454,9 +430,7 @@ static int32_t smap_at(uint32_t x){ return rc_smap_at(g_smap_b, g_smap_v, (int)g
  * uncommitted window is a superset (larger aligned rows and/or a deeper ring) still decodes
  * correctly — old bytes survive strictly longer than the encoder assumed; a smaller window
  * rejects via CRC32(to), never silent-wrong. */
-#ifndef OUTROW_DEPTH
-#define OUTROW_DEPTH RC_ROW_DEPTH_DEFAULT   /* shared default in rc_models.h (encoder mirror: A1_ROW_DEPTH) */
-#endif
+/* OUTROW_DEPTH is configured in patch_config.h (encoder mirror: A1_ROW_DEPTH). */
 static uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
 #define OROW_NONE UINT32_MAX
 static uint32_t g_orow_base[OUTROW_DEPTH];   /* resident row base per slot, or OROW_NONE */
@@ -1128,6 +1102,14 @@ static inline int patch_apply_reject(void){ return g_reject; }
  * (still bootable, safe to retry after fixing the cause), 1 = image partially overwritten
  * (bootloader recovery required). Same unused-static-inline compile-out as patch_apply_reject. */
 static inline int patch_apply_flash_touched(void){ return g_flash_touched; }
+
+/* Parsed patch geometry/state after a completed run. These keep host harnesses and
+ * integrations from depending on decoder global names while still compiling out when unused. */
+static inline uint32_t patch_apply_from_size(void){ return g_from_size; }
+static inline uint32_t patch_apply_to_size(void){ return g_to_size; }
+static inline uint32_t patch_apply_image_span(void){ return g_image_span; }
+static inline int patch_apply_forward(void){ return g_FWD; }
+static inline uint32_t patch_apply_journal_used(void){ return g_jcount; }
 
 /* ===================================================================================== */
 /* DEVICE static measurement: exported entry point so arm-none-eabi-size sees the real      */

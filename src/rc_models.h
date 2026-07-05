@@ -14,19 +14,7 @@
 #define RC_MODELS_H
 #include <stdint.h>
 #include <string.h>
-
-/* ---- target-family wire contract ----
- * The A1 wire is target-family-specific. CORTEX_M0 (Thumb-1/ARMv6-M, the implemented
- * family) must be defined for BOTH the encoder and the decoder TU — this header is
- * included by both, so a missing define fails BOTH builds and an encoder/decoder pair
- * can never silently disagree about the family. CORTEX_M4 is RESERVED for a future
- * Thumb-2 wire revision and MAY change the wire format (accepted by design). */
-#if !defined(CORTEX_M0) && !defined(CORTEX_M4)
-#error "define CORTEX_M0 for both the encoder and the decoder build (CORTEX_M4 is reserved)"
-#endif
-#ifdef CORTEX_M4
-#error "CORTEX_M4 is reserved for a future wire revision; only CORTEX_M0 is implemented"
-#endif
+#include "patch_config.h"
 
 #define RC_KTOP (1u<<24)
 #define RC_PBIT 4096u
@@ -261,23 +249,5 @@ static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++
 /* Header raw k-field width: the distance rice parameter kd and (when out-matches are enabled) the
  * out-position rice parameter ko each ship as a fixed RC_KFIELD_BITS-bit raw field. */
 #define RC_KFIELD_BITS 4
-
-/* ---- decoder resource-cap / window DEFAULTS. ONE default site; each TU keeps its own
- * -D-overridable knob (decoder JSLOTS, OPC_CAP, DR_KCAP_BL/EX, SA_W; encoder A1_JSLOTS, A1_OPC_CAP, PATHE_W)
- * that falls back to the value here. BUILD CONTRACT: a deployment that -D-retunes the decoder caps
- * must retune the encoder mirrors identically, or the round-trip breaks. Caps are corpus-peak +
- * margin; over-cap input is REJECTED on-device (CRC-gated, never silent-wrong), not applied. ---- */
-#define RC_JSLOTS_DEFAULT      768u   /* journal slot capacity (home-corpus peak 478; out-of-corpus headroom) */
-#define RC_OPC_CAP_DEFAULT     80     /* per-op correction cap (corpus peak 68; +12 margin) */
-#define RC_DR_KCAP_BL_DEFAULT  208    /* max distinct bl delta values (corpus peak 180; +28 margin) */
-#define RC_DR_KCAP_EX_DEFAULT  128    /* max distinct ex delta values (corpus peak 106; +22 margin) */
-#define RC_WINDOW_LOG_DEFAULT  10     /* LZSS window log2: ring 2^W. W=10 (ring 1024) keeps the decoder within 12 KiB SRAM */
-
-/* NVM row-window DEFAULTS (row size x depth). The decoder window may legitimately be a SUPERSET of
- * the encoder's assumption (monotone compatibility — see docs/device-integration.md "NVM row
- * window"), so decoder OUTROW/OUTROW_DEPTH and encoder A1_OUTROW/A1_ROW_DEPTH stay SEPARATELY
- * overridable; only their shared DEFAULT lives here. */
-#define RC_OUTROW_DEFAULT      256u
-#define RC_ROW_DEPTH_DEFAULT   2u
 
 #endif

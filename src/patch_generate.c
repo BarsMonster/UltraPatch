@@ -28,17 +28,7 @@ extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
 
 int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 
-/* PATHE_W: compile-time window-log mirror -- the encoder window. MUST equal the decoder SA_W;
- * -D-overridable exactly like every other mirror knob and single-sources the default value. */
-#ifndef PATHE_W
-#define PATHE_W RC_WINDOW_LOG_DEFAULT
-#endif
-#ifndef DR_KCAP_BL
-#define DR_KCAP_BL RC_DR_KCAP_BL_DEFAULT   /* mirrors decoder DR_KCAP_BL (default value in rc_models.h) */
-#endif
-#ifndef DR_KCAP_EX
-#define DR_KCAP_EX RC_DR_KCAP_EX_DEFAULT   /* mirrors decoder DR_KCAP_EX (default value in rc_models.h) */
-#endif
+/* PATHE_W / A1_* encoder mirrors and DR_KCAP_* are configured in patch_config.h. */
 /* DR_HIT_INIT is single-sourced in rc_models.h (shared by decoder dr_init and encoder dr_init_e). */
 
 /* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
@@ -65,14 +55,8 @@ static size_t g_deg_converted;    /* source bytes converted from journal reads t
 static size_t g_opc_splits;       /* ops split because per-op corrections exceeded A1_OPC_CAP */
 
 /* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting build
- * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in rc_models.h;
+ * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in patch_config.h;
  * kept SEPARATELY overridable from the decoder knobs (a decoder window may legitimately be a superset). */
-#ifndef A1_OUTROW
-#define A1_OUTROW RC_OUTROW_DEFAULT
-#endif
-#ifndef A1_ROW_DEPTH
-#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
-#endif
 
 /* Row-window oracle: is source address a — already logically overwritten — still OLD in
  * physical flash when the decoder produces output position t? The decoder keeps the last
@@ -86,14 +70,8 @@ static int a1_row_covered(int64_t a, int64_t t) {
 }
 
 /* Decoder resource-cap mirrors — MUST match patch_apply JSLOTS / OPC_CAP (a deployment that
- * -D-retunes the decoder caps must retune these identically). Shared DEFAULT in rc_models.h.
+ * -D-retunes the decoder caps must retune these identically). Shared DEFAULT in patch_config.h.
  * A1_JSLOTS is also the journal budget for plan degradation (degrade_ops_to_journal_budget). */
-#ifndef A1_JSLOTS
-#define A1_JSLOTS RC_JSLOTS_DEFAULT
-#endif
-#ifndef A1_OPC_CAP
-#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
-#endif
 
 enum { STREAM_DATA, STREAM_CODE, STREAM_BL, STREAM_LDR, STREAM_N };
 

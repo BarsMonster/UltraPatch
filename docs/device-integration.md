@@ -14,6 +14,8 @@ Include `src/patch_apply.h` in exactly one translation unit. The header
 owns decoder static state: entropy models, the journal arena, and the output
 row cache. There is no coroutine, no fiber, and no private decode stack — the
 decode runs on the caller's stack.
+Keep `src/rc_models.h` and `src/patch_config.h` on the include path; they are
+part of the decoder source artifact.
 
 The target must provide exactly two flash primitives:
 
@@ -212,12 +214,16 @@ path.
 ## Build-Time Contract
 
 **Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
-build and the decoder TU — `rc_models.h` fails the build with a clear `#error`
+build and the decoder TU — `patch_config.h` fails the build with a clear `#error`
 without it, so an encoder/decoder pair can never silently disagree about the
 target family. `CORTEX_M0` selects the implemented Thumb-1/ARMv6-M wire and
 compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
 is reserved for a future Thumb-2 wire revision; it may change the wire format
 and is currently rejected at compile time.
+
+All build-time defaults and encoder/decoder mirror knobs live in
+`src/patch_config.h`; `src/rc_models.h` contains the wire models that consume
+that configuration.
 
 The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
 `PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.
