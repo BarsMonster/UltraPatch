@@ -142,8 +142,6 @@ static uint32_t crc32_buf(const uint8_t *p, size_t n) {
     return c ^ 0xffffffffu;
 }
 
-static uint32_t zz32(int32_t v) { return v >= 0 ? ((uint32_t)v << 1) : (((uint32_t)(-v) << 1) - 1u); }
-
 static int bitlen32(uint32_t v) {
     int n = 0;
     do { n++; v >>= 1; } while (v);
@@ -157,12 +155,6 @@ static void put_uleb(Buf *b, uint32_t v) {
         buf_put(b, v ? (uint8_t)(x | 0x80u) : x);
         if (!v) break;
     }
-}
-
-static int uleb_len(uint32_t v) {
-    int n = 1;
-    while (v >>= 7) n++;
-    return n;
 }
 
 /* uLEB with one redundant trailing continuation byte — value-identical, non-canonical.
@@ -267,4 +259,3 @@ static const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int
     }
     return NULL;
 }
-

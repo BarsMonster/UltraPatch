@@ -44,7 +44,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * degrade — so pruning halves encode time with byte-identical home output. A clean
      * natural winner that would still lose to the flip is unobserved in any corpus; if one
      * exists, the cost is a slightly larger blob, never a bad one. */
-    int natdir = (to_size > from_size) ? 1 : 0;
+    int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
         if (pass && bestv >= 0 && !st.deg_engaged) break;
@@ -58,8 +58,8 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
              * varint, and the UNNATURAL direction pays the 1-byte overlong marker. The 7B
              * initial-seek varint (fp_start) rides both directions equally, so it does not
              * shift the argmin — accounted in the emitted blob, omitted from this comparison. */
-            size_t tot = b.n + (dir ? (size_t)uleb_len(zz32(fpe - (int32_t)from_size)) : 0u)
-                             + (((to_size > from_size) ? 1 : 0) != dir ? 1u : 0u);
+            size_t tot = b.n + (dir ? (size_t)rc_uleb_len(rc_zz32(fpe - (int32_t)from_size)) : 0u)
+                             + (rc_dir_is_natural(from_size, to_size, dir) ? 0u : 1u);
             if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
             else buf_free(&b);
         }
@@ -80,7 +80,7 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
         fprintf(stderr,
                 "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
                 best_desc ? "bwd" : "fwd",
-                best_desc == (to_size > from_size ? 1 : 0),
+                rc_dir_is_natural(from_size, to_size, best_desc),
                 st.deg_engaged, st.deg_pres_needed, st.deg_converted, st.opc_splits, sweep_opc_splits,
                 (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
     Buf blob = {0};
@@ -97,20 +97,20 @@ static void encode_a1(const char *from_dir, const char *to_dir, const char *blob
      * The apply direction rides the same field: the NATURAL direction (descending iff growing)
      * is the canonical encoding — byte-identical to the historical envelope — and the unnatural
      * direction is one redundant continuation byte (overlong uLEB, value-neutral). */
-    { uint32_t zd = zz32((int32_t)to_size - (int32_t)from_size);
-      if (best_desc == (to_size > from_size ? 1 : 0)) put_uleb(&blob, zd);
+    { uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
+      if (rc_dir_is_natural(from_size, to_size, best_desc)) put_uleb(&blob, zd);
       else put_uleb_overlong(&blob, zd); }
     /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
      * grow (!FWD) direction. For FWD the decoder computes s->fp incrementally from 0, so fp_end is
      * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
      * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
-    if (best_desc) put_uleb(&blob, zz32(fp_end_s - (int32_t)from_size));
+    if (best_desc) put_uleb(&blob, rc_zz32(fp_end_s - (int32_t)from_size));
     /* Feature 7B: initial source seek (fp_start). Zero-output pure-seek ops are folded off the wire
      * (so `nops` can go and the decoder frontier-terminates); a LEADING zero-op's seek is carried
      * here instead. Seeds the FWD source walk (was implicitly 0) and is the grow landing point
      * (grow's final fp must equal it). Almost always 0 (1 byte) — a leading zero-op is rare. Shipped
      * for BOTH directions, right after the (grow-only) fp_end field. */
-    put_uleb(&blob, zz32(fp_start_s));
+    put_uleb(&blob, rc_zz32(fp_start_s));
     /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
      * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
      * information, so it is dropped from the wire.

@@ -306,7 +306,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
             re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
             oy_cost += bit_price(outb, 1); oy_n++;
             re_bit(&r, &outb, 1, RC_S_BIT_RATE);
-            { uint32_t zv = zz32((int32_t)((uint32_t)t.dist - oexp));
+            { uint32_t zv = rc_zz32((int32_t)((uint32_t)t.dist - oexp));
               op_cost += ug_price(&go, zv); op_n++;
               ug_encode(&go, &r, zv);
               oexp = pt->fwd ? (uint32_t)t.dist + (uint32_t)t.len
@@ -348,7 +348,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     pt->outb_no  = on_n ? (uint32_t)(on_cost / on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
-    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&go, zz32(256));
+    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&go, rc_zz32(256));
     pt->go = go; pt->glo = glo;
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&lit0[c], (uint8_t)b);
@@ -655,7 +655,7 @@ static int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
         uint32_t exp = oexp0;
         for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'O') {
             any = 1;
-            uint32_t v = zz32((int32_t)((uint32_t)tv->v[i].dist - exp));
+            uint32_t v = rc_zz32((int32_t)((uint32_t)tv->v[i].dist - exp));
             exp = fwd ? (uint32_t)tv->v[i].dist + (uint32_t)tv->v[i].len
                       : (uint32_t)tv->v[i].dist - (uint32_t)tv->v[i].len;
             c += (v >> k) + 1u + (uint32_t)k;

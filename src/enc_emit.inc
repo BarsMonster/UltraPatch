@@ -48,12 +48,12 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     int32_t exstart = tp0 + o->diff_len;
     if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
         for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-    uint32_t cc = (uint32_t)uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len);
+    uint32_t cc = (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len);
     int32_t base = FWD ? 0 : o->diff_len;   /* read-ahead gap base (next uncoded literal) */
     int32_t cprev = FWD ? 0 : o->diff_len;  /* emitted-literal gap base */
     size_t li = 0; int32_t nextpos = -1;
     #define LC_STEP() do { if (li < lits.n) { int32_t p = FWD ? lits.v[li] : lits.v[lits.n - 1 - li]; \
-        cc += (uint32_t)uleb_len((uint32_t)(FWD ? p - base : base - p)) + 1u; base = p; nextpos = p; li++; } else nextpos = -1; } while (0)
+        cc += (uint32_t)rc_uleb_len((uint32_t)(FWD ? p - base : base - p)) + 1u; base = p; nextpos = p; li++; } else nextpos = -1; } while (0)
     #define EMIT_LIT(K) do { int32_t _k = (K); \
         tmp.n = 0; put_uleb(&tmp, (uint32_t)(FWD ? _k - cprev : cprev - _k)); \
         buf_write(content, tmp.d, tmp.n); for (size_t _i = 0; _i < tmp.n; _i++) buf_put(tags, 0); \
@@ -78,7 +78,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
 static void bv_encode(BitTree *t, REnc *r, int64_t x) {
-    uint32_t v = zz32((int32_t)x);
+    uint32_t v = rc_zz32((int32_t)x);
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
         v >>= 7;
@@ -144,7 +144,7 @@ static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     ug_encode(&M->gdl, r, (uint32_t)o->diff_len);
     ug_encode(&M->gel, r, (uint32_t)o->extra_len);
-    ug_encode(&M->gadj, r, zz32(o->adj));
+    ug_encode(&M->gadj, r, rc_zz32(o->adj));
     ug_encode(&M->pgn, r, (uint32_t)pc->pres.n);
     int32_t prev = 0;
     for (size_t i = 0; i < pc->pres.n; i++) { ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
@@ -235,7 +235,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
           uint32_t gap = mb[i] - prev;
           ug_encode(&M.gdl, &rc, i ? gap - 1u : gap);
           prev = mb[i];
-          ug_encode(&M.gadj, &rc, zz32(mv[i]));
+          ug_encode(&M.gadj, &rc, rc_zz32(mv[i]));
       } }
     /* re-init the borrowed models to their apply-phase state (clear map pollution + apply seed_cont),
      * mirroring the ugg_init/ugg_seed_cont(&M_gdl,&M_gadj) in decode_body before its token loop. */
@@ -267,7 +267,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         else if (cur.type == 'O') { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
             re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; \
             re_bit(&rc, &M.outb, 1, RC_S_BIT_RATE); \
-            ug_encode(&M.go, &rc, zz32((int32_t)((uint32_t)cur.dist - oexp))); \
+            ug_encode(&M.go, &rc, rc_zz32((int32_t)((uint32_t)cur.dist - oexp))); \
             oexp = FWD ? (uint32_t)cur.dist + (uint32_t)cur.len : (uint32_t)cur.dist - (uint32_t)cur.len; \
             ug_encode(&M.glo, &rc, (uint32_t)cur.len - RC_OUTMATCH_MIN); tok_mode = 'R'; tok_left = cur.len; } \
         else { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
@@ -348,7 +348,7 @@ static uint64_t px_bt(BitTree *t, uint8_t byte) {
 }
 /* zigzag-uLEB escape value through dval (mirror bv_encode) */
 static uint64_t px_bv(BitTree *t, int64_t x) {
-    uint32_t v = zz32((int32_t)x);
+    uint32_t v = rc_zz32((int32_t)x);
     uint64_t c = 0;
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
@@ -393,7 +393,7 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
         uint32_t gap = mb[i] - prev;
         bits += gammalen_u32((i ? gap - 1u : gap) + 1u);
         prev = mb[i];
-        bits += gammalen_u32(zz32(mv[i]) + 1u);
+        bits += gammalen_u32(rc_zz32(mv[i]) + 1u);
     }
     return bits * PR_SCALE;
 }

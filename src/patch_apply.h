@@ -120,16 +120,14 @@ static int env_u32le(uint32_t*out){
 static int env_uleb_ov(uint32_t*out, uint8_t*ov){
     uint32_t v=0; int sh=0, n=0; uint8_t b;
     do{ if(sh>28||!env_byte(&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
-    *ov=(uint8_t)(n>1 && b==0u);
+    *ov=(uint8_t)rc_uleb_overlong(n,b);
     *out=v; return 1;
 }
 static int env_uleb(uint32_t*out){ uint8_t ov; return env_uleb_ov(out, &ov); }
 /* zigzag-uLEB absolute around `base` (to_size and fp_end are delta-coded vs from_size). */
 static int env_zz_abs(uint32_t base, uint32_t*out){
     uint32_t z; if(!env_uleb(&z)) return 0;
-    if(z&1u){ uint32_t m=(z>>1)+1u; if(m>base) return 0; *out=base-m; }
-    else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||base>A1_MAX_IMAGE-d) return 0; *out=base+d; }
-    return 1;
+    return rc_zz_abs(base,z,A1_MAX_IMAGE,out);
 }
 
 /* divide-free range decoder reading through the (possibly blocking) byte source. */
@@ -198,8 +196,8 @@ static int s_bt(BitTree*t,int rate){
     return m-256;
 }
 static int32_t bb_unzz(uint32_t u){
-    if(u==0xffffffffu){ g_rcerr=1; return 0; }
-    return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
+    if(!rc_unzz32_valid(u)){ g_rcerr=1; return 0; }
+    return rc_unzz32_value(u);
 }
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
 static int32_t s_bv(BitTree*t,int rate){
@@ -238,7 +236,7 @@ static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
  * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
  * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
 static void ugg_seed_cont(UGGamma*g,int depth){
-    for(int i=0;i<depth && i<=UG_CTX;i++) g->u[i]=(uint16_t)(RC_PBIT/16);  /* low p == bit1(continue) cheap */
+    rc_seed_cont_u(g->u,UG_CTX,depth);  /* low p == bit1(continue) cheap */
 }
 /* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
  * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
@@ -362,7 +360,7 @@ typedef struct {
 #define ARENA_BYTES (JREGION + SA_ARENA)
 /* One ARENA, two DISJOINT phase lifetimes overlaid as a union (standard C, no pointer casts):
  *  - seed  (decode_header ONLY): the flash parity histograms hist0/hist1 + the 512-word scratch w
- *           that lit_tree_from_hist folds into the M_lit* trees. Exactly 4096 B.
+ *           that rc_lit_tree_from_hist folds into the M_lit* trees. Exactly 4096 B.
  *  - apply (jr_reset onward): the flat journal slots jbuf (JREGION) then the SA working set.
  * The seed phase completes INSIDE decode_header and its result is copied into the M_lit* statics
  * before rc_init/jr_reset ever touch the apply member, so the two lifetimes never overlap. sab
@@ -999,7 +997,7 @@ static int __attribute__((noinline)) decode_header(void){
       g_FWD=!desc; }
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped for both directions right after
      * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
-    { uint32_t z2; if(!env_uleb(&z2)) return 0;
+    { uint32_t z2; if(!env_uleb(&z2) || z2==0xffffffffu) return 0;
       g_fp_start=(z2&1u)? -(int32_t)((z2>>1)+1u) : (int32_t)(z2>>1); }
     g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_want_to=want_to;
     g_image_span = fs>ts ? fs : ts;
@@ -1093,9 +1091,7 @@ static int decode_body(void){
 /* public API: patch_apply_run(callback, ctx) -> DONE / ERROR                              */
 /* ===================================================================================== */
 static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
-    for(int s=0;s<256;s++) w[256+s]=hist[s];
-    for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++) bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
+    rc_lit_tree_from_hist(t,hist,w);
 }
 
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob

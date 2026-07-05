@@ -95,10 +95,8 @@ static void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t
     uint32_t hist[256], w[512];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
-    for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
-    for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
     memset(t->p, 0, sizeof t->p);
-    for (int m = 1; m < 256; m++) bt_set(t, m - 1, rc_lit_seed_prob(w[2*m], w[m]));   /* mirror of decoder lit_tree_from_hist */
+    rc_lit_tree_from_hist(t, hist, w);   /* mirror of decoder lit_tree_from_hist */
 }
 
 static void ug_init_e(UGE *g, char code, int k) {
@@ -110,7 +108,7 @@ static int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
 
 /* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
 static void ug_seed_cont_e(UGE *g, int depth) {
-    for (int i = 0; i < depth && i <= UG_CTX; i++) g->u[i] = (uint16_t)(RC_PBIT / 16);
+    rc_seed_cont_u(g->u, UG_CTX, depth);
 }
 
 static void ug_encode(UGE *g, REnc *r, uint32_t v) {
@@ -138,4 +136,3 @@ static void idx_encode(IdxUnary *g, REnc *r, uint32_t v) {
 
 /* order-2 token flag: the Flag1 struct + fl_init are single-sourced in rc_models.h (decoder mirror). */
 static void fl_encode(Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
-

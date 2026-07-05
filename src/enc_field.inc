@@ -541,7 +541,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
             /* terminal (no further split): the historical DP(nr, p) row */
             uint64_t v = dz_bits_u32((uint32_t)(o->diff_len - seg)) +
                          dz_bits_u32((uint32_t)o->extra_len) +
-                         dz_bits_u32(zz32(o->adj)) + 2 +
+                         dz_bits_u32(rc_zz32(o->adj)) + 2 +
                          DIFFBITS(p, nr, o->diff_len, seg) + XF;
             int32_t take = -1;
             /* downward scan mirrors the historical backward recurrence: at each s the
@@ -551,7 +551,7 @@ static void split_nonzero_diff_runs(OpVec *ops, const Buf *from, const Buf *to) 
                 int32_t len = runs[s].end - runs[s].begin;
                 uint64_t c = dz_bits_u32((uint32_t)(runs[s].begin - seg)) +
                              dz_bits_u32((uint32_t)len) +
-                             dz_bits_u32(zz32(len)) + 2 +
+                             dz_bits_u32(rc_zz32(len)) + 2 +
                              DIFFBITS(p, s, runs[s].begin, seg) + X[s] +
                              E[s + 1];
                 if (c + SPLIT_GAIN_MARGIN_BITS < v) { v = c; take = (int32_t)s; }
