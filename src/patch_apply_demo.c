@@ -69,11 +69,12 @@ int main(int argc,char**argv){
 
     /* the decoder drives; the callback serves blob bytes. byte_mode routes through the
      * push adapter (tiny ring, one byte fed per wait) as the streaming proof. */
+    PatchApply pa;
     int rc;
     if(byte_mode){
         uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0};
         patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc);
-        rc=patch_apply_run(patch_ring_next,&ring);
+        rc=patch_apply_run(&pa, patch_ring_next,&ring);
         if(rc==PATCH_APPLY_DONE){
             if(fc.feeds!=(long)bsz){
                 fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes\n",fc.feeds,bsz);
@@ -82,14 +83,14 @@ int main(int argc,char**argv){
             fprintf(stderr,"adapter streaming OK: %ld single-byte feeds over %ld blob bytes\n",fc.feeds,bsz);
         }
     } else {
-        PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(pull_next,&pc);
+        PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(&pa, pull_next,&pc);
     }
-    if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(); if(!rj) rj=REJ_CORRUPT;
+    if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(&pa); if(!rj) rj=REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         fclose(mf); free(sc_flash); free(blob); return 1; }
     /* decode succeeded: the decoder owns the true sizes (envelope-parsed + CRC-gated). */
-    uint32_t to_size=patch_apply_to_size(), span=patch_apply_image_span();
+    uint32_t to_size=patch_apply_to_size(&pa), span=patch_apply_image_span(&pa);
 #ifdef RC_V3_BAKEDUMP
     { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(sc_flash,1,to_size,f); fclose(f); } }
 #endif
@@ -102,7 +103,7 @@ int main(int argc,char**argv){
     if(fwrite(sc_flash,1,to_size,mf)!=to_size){ fclose(mf); free(sc_flash); free(blob); return 1; }
     fflush(mf);
     if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
-    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward()?"fwd":"bwd",(unsigned)patch_apply_journal_used(),(unsigned)JSLOTS);
+    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&pa),(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
             nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),span,(span+255)/256);
     fclose(mf); free(blob);

@@ -6,7 +6,7 @@ CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
 # Target-family wire contract: CORTEX_M0 must be defined for BOTH the encoder and the
-# decoder TU (patch_config.h #errors without it). CORTEX_M4 is reserved (future wire).
+# decoder TU. CORTEX_M4 is reserved (future wire).
 CFLAGS += -DCORTEX_M0
 CFLAGS += -g
 CFLAGS += -Wall
@@ -25,7 +25,7 @@ CFLAGS += $(CFLAGS_EXTRA)
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
-APPLY_HDR := src/patch_apply.h src/rc_models.h $(CONFIG_HDR)
+APPLY_HDR := src/patch_apply.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
 # Shared host-side NVM emulator, #included by patch_selfcheck.c (in hy_enc) and
 # patch_apply_demo.c (hy_dec) before their patch_apply.h.
@@ -52,7 +52,7 @@ BASE_FULL_TOTAL ?= 4150978
 BASE_FOREIGN_TOTAL ?= 1333398
 BASE_ONEFACE_GROW ?= 572
 BASE_ONEFACE_REVERT ?= 285
-BASE_ARM_TEXT ?= 5944
+BASE_ARM_TEXT ?= 6237
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 11360
 BASE_ARM_SOFT_DIV ?= 1
@@ -71,7 +71,7 @@ BASE_STACK_CEIL_O2 ?= 480
 # an explicit error instead of a bare status 124. One-off override (never commit a
 # longer default): A1_TIMEOUT=<secs> make <target>.
 A1_TIMEOUT ?= 60
-CAPPED := all check check-arm check-stack check-stack-qemu check-assets \
+CAPPED := all check check-arm check-stack check-stack-qemu check-assets check-decoder-contract \
           check-malformed check-corpus check-edge check-degrade check-golden \
           check-models golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -115,7 +115,11 @@ check-arm-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DCORTEX_M0 -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o"; \
+	{ printf '%s\n' '#include "patch_apply.h"'; \
+	  printf '%s\n' 'static PatchApply g_patch_apply_state;'; \
+	  printf '%s\n' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }'; \
+	} > "$$tmp/patch_apply_arm.c"; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DCORTEX_M0 -I src -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -144,13 +148,40 @@ check-stack-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O2 -DCORTEX_M0 -DRC_V3_ARM -I src -x c -c src/patch_apply.h -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
+	{ printf '%s\n' '#include "patch_apply.h"'; \
+	  printf '%s\n' 'static PatchApply g_patch_apply_state;'; \
+	  printf '%s\n' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }'; \
+	} > "$$tmp/patch_apply_arm.c"; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O2 -DCORTEX_M0 -I src -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack.txt"; \
 	cat "$$tmp/stack.txt"; \
 	echo "stack_ceiling_o2=$(BASE_STACK_CEIL_O2)"; \
 	bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack.txt"); \
 	test -n "$$bound"; \
 	test "$$bound" -le "$(BASE_STACK_CEIL_O2)"
+
+check-decoder-contract-internal:
+	@set -e; \
+	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/patch_apply.h; then \
+		echo "patch_apply.h must be self-contained and not include project headers" >&2; exit 1; \
+	fi; \
+	if grep -nE '\b(malloc|calloc|realloc|free)[[:space:]]*\(' src/patch_apply.h; then \
+		echo "patch_apply.h must not use dynamic memory" >&2; exit 1; \
+	fi; \
+	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' src/patch_apply.h; then :; else \
+		echo "patch_apply.h must not declare file-scope static variables" >&2; exit 1; \
+	fi; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	{ printf '%s\n' '#include <stdint.h>'; \
+	  printf '%s\n' '#include "patch_apply.h"'; \
+	  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
+	  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
+	  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
+	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
+	} > "$$tmp/smoke.c"; \
+	$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$tmp/smoke.c" -o "$$tmp/smoke.o"; \
+	echo "decoder_contract=OK"
 
 check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
@@ -270,7 +301,7 @@ check-corpus-internal: all-internal check-assets-internal
 # (measured ~29 s at 32 jobs, incl. the folded-in foreign lineage). Builds up-front, then runs
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
-# check-malformed, check-edge, check-degrade, check-golden, check-models, check-arm
+# check-malformed, check-edge, check-degrade, check-golden, check-models, check-decoder-contract, check-arm
 # (sizes + divide policy), check-stack, and the FULL 256-pair corpus matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, foreign_total vs BASE_FOREIGN_TOTAL,
 # foreign 34/34 round-trips, NVM write-safety, journal peak — check-corpus; the
@@ -282,7 +313,7 @@ check-corpus-internal: all-internal check-assets-internal
 gate-internal: all-internal model_diff
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-arm + check-stack + check-corpus..."; \
+	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-decoder-contract + check-arm + check-stack + check-corpus..."; \
 	$(MAKE) --no-print-directory check-assets-internal >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
 	$(MAKE) --no-print-directory check-internal >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
 	$(MAKE) --no-print-directory check-malformed-internal >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
@@ -290,10 +321,11 @@ gate-internal: all-internal model_diff
 	$(MAKE) --no-print-directory check-degrade-internal >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
 	$(MAKE) --no-print-directory check-golden-internal >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
 	$(MAKE) --no-print-directory check-models-internal >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
+	$(MAKE) --no-print-directory check-decoder-contract-internal >"$$tmp/dec_contract.txt" 2>&1 & p_dec_contract=$$!; \
 	$(MAKE) --no-print-directory check-arm-internal >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
 	$(MAKE) --no-print-directory check-stack-internal >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
 	$(MAKE) --no-print-directory check-corpus-internal >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
-	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_a $$p_st $$p_m; do \
+	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_dec_contract $$p_a $$p_st $$p_m; do \
 		wait $$p || rc=1; \
 	done; \
 	echo "==================== A1 GATE ========================="; \
@@ -303,6 +335,7 @@ gate-internal: all-internal model_diff
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
 	sed -n 's/^model_diff=/model diff              : /p' "$$tmp/mdl.txt"; \
+	sed -n 's/^decoder_contract=/decoder contract        : /p' "$$tmp/dec_contract.txt"; \
 	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_bigspan=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
@@ -329,6 +362,7 @@ gate-internal: all-internal model_diff
 		echo "------------------ check-degrade ------------------"; cat "$$tmp/dg.txt"; \
 		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
 		echo "------------------ check-models ------------------"; cat "$$tmp/mdl.txt"; \
+		echo "------------------ check-decoder-contract ------------------"; cat "$$tmp/dec_contract.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
 		if [ -s "$$tmp/m.txt" ]; then \

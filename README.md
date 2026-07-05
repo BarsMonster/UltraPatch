@@ -4,7 +4,7 @@ Final A1 firmware patcher for the Sensor Watch target.
 
 Production code lives under `src/`, with third-party code under `vendor/`:
 
-- `src/patch_apply.h`: reusable header-only streaming in-place decoder.
+- `src/patch_apply.h`: reusable self-contained header-only streaming in-place decoder.
 - `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
   (ISR push) producers; not part of the device decoder artifact.
 - `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`,
@@ -20,9 +20,10 @@ Production code lives under `src/`, with third-party code under `vendor/`:
 - `src/patch_selfcheck.c`: reference-decoder self-verification built into
   `hy_enc` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
-- `src/rc_models.h`: shared wire-model constants and packed model helpers.
-- `src/patch_config.h`: shared build-time configuration defaults and encoder/decoder
-  mirror knobs.
+- `src/rc_models.h`: encoder-side wire-model constants and packed model helpers,
+  mirrored inside the self-contained decoder header.
+- `src/patch_config.h`: encoder-side build-time configuration defaults and mirror knobs,
+  also mirrored inside the self-contained decoder header.
 
 Build and smoke-test:
 
@@ -47,7 +48,8 @@ elsewhere.
 The expected corpus contents are pinned by `test-bench/corpus.sha256`; `make gate`
 runs `make check-assets` before the matrix so a stale or partial corpus fails
 early.
-`make gate` also runs `make check-malformed` (a deterministic reject-regression
+`make gate` also runs `make check-decoder-contract` (single-header/no-globals/no-heap
+decoder API contract), `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, appended garbage, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
 random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
@@ -70,16 +72,16 @@ CI verifies the tracked corpus with `make check-assets` before the same
 
 Device integration contract:
 
-- Include `src/patch_apply.h` in exactly one update module, with `src/rc_models.h`
-  and `src/patch_config.h` available on the include path.
+- Include only `src/patch_apply.h` in an update module and allocate a caller-owned
+  `PatchApply` state object.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write(uint32_t, uint8_t)`.
 - Authenticate the update, then run the WHOLE blob through
-  `patch_apply_run(callback, ctx)` — the callback serves blob bytes (it may
+  `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
   block internally) and the return is the verdict. The decoder parses the
   envelope and verifies both CRC gates itself; there is no coroutine/fiber.
   Event-driven producers adapt via `src/patch_apply_push_adapter.h`.
-- The decoder is single-instance and non-reentrant; see
+- Do not run concurrent decodes against the same flash image; see
   `docs/device-integration.md` before wiring it into a bootloader.
 
 ## License

@@ -8,14 +8,14 @@
 #define PATCH_APPLY_PUSH_ADAPTER_H
 /*
  * OPTIONAL push->pull adapter for event-driven producers. patch_apply.h exposes ONE decode
- * entry point, patch_apply_run(callback, ctx), which pulls blob bytes and may block. A
+ * entry point, patch_apply_run(state, callback, ctx), which pulls blob bytes and may block. A
  * producer that instead PUSHES bytes as they arrive (a UART/BLE RX interrupt, a radio event
  * handler) adapts through this single-producer/single-consumer byte ring:
  *
  *   producer (ISR / event handler)          consumer (update task / main loop)
  *   ------------------------------          ----------------------------------
  *   patch_ring_push(&ring, byte);           patch_ring_init(&ring, buf, cap, wait, wctx);
- *   ... last byte ...                       rc = patch_apply_run(patch_ring_next, &ring);
+ *   ... last byte ...                       rc = patch_apply_run(&pa, patch_ring_next, &ring);
  *   patch_ring_eof(&ring);
  *
  * patch_ring_next blocks by invoking the integrator `wait` hook while the ring is empty —

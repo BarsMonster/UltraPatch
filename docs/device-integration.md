@@ -1,8 +1,10 @@
 # Device Integration Contract
 
-`src/patch_apply.h` is the production decoder artifact. It is deliberately
-small and static-state driven so the Cortex-M0+ `.bss` gate remains meaningful.
-Treat it as a bootloader/update component, not as a general reentrant library.
+`src/patch_apply.h` is the production decoder artifact. It is a self-contained
+header-only library: end users compile the decoder by including this single
+header and providing the two flash primitives below. The decoder owns no global
+static state and uses no heap; the integrator owns the `PatchApply` state object
+so the Cortex-M0+ SRAM gate remains meaningful.
 
 The decoder owns the whole patch blob: envelope parsing, both CRC gates, the
 apply direction, and the image span are all derived internally from the pushed
@@ -10,12 +12,11 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 
 ## Ownership
 
-Include `src/patch_apply.h` in exactly one translation unit. The header
-owns decoder static state: entropy models, the journal arena, and the output
-row cache. There is no coroutine, no fiber, and no private decode stack — the
-decode runs on the caller's stack.
-Keep `src/rc_models.h` and `src/patch_config.h` on the include path; they are
-part of the decoder source artifact.
+Include `src/patch_apply.h` in the update translation unit and allocate one
+caller-owned `PatchApply` object for the run. Entropy models, the journal arena,
+and the output row cache live inside that object. There is no coroutine, no
+fiber, no private decode stack, and no heap allocation — the decode runs on the
+caller's stack plus the caller-owned state object.
 
 The target must provide exactly two flash primitives:
 
@@ -99,8 +100,8 @@ add one.
 ## Integration
 
 Supply a callback that returns the next blob byte (it may poll a UART/BLE
-buffer internally) or 0 at end-of-blob, and call
-`patch_apply_run(callback, ctx)`. The whole decode runs synchronously on the
+buffer internally) or 0 at end-of-blob, allocate a `PatchApply`, and call
+`patch_apply_run(&state, callback, ctx)`. The whole decode runs synchronously on the
 caller's stack: no coroutine, no fiber stack, no platform context-switch code,
 no compiler-specific stack sizing.
 
@@ -109,7 +110,8 @@ no compiler-specific stack sizing.
  * May block internally (e.g. wait on a UART ring buffer) before returning. */
 int next_byte(void *ctx, uint8_t *out);
 
-int rc = patch_apply_run(next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
+PatchApply state;
+int rc = patch_apply_run(&state, next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
 ```
 
 `src/patch_apply_demo.c` (`PullCtx` / `pull_next`) is a minimal reference
@@ -126,7 +128,7 @@ around the single `patch_apply_run` call.
 single-producer/single-consumer byte ring in `src/patch_apply_push_adapter.h`:
 the RX interrupt calls `patch_ring_push(&ring, byte)` (then `patch_ring_eof()`
 after the last byte), and the update task calls
-`patch_apply_run(patch_ring_next, &ring)`. While the ring is empty the adapter
+`patch_apply_run(&state, patch_ring_next, &ring)`. While the ring is empty the adapter
 invokes an integrator wait hook (typically WFI/WFE, an RTOS yield, or a
 transport poll) — the hook must allow the producer to run; never call
 `patch_apply_run` from the producer's own context. The adapter is deliberately
@@ -148,15 +150,14 @@ drive exactly this wind-down and reject.
 ## Stack Budget
 
 The whole decode runs on the caller's stack (no fiber since commit 44eee88), so the
-integrator must reserve stack for it on top of the interrupt/RTOS frames. The worst-case
-caller-stack cost of `patch_apply_run()` on Cortex-M0+, measured statically:
+integrator must reserve stack for it on top of the interrupt/RTOS frames. This stack
+number excludes the caller-owned `PatchApply` object; place that object in static/noinit
+storage if the bootloader stack is tight. The worst-case caller-stack cost of
+`patch_apply_run()` on Cortex-M0+, measured statically:
 
 | Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
 | --------------------------------- | ----------------------- |
-| **gcc -O2 (gated ceiling: 480 B)** | **336 B** |
-| gcc -Os                            | 304 B |
-| clang (armv6m) -O2                 | 360 B |
-| clang (armv6m) -Os                 | 336 B |
+| **gcc -O2 (gated ceiling: 480 B)** | **296 B** |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
@@ -176,25 +177,25 @@ of magnitude; the static bound above is authoritative for the device.
 ## Call Sequence
 
 1. Authenticate the update envelope and reject rollback or wrong-target updates.
-2. Call `patch_apply_run(callback, ctx)` and use its return —
+2. Allocate a `PatchApply` object, call `patch_apply_run(&state, callback, ctx)`, and use its return —
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
    image was written and both `CRC32(from)` and `CRC32(to)` verified.
 
-Two accessors classify the terminal state: `patch_apply_reject()` gives the
-reject reason, and `patch_apply_flash_touched()` reports whether any flash
+Two accessors classify the terminal state: `patch_apply_reject(&state)` gives the
+reject reason, and `patch_apply_flash_touched(&state)` reports whether any flash
 write happened during the run (like `patch_apply_reject`, it compiles out when
 unused). The terminal-state matrix:
 
 | Terminal state | Flash content | Recovery |
 | -------------- | ------------- | -------- |
 | `DONE` | new image fully written, both CRCs verified | boot the new image |
-| `ERROR`, flash untouched (`patch_apply_flash_touched() == 0`) | old image intact, still bootable | fix the cause, retry with a corrected patch |
-| `ERROR`, flash touched (`patch_apply_flash_touched() != 0`) | partially overwritten — image destroyed | bootloader recovery (e.g. full reflash) |
+| `ERROR`, flash untouched (`patch_apply_flash_touched(&state) == 0`) | old image intact, still bootable | fix the cause, retry with a corrected patch |
+| `ERROR`, flash touched (`patch_apply_flash_touched(&state) != 0`) | partially overwritten — image destroyed | bootloader recovery (e.g. full reflash) |
 | `ERROR` at the final `CRC32(to)` gate | fully written, wrong image | bootloader recovery (e.g. full reflash) |
 
 `REJ_RESOURCE` (a decoder resource cap was exceeded) can raise mid-apply, so
 it is NOT simply "rebuild with larger caps and retry": check
-`patch_apply_flash_touched()` first. If flash was touched, the device image is
+`patch_apply_flash_touched(&state)` first. If flash was touched, the device image is
 already partially overwritten and must be recovered before any retry — a
 larger-capped build fixes the cap, but only a recovered or still-intact image
 can accept the retried patch (retrying the same patch on the half-written
@@ -206,24 +207,24 @@ caught at the final `CRC32(to)` gate (the last matrix row) — so a `REJ_CORRUPT
 with flash touched warrants a driver-level write check (see the flash-primitive
 contract above), not just a re-transfer.
 
-The API is single-instance, non-reentrant, and not thread-safe. Do not run two
-decoders concurrently in one image. Do not start a new patch until the previous
-patch has reached `DONE` or `ERROR` and the bootloader has chosen a recovery
-path.
+Do not run two decodes concurrently against one flash image. Do not start a new
+patch until the previous patch has reached `DONE` or `ERROR` and the bootloader
+has chosen a recovery path.
 
 ## Build-Time Contract
 
 **Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
-build and the decoder TU — `patch_config.h` fails the build with a clear `#error`
+build and the decoder TU — `patch_apply.h` fails the build with a clear `#error`
 without it, so an encoder/decoder pair can never silently disagree about the
 target family. `CORTEX_M0` selects the implemented Thumb-1/ARMv6-M wire and
 compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
 is reserved for a future Thumb-2 wire revision; it may change the wire format
 and is currently rejected at compile time.
 
-All build-time defaults and encoder/decoder mirror knobs live in
-`src/patch_config.h`; `src/rc_models.h` contains the wire models that consume
-that configuration.
+The decoder defaults and wire-model helpers are embedded in `src/patch_apply.h`
+so the device artifact is a single header. The encoder keeps its mirror defaults
+in `src/patch_config.h` and wire-model helpers in `src/rc_models.h`; model and
+golden gates enforce that the two copies stay bit-exact.
 
 The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
 `PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.

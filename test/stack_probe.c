@@ -44,6 +44,7 @@ static int pull_next(void *c, uint8_t *out) {
 #define SENT 0xA5u
 
 static volatile unsigned char *g_lo, *g_hi;
+static PatchApply g_pa;
 
 /* Paint a deep window on the stack, record its bounds, then return (the bytes survive).
  * Recording the address of a local that outlives the frame is the whole technique here, so
@@ -66,7 +67,7 @@ static void __attribute__((noinline)) paint(void) {
 /* Run one full decode; kept noinline so its frame sits at a stable, comparable depth. */
 static int __attribute__((noinline)) decode_once(const uint8_t *blob, size_t bsz) {
     PullCtx pc = { blob, bsz, 0 };
-    return patch_apply_run(pull_next, &pc);
+    return patch_apply_run(&g_pa, pull_next, &pc);
 }
 
 int main(int argc, char **argv) {

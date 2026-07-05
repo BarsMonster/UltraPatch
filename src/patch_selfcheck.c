@@ -56,13 +56,14 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     /* ---- run the reference decoder over the WHOLE blob (it parses the envelope and
      * gates on both CRCs itself; DONE implies CRC32(from) and CRC32(to) both verified) ---- */
     ScPull pc = { blob, blob_n, 0 };
-    int rc = patch_apply_run(sc_pull_next, &pc);
+    PatchApply pa;
+    int rc = patch_apply_run(&pa, sc_pull_next, &pc);
     if (rc != PATCH_APPLY_DONE)
-        return patch_apply_reject() == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
-                                                    : "reference decoder rejected the patch";
+        return patch_apply_reject(&pa) == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
+                                                       : "reference decoder rejected the patch";
     if (pc.i != blob_n) return "decoder did not consume the whole blob";
     /* header cross-check: decoder's own parsed sizes must equal the encoder's ground truth */
-    if (patch_apply_from_size() != (uint32_t)from_n || patch_apply_to_size() != (uint32_t)to_n) return "header size mismatch";
+    if (patch_apply_from_size(&pa) != (uint32_t)from_n || patch_apply_to_size(&pa) != (uint32_t)to_n) return "header size mismatch";
 
     /* ---- exact output + NVM write-safety ---- */
     if (to_n && memcmp(sc_flash, to, to_n) != 0) return "decoded image differs from target";
