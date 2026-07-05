@@ -44,16 +44,16 @@ FOREIGN ?= test-bench/foreign
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
 FOREIGN_MANIFEST ?= test-bench/foreign.sha256
 
-BASE_FULL_TOTAL ?= 4155433
+BASE_FULL_TOTAL ?= 4150978
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
-BASE_FOREIGN_TOTAL ?= 1335056
-BASE_ONEFACE_GROW ?= 573
+BASE_FOREIGN_TOTAL ?= 1333398
+BASE_ONEFACE_GROW ?= 572
 BASE_ONEFACE_REVERT ?= 285
-BASE_ARM_TEXT ?= 5904
+BASE_ARM_TEXT ?= 5944
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 11368
+BASE_ARM_BSS ?= 11360
 BASE_ARM_SOFT_DIV ?= 1
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
