@@ -29,6 +29,9 @@ jobs:
       - name: Run release gate
         run: make gate
 
+      - name: Static analyzer
+        run: make check-analyze
+
       # Second-compiler leg: clang must build warning-free and its encoder must produce
       # byte-identical blobs (golden manifest) — proves the wire is compiler-independent.
       - name: Clang build + host checks

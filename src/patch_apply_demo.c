@@ -52,7 +52,9 @@ int main(int argc,char**argv){
     FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
-    uint8_t*blob=malloc((size_t)bsz); if(fread(blob,1,(size_t)bsz,bf)!=(size_t)bsz){ fclose(bf); return 2; } fclose(bf);
+    uint8_t*blob=malloc((size_t)bsz);
+    if(!blob){ fclose(bf); return 2; }
+    if(fread(blob,1,(size_t)bsz,bf)!=(size_t)bsz){ fclose(bf); free(blob); return 2; } fclose(bf);
     /* Size the emulated flash to the max image span and load the CURRENT image; the DECODER
      * owns the envelope parse, size caps and CRC32(from) gate, so the host does NO header
      * pre-parse (a device integration needs none of this — its flash is fixed hardware). One
@@ -61,6 +63,7 @@ int main(int argc,char**argv){
     fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
     { uint32_t span = (uint32_t)fsz>A1_MAX_IMAGE ? (uint32_t)fsz : A1_MAX_IMAGE;
       uint8_t*tmp=(uint8_t*)malloc(fsz?(size_t)fsz:1);
+      if(!tmp){ fclose(mf); free(blob); return 2; }
       if(fread(tmp,1,(size_t)fsz,mf)!=(size_t)fsz){ fclose(mf); free(tmp); free(blob); return 2; }
       nvm_init(tmp,(uint32_t)fsz,span,(uint32_t)fsz); free(tmp); }
 
