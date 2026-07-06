@@ -121,6 +121,33 @@ void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
+enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC, DR_TR_OVER };
+typedef struct { uint8_t kind, ri; uint32_t idx; } DRTrans;
+
+static DRTrans dr_transition(DRE *D, int64_t delta) {
+    DRTrans tr = { DR_TR_REP, (uint8_t)(D->rh | (D->last == 0 ? 2 : 0)), 0 };
+    if (delta == D->last) { D->rh = 1; return tr; }
+    D->rh = 0;
+    D->last = delta;
+    int j = -1;
+    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
+    if (j > 0) {
+        int64_t t = D->dic[j];
+        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = t;
+        tr.kind = DR_TR_HIT;
+        tr.idx = (uint32_t)(j - 1);
+    } else {
+        if (j == 0) die("unexpected delta dict index 0");
+        if (D->K >= D->cap) { tr.kind = DR_TR_OVER; return tr; }
+        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
+        D->dic[0] = delta;
+        D->K++;
+        tr.kind = DR_TR_ESC;
+    }
+    return tr;
+}
+
 /* Set when an emit exceeds a decoder resource cap (e.g. the MTF dict): the candidate
  * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
 int g_emit_overflow;
@@ -129,31 +156,19 @@ void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
     if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
-    int ri = D->rh | (D->last == 0 ? 2 : 0);
-    if (delta == D->last) {
-        re_bit(r, &D->rep[ri], 1, RC_S_BIT_RATE);
-        D->rh = 1;
+    DRTrans tr = dr_transition(D, delta);
+    if (tr.kind == DR_TR_REP) {
+        re_bit(r, &D->rep[tr.ri], 1, RC_S_BIT_RATE);
         return;
     }
-    re_bit(r, &D->rep[ri], 0, RC_S_BIT_RATE);
-    D->rh = 0;
-    D->last = delta;
-    int j = -1;
-    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
-    if (j >= 0) {
-        if (j == 0) die("unexpected delta dict index 0");
+    re_bit(r, &D->rep[tr.ri], 0, RC_S_BIT_RATE);
+    if (tr.kind == DR_TR_OVER) { g_emit_overflow = 1; return; }
+    if (tr.kind == DR_TR_HIT) {
         re_bit(r, &D->hit, 1, RC_S_BIT_RATE);
-        idx_encode(gix, r, (uint32_t)(j - 1));
-        int64_t t = D->dic[j];
-        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = t;
+        idx_encode(gix, r, tr.idx);
     } else {
-        if (D->K >= D->cap) { g_emit_overflow = 1; return; }
         re_bit(r, &D->hit, 0, RC_S_BIT_RATE);
         bv_encode(&M->dval, r, delta);
-        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = delta;
-        D->K++;
     }
 }
 
@@ -441,25 +456,16 @@ static uint64_t px_bv(A1BitTree *t, int64_t x) {
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
 static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int64_t delta, int *overflow) {
-    int ri = D->rh | (D->last == 0 ? 2 : 0);
-    if (delta == D->last) { uint64_t c = px_bit(&D->rep[ri], 1); D->rh = 1; return c; }
-    uint64_t c = px_bit(&D->rep[ri], 0);
-    D->rh = 0; D->last = delta;
-    int j = -1;
-    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
-    if (j > 0) {
+    DRTrans tr = dr_transition(D, delta);
+    if (tr.kind == DR_TR_REP) return px_bit(&D->rep[tr.ri], 1);
+    uint64_t c = px_bit(&D->rep[tr.ri], 0);
+    if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
+    if (tr.kind == DR_TR_HIT) {
         c += px_bit(&D->hit, 1);
-        c += px_idx(gix, (uint32_t)(j - 1));
-        int64_t t = D->dic[j];
-        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = t;
+        c += px_idx(gix, tr.idx);
     } else {
-        if (D->K >= D->cap) { *overflow = 1; return c; }
         c += px_bit(&D->hit, 0);
         c += px_bv(dval, delta);
-        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = delta;
-        D->K++;
     }
     return c;
 }

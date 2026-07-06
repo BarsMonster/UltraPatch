@@ -40,12 +40,12 @@ committed separately after its verification passes.
 6. Fuse preserve/correction planning and remove the redundant `chas` bitmap.
    - Status: complete.
    - Verification: `make gate`.
-   - Commit: this commit.
+   - Commit: `41cb804`.
 
 7. Single-source encoder delta stream transition logic.
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`.
-   - Commit: pending.
+   - Commit: this commit.
 
 8. Consolidate repeated host vector growth boilerplate.
    - Status: pending.
