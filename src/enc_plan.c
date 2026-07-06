@@ -152,14 +152,11 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to,
                                const FieldDeltaVec *fd) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    uint8_t *presset = NULL;
     OpPC *pc = NULL;
     for (int pass = 0;; pass++) {
-        presset = preserve_indices(ctx, ops, from_size, to_size);
-        pc = preserve_corrections_pc(ctx, ops, from->d, to->d, fd, from_size, to_size, presset);
+        pc = preserve_corrections_pc(ctx, ops, from->d, to->d, fd, from_size, to_size);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
-        free(presset);
         if (!split_any) break;
         oppc_array_free(pc, old_n);
     }

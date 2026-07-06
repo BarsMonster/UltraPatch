@@ -93,9 +93,38 @@ static void preserve_index_byte(void *user, const OpWalkEnt *we, int32_t off, in
     pw->wi++;
 }
 
+static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, uint32_t from_size) {
+    int FWD = ctx->fwd;
+    int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
+    for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
+    OpWalkEnt *m = opwalk_build(ops);
+    for (size_t oi = 0; oi < ops->n; oi++) {
+        const OpWalkEnt *we = &m[oi];
+        for (int32_t k = 0; k < we->o->diff_len; k++) {
+            int32_t a = we->fp + k;
+            if (0 <= a && (uint32_t)a < from_size) {
+                int32_t t = we->tp + k;
+                /* a read behind the frontier that the row window covers reads OLD flash
+                 * directly — it must not force a journal entry. */
+                if ((FWD ? a < t : a > t) && a1_row_covered(ctx, a, t)) continue;
+                if (FWD) { if (readarr[a] < t) readarr[a] = t; }
+                else { if (readarr[a] > t) readarr[a] = t; }
+            }
+        }
+    }
+    free(m);
+    return readarr;
+}
+
+static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
+    if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
+    return ctx->fwd ? (readarr[tpw] > tpw) : (readarr[tpw] >= 0 && readarr[tpw] < tpw);
+}
+
 typedef struct {
     const EncCtx *ctx;
-    const uint8_t *frm, *true_to, *presset, *ohas, *oval;
+    const int32_t *readarr;
+    const uint8_t *frm, *true_to, *ohas, *oval;
     uint8_t *buf, *jhas, *jval;
     uint32_t from_size;
     OpPC *pc;
@@ -106,8 +135,9 @@ static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int
     PreserveCorrWalk *pw = (PreserveCorrWalk *)user;
     int32_t tp = we->tp + off;
     int32_t fp = is_diff ? we->fp + off : -1;
-    if (pw->presset[pw->wi]) ivec_push(&pw->pc->pres, off);
-    if (pw->presset[pw->wi] && 0 <= tp && (uint32_t)tp < pw->from_size && !pw->jhas[tp]) {
+    int preserve = preserve_needed_at(pw->ctx, pw->readarr, pw->from_size, tp);
+    if (preserve) ivec_push(&pw->pc->pres, off);
+    if (preserve && 0 <= tp && (uint32_t)tp < pw->from_size && !pw->jhas[tp]) {
         pw->jhas[tp] = 1;
         pw->jval[tp] = pw->buf[tp];
     }
@@ -192,14 +222,14 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                                   uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
     FieldDeltaVec add = {0};
-    int32_t tp = 0, fp = 0;
+    OpWalkEnt *walk = opwalk_build(ops);
     for (size_t oi = 0; oi < ops->n; oi++) {
-        const Op *o = &ops->v[oi];
-        IVec ldr = op_ldr_set(frm, fp, o->diff_len, from_size);
-        for (int32_t k = 0; k + 4 <= o->diff_len; k += 2) {
+        const OpWalkEnt *we = &walk[oi];
+        IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
+        for (int32_t k = 0; k + 4 <= we->o->diff_len; k += 2) {
             uint32_t fpk;
-            if (!field_addr(fp, k, from_size, &fpk)) continue;
-            int64_t tpk = (int64_t)tp + k;
+            if (!field_addr(we->fp, k, from_size, &fpk)) continue;
+            int64_t tpk = (int64_t)we->tp + k;
             if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
             if (is_local_bl(frm, from_size, fpk)) {
                 uint16_t tu = u16le_at(tob + (size_t)tpk), tl = u16le_at(tob + (size_t)tpk + 2);
@@ -214,9 +244,8 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
             }
         }
         free(ldr.v);
-        tp += o->diff_len + o->extra_len;
-        fp += o->diff_len + o->adj;
     }
+    free(walk);
     fd_finalize(&add);
     /* rebuild fd: old entries not overridden + all op-derived entries */
     FieldDeltaVec out = {0};
@@ -258,22 +287,22 @@ FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm
                                 const FieldDeltaVec *fd, size_t *nout) {
     int FWD = ctx->fwd;
     FieldRef *out = NULL; size_t n = 0, cap = 0;
-    int32_t fp0 = 0;
+    OpWalkEnt *walk = opwalk_build(ops);
     for (size_t oi = 0; oi < ops->n; oi++) {
-        const Op *o = &ops->v[oi];
-        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
+        const OpWalkEnt *we = &walk[oi];
+        IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
         size_t n0 = n;
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, o, fp0, o->diff_len);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, we->o, we->fp, we->o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
             out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
-            out[n].kind = w.ev.type; out[n].fpk = (uint32_t)(fp0 + w.pos); out[n].delta = w.ev.delta; n++;
+            out[n].kind = w.ev.type; out[n].fpk = (uint32_t)(we->fp + w.pos); out[n].delta = w.ev.delta; n++;
         }
         if (!FWD)                                        /* grow yields descending; restore ascending fpk */
             for (size_t a = n0, b = n; a + 1 < b; a++, b--) { FieldRef t = out[a]; out[a] = out[b - 1]; out[b - 1] = t; }
         free(ldr.v);
-        fp0 += o->diff_len + o->adj;
     }
+    free(walk);
     *nout = n;
     return out;
 }
@@ -307,15 +336,14 @@ int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
     SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
     uint32_t *pw = (uint32_t *)xmalloc(pcap * sizeof(*pw));
-    { int32_t tp = 0, fp = 0;
+    { OpWalkEnt *walk = opwalk_build(ops);
       for (size_t i = 0; i < ops->n; i++) {
-          if (ops->v[i].diff_len > 0 && fp >= 0) {
-              pool[pn].b = (uint32_t)fp; pool[pn].v = tp - fp;
-              pw[pn] = (uint32_t)ops->v[i].diff_len; pn++;
+          if (walk[i].o->diff_len > 0 && walk[i].fp >= 0) {
+              pool[pn].b = (uint32_t)walk[i].fp; pool[pn].v = walk[i].tp - walk[i].fp;
+              pw[pn] = (uint32_t)walk[i].o->diff_len; pn++;
           }
-          tp += ops->v[i].diff_len + ops->v[i].extra_len;
-          fp += ops->v[i].diff_len + ops->v[i].adj;
       }
+      free(walk);
       pool[pn].b = from_size > to_size ? from_size : to_size; pool[pn].v = 0;
       pw[pn] = 0x7fffffffu; pn++; }                      /* terminator: never pre-trimmed */
     if (nex) {
@@ -559,25 +587,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
 
 uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
-    int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
-    for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
-    int32_t tp = 0, fp = 0;
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        const Op *o = &ops->v[oi];
-        for (int32_t k = 0; k < o->diff_len; k++) {
-            int32_t a = fp + k;
-            if (0 <= a && (uint32_t)a < from_size) {
-                int32_t t = tp + k;
-                /* a read behind the frontier that the row window covers reads OLD flash
-                 * directly — it must not force a journal entry. */
-                if ((FWD ? a < t : a > t) && a1_row_covered(ctx, a, t)) continue;
-                if (FWD) { if (readarr[a] < t) readarr[a] = t; }
-                else { if (readarr[a] > t) readarr[a] = t; }
-            }
-        }
-        tp += o->diff_len + o->extra_len;
-        fp += o->diff_len + o->adj;
-    }
+    int32_t *readarr = preserve_readarr(ctx, ops, from_size);
     uint8_t *pres = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
     OpWalkEnt *m = opwalk_build(ops);
     PreserveIndexWalk iw = { ctx, readarr, from_size, pres, 0 };
@@ -591,11 +601,11 @@ uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_siz
 }
 
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
-                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              const uint8_t *presset) {
+                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
+    int32_t *readarr = preserve_readarr(ctx, ops, from_size);
     OpWalkEnt *m = opwalk_build(ops);
     for (size_t idx = 0; idx < ops->n; idx++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, idx)];
@@ -622,7 +632,7 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, frm, true_to, presset, ohas, oval, buf, jhas, jval, from_size, NULL, 0 };
+    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, ohas, oval, buf, jhas, jval, from_size, NULL, 0 };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
         OpPC *pc = &out[step];
@@ -633,6 +643,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
+    free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m); free(readarr);
     return out;
 }

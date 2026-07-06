@@ -212,8 +212,7 @@ Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to);
 uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size);
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
-                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              const uint8_t *presset);
+                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size);
 
 void re_init(REnc *r);
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
