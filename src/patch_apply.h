@@ -117,15 +117,14 @@ typedef struct {
  * per-op correction array + the streaming scalars/cursors. */
 typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
-    uint32_t span_left, br_left; uint32_t br_src; /* br_src is an absolute ototal index */
-    uint32_t o_src, o_left;                       /* out-match replay: absolute OUTPUT position */
+    uint32_t tok_left, tok_src;                   /* token replay count + ring/output source */
     int32_t tp, fp;                               /* running accumulators (apply order) */
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } A1ApplyState;
 /* SA_ARENA: hand-rounded byte reservation for the apply-phase A1ApplyState. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
+#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 36u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
@@ -638,10 +637,22 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* ===================================================================================== */
 /* A1ApplyState type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
  * union (near JREGION), since the union embeds A1ApplyState and reserves SA_ARENA bytes for it. */
-/* correction lookup by op-local write-offset (small array; unique offsets => linear scan) */
-static int32_t corr_at(A1ApplyState*s, int32_t off){
-    for(int32_t i=0;i<s->op_nc;i++){
-        if((int32_t)(s->op_corr[i]>>8)==off) return (int32_t)(s->op_corr[i]&0xffu);
+static int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
+    uint32_t gap=s_ug_gamma(pa,idx?&M_pg2:&M_pg);
+    if((idx && gap==0u) || gap>UINT32_MAX-*off){ g_rcerr=1; return 0; }
+    *off+=gap;
+    if(*off>=nwu){ g_rcerr=1; return 0; }
+    return 1;
+}
+
+typedef struct { int32_t i, step; } A1CorrCur;
+static void corr_cur_init(A1CorrCur*c, A1ApplyState*s, int fwd){
+    c->step=fwd?1:-1; c->i=fwd?0:s->op_nc-1;
+}
+static int32_t corr_take(A1ApplyState*s, A1CorrCur*c, int32_t off){
+    if(c->i>=0 && c->i<s->op_nc){
+        uint32_t slot=s->op_corr[c->i];
+        if((int32_t)(slot>>8)==off){ c->i+=c->step; return (int32_t)(slot&0xffu); }
     }
     return 0;
 }
@@ -692,20 +703,13 @@ static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->
 static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
-        if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
-            int b=s_bt(pa,tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
-            sa_emit_ring(pa,s,(uint8_t)b); s->span_left--;
-            if(s->span_left==0) s->tok_mode=0;
-            return (uint8_t)b;
-        }
-        if(s->tok_mode==2 && s->br_left>0){              /* backref: copy from ring */
-            uint8_t b=s->ring[s->br_src & SA_MASK]; sa_emit_ring(pa,s,b); s->br_src++; s->br_left--;
-            if(s->br_left==0) s->tok_mode=0;
-            return b;
-        }
-        if(s->tok_mode==3 && s->o_left>0){               /* out-match: copy already-produced output */
-            uint8_t b=out_read(pa,s->o_src); sa_emit_ring(pa,s,b); s->o_src+=(uint32_t)(g_FWD?1:-1); s->o_left--;
-            if(s->o_left==0) s->tok_mode=0;
+        if(s->tok_left>0){
+            uint8_t b;
+            if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
+            else if(s->tok_mode==2){ b=s->ring[s->tok_src & SA_MASK]; s->tok_src++; }
+            else { b=out_read(pa,s->tok_src); s->tok_src+=(uint32_t)(g_FWD?1:-1); }
+            sa_emit_ring(pa,s,b); s->tok_left--;
+            if(s->tok_left==0) s->tok_mode=0;
             return b;
         }
         /* adjacent spans never ship (the encoder merges them), so after a span the
@@ -716,7 +720,7 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
         else is_match=s_flag(pa,&M_flag);
         if(!is_match){
             uint32_t ln=s_ug_gamma(pa,&M_gs)+1u;
-            s->tok_mode=1; s->span_left=ln; s->last_span=1;
+            s->tok_mode=1; s->tok_left=ln; s->last_span=1;
         } else {
             uint32_t d;
             int rb=s_bit(pa,&M_rep0[g_rep0h]); g_rep0h=rb;
@@ -729,13 +733,13 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
                  * grow content (whose extras are byte-reversed) still matches produced output. */
                 if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
                 g_oexp=rc_outmatch_next_expect(g_FWD,p,ln);  /* sequential runs keep deltas tiny */
-                s->tok_mode=3; s->o_src=p; s->o_left=ln; s->last_span=0;
+                s->tok_mode=3; s->tok_src=p; s->tok_left=ln; s->last_span=0;
                 continue;
             }
             else { d=s_ug_rice(pa,&M_gd)+1u; g_lastdist=d; }
             uint32_t ln=s_ug_gamma(pa,&M_gl)+1u;
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
-            s->tok_mode=2; s->br_src=s->ototal-d; s->br_left=ln; s->last_span=0;
+            s->tok_mode=2; s->tok_src=s->ototal-d; s->tok_left=ln; s->last_span=0;
         }
     }
 fail:
@@ -880,18 +884,18 @@ A1_ALWAYS_INLINE void litcur_next(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, i
     litcur_step(pa, s, lc, nl);
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-A1_ALWAYS_INLINE void wr_extras(PatchApply *pa, A1ApplyState*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
+A1_ALWAYS_INLINE void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=sa_next_content(pa,s,(int)((tp0+dl+e)&1));
-        out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_at(s,dl+e)));
+        out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_take(s,cc,dl+e)));
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-A1_ALWAYS_INLINE void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+A1_ALWAYS_INLINE void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(pa,s,lc,nl); }
-    out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_at(s,K)));
+    out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_take(s,cc,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
@@ -933,10 +937,7 @@ static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
     if(np>(uint32_t)nw){ g_rcerr=1; return; }
     uint32_t poff=0, nwu=(uint32_t)nw;
     for(uint32_t i=0;i<np && !g_rcerr;i++){
-        uint32_t gap=s_ug_gamma(pa,i?&M_pg2:&M_pg);
-        if(gap>UINT32_MAX-poff){ g_rcerr=1; return; }
-        poff+=gap;
-        if(poff>=nwu){ g_rcerr=1; return; }
+        if(!op_next_offset(pa,&poff,i,nwu)) return;
         sa_journal(pa,tp0+(int32_t)poff);
     }
     if(g_rcerr) return;
@@ -947,10 +948,7 @@ static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
     if(nc>(uint32_t)nw){ g_rcerr=1; return; }
     s->op_nc=(int32_t)nc; { uint32_t coff=0;
         for(uint32_t i=0;i<nc && !g_rcerr;i++){
-            uint32_t gap=s_ug_gamma(pa,i?&M_pg2:&M_pg);
-            if(gap>UINT32_MAX-coff){ g_rcerr=1; return; }
-            coff+=gap;
-            if(coff>=nwu){ g_rcerr=1; return; }
+            if(!op_next_offset(pa,&coff,i,nwu)) return;
             int cbyte=s_bt(pa,&M_dval, RC_DVAL_RATE);
             s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
     if(g_rcerr) return;
@@ -967,7 +965,8 @@ static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
     uint8_t packed[4];
     int fwd=g_FWD; int32_t step=fwd?1:-1;
     A1LitCur lc;
-    if(!fwd) wr_extras(pa,s, fwd, tp0, dl, el);
+    A1CorrCur cc; corr_cur_init(&cc,s,fwd);
+    if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
     while(k>=0 && k<dl && !g_rcerr){
@@ -977,15 +976,15 @@ static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
             int fa=field_at(pa,s, fp0, a0, packed, pure, dl);
             if(fa){
                 for(int b=fwd?0:3; b>=0 && b<4; b+=step){
-                    if(fa==2) wr_copy(pa,s, &lc, tp0, fp0, nl, a0+b);
-                    else out_write(pa,(uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_at(s,a0+b)));
+                    if(fa==2) wr_copy(pa,s, &lc, &cc, tp0, fp0, nl, a0+b);
+                    else out_write(pa,(uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_take(s,&cc,a0+b)));
                 }
                 k+=4*step; continue;
             }
         }
-        wr_copy(pa,s, &lc, tp0, fp0, nl, k); k+=step;
+        wr_copy(pa,s, &lc, &cc, tp0, fp0, nl, k); k+=step;
     }
-    if(fwd) wr_extras(pa,s, fwd, tp0, dl, el);
+    if(fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
 }
 
 /* ===================================================================================== */
