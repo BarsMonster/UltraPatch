@@ -63,7 +63,8 @@ from_size uLEB
 zigzag(to_size - from_size) uLEB  # overlong encoding = unnatural apply direction
 zigzag(fp_end - from_size) uLEB   # present only when the apply is DESCENDING
 zigzag(fp_start) uLEB
-range-coded body bytes            # final raw EOF marker + consumed range flush bytes
+compressed_body_len uLEB
+range-coded body bytes            # exactly compressed_body_len bytes
 ```
 
 The apply direction is an encoder choice. The NATURAL direction (descending iff
@@ -80,12 +81,12 @@ image at the end of the same `patch_apply_run()` call. Because `CRC32(to)`
 gates the *result*, a wrong `CRC32(to)` is detected only AFTER the image has
 been written to flash — the same order as a wrong trailer in the previous wire
 revision; only `CRC32(from)` protects flash from being touched. The
-range-coded body is the last thing on the wire and its length is implicit. It
-terminates itself with one final raw range-coded EOF marker and carries the
-range-flush bytes the decoder consumes, so `PATCH_APPLY_DONE` does not require
-a transport EOF or exact blob length. Bytes after the logical body are outside
-the decoder contract and must be handled by the authenticated outer
-framing/session. Header sizes above 64 MiB are rejected as implausible.
+range-coded body is the last thing on the wire. Its compressed byte length is
+part of the envelope, so the decoder zero-fills the range coder internally
+after exactly that many body bytes and `PATCH_APPLY_DONE` does not require a
+transport EOF. Bytes after the counted body are outside the decoder contract
+and must be handled by the authenticated outer framing/session. Header sizes
+above 64 MiB are rejected as implausible.
 
 CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
@@ -135,7 +136,7 @@ transport poll) — the hook must allow the producer to run; never call
 `patch_apply_run` from the producer's own context. The adapter is deliberately
 not part of the device decoder artifact: `patch_apply.h` compiles and gets sized
 without it. `patch_ring_eof()` is only for abort/timeout paths; a valid patch
-finishes from the body marker before the adapter needs EOF.
+finishes from the counted body before the adapter needs EOF.
 
 ### Aborting a transfer
 

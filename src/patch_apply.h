@@ -12,13 +12,13 @@
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
  * callback (which may block internally — e.g. poll a UART ring) and passes the blob —
- * envelope (both CRCs in the header) followed by the self-terminating range-coded body — through one
+ * envelope (both CRCs and the compressed body length in the header) followed by the range-coded body — through one
  * patch_apply_run(state, callback, ctx) call whose return is the DONE/ERROR verdict; the whole decode
  * runs synchronously on the CALLER's stack (no coroutine, no fiber, no private decode stack).
  * The decoder itself parses the envelope (sizes, direction, span) and gates on CRC32(from)
  * BEFORE the first flash write and CRC32(to) after the apply. The body is the last thing on the
- * wire and ends with a logical EOF marker inside the range-coded stream, so there is no trailer,
- * length field, or withhold ring. A single divide-free binary range coder (LZMA bound; no
+ * wire and the decoder zero-fills internally after the header's compressed byte count, so there
+ * is no trailer or withhold ring. A single divide-free binary range coder (LZMA bound; no
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
  * Event-driven producers (ISR push) integrate via the optional SPSC ring adapter in
@@ -308,7 +308,7 @@ typedef union {
 
 typedef struct PatchApply {
     uint32_t g_image_span;
-    uint32_t g_from_size, g_to_size, g_fp_end;
+    uint32_t g_from_size, g_to_size, g_body_left;
     int32_t  g_fp_start;
     uint32_t g_want_to;
     int      g_FWD;
@@ -361,12 +361,12 @@ typedef struct PatchApply {
 #define g_image_span (pa->g_image_span)
 #define g_from_size (pa->g_from_size)
 #define g_to_size (pa->g_to_size)
-#define g_fp_end (pa->g_fp_end)
 #define g_fp_start (pa->g_fp_start)
 #define g_want_to (pa->g_want_to)
 #define g_FWD (pa->g_FWD)
 #define g_pull_fn (pa->g_pull_fn)
 #define g_pull_ctx (pa->g_pull_ctx)
+#define g_body_left (pa->g_body_left)
 #define g_pull_eof (pa->g_pull_eof)
 #define RC (pa->RC)
 #define g_rcerr (pa->g_rcerr)
@@ -434,11 +434,10 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 /* byte source: the integrator supplies a (possibly blocking) callback and calls           */
 /* patch_apply_run() — the whole decode runs on the caller's stack, plain calls only.      */
 /* CRC32(to) rides in the header (g_want_to), so the range-coded body is the LAST thing on  */
-/* the wire — NO trailer-withhold ring. The body length stays implicit: after the frontier   */
-/* reaches the target image size the decoder requires one final raw range-coded EOF marker.  */
-/* The encoder also carries the range-flush bytes consumed by the decoder, so a valid blob   */
-/* finishes without asking the byte source for transport EOF; EOF from the callback is only  */
-/* the truncation/abort path.                                                                */
+/* the wire — NO trailer-withhold ring. The header carries the compressed body length;       */
+/* next_byte() zero-fills after exactly that many body bytes, so a valid blob finishes       */
+/* without asking the byte source for transport EOF. EOF from the callback is only the       */
+/* truncation/abort path.                                                                    */
 /* ===================================================================================== */
 static int decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
@@ -453,7 +452,13 @@ static int pull_raw(PatchApply *pa, uint8_t*out){
     if(!g_pull_fn(g_pull_ctx,out)){ g_pull_eof=1; return 0; }
     return 1;
 }
-static uint8_t next_byte(PatchApply *pa){ uint8_t b; return pull_raw(pa,&b)?b:0; }  /* abort/truncation: zero-fill past EOF */
+static uint8_t next_byte(PatchApply *pa){
+    uint8_t b;
+    if(g_body_left==0) return 0;
+    if(!pull_raw(pa,&b)){ g_body_left=0; return 0; }
+    g_body_left--;
+    return b;
+}
 static int env_byte(PatchApply *pa, uint8_t*out){ return pull_raw(pa,out); }             /* envelope: strict */
 
 static int env_u32le(PatchApply *pa, uint32_t*out){
@@ -1173,17 +1178,18 @@ static void sa_apply_op(PatchApply *pa, SA*s){
 /* that patch_apply_run primes before invoking decode_body.                                  */
 /* ===================================================================================== */
 /* ---- envelope header (strict reads): CRC32(from)[4] | CRC32(to)[4] | from_size uLEB |
- * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending]. The decoder derives
- * the apply direction and the image span itself and verifies CRC32(from) over flash BEFORE
- * the first flash write — a truncated header, implausible sizes, or a wrong/dirty current
- * image all reject cleanly with flash untouched. CRC32(to) is stashed in g_want_to here and
- * checked over the final image after apply (patch_apply_run). Then the literal bit-trees are
- * seeded from flash parity histograms (hist0/hist1/w borrow 4 KiB of ARENA before the apply
+ * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | zz(fp_start) |
+ * compressed_body_len. The decoder derives the apply direction and the image span itself
+ * and verifies CRC32(from) over flash BEFORE the first flash write — a truncated header,
+ * implausible sizes, or a wrong/dirty current image all reject cleanly with flash untouched.
+ * CRC32(to) is stashed in g_want_to here and checked over the final image after apply
+ * (patch_apply_run). Then the literal bit-trees are seeded from flash parity histograms
+ * (hist0/hist1/w borrow 4 KiB of ARENA before the apply
  * overlays it). noinline: this runs ONCE at the top of decode_body, so keeping its locals in
  * their own frame (not merged into decode_body's) keeps them off the deep apply call chain
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
 static int __attribute__((noinline)) decode_header(PatchApply *pa){
-    uint32_t want_from, want_to, fs, ts, fpe, z; uint8_t ov;
+    uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
     if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
     else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
@@ -1201,7 +1207,9 @@ static int __attribute__((noinline)) decode_header(PatchApply *pa){
      * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
     { uint32_t z2; if(!env_uleb(pa,&z2) || z2==0xffffffffu) return 0;
       g_fp_start=(z2&1u)? -(int32_t)((z2>>1)+1u) : (int32_t)(z2>>1); }
-    g_from_size=fs; g_to_size=ts; g_fp_end=fpe; g_want_to=want_to;
+    if(!env_uleb(pa,&bl) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
+    g_from_size=fs; g_to_size=ts; g_want_to=want_to;
+    g_body_left=bl;
     g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
     { uint32_t *hist0=ARENA.seed.hist0, *hist1=ARENA.seed.hist1, *w=ARENA.seed.w;
@@ -1210,6 +1218,7 @@ static int __attribute__((noinline)) decode_header(PatchApply *pa){
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
       lit_tree_from_hist(&M_lit1,hist1,w);
       g_litprev=0; }
+    { SA*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?g_fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -1256,8 +1265,7 @@ static int decode_body(PatchApply *pa){
                                * invariant, like M_gl): seed it cheap from symbol 1. */
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
-    { SA*s=&SAst; memset(s,0,sizeof*s);
-      s->tp=g_FWD?0:(int32_t)g_to_size; s->fp=g_FWD?g_fp_start:(int32_t)g_fp_end;
+    { SA*s=&SAst;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
@@ -1281,12 +1289,11 @@ static int decode_body(PatchApply *pa){
        * is not shipped for FWD — CRC32(to) validates). */
       if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=g_fp_start))) g_rcerr=1;
       if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
-      if(!g_rcerr && s_raw(pa)!=1) g_rcerr=1;  /* logical end-of-body marker */
       if(g_rcerr) return 0;
       orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
     }
     /* body complete: the caller verifies CRC32(to) (g_want_to) over the final image before
-     * declaring DONE. Bytes after the logical body marker belong to outer framing. */
+     * declaring DONE. Bytes after the counted body belong to outer framing. */
     return 1;
 }
 
@@ -1300,12 +1307,12 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
  * byte, or 0 when the source aborts/ends early (it may block internally — e.g. poll a UART —
  * before returning; the decoder consumes bytes strictly in order). Valid patches terminate at
- * the logical EOF marker in the range-coded body and do not require callback EOF. Returns
+ * the header's compressed body length and do not require callback EOF. Returns
  * PATCH_APPLY_DONE (image written, both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds
  * the reason). */
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
-    g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0; g_flash_touched=0;
+    g_pull_fn=next; g_pull_ctx=ctx; g_body_left=0; g_pull_eof=0; g_flash_touched=0;
     if(!decode_body(pa)) return PATCH_APPLY_ERROR;
     if(crc32_flash(g_to_size)!=g_want_to){
         if(!g_reject) g_reject=REJ_CORRUPT;
@@ -1344,12 +1351,12 @@ int  rcv3_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){ return p
 #undef g_image_span
 #undef g_from_size
 #undef g_to_size
-#undef g_fp_end
 #undef g_fp_start
 #undef g_want_to
 #undef g_FWD
 #undef g_pull_fn
 #undef g_pull_ctx
+#undef g_body_left
 #undef g_pull_eof
 #undef RC
 #undef g_rcerr

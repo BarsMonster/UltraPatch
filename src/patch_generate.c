@@ -21,12 +21,10 @@
 #include "rc_models.h"
 
 /* patch_selfcheck.c: reference-decoder self-verification of an emitted blob.
- * Returns NULL on success, else a short static error message; consumed_out receives the
- * number of bytes the decoder actually pulled from the blob. */
+ * Returns NULL on success, else a short static error message. */
 extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                                 const uint8_t *from, size_t from_n,
-                                const uint8_t *to, size_t to_n,
-                                size_t *consumed_out);
+                                const uint8_t *to, size_t to_n);
 
 int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
 

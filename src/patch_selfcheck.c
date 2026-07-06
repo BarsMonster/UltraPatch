@@ -36,14 +36,11 @@ static int sc_pull_next(void *c, uint8_t *out) {
     return 1;
 }
 
-/* Verify that `blob` applies from -> to on the reference decoder without needing source EOF.
- * `consumed_out` reports how many bytes the decoder actually pulled; the encoder uses it to
- * trim conservative range-flush bytes that are not part of the logical body. Returns NULL on
- * success, else a short static error message. */
+/* Verify that `blob` applies from -> to on the reference decoder.
+ * Returns NULL on success, else a short static error message. */
 const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
-                         const uint8_t *to, size_t to_n,
-                         size_t *consumed_out)
+                         const uint8_t *to, size_t to_n)
 {
     /* ---- fresh emulator: flash = from image, the beyond-`from` span filled with a per-blob
      * deterministic pseudo-random pad (NOT 0xFF). An encoder out-match that reads not-yet-written
@@ -56,16 +53,15 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     for (int k = 0; k < 8; k++) pad_seed = pad_seed * 1664525u + 1013904223u + blob[k];
     if (nvm_init(from, (uint32_t)from_n, span, pad_seed)) return "selfcheck out of memory";
 
-    /* ---- run the reference decoder (it parses the envelope and gates on both CRCs itself;
-     * DONE implies CRC32(from) and CRC32(to) both verified) ---- */
+    /* ---- run the reference decoder over the WHOLE blob (it parses the envelope and
+     * gates on both CRCs itself; DONE implies CRC32(from) and CRC32(to) both verified) ---- */
     ScPull pc = { blob, blob_n, 0 };
     PatchApply pa;
     int rc = patch_apply_run(&pa, sc_pull_next, &pc);
-    if (consumed_out) *consumed_out = pc.i;
     if (rc != PATCH_APPLY_DONE)
         return patch_apply_reject(&pa) == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
                                                        : "reference decoder rejected the patch";
-    if (pa.g_pull_eof) return "decoder needed source EOF";
+    if (pc.i != blob_n) return "decoder did not consume the whole blob";
     /* header cross-check: decoder's own parsed sizes must equal the encoder's ground truth */
     if (patch_apply_from_size(&pa) != (uint32_t)from_n || patch_apply_to_size(&pa) != (uint32_t)to_n) return "header size mismatch";
 

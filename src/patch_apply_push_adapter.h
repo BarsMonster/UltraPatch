@@ -15,12 +15,12 @@
  *   producer (ISR / event handler)          consumer (update task / main loop)
  *   ------------------------------          ----------------------------------
  *   patch_ring_push(&ring, byte);           patch_ring_init(&ring, buf, cap, wait, wctx);
- *   ... body marker terminates ...          rc = patch_apply_run(&pa, patch_ring_next, &ring);
+ *   ... counted body terminates ...         rc = patch_apply_run(&pa, patch_ring_next, &ring);
  *
  * patch_ring_next blocks by invoking the integrator `wait` hook while the ring is empty —
  * on a device typically WFI/WFE, an RTOS yield, or a poll of the transport. The hook MUST
  * allow the producer to run (never call patch_apply_run from the producer's own context).
- * A valid patch completes from its range-coded body marker before EOF is needed; use
+ * A valid patch completes from its header-counted body before EOF is needed; use
  * patch_ring_eof() only to abort a stalled/truncated transfer.
  *
  * Concurrency contract: exactly one producer and one consumer. `w` is written only by the
@@ -62,7 +62,7 @@ static inline int patch_ring_push(PatchRing *g, uint8_t b) {
 }
 
 /* Signal abort/end-of-source for a stalled or truncated transfer. A valid patch normally
- * completes from its body marker before this is needed; the store is idempotent. */
+ * completes from its counted body before this is needed; the store is idempotent. */
 static inline void patch_ring_eof(PatchRing *g) { g->eof = 1; }
 
 /* consumer: the patch_apply_run callback. Pass the PatchRing as ctx.

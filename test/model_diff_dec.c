@@ -23,8 +23,8 @@ void    flash_write(uint32_t a, uint8_t v) { (void)a; (void)v; }
 /* ---- byte-source priming ------------------------------------------------------------------
  * rc_init() and next_byte() pull straight from the callback (no trailer-withhold ring anymore —
  * CRC32(to) rides in the header on the real wire, so the range body is the last thing on the
- * stream). We feed the range coder the encoder body directly; the self-terminating range flush
- * carries its final zero bytes, matching patch_selfcheck.c / patch_apply_run. */
+ * stream). We feed the range coder the encoder body directly and seed the counted body source
+ * to mirror patch_apply_run after the envelope's compressed-body-length field. */
 static uint8_t *md_src;
 static size_t   md_cap;
 static PatchApply md_pa;
@@ -42,7 +42,7 @@ static void md_begin(const uint8_t *body, size_t n) {
     if (n) memcpy(md_src, body, n);
     md_ctx.d = md_src; md_ctx.n = n; md_ctx.i = 0;
     memset(pa, 0, sizeof *pa);
-    pa->g_pull_fn = md_pull; pa->g_pull_ctx = &md_ctx; pa->g_pull_eof = 0;
+    pa->g_pull_fn = md_pull; pa->g_pull_ctx = &md_ctx; pa->g_body_left = (uint32_t)n; pa->g_pull_eof = 0;
     pa->g_rcerr = 0; pa->g_reject = REJ_NONE;
     rc_init(pa);
 }
