@@ -25,12 +25,12 @@ committed separately after its verification passes.
 3. Remove the `model_diff` harness and raw-gamma test-only code.
    - Status: complete.
    - Verification: `make gate`; `make clean`.
-   - Commit: this commit.
+   - Commit: `5175ccb`.
 
 4. Remove dead helper APIs (`join2`, `a1_m4_pack` facade).
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`.
-   - Commit: pending.
+   - Commit: this commit.
 
 5. Unify shift-map fitter prune/cap/merge mechanics.
    - Status: pending.

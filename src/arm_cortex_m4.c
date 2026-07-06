@@ -80,16 +80,11 @@ static void uset_free(uset_t *s){ free(s->key); free(s->used); s->key=NULL; s->u
 /* ---------- little-endian helpers ---------- */
 static uint16_t rd16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1]<<8)); }
 static uint32_t rd32(const uint8_t *p){ return (uint32_t)(p[0]|(p[1]<<8)|(p[2]<<16)|((uint32_t)p[3]<<24)); }
-static void wr32(uint8_t *p, uint32_t v){ p[0]=v&0xff;p[1]=(v>>8)&0xff;p[2]=(v>>16)&0xff;p[3]=(v>>24)&0xff; }
 
-/* ---------- bl (re)encoder (inverse of py unpack_bl) ---------- */
+/* ---------- bl unpacker (inverse of py unpack_bl) ---------- */
 static int32_t unpack_bl(uint16_t up, uint16_t lo) {
     uint32_t imm24 = rc_bl_imm24(up, lo);
     return (int32_t)(imm24 << 8) >> 8;   /* sign-extend the 24-bit immediate */
-}
-static void pack_bl(int32_t imm32, uint8_t out[4]) {
-    if (imm32 < 0) imm32 += (1<<24);
-    rc_bl_pack((uint32_t)imm32, out);
 }
 
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
@@ -192,8 +187,4 @@ int a1_m4_disassemble(const uint8_t *from, size_t from_size,
 }
 void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
     for (int s = 0; s < M4_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }
-}
-void a1_m4_pack(int pk, int32_t value, uint8_t out[4]) {
-    if (pk == M4_PK_BL) pack_bl(value, out);
-    else wr32(out, (uint32_t)value);
 }

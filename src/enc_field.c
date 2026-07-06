@@ -16,14 +16,14 @@ static void u32le_put(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8
 
 /* rc_bl_imm24 / rc_bl_pack / rc_bl_pattern (rc_models.h) single-source the decoder-mirrored BL
  * unpack/pack/predicate. unpack_bl_local sign-extends the raw 24-bit immediate (same idiom the
- * decoder uses); the pack path routes through a1_m4_pack -> pack_bl (also rc_bl_pack-based). */
+ * decoder uses); pack_bl_local writes the low 24 bits back through rc_bl_pack. */
 static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
     uint32_t imm24 = rc_bl_imm24(up, lo);
     return (int32_t)(imm24 << 8) >> 8;
 }
 
 static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
-    a1_m4_pack(M4_PK_BL, imm32, out);
+    rc_bl_pack((uint32_t)imm32 & 0x00ffffffu, out);
 }
 
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {

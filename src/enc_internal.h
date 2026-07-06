@@ -138,7 +138,6 @@ static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
 }
 Buf slurp(const char *path);
 void write_file(const char *path, const void *p, size_t n);
-char *join2(const char *a, const char *b);
 uint32_t crc32_buf(const uint8_t *p, size_t n);
 int bitlen32(uint32_t v);
 void put_uleb(Buf *b, uint32_t v);

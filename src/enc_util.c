@@ -162,15 +162,6 @@ void write_file(const char *path, const void *p, size_t n) {
     fclose(f);
 }
 
-char *join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    char *s = (char *)xmalloc(na + nb + 2);
-    memcpy(s, a, na);
-    s[na] = '/';
-    memcpy(s + na + 1, b, nb + 1);
-    return s;
-}
-
 uint32_t crc32_buf(const uint8_t *p, size_t n) {
     uint32_t c = 0xffffffffu;
     for (size_t i = 0; i < n; i++) {
