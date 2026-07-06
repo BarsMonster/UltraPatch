@@ -103,7 +103,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-void bv_encode(A1BitTree *t, REnc *r, int32_t x) {
+static void bv_encode(A1BitTree *t, REnc *r, int32_t x) {
     uint32_t v = rc_zz32(x);
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
@@ -113,7 +113,7 @@ void bv_encode(A1BitTree *t, REnc *r, int32_t x) {
     }
 }
 
-void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
+static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
     d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->rh = 0; d->hit = hitseed;
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }

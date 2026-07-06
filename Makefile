@@ -18,10 +18,13 @@ CFLAGS += -Wshadow
 CFLAGS += -Werror
 CFLAGS += -std=c99
 CFLAGS += $(OPT)
+CFLAGS += -ffunction-sections
+CFLAGS += -fdata-sections
 CFLAGS += -I.
 CFLAGS += -Isrc
 CFLAGS += -Ivendor/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
+LDFLAGS += -Wl,--gc-sections
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
@@ -86,7 +89,7 @@ all-internal: ultrapatch
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN -c $(DEC_SRCS) -o /dev/null
 
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
-	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) -o $@
+	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
 
 check-internal: all-internal
 	@set -e; \

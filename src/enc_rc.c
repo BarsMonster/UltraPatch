@@ -87,7 +87,7 @@ void ug_init_e(UGE *g, char code, int k) {
     for (int i = 0; i <= UG_CTX; i++) { g->u[i] = RC_PHALF; for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF; }
 }
 
-int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
+static inline int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
 
 /* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
 void ug_seed_cont_e(UGE *g, int depth) {

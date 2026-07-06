@@ -151,7 +151,6 @@ typedef struct {
 void die(const char *msg) ENC_NORETURN;
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t s);
-void *xrealloc(void *p, size_t n);
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap);
 void a1_sort(void *base, size_t n, size_t esz, int (*cmp)(const void *, const void *));
 void buf_put(Buf *b, uint8_t v);
@@ -222,7 +221,6 @@ void put_raw_bits(REnc *r, uint32_t v, int nb);
 void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
 void ug_init_e(UGE *g, char code, int k);
-int ug_c(int x);
 void ug_seed_cont_e(UGE *g, int depth);
 void ug_encode(UGE *g, REnc *r, uint32_t v);
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v);
@@ -257,8 +255,6 @@ uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
 
 extern int g_emit_overflow;
-void bv_encode(A1BitTree *t, REnc *r, int32_t x);
-void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed);
 void emit_delta(Models *M, REnc *r, int kind, int32_t delta);
 int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip);
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,

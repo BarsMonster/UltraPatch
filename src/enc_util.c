@@ -60,12 +60,6 @@ void a1_sort(void *base, size_t n, size_t esz,
     free(tmp);
 }
 
-void *xrealloc(void *p, size_t n) {
-    void *q = realloc(p, n ? n : 1);
-    if (!q) die("out of memory");
-    return q;
-}
-
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap) {
     if (need <= *cap) return p;
     size_t nc = *cap;
@@ -82,7 +76,9 @@ void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t in
     }
     if (elem_size && nc > SIZE_MAX / elem_size) die("allocation too large");
     *cap = nc;
-    return xrealloc(p, nc * elem_size);
+    void *q = realloc(p, nc * elem_size);
+    if (!q) die("out of memory");
+    return q;
 }
 
 static void buf_reserve(Buf *b, size_t need) {
