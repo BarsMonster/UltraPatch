@@ -507,14 +507,6 @@ static InjVec *build_inj_map(const InjVec *inj, size_t nops, const uint8_t *frm,
     return out;
 }
 
-/* Is candidate map A identical (boundaries + values) to map B? */
-static int smap_eq(const uint32_t *ab, const int32_t *av, int an,
-                   const uint32_t *bb, const int32_t *bv, int bn) {
-    if (an != bn) return 0;
-    for (int i = 0; i < an; i++) if (ab[i] != bb[i] || av[i] != bv[i]) return 0;
-    return 1;
-}
-
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold) {
@@ -553,7 +545,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
       if (nfr) {
           map_n = fit_shift_map_hit(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
           map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
-          if (smap_eq(map_b2, map_v2, map_n2, map_b, map_v, map_n)) map_n2 = 0;   /* duplicate */
       }
       free(frs); }
     if (map_n > 0) inj_m = build_inj_map(inj, ops->n, frm, map_b, map_v, map_n);
