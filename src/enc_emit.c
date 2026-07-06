@@ -285,8 +285,10 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         emit_geom_pc(&rc, &M, &oe, &pc[step]);
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
-            content_cursor_to(&ec, base + inj[step].v[ii].cc, NULL);
-            emit_delta(&M, &rc, inj[step].v[ii].kind, inj[step].v[ii].delta);
+            const Inj *ij = &inj[step].v[ii];
+            int32_t delta = mn ? field_residual(ij->kind, frm, ij->fpk, ij->delta, mb, mv, mn) : ij->delta;
+            content_cursor_to(&ec, base + ij->cc, NULL);
+            emit_delta(&M, &rc, ij->kind, delta);
         }
         content_cursor_to(&ec, op_end, NULL);
     }
@@ -493,20 +495,6 @@ static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_
     return mn;
 }
 
-/* Residual-space injection variant for a candidate map: re-price each plain-delta inj through the
- * map (no content re-walk — the cursors are map-independent). Per-op InjVec array; caller frees. */
-static InjVec *build_inj_map(const InjVec *inj, size_t nops, const uint8_t *frm,
-                             const uint32_t *mb, const int32_t *mv, int mn) {
-    InjVec *out = (InjVec *)xcalloc(nops ? nops : 1, sizeof(*out));
-    for (size_t step = 0; step < nops; step++) {
-        const InjVec *s = &inj[step];
-        for (size_t ii = 0; ii < s->n; ii++)
-            inj_push(&out[step], s->v[ii].cc, s->v[ii].kind, s->v[ii].fpk,
-                     field_residual(s->v[ii].kind, frm, s->v[ii].fpk, s->v[ii].delta, mb, mv, mn));
-    }
-    return out;
-}
-
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold) {
@@ -533,14 +521,12 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, tags.d, content.n, L0, L1, &kd, &cands, &ncand);
     /* ---- D1 shift map: fit TWO candidate maps from the op walk — the hit-count fit and the
-     * bits-based fit (C6) — and build each one's residual-space injection variant. The LZ parse is
-     * map-independent (inj values never touch content bytes), so the pipeline below runs on the
-     * plain-delta inj; both maps then compete against the no-map body under the exact byte gate at
-     * the end (ship-smallest => improve-or-tie per pair by construction). The bits fit is skipped
-     * when it lands on the same map as the hit fit (no second emit_body needed). */
+     * bits-based fit (C6). The LZ parse is map-independent (inj values never touch content bytes),
+     * and emit_body derives mapped residuals from the plain-delta injections at the exact emit site.
+     * Both maps then compete against the no-map body under the exact byte gate at the end
+     * (ship-smallest => improve-or-tie per pair by construction). */
     uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;      /* hit-count fit */
     uint32_t map_b2[SMAP_CAP]; int32_t map_v2[SMAP_CAP]; int map_n2 = 0;   /* bits fit */
-    InjVec *inj_m = NULL, *inj_m2 = NULL;
     int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
     { size_t nfr = 0;
       FieldRef *frs = collect_fields(ctx, ops, walk, ldrs, frm, from_size, fd, &nfr);
@@ -549,8 +535,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
           map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
       }
       free(frs); }
-    if (map_n > 0) inj_m = build_inj_map(inj, ops->n, frm, map_b, map_v, map_n);
-    if (map_n2 > 0) inj_m2 = build_inj_map(inj, ops->n, frm, map_b2, map_v2, map_n2);
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
      * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
     uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
@@ -637,24 +621,21 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         /* map variants: same fixed parse, residual-space inj + shipped map. Each ships only if its
          * exact emitted body beats the current best (no-map, then whichever map already won). */
         if (map_n > 0) {
-            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj_m, map_b, map_v, map_n);
+            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, map_b, map_v, map_n);
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; }
         }
         if (map_n2 > 0) {
-            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj_m2, map_b2, map_v2, map_n2);
+            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, map_b2, map_v2, map_n2);
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 2; }
         }
     }
     free(cands); free(ncand);
-    const InjVec *sel_inj = use_map == 2 ? inj_m2 : use_map == 1 ? inj_m : inj;
     const uint32_t *sel_b = use_map == 2 ? map_b2 : use_map == 1 ? map_b : NULL;
     const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         sel_inj, sel_b, sel_v, sel_n, fold);
+                         inj, sel_b, sel_v, sel_n, fold);
     injvec_array_free(inj, ops->n);
-    injvec_array_free(inj_m, ops->n);
-    injvec_array_free(inj_m2, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
     for (size_t oi = 0; oi < ops->n; oi++) free(ldrs[oi].v);
     free(ldrs); free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
