@@ -116,7 +116,7 @@ int fw_next(FieldWalk *w) {
 /* Mask every local-BL immediate in `mut` (positions detected on the REAL image), keeping the
  * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
  * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
- * corrections_hybrid absorbs any mask-induced diff mismatch by construction. */
+ * preserve_corrections_pc absorbs any mask-induced diff mismatch by construction. */
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
     for (size_t a = 0; a + 4 <= n;) {
         uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
@@ -562,9 +562,9 @@ uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_siz
     return pres;
 }
 
-uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
-                                   const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                                   const uint8_t *presset) {
+OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                              const uint8_t *presset) {
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
@@ -593,11 +593,12 @@ uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *
     uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
-    uint8_t *corr = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
-    uint8_t *chas = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
+    OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
     int32_t wi = 0;
-#define SIM_WRITE(TP, FP, ISD, DB) do { \
+#define SIM_WRITE(TP, FP, ISD, DB, OFF) do { \
         int32_t _tp = (TP), _fp = (FP); \
+        int32_t _off = (OFF); \
+        if (presset[wi]) ivec_push(&pc->pres, _off); \
         if (presset[wi] && 0 <= _tp && (uint32_t)_tp < from_size && !jhas[_tp]) { jhas[_tp] = 1; jval[_tp] = buf[_tp]; } \
         uint8_t produced; \
         if (ohas[_tp]) produced = oval[_tp]; \
@@ -608,62 +609,32 @@ uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *
                produced = (uint8_t)((DB) + src); } \
         uint8_t want = true_to[_tp]; \
         uint8_t c = (uint8_t)(want - produced); \
-        if (c) { corr[_tp] = c; chas[_tp] = 1; } \
+        if (c) corr_push(&pc->corr, _off, c); \
         buf[_tp] = want; wi++; \
     } while (0)
-    if (FWD) {
-        for (size_t oi = 0; oi < ops->n; oi++) {
-            const Op *o = m[oi].o;
-            for (int32_t k = 0; k < o->diff_len; k++) SIM_WRITE(m[oi].tp + k, m[oi].fp + k, 1, o->diff[k]);
-            for (int32_t e = 0; e < o->extra_len; e++) SIM_WRITE(m[oi].tp + o->diff_len + e, -1, 0, o->extra[e]);
-        }
-    } else {
-        for (size_t rr = ops->n; rr-- > 0;) {
-            const Op *o = m[rr].o;
-            for (int32_t e = o->extra_len - 1; e >= 0; e--) SIM_WRITE(m[rr].tp + o->diff_len + e, -1, 0, o->extra[e]);
-            for (int32_t k = o->diff_len - 1; k >= 0; k--) SIM_WRITE(m[rr].tp + k, m[rr].fp + k, 1, o->diff[k]);
-        }
-    }
-#undef SIM_WRITE
-    for (uint32_t i = 0; i < to_size; i++) if (!chas[i]) corr[i] = 0;
-    free(chas); free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
-    return corr;
-}
-
-OpPC *preserve_corr_per_op(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size,
-                                  const uint8_t *presset, const uint8_t *corr) {
-    int FWD = ctx->fwd; (void)from_size; (void)to_size;
-    OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    OpWalkEnt *m = opwalk_build(ops);
-    int32_t wi = 0;
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
         const Op *o = we->o;
         OpPC *pc = &out[step];
         if (FWD) {
-            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
-                if (presset[wi]) ivec_push(&pc->pres, k);
-                if (corr[we->tp + k]) corr_push(&pc->corr, k, corr[we->tp + k]);
-            }
-            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
+            for (int32_t k = 0; k < o->diff_len; k++)
+                SIM_WRITE(we->tp + k, we->fp + k, 1, o->diff[k], k);
+            for (int32_t e = 0; e < o->extra_len; e++) {
                 int32_t off = o->diff_len + e;
-                if (presset[wi]) ivec_push(&pc->pres, off);
-                if (corr[we->tp + off]) corr_push(&pc->corr, off, corr[we->tp + off]);
+                SIM_WRITE(we->tp + off, -1, 0, o->extra[e], off);
             }
         } else {
-            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
+            for (int32_t e = o->extra_len - 1; e >= 0; e--) {
                 int32_t off = o->diff_len + e;
-                if (presset[wi]) ivec_push(&pc->pres, off);
-                if (corr[we->tp + off]) corr_push(&pc->corr, off, corr[we->tp + off]);
+                SIM_WRITE(we->tp + off, -1, 0, o->extra[e], off);
             }
-            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
-                if (presset[wi]) ivec_push(&pc->pres, k);
-                if (corr[we->tp + k]) corr_push(&pc->corr, k, corr[we->tp + k]);
-            }
+            for (int32_t k = o->diff_len - 1; k >= 0; k--)
+                SIM_WRITE(we->tp + k, we->fp + k, 1, o->diff[k], k);
             if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(m);
+#undef SIM_WRITE
+    free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
     return out;
 }

@@ -150,22 +150,19 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
  * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
  * computes exactly the untransformed plan (bit-identical wire). */
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to,
-                               const FieldDeltaVec *fd, uint8_t **presset_out, uint8_t **corr_out) {
+                               const FieldDeltaVec *fd) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    uint8_t *presset = NULL, *corr = NULL;
+    uint8_t *presset = NULL;
     OpPC *pc = NULL;
     for (int pass = 0;; pass++) {
         presset = preserve_indices(ctx, ops, from_size, to_size);
-        corr = corrections_hybrid(ctx, ops, from->d, to->d, fd, from_size, to_size, presset);
-        pc = preserve_corr_per_op(ctx, ops, from_size, to_size, presset, corr);
+        pc = preserve_corrections_pc(ctx, ops, from->d, to->d, fd, from_size, to_size, presset);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
+        free(presset);
         if (!split_any) break;
-        free(presset); free(corr);
         oppc_array_free(pc, old_n);
     }
-    *presset_out = presset;
-    *corr_out = corr;
     return pc;
 }
 
@@ -213,8 +210,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
     FieldDeltaVec fd = {0};
     OpVec ops = build_candidate_ops(ctx, from, to, fr, tr, cfg, blocks, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    uint8_t *presset, *corr;
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, from, to, &fd, &presset, &corr);
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, from, to, &fd);
     int32_t fp_end_s = opvec_fp_end(&ops);
     /* Feature 7B initial source seek: leading zero-output ops fold into this shipped seed (see
      * fold_zero_ops). Derived from the SAME final ops array emit_body folds, so envelope and body
@@ -235,7 +231,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
      * preserve/correction budgets, so another variant may fit the decoder caps (measured on
      * foreign firmware: config 0 over-journal while fuzz variants fit). encode_a1 dies only
      * when EVERY config is infeasible. */
-    free(presset); free(corr); free(fd.v);
+    free(fd.v);
     oppc_array_free(pc, ops.n);
     opvec_free_deep(&ops);
     blockvec_array_free(blocks);

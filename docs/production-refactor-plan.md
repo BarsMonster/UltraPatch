@@ -35,12 +35,12 @@ committed separately after its verification passes.
 5. Unify shift-map fitter prune/cap/merge mechanics.
    - Status: complete.
    - Verification: `make gate`.
-   - Commit: this commit.
+   - Commit: `3c85b48`.
 
 6. Fuse preserve/correction planning and remove the redundant `chas` bitmap.
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`.
-   - Commit: pending.
+   - Commit: this commit.
 
 7. Single-source encoder delta stream transition logic.
    - Status: pending.
