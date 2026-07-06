@@ -207,7 +207,7 @@ FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm
         FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, o, fp0, o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
-            if (n == cap) { cap = cap ? cap * 2 : 256; out = (FieldRef *)xrealloc(out, cap * sizeof(*out)); }
+            out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
             out[n].kind = w.ev.type; out[n].fpk = (uint32_t)(fp0 + w.pos); out[n].delta = w.ev.delta; n++;
         }
         if (!FWD)                                        /* grow yields descending; restore ascending fpk */
@@ -399,10 +399,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
             if (scan >= o->diff_len) break;
             int32_t begin = scan++;
             while (scan < o->diff_len && o->diff[scan] != 0) scan++;
-            if (nr == rcap) {
-                rcap = rcap ? rcap * 2 : 16;
-                runs = (Run *)xrealloc(runs, rcap * sizeof(runs[0]));
-            }
+            runs = (Run *)vec_reserve(runs, &rcap, nr + 1, sizeof(runs[0]), 16);
             runs[nr++] = (Run){ begin, scan };
         }
         if (!nr) {

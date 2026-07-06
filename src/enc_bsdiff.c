@@ -24,23 +24,16 @@ static void b2j_add(B2JVec *m, int32_t val, int32_t idx) {
     for (size_t i = 0; i < m->n; i++) {
         if (m->v[i].val == val) {
             B2J *e = &m->v[i];
-            if (e->n == e->cap) {
-                e->cap = e->cap ? e->cap * 2 : 8;
-                e->idx = (int32_t *)xrealloc(e->idx, e->cap * sizeof(e->idx[0]));
-            }
+            e->idx = (int32_t *)vec_reserve(e->idx, &e->cap, e->n + 1, sizeof(e->idx[0]), 8);
             e->idx[e->n++] = idx;
             return;
         }
     }
-    if (m->n == m->cap) {
-        m->cap = m->cap ? m->cap * 2 : 64;
-        m->v = (B2J *)xrealloc(m->v, m->cap * sizeof(m->v[0]));
-    }
+    m->v = (B2J *)vec_reserve(m->v, &m->cap, m->n + 1, sizeof(m->v[0]), 64);
     B2J *e = &m->v[m->n++];
     memset(e, 0, sizeof(*e));
     e->val = val;
-    e->cap = 8;
-    e->idx = (int32_t *)xmalloc(e->cap * sizeof(e->idx[0]));
+    e->idx = (int32_t *)vec_reserve(e->idx, &e->cap, e->n + 1, sizeof(e->idx[0]), 8);
     e->idx[e->n++] = idx;
 }
 
@@ -56,10 +49,7 @@ static B2J *b2j_find(B2JVec *m, int32_t val) {
 }
 
 static void match_push(MatchVec *v, Match m) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 32;
-        v->v = (Match *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Match *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 32);
     v->v[v->n++] = m;
 }
 
@@ -120,11 +110,11 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
         if (m.size) {
             match_push(&raw, m);
             if (r.alo < m.a && r.blo < m.b) {
-                if (qn == qcap) { qcap *= 2; q = (Region *)xrealloc(q, qcap * sizeof(*q)); }
+                q = (Region *)vec_reserve(q, &qcap, qn + 1, sizeof(*q), 64);
                 q[qn++] = (Region){ r.alo, m.a, r.blo, m.b };
             }
             if (m.a + m.size < r.ahi && m.b + m.size < r.bhi) {
-                if (qn == qcap) { qcap *= 2; q = (Region *)xrealloc(q, qcap * sizeof(*q)); }
+                q = (Region *)vec_reserve(q, &qcap, qn + 1, sizeof(*q), 64);
                 q[qn++] = (Region){ m.a + m.size, r.ahi, m.b + m.size, r.bhi };
             }
         }

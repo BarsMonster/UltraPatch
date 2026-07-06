@@ -11,10 +11,7 @@
 /* LZSS planning and entropy models.                                                       */
 /* ------------------------------------------------------------------------------------- */
 static void tok_push(TokenVec *v, Token t) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 1024;
-        v->v = (Token *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Token *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 1024);
     v->v[v->n++] = t;
 }
 

@@ -45,12 +45,12 @@ committed separately after its verification passes.
 7. Single-source encoder delta stream transition logic.
    - Status: complete.
    - Verification: `make gate`.
-   - Commit: this commit.
+   - Commit: `07a96ab`.
 
 8. Consolidate repeated host vector growth boilerplate.
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`; `make check-analyze`.
-   - Commit: pending.
+   - Commit: this commit.
 
 ## Final Verification
 

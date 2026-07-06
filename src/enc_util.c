@@ -66,12 +66,27 @@ void *xrealloc(void *p, size_t n) {
     return q;
 }
 
+void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap) {
+    if (need <= *cap) return p;
+    size_t nc = *cap;
+    if (nc) {
+        if (nc > SIZE_MAX / 2u) die("allocation too large");
+        nc *= 2u;
+    } else {
+        nc = init_cap;
+    }
+    if (!nc) nc = 1;
+    while (nc < need) {
+        if (nc > SIZE_MAX / 2u) die("allocation too large");
+        nc *= 2u;
+    }
+    if (elem_size && nc > SIZE_MAX / elem_size) die("allocation too large");
+    *cap = nc;
+    return xrealloc(p, nc * elem_size);
+}
+
 static void buf_reserve(Buf *b, size_t need) {
-    if (need <= b->cap) return;
-    size_t nc = b->cap ? b->cap * 2 : 256;
-    while (nc < need) nc *= 2;
-    b->d = (uint8_t *)xrealloc(b->d, nc);
-    b->cap = nc;
+    b->d = (uint8_t *)vec_reserve(b->d, &b->cap, need, sizeof(b->d[0]), 256);
 }
 
 void buf_put(Buf *b, uint8_t v) {
@@ -199,18 +214,12 @@ void put_uleb_overlong(Buf *b, uint32_t v) {
 }
 
 void ivec_push(IVec *v, int32_t x) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 16;
-        v->v = (int32_t *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (int32_t *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
     v->v[v->n++] = x;
 }
 
 void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 16;
-        v->v = (CorrEnt *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (CorrEnt *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
     v->v[v->n].off = off;
     v->v[v->n].byte = byte;
     v->n++;
@@ -227,18 +236,12 @@ int cmp_corr(const void *a, const void *b) {
 }
 
 void opvec_push(OpVec *v, Op o) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 64;
-        v->v = (Op *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Op *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 64);
     v->v[v->n++] = o;
 }
 
 void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 8;
-        v->v = (Block *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Block *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 8);
     Block *b = &v->v[v->n++];
     b->from_offset = fo;
     b->to_address = ta;
@@ -254,10 +257,7 @@ static int cmp_fd(const void *a, const void *b) {
 }
 
 void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 256;
-        v->v = (FieldDelta *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (FieldDelta *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 256);
     v->v[v->n].addr = addr;
     v->v[v->n].kind = kind;
     v->v[v->n].delta = delta;

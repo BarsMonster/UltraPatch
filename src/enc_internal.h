@@ -124,6 +124,7 @@ void die(const char *msg) ENC_NORETURN;
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t s);
 void *xrealloc(void *p, size_t n);
+void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap);
 void a1_sort(void *base, size_t n, size_t esz, int (*cmp)(const void *, const void *));
 void buf_put(Buf *b, uint8_t v);
 void buf_write(Buf *b, const void *p, size_t n);

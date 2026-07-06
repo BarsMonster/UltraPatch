@@ -14,10 +14,7 @@ typedef struct { uint32_t cc; int kind; uint32_t fpk; int64_t delta; } Inj;
 typedef struct { Inj *v; size_t n, cap; } InjVec;
 
 static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t delta) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 16;
-        v->v = (Inj *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Inj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
     v->v[v->n++] = (Inj){cc, kind, fpk, delta};
 }
 

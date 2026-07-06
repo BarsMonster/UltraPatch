@@ -25,19 +25,13 @@ static int cmp_sym_val(const void *a, const void *b) {
 }
 
 static void sym_push(SymVec *v, Sym s) {
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 1024;
-        v->v = (Sym *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (Sym *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 1024);
     v->v[v->n++] = s;
 }
 
 static void range_push(RangeVec *v, uint32_t begin, uint32_t end, uint32_t sec) {
     if (end <= begin) return;
-    if (v->n == v->cap) {
-        v->cap = v->cap ? v->cap * 2 : 128;
-        v->v = (ARange *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
-    }
+    v->v = (ARange *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 128);
     v->v[v->n++] = (ARange){ begin, end, sec };
 }
 
