@@ -372,6 +372,26 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     return re_flush_opt(&rc);
 }
 
+typedef struct {
+    const OpVec *ops;
+    const uint8_t *frm;
+    uint32_t from_size;
+    const OpPC *pc;
+    const Buf *content;
+    const Buf *tags;
+    const size_t *ends;
+    int FWD;
+} EmitBodyMeasure;
+
+static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
+                             const InjVec *inj, const uint32_t *mb, const int32_t *mv, int mn) {
+    Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
+                         m->content, m->tags, m->ends, inj, mb, mv, mn);
+    size_t n = g_emit_overflow ? (size_t)-1 : body.n;
+    buf_free(&body);
+    return n;
+}
+
 /* ---- bits-based shift-map fit (D1, C6). The hit-count fit above scores a candidate map by the
  * COUNT of residuals it drives to zero, but hits have wildly different wire VALUE (a residual
  * absorbed into a rep0 run costs ~1 bit; a fresh escape costs a whole zigzag-uLEB through the dval
@@ -626,6 +646,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
       free(tp0s); }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
+    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -633,8 +654,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        Buf cur_body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
-        size_t cur_bytes = g_emit_overflow ? (size_t)-1 : cur_body.n; buf_free(&cur_body);
+        size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, inj, NULL, NULL, 0);
         /* Phase 1: ring-only price feedback to its fixpoint (the pre-out-match trajectory).
          * Phase 2: re-parse WITH out-candidates; each candidate must beat the phase-1 fixpoint
          * under the exact byte gate, so out-matches (and their per-fresh-match out-bit tax +
@@ -650,8 +670,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
-                Buf cand_body = emit_body(&cand_seq, nk, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
-                size_t cand_bytes = g_emit_overflow ? (size_t)-1 : cand_body.n; buf_free(&cand_body);
+                size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, nko, inj, NULL, NULL, 0);
                 if (cand_bytes < cur_bytes) {
                     size_t gain = cur_bytes - cand_bytes;
                     free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
@@ -671,8 +690,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
          * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                Buf b = emit_body(&seq, nk, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
-                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
+                size_t bb = emit_body_size(&meas, &seq, nk, ko, inj, NULL, NULL, 0);
                 if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
                 else break;
             }
@@ -680,8 +698,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         /* anneal-ko probe: same unimodal walk for the out-match position rice parameter. */
         for (int dir = -1; dir <= 1; dir += 2) {
             for (int nko = ko + dir; nko >= 0 && nko <= 15; nko += dir) {
-                Buf b = emit_body(&seq, kd, nko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj, NULL, NULL, 0);
-                size_t bb = g_emit_overflow ? (size_t)-1 : b.n; buf_free(&b);
+                size_t bb = emit_body_size(&meas, &seq, kd, nko, inj, NULL, NULL, 0);
                 if (bb < cur_bytes) { cur_bytes = bb; ko = nko; }
                 else break;
             }
@@ -689,13 +706,11 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         /* map variants: same fixed parse, residual-space inj + shipped map. Each ships only if its
          * exact emitted body beats the current best (no-map, then whichever map already won). */
         if (map_n > 0) {
-            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m, map_b, map_v, map_n);
-            size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
+            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj_m, map_b, map_v, map_n);
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; }
         }
         if (map_n2 > 0) {
-            Buf b0 = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends, inj_m2, map_b2, map_v2, map_n2);
-            size_t mbytes = g_emit_overflow ? (size_t)-1 : b0.n; buf_free(&b0);
+            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj_m2, map_b2, map_v2, map_n2);
             if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 2; }
         }
     }
