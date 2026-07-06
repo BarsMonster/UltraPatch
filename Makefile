@@ -27,17 +27,19 @@ DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
-# Shared host-side NVM emulator, #included by patch_selfcheck.c and
-# patch_apply_demo.c before their patch_apply.h.
+# Shared host-side NVM emulator, #included by patch_host_backend.c before patch_apply.h.
 NVM_EMU := src/nvm_emu.inc
 # Host encoder modules. The encoder is a normal CLI tool and may rely on this Makefile;
 # the device decoder remains header-only for integrators.
 ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h src/enc_internal.h
-ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
+# The host backend owns the single reference-decoder copy used by both encode
+# selfcheck and CLI decode. patch_apply_demo.c is only a standalone wrapper.
+HOST_BACKEND_SRC := src/patch_host_backend.c
+ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) src/arm_cortex_m4.c $(HOST_BACKEND_SRC) $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
-TOOL_SRCS := $(ENC_SRCS) $(DEC_SRCS)
+TOOL_SRCS := $(ENC_SRCS)
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
@@ -81,7 +83,7 @@ $(CAPPED): %:
 	exit $$s
 
 all-internal: ultrapatch
-	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -c $(DEC_SRCS) -o /dev/null
+	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN -c $(DEC_SRCS) -o /dev/null
 
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) -o $@

@@ -64,7 +64,7 @@ deterministic for a fixed `test-bench/corpus.sha256` manifest.
 The release source artifact is the Git commit. The device decoder artifact is
 the decoder header set rooted at `src/patch_apply.h`; the host encoder is built from
 `src/patch_generate.c`, the `src/enc_*.c` subsystem modules, `src/arm_cortex_m4.c`,
-`src/patch_selfcheck.c`, and the vendored
+`src/patch_host_backend.c`, and the vendored
 `vendor/libdivsufsort/` sources.
 
 For traceability, release notes should include:

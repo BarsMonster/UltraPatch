@@ -6,10 +6,9 @@
 
 /* Shared SAML22-shaped NVM row emulator for the host gate binaries. The reusable
  * decoder (patch_apply.h) only calls flash_read()/flash_write(); all emulation and
- * write-safety counters live here, outside the production header. #included by BOTH
- * patch_apply_demo.c and patch_selfcheck.c BEFORE their patch_apply.h -- separate
- * binaries, so the static state stays private to each. The selfcheck copy is the
- * ship/no-ship oracle: this file keeps the two byte-identical instead of by eyeball.
+ * write-safety counters live here, outside the production header. #included by
+ * patch_host_backend.c BEFORE patch_apply.h, so CLI decode and encoder selfcheck
+ * share one reference-decoder copy in the host tool.
  * Semantics: a byte program is a free 1->0 transition; a program needing any 0->1
  * erases the whole 256 B row to 0xFF. Counters reproduce the product write-safety
  * gate (each row erased at most once, monotonic erase frontier). Requires <stdint.h>,

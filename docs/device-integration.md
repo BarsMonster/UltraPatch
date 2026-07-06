@@ -119,7 +119,7 @@ PatchApply state;
 int rc = patch_apply_run(&state, next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
 ```
 
-`src/patch_apply_demo.c` (`PullCtx` / `pull_next`) is a minimal reference
+`src/patch_host_backend.c` (`PullCtx` / `pull_next`) is a minimal reference
 implementation of the callback.
 
 **`patch_apply_run` blocks the caller for the whole decode** — two full-image
@@ -280,6 +280,6 @@ recovery path. A retry of the same patch on the interrupted image rejects
 cleanly at the `CRC32(from)` gate with no further flash writes, which is the
 supported detection mechanism.
 
-The host wrapper in `src/patch_apply_demo.c` is a verification harness and NVM
+The host backend in `src/patch_host_backend.c` is a verification harness and NVM
 emulator. It is useful as a reference for driving the push API and collecting
 NVM metrics, but it is not the device integration layer.

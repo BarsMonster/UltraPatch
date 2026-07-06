@@ -118,7 +118,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     put_uleb(&blob, (uint32_t)(body.n - 1u));
     buf_write(&blob, body.d + 1, body.n - 1);
     /* No trailer: CRC32(to) already sits in the header above. */
-    /* Self-verification (patch_selfcheck.c): apply the finished blob to `from` on the
+    /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
      * cannot prove applies. */

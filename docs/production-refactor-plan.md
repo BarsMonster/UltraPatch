@@ -13,14 +13,14 @@ committed separately after its verification passes.
 ## Items
 
 1. Tracked plan.
-   - Status: in progress.
+   - Status: complete.
    - Verification: `git diff --check`.
-   - Commit: pending.
+   - Commit: `e8aa361`.
 
 2. Deduplicate the host decoder backend used by CLI decode and encoder selfcheck.
-   - Status: pending.
-   - Verification: `make gate`; inspect `nm -S ultrapatch` for no duplicate decoder-local symbols.
-   - Commit: pending.
+   - Status: complete.
+   - Verification: `make gate`; `nm -S ultrapatch` showed one copy of decoder-local symbols.
+   - Commit: this commit.
 
 3. Remove the `model_diff` harness and raw-gamma test-only code.
    - Status: pending.
