@@ -89,96 +89,142 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
     *ops = out;
 }
 
+static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
+                                 const Ranges *fr, const Ranges *tr, PlanCfg cfg,
+                                 BlockVec blocks[STREAM_N], Buf *from_df, Buf *to_df,
+                                 FieldDeltaVec *fd) {
+    int variant = cfg.variant;
+    data_format_encode(from, to, fr, tr, from_df, to_df, blocks,
+                       variant >= 2 ? 1 : 0);
+    OpVec ops = bsdiff_ops(from_df, to_df, cfg.fuzz);
+    uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
+    *fd = build_field_deltas(from, fr, blocks);
+    split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
+    if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
+    coerce_reloc_literals(ctx, &ops, from->d, from_size, to_size, fd);
+    degrade_ops_to_journal_budget(ctx, &ops, to, from_size, to_size, A1_JSLOTS);
+    return ops;
+}
+
+static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, int pass) {
+    int split_any = 0;
+    if (pass >= 12) return 0;
+    int FWDD = ctx->fwd;
+    int32_t *cut = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    for (size_t i = 0; i < ops->n; i++) cut[i] = -1;
+    for (size_t step = 0; step < ops->n; step++) {
+        if (pc[step].corr.n <= A1_OPC_CAP) continue;
+        size_t oi = FWDD ? step : ops->n - 1 - step;
+        int32_t dl = ops->v[oi].diff_len;
+        if (dl < 2) continue;                       /* cannot split further: stays infeasible */
+        int32_t m = pc[step].corr.v[pc[step].corr.n / 2].off;
+        if (m <= 0 || m >= dl) m = dl / 2;
+        if (m <= 0 || m >= dl) continue;
+        cut[oi] = m;
+        ctx->opc_splits++;
+        split_any = 1;
+    }
+    if (split_any) {
+        OpVec out2 = {0};
+        for (size_t oi = 0; oi < ops->n; oi++) {
+            Op *o = &ops->v[oi];
+            if (cut[oi] < 0) { opvec_push(&out2, *o); continue; }
+            /* split keeps the tp/fp walk exact: sub1 advances fp by cut (adj 0),
+             * sub2 carries the remaining diff + the original extras and adj. */
+            opvec_push(&out2, op_copy(cut[oi], o->diff, 0, NULL, 0));
+            opvec_push(&out2, op_copy(o->diff_len - cut[oi], o->diff + cut[oi],
+                                      o->extra_len, o->extra, o->adj));
+            free(o->diff); free(o->extra);
+        }
+        free(ops->v);
+        *ops = out2;
+    }
+    free(cut);
+    return split_any;
+}
+
+/* corrections-cap degradation (same philosophy as the journal budget): OPC_CAP bounds
+ * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
+ * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
+ * op boundaries, which shifts field detection and thus the corrections themselves, so
+ * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
+ * computes exactly the untransformed plan (bit-identical wire). */
+static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to,
+                               const FieldDeltaVec *fd, uint8_t **presset_out, uint8_t **corr_out) {
+    uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
+    uint8_t *presset = NULL, *corr = NULL;
+    OpPC *pc = NULL;
+    for (int pass = 0;; pass++) {
+        presset = preserve_indices(ctx, ops, from_size, to_size);
+        corr = corrections_hybrid(ctx, ops, from->d, to->d, fd, from_size, to_size, presset);
+        pc = preserve_corr_per_op(ctx, ops, from_size, to_size, presset, corr);
+        size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
+        int split_any = split_overfull_corrections(ctx, ops, pc, pass);
+        if (!split_any) break;
+        free(presset); free(corr);
+        oppc_array_free(pc, old_n);
+    }
+    *presset_out = presset;
+    *corr_out = corr;
+    return pc;
+}
+
+static int32_t opvec_fp_end(const OpVec *ops) {
+    int32_t fp_end = 0;
+    for (size_t i = 0; i < ops->n; i++) fp_end += ops->v[i].diff_len + ops->v[i].adj;
+    return fp_end;
+}
+
+static int32_t opvec_fp_start(const OpVec *ops) {
+    int32_t *ea = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
+    uint8_t *sk = (uint8_t *)xmalloc(ops->n ? ops->n : 1);
+    int32_t fp_start = fold_zero_ops(ops, ea, sk);
+    free(ea); free(sk);
+    return fp_start;
+}
+
+static int plan_caps_feasible(const OpVec *ops, const OpPC *pc) {
+    int feasible = 1;
+    size_t tpres = 0;
+    for (size_t i = 0; i < ops->n; i++) {
+        if (pc[i].corr.n > A1_OPC_CAP) feasible = 0;
+        tpres += pc[i].pres.n;
+    }
+    if (tpres > A1_JSLOTS) feasible = 0;
+    return feasible;
+}
+
+static void encstats_from_ctx(const EncCtx *ctx, EncStats *st) {
+    st->deg_engaged = ctx->deg_engaged;
+    st->deg_pres_needed = ctx->deg_pres_needed;
+    st->deg_converted = ctx->deg_converted;
+    st->opc_splits = ctx->opc_splits;
+}
+
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
 Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                        PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
-    int variant = cfg.variant;
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
-    data_format_encode(from, to, fr, tr, &from_df, &to_df, blocks,
-                       variant >= 2 ? 1 : 0);
-    OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
+    FieldDeltaVec fd = {0};
+    OpVec ops = build_candidate_ops(ctx, from, to, fr, tr, cfg, blocks, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    FieldDeltaVec fd = build_field_deltas(from, fr, blocks);
-    split_nonzero_diff_runs(ctx, &ops, &from_df, &to_df);
-    if (variant >= 1) merge_op_field_deltas(&fd, &ops, from->d, from_size, to->d, to_size);
-    coerce_reloc_literals(ctx, &ops, from->d, from_size, to_size, &fd);
-    degrade_ops_to_journal_budget(ctx, &ops, to, from_size, to_size, A1_JSLOTS);
-    /* corrections-cap degradation (same philosophy as the journal budget): OPC_CAP bounds
-     * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
-     * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
-     * op boundaries, which shifts field detection and thus the corrections themselves, so
-     * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
-     * computes exactly the untransformed plan (bit-identical wire). */
-    uint8_t *presset, *corr; OpPC *pc;
-    for (int pass = 0;; pass++) {
-        presset = preserve_indices(ctx, &ops, from_size, to_size);
-        corr = corrections_hybrid(ctx, &ops, from->d, to->d, &fd, from_size, to_size, presset);
-        pc = preserve_corr_per_op(ctx, &ops, from_size, to_size, presset, corr);
-        size_t old_n = ops.n;                               /* pc[] is sized for THIS op count */
-        int split_any = 0;
-        if (pass < 12) {
-            int FWDD = ctx->fwd;
-            int32_t *cut = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
-            for (size_t i = 0; i < ops.n; i++) cut[i] = -1;
-            for (size_t step = 0; step < ops.n; step++) {
-                if (pc[step].corr.n <= A1_OPC_CAP) continue;
-                size_t oi = FWDD ? step : ops.n - 1 - step;
-                int32_t dl = ops.v[oi].diff_len;
-                if (dl < 2) continue;                       /* cannot split further: stays infeasible */
-                int32_t m = pc[step].corr.v[pc[step].corr.n / 2].off;
-                if (m <= 0 || m >= dl) m = dl / 2;
-                if (m <= 0 || m >= dl) continue;
-                cut[oi] = m;
-                ctx->opc_splits++;
-                split_any = 1;
-            }
-            if (split_any) {
-                OpVec out2 = {0};
-                for (size_t oi = 0; oi < ops.n; oi++) {
-                    Op *o = &ops.v[oi];
-                    if (cut[oi] < 0) { opvec_push(&out2, *o); continue; }
-                    /* split keeps the tp/fp walk exact: sub1 advances fp by cut (adj 0),
-                     * sub2 carries the remaining diff + the original extras and adj. */
-                    opvec_push(&out2, op_copy(cut[oi], o->diff, 0, NULL, 0));
-                    opvec_push(&out2, op_copy(o->diff_len - cut[oi], o->diff + cut[oi],
-                                              o->extra_len, o->extra, o->adj));
-                    free(o->diff); free(o->extra);
-                }
-                free(ops.v);
-                ops = out2;
-            }
-            free(cut);
-        }
-        if (!split_any) break;
-        free(presset); free(corr);
-        oppc_array_free(pc, old_n);
-    }
-    int32_t fp_end_s = 0;
-    for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
+    uint8_t *presset, *corr;
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, from, to, &fd, &presset, &corr);
+    int32_t fp_end_s = opvec_fp_end(&ops);
     /* Feature 7B initial source seek: leading zero-output ops fold into this shipped seed (see
      * fold_zero_ops). Derived from the SAME final ops array emit_body folds, so envelope and body
      * agree bit-for-bit. Sum(dl+adj) is fold-invariant, so fp_end_s above stays correct. */
-    int32_t fp_start_s;
-    { int32_t *ea = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
-      uint8_t *sk = (uint8_t *)xmalloc(ops.n ? ops.n : 1);
-      fp_start_s = fold_zero_ops(&ops, ea, sk);
-      free(ea); free(sk); }
+    int32_t fp_start_s = opvec_fp_start(&ops);
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
-    st_out->deg_engaged = ctx->deg_engaged;
-    st_out->deg_pres_needed = ctx->deg_pres_needed;
-    st_out->deg_converted = ctx->deg_converted;
-    st_out->opc_splits = ctx->opc_splits;
+    encstats_from_ctx(ctx, st_out);
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
-    int feasible = 1;
-    { size_t tpres = 0;
-      for (size_t i = 0; i < ops.n; i++) { if (pc[i].corr.n > A1_OPC_CAP) feasible = 0; tpres += pc[i].pres.n; }
-      if (tpres > A1_JSLOTS) feasible = 0; }
+    int feasible = plan_caps_feasible(&ops, pc);
     Buf body = {0};
     if (feasible) {
         body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc);
