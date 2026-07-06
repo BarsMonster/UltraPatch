@@ -17,6 +17,20 @@ static char *elf_sidecar_path(const char *image_path) {
     return elf;
 }
 
+static size_t candidate_wire_size(uint32_t from_size, uint32_t to_size, int desc,
+                                  int32_t fp_end, int32_t fp_start, size_t body_n) {
+    if (body_n == 0 || body_n - 1u > UINT32_MAX) return SIZE_MAX;
+    uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
+    size_t n = 8u;                                      /* CRC32(from), CRC32(to) */
+    n += (size_t)rc_uleb_len(from_size);
+    n += (size_t)rc_uleb_len(zd) + (rc_dir_is_natural(from_size, to_size, desc) ? 0u : 1u);
+    if (desc) n += (size_t)rc_uleb_len(rc_zz32(fp_end - (int32_t)from_size));
+    n += (size_t)rc_uleb_len(rc_zz32(fp_start));
+    n += (size_t)rc_uleb_len((uint32_t)(body_n - 1u));
+    n += body_n - 1u;                                  /* range coder leading cache byte is dropped */
+    return n;
+}
+
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
     char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
     Buf from = slurp(from_image), to = slurp(to_image);
@@ -64,12 +78,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
             Buf b = plan_encode(&ctx, &from, &to, &pa, PLANS[v], &fpe, &fps, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
-            /* judge by SHIPPED total: descending additionally pays the fp_end envelope
-             * varint, and the UNNATURAL direction pays the 1-byte overlong marker. The 7B
-             * initial-seek varint (fp_start) rides both directions equally, so it does not
-             * shift the argmin — accounted in the emitted blob, omitted from this comparison. */
-            size_t tot = b.n + (dir ? (size_t)rc_uleb_len(rc_zz32(fpe - (int32_t)from_size)) : 0u)
-                             + (rc_dir_is_natural(from_size, to_size, dir) ? 0u : 1u);
+            size_t tot = candidate_wire_size(from_size, to_size, dir, fpe, fps, b.n);
             if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
             else buf_free(&b);
         }
@@ -120,6 +129,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     put_uleb(&blob, (uint32_t)(body.n - 1u));
     buf_write(&blob, body.d + 1, body.n - 1);
     /* No trailer: CRC32(to) already sits in the header above. */
+    if (blob.n != best_tot) die("candidate size accounting drifted from emitted blob");
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
