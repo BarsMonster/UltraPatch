@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections.
+ * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, build_field_deltas, proxy pricing, split runs, preserve/corrections.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -280,31 +280,6 @@ int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta
         pred = (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, u32le_at(frm + fpk)));
     }
     return (int32_t)((uint32_t)delta - (uint32_t)pred);
-}
-
-/* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan,
- * walking each op in APPLY direction (mirror op_emit_content / the decoder replay:
- * adjacent windows <4 B apart resolve to a different field set per direction). Entries
- * stay in ascending-fpk order so an unchanged field set fits an identical map. */
-FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const OpWalkEnt *walk,
-                         const IVec *ldrs, const uint8_t *frm, uint32_t from_size,
-                         const FieldDeltaVec *fd, size_t *nout) {
-    int FWD = ctx->fwd;
-    FieldRef *out = NULL; size_t n = 0, cap = 0;
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        const OpWalkEnt *we = &walk[oi];
-        size_t n0 = n;
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldrs[oi], we->o, we->fp, we->o->diff_len);
-        while (fw_next(&w)) {
-            if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
-            out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
-            out[n].kind = w.ev.type; out[n].fpk = (uint32_t)(we->fp + w.pos); out[n].delta = w.ev.delta; n++;
-        }
-        if (!FWD)                                        /* grow yields descending; restore ascending fpk */
-            for (size_t a = n0, b = n; a + 1 < b; a++, b--) { FieldRef t = out[a]; out[a] = out[b - 1]; out[b - 1] = t; }
-    }
-    *nout = n;
-    return out;
 }
 
 typedef struct { uint32_t b; int32_t v; } SegCand;

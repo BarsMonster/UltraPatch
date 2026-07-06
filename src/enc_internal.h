@@ -198,9 +198,6 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
 int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
                        const uint32_t *mb, const int32_t *mv, int mn);
-FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const OpWalkEnt *walk,
-                         const IVec *ldrs, const uint8_t *frm, uint32_t from_size,
-                         const FieldDeltaVec *fd, size_t *nout);
 int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                     const uint8_t *frm, const FieldRef *fr, size_t nfr,
                     uint32_t *tb, int32_t *tv, FieldKey *fk);

@@ -24,6 +24,23 @@ static void injvec_array_free(InjVec *v, size_t n) {
     free(v);
 }
 
+static FieldRef *field_refs_from_inj(const InjVec *inj, size_t nops, int FWD, size_t *nout) {
+    FieldRef *out = NULL;
+    size_t n = 0, cap = 0;
+    for (size_t oi = 0; oi < nops; oi++) {
+        size_t step = FWD ? oi : nops - 1u - oi;
+        const InjVec *iv = &inj[step];
+        for (size_t q = 0; q < iv->n; q++) {
+            size_t ii = FWD ? q : iv->n - 1u - q;
+            const Inj *ij = &iv->v[ii];
+            out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
+            out[n++] = (FieldRef){ ij->kind, ij->fpk, ij->delta };
+        }
+    }
+    *nout = n;
+    return out;
+}
+
 typedef struct {
     const Op *o;
     const IVec *lits;
@@ -317,7 +334,7 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
  * byte tree). This fit instead prices, in fractional bits, the exact map header PLUS the BL/EX
  * residual streams under a candidate map, and eliminates segments by NET bits (segment wire cost
  * vs the residual-bit increase from dropping it). The price is a PROXY (residuals are priced in
- * collect_fields order and the shared dval tree ignores the interleaved corrections, both
+ * field-reference order and the shared dval tree ignores the interleaved corrections, both
  * second-order); the final map choice is always settled by encode_body's exact full-body byte
  * gate, which competes this map against the hit-count map and the no-map body. ---- */
 
@@ -524,7 +541,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     uint32_t map_b2[SMAP_CAP]; int32_t map_v2[SMAP_CAP]; int map_n2 = 0;   /* bits fit */
     int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
     { size_t nfr = 0;
-      FieldRef *frs = collect_fields(ctx, ops, walk, ldrs, frm, from_size, fd, &nfr);
+      FieldRef *frs = field_refs_from_inj(inj, ops->n, FWD, &nfr);
       if (nfr) {
           map_n = fit_shift_map_hit(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
           map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
@@ -535,25 +552,22 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
     uint32_t *olim2 = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
     uint32_t *ocap = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
-    { int32_t *tp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-      int32_t tpw = 0;
-      for (size_t i = 0; i < ops->n; i++) { tp0s[i] = tpw; tpw += ops->v[i].diff_len + ops->v[i].extra_len; }
-      size_t prev_end = 0;
+    { size_t prev_end = 0;
       for (size_t step = 0; step < ops->n; step++) {
           size_t oi = FWD ? step : ops->n - 1 - step;
-          uint32_t tpe = (uint32_t)(tp0s[oi] + ops->v[oi].diff_len + ops->v[oi].extra_len);
-          uint32_t lim = FWD ? (uint32_t)tp0s[oi] : tpe;
+          int32_t tp0 = walk[oi].tp;
+          uint32_t tpe = (uint32_t)(tp0 + ops->v[oi].diff_len + ops->v[oi].extra_len);
+          uint32_t lim = FWD ? (uint32_t)tp0 : tpe;
           /* OLD window edge: FWD [tp_end, from_size) stays pristine through this op; grow
            * [0, min(tp0, from_size)) likewise (beyond from_size is erased/undefined flash). */
           uint32_t lim2 = FWD ? tpe
-                              : ((uint32_t)tp0s[oi] < from_size ? (uint32_t)tp0s[oi] : from_size);
+                              : ((uint32_t)tp0 < from_size ? (uint32_t)tp0 : from_size);
           for (size_t c = prev_end; c < ends[step]; c++) {
               olim[c] = lim; olim2[c] = lim2;
               ocap[c] = (uint32_t)(ends[step] - c);          /* OLD tokens end inside their op */
           }
           prev_end = ends[step];
-      }
-      free(tp0s); }
+      } }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
     EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, fold, FWD };
