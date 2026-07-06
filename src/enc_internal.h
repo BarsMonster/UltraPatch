@@ -6,7 +6,6 @@
 #ifndef A1_ENC_INTERNAL_H
 #define A1_ENC_INTERNAL_H
 
-#include <unistd.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,7 +32,6 @@ int divsufsort(const uint8_t *T, int32_t *suffix_array, int32_t n);
 
 typedef struct {
     int fwd;
-    int litdump;
     int    deg_engaged;
     size_t deg_pres_needed;
     size_t deg_converted;

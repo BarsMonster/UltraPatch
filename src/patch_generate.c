@@ -57,7 +57,6 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
         if (pass && bestv >= 0 && !st.deg_engaged) break;
         ctx.fwd = (dir == 0);
-        ctx.litdump = 0;
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0, fps = 0; EncStats stv = {0};
             Buf b = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
@@ -74,15 +73,6 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
-    /* WIRE-NEUTRAL scaffold: re-run the WINNING plan once with the literal dump enabled so the dump
-     * file holds exactly the tag0/tag1 span literals that ship (the sweep above ran with dumping off,
-     * so loser configs never pollute it). Deterministic replay reproduces the identical body. */
-    if (getenv("A1_LITDUMP")) {
-        ctx.fwd = (best_desc == 0); ctx.litdump = 1;
-        int32_t fpe = 0, fps = 0; EncStats stv = {0};
-        Buf rb = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[bestv], &fpe, &fps, &stv);
-        buf_free(&rb); ctx.litdump = 0;
-    }
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
     if (getenv("A1_DEGRADE_STATS"))

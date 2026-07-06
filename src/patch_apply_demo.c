@@ -92,9 +92,6 @@ int decode_a1(const char *image_path, const char *patch_path, int byte_mode){
         fclose(mf); free(sc_flash); free(blob); return 1; }
     /* decode succeeded: the decoder owns the true sizes (envelope-parsed + CRC-gated). */
     uint32_t to_size=patch_apply_to_size(&pa), span=patch_apply_image_span(&pa);
-#ifdef RC_V3_BAKEDUMP
-    { const char*dp=getenv("AGENT07_OUTDUMP"); if(dp){ FILE*f=fopen(dp,"wb"); fwrite(sc_flash,1,to_size,f); fclose(f); } }
-#endif
     if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
                 nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());

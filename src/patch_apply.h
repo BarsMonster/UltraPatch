@@ -45,9 +45,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#ifdef HY_DBG
-#include <stdio.h>
-#endif
 
 #include "rc_models.h"
 
@@ -968,10 +965,6 @@ static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
     if(g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (ldr_targets). */
-#ifdef HY_DBG
-    fprintf(stderr,"OP tp0=%d fp0=%d dl=%d el=%d adj=%d blK=%d exK=%d\n",
-        tp0,fp0,dl,el,adj,DR_BL.K,DR_EX.K);
-#endif
     /* ---- CONTENT decode + streaming write with inline field detection ----
      * Both directions process the same 4-byte ascending field windows over [0,dl); they differ only
      * in (a) iteration direction (step), (b) when the el extra bytes are consumed relative to the dl
