@@ -48,6 +48,7 @@ enum { STREAM_DATA, STREAM_CODE, STREAM_BL, STREAM_LDR, STREAM_N };
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
+typedef struct { int32_t tp, fp; const Op *o; size_t orig; } OpWalkEnt;
 typedef struct { int32_t from_offset, to_address, n; int64_t *values; } Block;
 typedef struct { Block *v; size_t n, cap; } BlockVec;
 typedef struct { uint32_t addr; int kind; int64_t delta; } FieldDelta;
@@ -133,6 +134,10 @@ void buf_free(Buf *b);
 void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 void blockvec_array_free(BlockVec blocks[STREAM_N]);
+OpWalkEnt *opwalk_build(const OpVec *ops);
+static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
+    return fwd ? step : n - 1u - step;
+}
 Buf slurp(const char *path);
 void write_file(const char *path, const void *p, size_t n);
 char *join2(const char *a, const char *b);

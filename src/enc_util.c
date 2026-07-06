@@ -124,6 +124,17 @@ void blockvec_array_free(BlockVec blocks[STREAM_N]) {
     }
 }
 
+OpWalkEnt *opwalk_build(const OpVec *ops) {
+    OpWalkEnt *w = (OpWalkEnt *)xmalloc((ops->n ? ops->n : 1) * sizeof(*w));
+    int32_t tp = 0, fp = 0;
+    for (size_t i = 0; i < ops->n; i++) {
+        w[i] = (OpWalkEnt){tp, fp, &ops->v[i], i};
+        tp += ops->v[i].diff_len + ops->v[i].extra_len;
+        fp += ops->v[i].diff_len + ops->v[i].adj;
+    }
+    return w;
+}
+
 Buf slurp(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); exit(2); }

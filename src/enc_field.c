@@ -611,14 +611,7 @@ uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_siz
             fp += o->diff_len + o->adj;
         }
     } else {
-        typedef struct { int32_t tp, fp; const Op *o; } M;
-        M *m = (M *)xmalloc(ops->n * sizeof(*m));
-        tp = fp = 0;
-        for (size_t oi = 0; oi < ops->n; oi++) {
-            m[oi] = (M){tp, fp, &ops->v[oi]};
-            tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
-            fp += ops->v[oi].diff_len + ops->v[oi].adj;
-        }
+        OpWalkEnt *m = opwalk_build(ops);
         for (size_t rr = ops->n; rr-- > 0;) {
             const Op *o = m[rr].o;
             for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
@@ -642,24 +635,17 @@ uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
-    typedef struct { int32_t tp, fp; const Op *o; } M;
-    M *m = (M *)xmalloc(ops->n * sizeof(*m));
-    int32_t tp = 0, fp = 0;
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        m[oi] = (M){tp, fp, &ops->v[oi]};
-        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
-        fp += ops->v[oi].diff_len + ops->v[oi].adj;
-    }
+    OpWalkEnt *m = opwalk_build(ops);
     for (size_t idx = 0; idx < ops->n; idx++) {
-        size_t oi = FWD ? idx : ops->n - 1 - idx;
-        const Op *o = m[oi].o;
-        IVec ldr = op_ldr_set(frm, m[oi].fp, o->diff_len, from_size);
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, o, m[oi].fp, o->diff_len);
+        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, idx)];
+        const Op *o = we->o;
+        IVec ldr = op_ldr_set(frm, we->fp, o->diff_len, from_size);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, o, we->fp, o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
             uint8_t packed[4];
             int32_t k = w.pos;
-            uint32_t fpk = (uint32_t)(m[oi].fp + k);
+            uint32_t fpk = (uint32_t)(we->fp + k);
             if (w.ev.type == EV_BL) {
                 uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
                 pack_bl_local(unpack_bl_local(up, lo) - w.ev.delta, packed);
@@ -667,7 +653,7 @@ uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *
                 uint32_t val = u32le_at(frm + fpk);
                 u32le_put(packed, val - (uint32_t)w.ev.delta);
             }
-            for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
+            for (int b = 0; b < 4; b++) { ohas[we->tp + k + b] = 1; oval[we->tp + k + b] = packed[b]; }
         }
         free(ldr.v);
     }
@@ -715,38 +701,31 @@ OpPC *preserve_corr_per_op(const EncCtx *ctx, const OpVec *ops, uint32_t from_si
                                   const uint8_t *presset, const uint8_t *corr) {
     int FWD = ctx->fwd; (void)from_size; (void)to_size;
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    typedef struct { int32_t tp, fp; const Op *o; size_t orig; } M;
-    M *m = (M *)xmalloc(ops->n * sizeof(*m));
-    int32_t tp = 0, fp = 0;
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        m[oi] = (M){tp, fp, &ops->v[oi], oi};
-        tp += ops->v[oi].diff_len + ops->v[oi].extra_len;
-        fp += ops->v[oi].diff_len + ops->v[oi].adj;
-    }
+    OpWalkEnt *m = opwalk_build(ops);
     int32_t wi = 0;
     for (size_t step = 0; step < ops->n; step++) {
-        size_t oi = FWD ? step : ops->n - 1 - step;
-        const Op *o = m[oi].o;
+        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
+        const Op *o = we->o;
         OpPC *pc = &out[step];
         if (FWD) {
             for (int32_t k = 0; k < o->diff_len; k++, wi++) {
                 if (presset[wi]) ivec_push(&pc->pres, k);
-                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+                if (corr[we->tp + k]) corr_push(&pc->corr, k, corr[we->tp + k]);
             }
             for (int32_t e = 0; e < o->extra_len; e++, wi++) {
                 int32_t off = o->diff_len + e;
                 if (presset[wi]) ivec_push(&pc->pres, off);
-                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+                if (corr[we->tp + off]) corr_push(&pc->corr, off, corr[we->tp + off]);
             }
         } else {
             for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
                 int32_t off = o->diff_len + e;
                 if (presset[wi]) ivec_push(&pc->pres, off);
-                if (corr[m[oi].tp + off]) corr_push(&pc->corr, off, corr[m[oi].tp + off]);
+                if (corr[we->tp + off]) corr_push(&pc->corr, off, corr[we->tp + off]);
             }
             for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
                 if (presset[wi]) ivec_push(&pc->pres, k);
-                if (corr[m[oi].tp + k]) corr_push(&pc->corr, k, corr[m[oi].tp + k]);
+                if (corr[we->tp + k]) corr_push(&pc->corr, k, corr[we->tp + k]);
             }
             if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);

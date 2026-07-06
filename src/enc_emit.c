@@ -493,23 +493,16 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
-    int32_t *fp0s = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    int32_t *tp0e = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));   /* to-image op starts (extras tag parity) */
-    { int32_t fp = 0, tp = 0;
-      for (size_t i = 0; i < ops->n; i++) {
-          fp0s[i] = fp; fp += ops->v[i].diff_len + ops->v[i].adj;
-          tp0e[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len;
-      } }
+    OpWalkEnt *walk = opwalk_build(ops);
     /* Fused build: one decoder-order walk per op emits content/tags AND records the field-injection
      * cursors (Inj) in the same pass -- byte layout and cursors can never disagree by construction. */
     for (size_t step = 0; step < ops->n; step++) {
-        size_t oi = FWD ? step : ops->n - 1 - step;
-        IVec ldr = op_ldr_set(frm, fp0s[oi], ops->v[oi].diff_len, from_size);
-        op_emit_content(&ops->v[oi], FWD, frm, from_size, fp0s[oi], tp0e[oi], fd, &ldr, &content, &tags, &inj[step]);
+        const OpWalkEnt *we = &walk[opwalk_apply_index(ops->n, FWD, step)];
+        IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
+        op_emit_content(we->o, FWD, frm, from_size, we->fp, we->tp, fd, &ldr, &content, &tags, &inj[step]);
         ends[step] = content.n;
         free(ldr.v);
     }
-    free(tp0e);
     uint8_t L0[256], L1[256];
     from_lit_proxy_bits(frm, from_size, L0, L1);
     uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
@@ -648,6 +641,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     injvec_array_free(inj_m, ops->n);
     injvec_array_free(inj_m2, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
-    free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
+    free(walk); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
