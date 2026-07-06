@@ -50,9 +50,9 @@ committed separately after its verification passes.
 8. Consolidate repeated host vector growth boilerplate.
    - Status: complete.
    - Verification: `make gate`; `make check-analyze`.
-   - Commit: this commit.
+   - Commit: `2bf652e`.
 
 ## Final Verification
 
-- Status: pending.
+- Status: complete.
 - Verification: `make gate`; `make check-analyze`.
