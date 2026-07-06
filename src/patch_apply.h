@@ -853,10 +853,9 @@ static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uin
     }
     return 0;
 }
-/* Literal cursor over the op's content stream + the per-byte write helpers. `fwd` is loop-invariant,
- * so these inline to straight-line code (the per-direction branch folds away) with named typed
- * parameters and no hidden mutation of enclosing locals. The cursor advances in wire order regardless
- * of write direction. */
+/* Literal cursor over the op's content stream + the per-byte write helpers. The cursor advances in
+ * wire order regardless of write direction; the copy/extra helpers are plain static functions so the
+ * two call sites share one body instead of duplicating the write loops inside sa_apply_op. */
 /* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
@@ -884,7 +883,7 @@ A1_ALWAYS_INLINE void litcur_next(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, i
     litcur_step(pa, s, lc, nl);
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-A1_ALWAYS_INLINE void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
+static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=sa_next_content(pa,s,(int)((tp0+dl+e)&1));
@@ -892,14 +891,14 @@ A1_ALWAYS_INLINE void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, in
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-A1_ALWAYS_INLINE void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(pa,s,lc,nl); }
     out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_take(s,cc,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
-static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
+static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&M_gdl), el_u=s_ug_gamma(pa,&M_gel), adj_u=s_ug_gamma(pa,&M_gadj);
     int32_t adj=bb_unzz(pa,adj_u);
     if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ g_rcerr=1; return; }

@@ -57,15 +57,15 @@ BASE_FULL_TOTAL ?= 4151558
 BASE_FOREIGN_TOTAL ?= 1333476
 BASE_ONEFACE_GROW ?= 574
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6253
+BASE_ARM_TEXT ?= 6093
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 11360
 BASE_ARM_SOFT_DIV ?= 1
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
-# derives the exact static bound from -fstack-usage frames + the call graph. Measured 336 B
-# (was 368 B before the CRC32(to)-in-header change deleted the trailer-withhold raw_next rotation,
-# which sat on the worst path); pinned ceiling gives ample headroom. check-stack fails above this.
+# derives the exact static bound from -fstack-usage frames + the call graph. Measured 400 B
+# after de-duplicating the op write helpers into shared call bodies; pinned ceiling gives
+# ample headroom. check-stack fails above this.
 BASE_STACK_CEIL_O2 ?= 480
 
 # ---- hard 60 s execution cap on EVERY public target ---------------------------------
