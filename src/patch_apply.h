@@ -49,199 +49,31 @@
 #include <stdio.h>
 #endif
 
-#ifndef RC_MODELS_H
-#define RC_MODELS_H
+#include "rc_models.h"
 
-#ifndef A1_PATCH_CONFIG_H
-#define A1_PATCH_CONFIG_H
-#if !defined(CORTEX_M0) && !defined(CORTEX_M4)
-#error "define CORTEX_M0 for the decoder build (CORTEX_M4 is reserved)"
-#endif
-#ifdef CORTEX_M4
-#error "CORTEX_M4 is reserved for a future wire revision; only CORTEX_M0 is implemented"
-#endif
-#ifndef A1_MAX_IMAGE
-#define A1_MAX_IMAGE (64u<<20)
-#endif
-#define RC_JSLOTS_DEFAULT      768u
-#define RC_OPC_CAP_DEFAULT     80
-#define RC_DR_KCAP_BL_DEFAULT  208
-#define RC_DR_KCAP_EX_DEFAULT  128
-#define RC_WINDOW_LOG_DEFAULT  10
-#define RC_OUTROW_DEFAULT      256u
-#define RC_ROW_DEPTH_DEFAULT   2u
-#ifndef PATHE_W
-#define PATHE_W RC_WINDOW_LOG_DEFAULT
-#endif
-#ifndef A1_JSLOTS
-#define A1_JSLOTS RC_JSLOTS_DEFAULT
-#endif
-#ifndef A1_OPC_CAP
-#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
-#endif
-#ifndef A1_OUTROW
-#define A1_OUTROW RC_OUTROW_DEFAULT
-#endif
-#ifndef A1_ROW_DEPTH
-#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
-#endif
-#ifndef SA_W
-#define SA_W RC_WINDOW_LOG_DEFAULT
-#endif
-#ifndef JSLOTS
-#define JSLOTS RC_JSLOTS_DEFAULT
-#endif
-#ifndef OPC_CAP
-#define OPC_CAP RC_OPC_CAP_DEFAULT
-#endif
-#ifndef DR_KCAP_BL
-#define DR_KCAP_BL RC_DR_KCAP_BL_DEFAULT
-#endif
-#ifndef DR_KCAP_EX
-#define DR_KCAP_EX RC_DR_KCAP_EX_DEFAULT
-#endif
-#ifndef OUTROW
-#ifdef NVM_ROW
-#define OUTROW NVM_ROW
+#if defined(__GNUC__) || defined(__clang__)
+#define A1_NOINLINE __attribute__((noinline))
+#define A1_ALWAYS_INLINE static inline __attribute__((always_inline))
+#define A1_UNUSED __attribute__((unused))
+#define A1_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
+#define A1_SUB_OVERFLOW(a,b,out) __builtin_sub_overflow((a),(b),(out))
 #else
-#define OUTROW RC_OUTROW_DEFAULT
+#define A1_NOINLINE
+#define A1_ALWAYS_INLINE static inline
+#define A1_UNUSED
+static inline int a1_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
+    if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
+    *out=(int32_t)(a+b);
+    return 0;
+}
+static inline int a1_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
+    if((b<0 && a>INT32_MAX+b) || (b>0 && a<INT32_MIN+b)) return 1;
+    *out=(int32_t)(a-b);
+    return 0;
+}
+#define A1_ADD_OVERFLOW(a,b,out) a1_add_overflow_i32((a),(b),(out))
+#define A1_SUB_OVERFLOW(a,b,out) a1_sub_overflow_i32((a),(b),(out))
 #endif
-#endif
-#ifndef OUTROW_DEPTH
-#define OUTROW_DEPTH RC_ROW_DEPTH_DEFAULT
-#endif
-#endif /* A1_PATCH_CONFIG_H */
-
-#define RC_KTOP (1u<<24)
-#define RC_PBIT 4096u
-#define RC_PHALF 2048u
-
-#define BT_PROBS 255u
-#define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
-typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;
-static inline uint16_t bt_get(const BitTree*t,int idx){
-    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
-    return (uint16_t)((v>>sh)&0xfffu);
-}
-static inline void bt_set(BitTree*t,int idx,uint16_t prob){
-    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
-    v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
-    t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8); t->p[off+2u]=(uint8_t)(v>>16);
-}
-static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) bt_set(t,i,RC_PHALF); }
-
-#define UG_CTX 6
-#define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
-#define SMAP_CAP 48
-
-#define LIT0_CTX 5
-static inline uint8_t rc_lit0_sel(uint8_t p){
-    return (uint8_t)(
-        "\001\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\001\003\001\000"
-        "\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\000"
-        "\003\001\003\003\003\003\003\001\001\001\001\001\001\001\001\001\001\000\001\001\003\001\003\001\000\003\000\001\000\000\003\001"
-        "\003\003\003\003\003\003\003\003\003\003\003\000\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\000"
-        "\003\003\003\003\001\001\003\000\003\003\003\001\003\003\003\001\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002"
-        "\000\000\000\000\000\000\000\000\002\002\001\002\002\001\002\001\000\000\000\000\000\001\000\000\001\000\001\000\001\001\001\000"
-        "\002\000\000\001\000\000\000\002\000\000\000\000\000\002\002\000\001\001\001\001\001\001\000\002\001\001\001\001\001\001\000\000"
-        "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\002\000\000\000\000\000\000\004\000\000\000\000\000\000\000\000"
-    )[p];
-}
-#define LIT0_SEL(p) rc_lit0_sel((uint8_t)(p))
-
-typedef struct { uint16_t m[4]; int h; } Flag1;
-static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
-
-static inline uint16_t rc_adapt(uint32_t p, int bit, int rate){
-    return (uint16_t)(bit ? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
-}
-static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
-    uint32_t pr = den ? (2u*RC_PBIT*num+den)/(2u*den) : RC_PHALF;
-    return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
-}
-static inline int rc_unzz32_valid(uint32_t u){ return u!=0xffffffffu; }
-static inline int32_t rc_unzz32_value(uint32_t u){
-    return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
-}
-static inline uint32_t rc_zz32(int32_t v){
-    uint32_t u=(uint32_t)v;
-    return v<0 ? ((0u-u)<<1)-1u : u<<1;
-}
-static inline int rc_unzz32(uint32_t u,int32_t*out){
-    if(!rc_unzz32_valid(u)) return 0;
-    *out=rc_unzz32_value(u);
-    return 1;
-}
-static inline int rc_zz_abs(uint32_t base,uint32_t z,uint32_t max,uint32_t*out){
-    if(z&1u){ uint32_t m=(z>>1)+1u; if(m>base) return 0; *out=base-m; }
-    else    { uint32_t d=z>>1; if(d>max||base>max-d) return 0; *out=base+d; }
-    return 1;
-}
-static inline int rc_uleb_len(uint32_t v){
-    int n=1;
-    while(v>>=7) n++;
-    return n;
-}
-static inline int rc_uleb_overlong(int n,uint8_t last){ return n>1 && last==0u; }
-static inline int rc_natural_desc(uint32_t from_size,uint32_t to_size){ return to_size>from_size; }
-static inline int rc_desc_from_marker(uint32_t from_size,uint32_t to_size,int overlong){
-    return rc_natural_desc(from_size,to_size)!=(overlong!=0);
-}
-static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc){
-    return desc==rc_natural_desc(from_size,to_size);
-}
-static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
-    for(int i=0;i<depth && i<=maxidx;i++) u[i]=(uint16_t)(RC_PBIT/16);
-}
-static inline void rc_lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
-    for(int s=0;s<256;s++) w[256+s]=hist[s];
-    for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++) bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
-}
-static inline int rc_bl_pattern(uint16_t up, uint16_t lo){
-    return ((up&0xf800u)==0xf000u) && ((lo&0xd000u)==0xd000u);
-}
-static inline uint32_t rc_bl_imm24(uint16_t up, uint16_t lo){
-    uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
-    return ((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21);
-}
-static inline void rc_bl_pack(uint32_t imm24, uint8_t out[4]){
-    uint32_t s=(imm24>>23)&1u;
-    uint32_t j1=1u-(((imm24>>22)&1u)^s), j2=1u-(((imm24>>21)&1u)^s);
-    uint16_t u=(uint16_t)(0xF000u|(s<<10)|((imm24>>11)&0x3ffu));
-    uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
-    out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
-}
-static inline int32_t rc_ldr_target(int32_t addr, int32_t imm8){
-    return (addr & ~3) + 4*imm8 + 4;
-}
-static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint32_t x){
-    int lo=0, hi=n-1, r=-1;
-    while(lo<=hi){ int mid=(lo+hi)>>1; if(b[mid]<=x){ r=mid; lo=mid+1; } else hi=mid-1; }
-    return r<0 ? 0 : v[r];
-}
-
-#define IDX_CTX 5
-typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
-static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
-
-#define RC_S_BIT_RATE 4
-#define RC_LIT0_RATE 5
-#define RC_LIT1_RATE 4
-#define RC_DVAL_RATE 4
-#define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
-#define DR_HIT_INIT 576u
-#define RC_IDX_SEED 2816u
-#define RC_SEED_DEPTH_GDL  6
-#define RC_SEED_DEPTH_GADJ 3
-#define RC_SEED_DEPTH_PG2  1
-#define RC_SEED_DEPTH_GL   1
-#define RC_OUTMATCH_MIN 4u
-#define RC_KFIELD_BITS 4
-
-#endif /* RC_MODELS_H */
 
 /* ===================================================================================== */
 /* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */
@@ -254,7 +86,7 @@ extern void    flash_write(uint32_t addr, uint8_t val);
 /* Decoder state is owned by the integrator and passed to patch_apply_run(). The header keeps no
  * file-scope storage: embedded users may place this object in .bss, noinit, a bootloader-owned
  * work area, or on a suitably sized stack. */
-typedef struct { uint32_t range, code; } SDec;
+typedef struct { uint32_t range, code; } A1RangeDec;
 
 /* ---- UGolomb (uses embedded UG_CTX mirror) ----
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
@@ -263,8 +95,8 @@ typedef struct { uint32_t range, code; } SDec;
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
-typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGRice;
-typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGGamma;
+typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGRice;
+typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGGamma;
 
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
  * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. Each delta on the wire: rep-bit (==last?)
@@ -274,19 +106,19 @@ typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } UGGamma
 typedef struct {
     uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
-} DRStream;
+} A1DRStream;
 
 /* JSLOTS is configured above. The ENCODER mirrors this budget
  * (A1_JSLOTS in patch_generate) and DEGRADES over-budget plans host-side
  * (over-budget reads ship as extra bytes), so a valid blob never exceeds it;
  * an over-cap stream still refuses cleanly here (REJ_RESOURCE). */
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
-/* LZSS window W (defined here so SA can size the apply phase). Default value above
+/* LZSS window W (defined here so A1ApplyState can size the apply phase). Default value above
  * keeps the decoder within the 12 KiB SRAM cap; the encoder PATHE_W MUST match this SA_W. */
 /* SA_W is configured above. */
 #define SA_RING (1u<<SA_W)
 #define SA_MASK (SA_RING-1u)
-/* SA = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
+/* A1ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
  * per-op correction array + the streaming scalars/cursors. */
 typedef struct {
     uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
@@ -296,15 +128,15 @@ typedef struct {
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
-} SA;
-/* SA_ARENA: hand-rounded byte reservation for the apply-phase SA. */
+} A1ApplyState;
+/* SA_ARENA: hand-rounded byte reservation for the apply-phase A1ApplyState. */
 #define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 48u)
 #define ARENA_BYTES (JREGION + SA_ARENA)
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint32_t jbuf[JSLOTS]; union { SA sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
-} Arena;
+    struct { uint32_t jbuf[JSLOTS]; union { A1ApplyState sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
+} A1Arena;
 
 typedef struct PatchApply {
     uint32_t g_image_span;
@@ -317,12 +149,12 @@ typedef struct PatchApply {
     void *g_pull_ctx;
     uint8_t g_pull_eof;
 
-    SDec RC;
+    A1RangeDec RC;
     uint8_t g_rcerr;
     uint8_t g_reject;
     uint8_t g_flash_touched;
 
-    Arena ARENA;
+    A1Arena ARENA;
     uint16_t g_jcount;
 
     uint32_t g_smap_b[SMAP_CAP];
@@ -333,27 +165,27 @@ typedef struct PatchApply {
     uint32_t g_orow_base[OUTROW_DEPTH];
     uint8_t  g_orow_dirty[OUTROW_DEPTH];
 
-    UGRice  M_gd;
-    UGGamma M_gl, M_gs;
-    UGRice  M_go;
-    UGGamma M_glo;
+    A1UGRice  M_gd;
+    A1UGGamma M_gl, M_gs;
+    A1UGRice  M_go;
+    A1UGGamma M_glo;
     uint16_t M_outb;
     uint8_t  g_out_en;
     uint32_t g_oexp;
-    UGGamma M_pg;
-    UGGamma M_pgn;
-    UGGamma M_pg2;
-    UGGamma M_gdl, M_gel, M_gadj;
-    IdxUnary M_dibl, M_diex;
-    BitTree M_lit0[LIT0_CTX], M_lit1;
+    A1UGGamma M_pg;
+    A1UGGamma M_pgn;
+    A1UGGamma M_pg2;
+    A1UGGamma M_gdl, M_gel, M_gadj;
+    A1IdxUnary M_dibl, M_diex;
+    A1BitTree M_lit0[LIT0_CTX], M_lit1;
     uint8_t g_litprev;
-    BitTree M_dval;
-    Flag1   M_flag;
+    A1BitTree M_dval;
+    A1Flag1   M_flag;
     uint16_t M_rep0[2];
     int g_rep0h;
     uint32_t g_lastdist;
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
-    DRStream DR_BL, DR_EX;
+    A1DRStream DR_BL, DR_EX;
 
     uint8_t g_psrc_imm[512], g_psrc_ldr[64];
 } PatchApply;
@@ -413,13 +245,13 @@ typedef struct PatchApply {
 #define g_psrc_imm (pa->g_psrc_imm)
 #define g_psrc_ldr (pa->g_psrc_ldr)
 
-_Static_assert(sizeof(SA) <= SA_ARENA, "SA apply state exceeds its ARENA reservation");
-_Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
-_Static_assert(offsetof(Arena, apply.sab.sa) == JREGION && (offsetof(Arena, apply.sab.sa) & 3u)==0u,
-               "SA must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
+_Static_assert(sizeof(A1ApplyState) <= SA_ARENA, "A1ApplyState apply state exceeds its ARENA reservation");
+_Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
+_Static_assert(offsetof(A1Arena, apply.sab.sa) == JREGION && (offsetof(A1Arena, apply.sab.sa) & 3u)==0u,
+               "A1ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
 _Static_assert(A1_MAX_IMAGE <= 0x7fffffffu, "A1_MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
-_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 DRStream.K (else the REJ_RESOURCE refuse wraps)");
+_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 A1DRStream.K (else the REJ_RESOURCE refuse wraps)");
 
 /* Patch geometry — decoder-OWNED. decode_body parses it from the blob envelope; the
  * integrator no longer supplies sizes/direction/span (footguns removed), it only provides
@@ -442,7 +274,7 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 static int decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
-static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
+static void lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w);
 enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 
 /* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
@@ -530,16 +362,16 @@ static uint32_t s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<
  * raw-gamma header field remains on the wire (shift map is adaptive-gamma; token/op counts dropped),
  * so this is unused in the decoder binary — but model_diff_dec.c still drives it for the raw_gz mirror
  * self-test (check-models), so keep it and silence the per-binary unused-function warning. */
-static uint32_t __attribute__((unused)) s_raw_gz(PatchApply *pa){
+static uint32_t A1_UNUSED s_raw_gz(PatchApply *pa){
     int n=0; while(s_raw(pa)==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
     return ((1u<<n) | s_raw_bits(pa,n)) - 1u; }   /* mantissa via s_raw_bits */
 /* ---- bit-tree byte ---- */
-static int s_bt(PatchApply *pa, BitTree*t,int rate){
+static int s_bt(PatchApply *pa, A1BitTree*t,int rate){
     int m=1;
     for(int i=0;i<8;i++){
-        uint16_t p=bt_get(t,m-1);
+        uint16_t p=a1_bt_get(t,m-1);
         int b=s_bit_r(pa,&p,rate);
-        bt_set(t,m-1,p);
+        a1_bt_set(t,m-1,p);
         m=(m<<1)|b;
     }
     return m-256;
@@ -549,7 +381,7 @@ static int32_t bb_unzz(PatchApply *pa, uint32_t u){
     return rc_unzz32_value(u);
 }
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
-static int32_t s_bv(PatchApply *pa, BitTree*t,int rate){
+static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
         if(sh>28){ g_rcerr=1; return 0; }            /* cap shift (uLEB <=32-bit) */
@@ -564,7 +396,7 @@ static int32_t s_bv(PatchApply *pa, BitTree*t,int rate){
  * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, W=11 =>
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
-static void ugr_init(UGRice*g,int k){
+static void ugr_init(A1UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
@@ -573,15 +405,15 @@ static void ugr_init(UGRice*g,int k){
  * so the smallest gamma values are cheap from the first symbol — used by the MTF dict-index gammas
  * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 is the
  * corpus optimum). Folding the u[] seed into the init avoids a second pass over u[]. */
-static void ugg_init_u(UGGamma*g,uint16_t useed){
+static void ugg_init_u(A1UGGamma*g,uint16_t useed){
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=useed; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
-static void ugg_init(UGGamma*g){ ugg_init_u(g,RC_PHALF); }
+static void ugg_init(A1UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
  * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
  * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
  * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
-static void ugg_seed_cont(UGGamma*g,int depth){
+static void ugg_seed_cont(A1UGGamma*g,int depth){
     rc_seed_cont_u(g->u,UG_CTX,depth);  /* low p == bit1(continue) cheap */
 }
 /* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
@@ -602,20 +434,20 @@ static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt,int lsb){
     uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(lsb?sig:cnt-1-sig)])<<sig;
     return v;
 }
-static uint32_t s_ug_rice(PatchApply *pa, UGRice*g){
+static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
     uint32_t cl=s_unary(pa,g->u,UG_CTX,RC_RICE_UNARY_MAX);
     return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k,1);
 }
-static uint32_t s_ug_gamma(PatchApply *pa, UGGamma*g){
+static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
     int cl=(int)s_unary(pa,g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant(pa,g->m[UG_C(cl)],cl,0)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / IdxUnary / idx_init are single-sourced
+/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / A1IdxUnary / a1_idx_init are single-sourced
  * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
-static int s_flag(PatchApply *pa, Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
+static int s_flag(PatchApply *pa, A1Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
 
 /* ===================================================================================== */
 /* CRC32 (zlib polynomial) over flash bytes                                               */
@@ -779,7 +611,7 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
 /* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
 static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=(uint8_t)v; out[1]=(uint8_t)(v>>8); out[2]=(uint8_t)(v>>16); out[3]=(uint8_t)(v>>24); }
 
-static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
+static void dr_init(A1DRStream*d, int32_t*dic, uint16_t hitseed){
     d->K=1; dic[0]=0;
     for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
     d->rh=0; d->hit=hitseed;
@@ -789,7 +621,7 @@ static void dr_init(DRStream*d, int32_t*dic, uint16_t hitseed){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(PatchApply *pa, DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
+static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=d->rh | (dic[0]==0 ? 2 : 0);
       int rb=s_bit(pa,&d->rep[ri]); d->rh=(uint8_t)rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
@@ -816,10 +648,10 @@ static int32_t pull_delta(PatchApply *pa, DRStream*d, IdxUnary*gix, int32_t*dic,
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
 /* The LZSS ring (size 2^SA_W) is the content history; backref distances <= 2^SA_W.             */
 /* ===================================================================================== */
-/* SA type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
- * union (near JREGION), since the union embeds SA and reserves SA_ARENA bytes for it. */
+/* A1ApplyState type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
+ * union (near JREGION), since the union embeds A1ApplyState and reserves SA_ARENA bytes for it. */
 /* correction lookup by op-local write-offset (small array; unique offsets => linear scan) */
-static int32_t corr_at(SA*s, int32_t off){
+static int32_t corr_at(A1ApplyState*s, int32_t off){
     for(int32_t i=0;i<s->op_nc;i++){
         if((int32_t)(s->op_corr[i]>>8)==off) return (int32_t)(s->op_corr[i]&0xffu);
     }
@@ -841,7 +673,7 @@ static uint8_t hy_src(PatchApply *pa, int32_t fp);   /* fwd decl: journal-aware 
  * preserved copy source, so raw flash would be wrong). s==NULL selects the FWD metadata path. Kept
  * static-inline so the per-direction branch folds away at each call site (no indirect call / no text
  * bloat on Cortex-M0+). No resident target store. */
-static inline int ldr_targets(PatchApply *pa, SA*s, int32_t fp0, int32_t dl, uint32_t fpk){
+static inline int ldr_targets(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t dl, uint32_t fpk){
     /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
      * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
      * skips any pristine read/record for an impossible target). */
@@ -867,9 +699,9 @@ static inline int ldr_targets(PatchApply *pa, SA*s, int32_t fp0, int32_t dl, uin
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
  * the next span selects M_lit0[LIT0_SEL(content[pos-1])] regardless of which token produced pos-1.
  * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
-static void sa_emit_ring(PatchApply *pa, SA*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; g_litprev=b; }
+static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
-static uint8_t sa_next_content(PatchApply *pa, SA*s, int tag){
+static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
     for(;;){
         if(g_rcerr) goto fail;
         if(s->tok_mode==1 && s->span_left>0){           /* span: decode one literal byte */
@@ -923,7 +755,7 @@ fail:
     return 0;
 }
 /* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
-static uint32_t sa_read_uleb(PatchApply *pa, SA*s){
+static uint32_t sa_read_uleb(PatchApply *pa, A1ApplyState*s){
     uint32_t acc=0; int sh=0;
     for(;;){ if(g_rcerr) return 0;
         uint8_t b=sa_next_content(pa,s,0);
@@ -991,7 +823,7 @@ static void hy_word4_rec(PatchApply *pa, uint32_t fpk, uint32_t w){
  * order: local-BL first (Thumb F000/D000 pattern, 2-aligned), else a same-op LDR-literal target.
  * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
  * stream, and record nothing into the ring). */
-static int field_at(PatchApply *pa, SA*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
+static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     /* fpk = fp0 + ks, range-checked in pure 32-bit. ks >= 0 (op-local field offset) and image sizes are
      * < 2^31 (hard design invariant), so fpk < 0 iff fp0 < -ks (no overflow: -ks is a valid int32 for
      * ks >= 0), and once fpk >= 0 the unsigned sum fp0+ks cannot wrap (0 <= fp0+ks < 2^32). */
@@ -1037,8 +869,8 @@ static int field_at(PatchApply *pa, SA*s, int32_t fp0, int32_t ks, uint8_t packe
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
-typedef struct { int32_t nextpos, litb, li, step, lim; } LitCur;
-__attribute__((always_inline)) static inline void litcur_step(PatchApply *pa, SA*s, LitCur*lc, int32_t nl){
+typedef struct { int32_t nextpos, litb, li, step, lim; } A1LitCur;
+A1_ALWAYS_INLINE void litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
     if(lc->li<nl){
         uint32_t g=sa_read_uleb(pa,s);
         /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
@@ -1051,16 +883,16 @@ __attribute__((always_inline)) static inline void litcur_step(PatchApply *pa, SA
     }
     else lc->nextpos=-1;
 }
-__attribute__((always_inline)) static inline void litcur_init(PatchApply *pa, SA*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
+A1_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int fwd, int32_t nl, int32_t dl){
     lc->step = fwd ? 1 : -1; lc->lim = dl;
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
-__attribute__((always_inline)) static inline void litcur_next(PatchApply *pa, SA*s, LitCur*lc, int32_t nl){
+A1_ALWAYS_INLINE void litcur_next(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
     litcur_step(pa, s, lc, nl);
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-__attribute__((always_inline)) static inline void wr_extras(PatchApply *pa, SA*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
+A1_ALWAYS_INLINE void wr_extras(PatchApply *pa, A1ApplyState*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=sa_next_content(pa,s,(int)((tp0+dl+e)&1));
@@ -1068,14 +900,14 @@ __attribute__((always_inline)) static inline void wr_extras(PatchApply *pa, SA*s
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-__attribute__((always_inline)) static inline void wr_copy(PatchApply *pa, SA*s, LitCur*lc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+A1_ALWAYS_INLINE void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(pa,s,lc,nl); }
     out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_at(s,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
-static void sa_apply_op(PatchApply *pa, SA*s){
+static void sa_apply_op(PatchApply *pa, A1ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&M_gdl), el_u=s_ug_gamma(pa,&M_gel), adj_u=s_ug_gamma(pa,&M_gadj);
     int32_t adj=bb_unzz(pa,adj_u);
     if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ g_rcerr=1; return; }
@@ -1091,16 +923,16 @@ static void sa_apply_op(PatchApply *pa, SA*s){
     int32_t tp0,fp0;
     if(g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
-         * checked with __builtin_add_overflow (no 64-bit math). (For a valid stream fp is a small
+         * checked with A1_ADD_OVERFLOW (no 64-bit math). (For a valid stream fp is a small
          * in-range position, so this never trips.) */
         int32_t nfp;
         if(nw>(int32_t)g_to_size || s->tp>(int32_t)g_to_size-nw ||
-           __builtin_add_overflow(s->fp,dl,&nfp) || __builtin_add_overflow(nfp,adj,&nfp)){ g_rcerr=1; return; }
+           A1_ADD_OVERFLOW(s->fp,dl,&nfp) || A1_ADD_OVERFLOW(nfp,adj,&nfp)){ g_rcerr=1; return; }
         tp0=s->tp; fp0=s->fp; s->tp=s->tp+nw; s->fp=nfp;
     } else {
         int32_t nfp;
         if(s->tp<nw ||
-           __builtin_sub_overflow(s->fp,dl,&nfp) || __builtin_sub_overflow(nfp,adj,&nfp)){ g_rcerr=1; return; }
+           A1_SUB_OVERFLOW(s->fp,dl,&nfp) || A1_SUB_OVERFLOW(nfp,adj,&nfp)){ g_rcerr=1; return; }
         s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
     /* fp headroom: the copy loop and the ldr back-scan form fp0+K for K<=dl, so fp0+dl must be
@@ -1150,7 +982,7 @@ static void sa_apply_op(PatchApply *pa, SA*s){
     if(nl<0||nl>dl){ g_rcerr=1; return; }
     uint8_t packed[4];
     int fwd=g_FWD; int32_t step=fwd?1:-1;
-    LitCur lc;
+    A1LitCur lc;
     if(!fwd) wr_extras(pa,s, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
@@ -1188,7 +1020,7 @@ static void sa_apply_op(PatchApply *pa, SA*s){
  * overlays it). noinline: this runs ONCE at the top of decode_body, so keeping its locals in
  * their own frame (not merged into decode_body's) keeps them off the deep apply call chain
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
-static int __attribute__((noinline)) decode_header(PatchApply *pa){
+static int A1_NOINLINE decode_header(PatchApply *pa){
     uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
     if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
@@ -1218,7 +1050,7 @@ static int __attribute__((noinline)) decode_header(PatchApply *pa){
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
       lit_tree_from_hist(&M_lit1,hist1,w);
       g_litprev=0; }
-    { SA*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?g_fp_start:(int32_t)fpe; }
+    { A1ApplyState*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?g_fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -1252,8 +1084,8 @@ static int decode_body(PatchApply *pa){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
-    idx_init(&M_dibl, RC_IDX_SEED); idx_init(&M_diex, RC_IDX_SEED);   /* dict-hit/index seeds mirrored with encoder */
+    a1_bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
+    a1_idx_init(&M_dibl, RC_IDX_SEED); a1_idx_init(&M_diex, RC_IDX_SEED);   /* dict-hit/index seeds mirrored with encoder */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
@@ -1265,7 +1097,7 @@ static int decode_body(PatchApply *pa){
                                * invariant, like M_gl): seed it cheap from symbol 1. */
     ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
-    { SA*s=&SAst;
+    { A1ApplyState*s=&SAst;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
       ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
@@ -1273,7 +1105,7 @@ static int decode_body(PatchApply *pa){
       g_oexp=g_FWD?0u:g_to_size;
       ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first
                                  * unary prefix bit is ALWAYS continue, so seed it cheap. */
-      fl_init(&M_flag);
+      a1_fl_init(&M_flag);
       M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
       if(g_rcerr) return 0;
       s->tok_mode=0;
@@ -1300,7 +1132,7 @@ static int decode_body(PatchApply *pa){
 /* ===================================================================================== */
 /* public API: patch_apply_run(state, callback, ctx) -> DONE / ERROR                       */
 /* ===================================================================================== */
-static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
+static void A1_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
     rc_lit_tree_from_hist(t,hist,w);
 }
 
@@ -1402,5 +1234,20 @@ int  rcv3_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){ return p
 #undef DR_EX
 #undef g_psrc_imm
 #undef g_psrc_ldr
+#undef A1_NOINLINE
+#undef A1_ALWAYS_INLINE
+#undef A1_UNUSED
+#undef A1_ADD_OVERFLOW
+#undef A1_SUB_OVERFLOW
+#undef RC_RICE_UNARY_MAX
+#undef JREGION
+#undef SA_RING
+#undef SA_MASK
+#undef SA_ARENA
+#undef ARENA_BYTES
+#undef RC_UNARY_MAX
+#undef OROW_NONE
+#undef OROW_SLOT
+#undef PSRC_HW_MASK
 
 #endif /* PATCH_APPLY_H */

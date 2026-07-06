@@ -5,7 +5,7 @@
 
 # Fast parallel corpus-matrix + foreign-lineage metrics for the A1 gate.
 #
-# Run from the repository root; needs ./hy_enc and ./hy_dec already built. Prints the gate
+# Run from the repository root; needs ./ultrapatch already built. Prints the gate
 # metric lines so the Makefile (or a measurement run) can parse them.
 #
 # Two independent pair sets share ONE parallel pool so the whole leg costs one wall-clock, not
@@ -41,10 +41,10 @@ FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 
 cm_work() {
   tag=$1; from=$2; to=$3
   d=$(mktemp -d)
-  ./hy_enc "$from" "$to" "$d/p.blob" >/dev/null 2>&1
+  ./ultrapatch "$from/watch.bin" "$to/watch.bin" "$d/p.blob" >/dev/null 2>&1
   sz=$(wc -c < "$d/p.blob")
   cp "$from/watch.bin" "$d/mem.bin"
-  ./hy_dec "$d/mem.bin" "$d/p.blob" 1 >/dev/null 2>"$d/log"
+  ./ultrapatch --decode --byte-mode "$d/mem.bin" "$d/p.blob" >/dev/null 2>"$d/log"
   if cmp -s "$d/mem.bin" "$to/watch.bin"; then ok=1; else ok=0; fi
   j=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$d/log")
   v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$d/log")
@@ -99,8 +99,8 @@ fi
 
 # real one-face firmware update (grow + revert) — two encodes, serial (negligible).
 d=$(mktemp -d)
-./hy_enc "$FIX/v0_base" "$FIX/v1_one_face" "$d/grow.blob" >/dev/null 2>&1
-./hy_enc "$FIX/v1_one_face" "$FIX/v0_base" "$d/revert.blob" >/dev/null 2>&1
+./ultrapatch "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$d/grow.blob" >/dev/null 2>&1
+./ultrapatch "$FIX/v1_one_face/watch.bin" "$FIX/v0_base/watch.bin" "$d/revert.blob" >/dev/null 2>&1
 og=$(wc -c < "$d/grow.blob"); orv=$(wc -c < "$d/revert.blob")
 rm -rf "$d"
 

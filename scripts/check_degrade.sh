@@ -8,10 +8,10 @@
 # exercise, and ASSERT the path was actually taken (not merely that the blob round-trips):
 #
 #   (a) journal-budget degradation  — over-budget read-after-overwrite converted to plain
-#       extras; asserts hy_enc reports deg_journal=1 AND the decoder's journal peak lands
+#       extras; asserts ultrapatch reports deg_journal=1 AND the decoder's journal peak lands
 #       exactly on the JSLOTS budget on the degraded blob.
 #   (b) OPC_CAP op-splitting         — an op needing >OPC_CAP corrections is split to fixpoint;
-#       asserts hy_enc reports opc_splits>=1.
+#       asserts ultrapatch reports opc_splits>=1.
 #   (c) unnatural apply direction    — the encoder flips direction and signals it with an
 #       OVERLONG size-delta uLEB; asserts the emitted envelope really carries the overlong
 #       marker (multi-byte encoding whose final byte is 0x00) and round-trips.
@@ -25,7 +25,7 @@
 #       selfcheck); the flat 24-bit journal spans 16 MiB, so it must encode and round-trip
 #       with the over-budget preserves degraded to extras.
 #
-# hy_enc self-verifies every emitted blob on the reference decoder, so a round-trip failure is
+# ultrapatch self-verifies every emitted blob on the reference decoder, so a round-trip failure is
 # already impossible for an accepted blob; this gate additionally pins that the SPECIFIC path
 # engaged, using the wire-neutral A1_DEGRADE_STATS stderr line (blob bytes unaffected — the
 # golden gate proves it) and the decoder's existing journal-peak metric.
@@ -34,7 +34,7 @@
 # LCG) — no committed binaries. Cases (a) and (c) request its two NAMED golden pins, so they are
 # byte-identical to the check_golden manifest entries by construction.
 #
-# Usage: check_degrade.sh     (needs ./hy_enc and ./hy_dec already built)
+# Usage: check_degrade.sh     (needs ./ultrapatch already built)
 set -u
 
 CC_HOST="${CC:-cc}"
@@ -68,10 +68,10 @@ dpin() {
   python3 "$(dirname "$0")/synth_gen.py" pin "$tmp/${name}_to/watch.bin"   to   "$pin"
 }
 
-# enc <name> -> writes $tmp/<name>.blob, captures A1_DEGRADE line in $tmp/<name>.deg; returns hy_enc rc
+# enc <name> -> writes $tmp/<name>.blob, captures A1_DEGRADE line in $tmp/<name>.deg; returns encoder rc
 enc() {
   name=$1
-  A1_DEGRADE_STATS=1 ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$tmp/$name.blob" \
+  A1_DEGRADE_STATS=1 ./ultrapatch "$tmp/${name}_from/watch.bin" "$tmp/${name}_to/watch.bin" "$tmp/$name.blob" \
     >/dev/null 2>"$tmp/$name.encerr"
   rc=$?
   grep '^A1_DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
@@ -82,7 +82,7 @@ enc() {
 dec() {
   d=$1; name=$2; bmode=$3
   cp "$tmp/${name}_from/watch.bin" "$tmp/$name.mem"
-  "$d" "$tmp/$name.mem" "$tmp/$name.blob" $bmode >/dev/null 2>"$tmp/$name.declog"; drc=$?
+  "$d" --decode $bmode "$tmp/$name.mem" "$tmp/$name.blob" >/dev/null 2>"$tmp/$name.declog"; drc=$?
   jp=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$tmp/$name.declog")
   if [ $drc -ne 0 ]; then echo "REJECT ${jp:-NA}"; return; fi
   if cmp -s "$tmp/$name.mem" "$tmp/${name}_to/watch.bin"; then echo "OK ${jp:-NA}"; else echo "WRONG ${jp:-NA}"; fi
@@ -101,8 +101,8 @@ JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
 # production D=2 build. Same source (patch_apply_demo.c), its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
-D1="$tmp/hy_dec_d1"
-if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -DOUTROW_DEPTH=1 -D_POSIX_C_SOURCE=200809L \
+D1="$tmp/ultrapatch_d1_decode"
+if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -DOUTROW_DEPTH=1 -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L \
       -Isrc src/patch_apply_demo.c -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
@@ -120,7 +120,7 @@ dpin jdeg synth_journal_degrade            # == golden pin (swap 2048 88); fixtu
 if enc jdeg; then
   dj=$(sed -n 's/.*deg_journal=\([0-9]\).*/\1/p' "$tmp/jdeg.deg")
   pn=$(sed -n 's/.*pres_needed=\([0-9]*\).*/\1/p' "$tmp/jdeg.deg")
-  r1=$(dec ./hy_dec jdeg 1); r0=$(dec ./hy_dec jdeg "")   # push adapter + direct pull
+  r1=$(dec ./ultrapatch jdeg --byte-mode); r0=$(dec ./ultrapatch jdeg "")   # push adapter + direct pull
   j_peak=${r1#* }
   [ "$dj" = 1 ] || bad "journal degradation did not engage (deg_journal=$dj, pres_needed=$pn)"
   [ "${r1%% *}" = OK ] && [ "${r0%% *}" = OK ] || bad "journal-degraded blob did not round-trip ($r1 / $r0)"
@@ -143,12 +143,12 @@ fi
 # runs (opc_splits_sweep). Assert the split machinery engaged and that the blob round-trips. The
 # corpus round-trip gate only checks round-trips (never asserts the split) and no WINNING plan
 # here ships a split (a cleaner variant wins) — this gate is what actually pins the op-split path.
-if A1_DEGRADE_STATS=1 ./hy_enc "$IMG/img_00_n3" "$IMG/img_15_n83" "$tmp/opc.blob" \
+if A1_DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watch.bin" "$tmp/opc.blob" \
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")
   cp "$IMG/img_00_n3/watch.bin" "$tmp/opc.mem"
-  if ./hy_dec "$tmp/opc.mem" "$tmp/opc.blob" 1 >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
+  if ./ultrapatch --decode --byte-mode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
   opc_n=$opc_sweep
   [ "${opc_sweep:-0}" -ge 1 ] || bad "OPC op-split never engaged in the plan sweep (opc_splits_sweep=$opc_sweep)"
   [ "$rt" = OK ] || bad "OPC pair did not round-trip ($rt)"
@@ -181,7 +181,7 @@ print("OVERLONG" if (n > 1 and last == 0) else "canonical")
 EOF
 )
   natflag=$(sed -n 's/.*natural=\([0-9]\).*/\1/p' "$tmp/dir.deg")
-  r=$(dec ./hy_dec dir 1)
+  r=$(dec ./ultrapatch dir --byte-mode)
   dir_flip=$ov
   [ "$ov" = OVERLONG ] || bad "direction pair did not emit the overlong size-delta uLEB ($ov)"
   [ "$natflag" = 0 ] || bad "encoder reports natural=$natflag for the flipped pair (expected 0)"
@@ -200,8 +200,8 @@ fi
 # =========================================================================================
 dpair rowwin rshift 8192 555 128 6000 32
 if enc rowwin; then
-  r2=$(dec ./hy_dec rowwin 1)
-  r1=$(dec "$D1" rowwin 1)
+  r2=$(dec ./ultrapatch rowwin --byte-mode)
+  r1=$(dec "$D1" rowwin --byte-mode)
   rw="D2:${r2%% *}_D1:${r1%% *}"
   [ "${r2%% *}" = OK ] || bad "row-window blob did not round-trip on the production D=2 decoder ($r2)"
   [ "${r2#* }" = 0 ] || bad "row-window blob used the journal (peak ${r2#* }); expected pure window reliance (0)"
@@ -220,7 +220,7 @@ fi
 # =========================================================================================
 dpair bigspan highswap 393216 4096 88
 if enc bigspan; then
-  r=$(dec ./hy_dec bigspan 1)
+  r=$(dec ./ultrapatch bigspan --byte-mode)
   bigspan="${r%% *}_j${r#* }"
   [ "${r%% *}" = OK ] || bad "big-span blob did not round-trip ($r)"
   note "(e) big span: roundtrip=${r%% *} journal_peak=${r#* }/$JBUDGET blob=$(wc -c <"$tmp/bigspan.blob")B"

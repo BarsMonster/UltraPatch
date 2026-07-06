@@ -6,10 +6,8 @@
 
 /* Model-level encoder/decoder differential test — ENCODER side + orchestration.
  *
- * See test/model_diff.h for the design. This TU #includes the whole host encoder
- * (src/patch_generate.c) WITHOUT RC_V3_ENC_MAIN, so patch_generate's main() is not compiled
- * and the wire is untouched (proved byte-neutral by the golden gate). That gives direct access
- * to every file-static encoder model (re_bit / bt_encode / ug_encode / idx_encode / fl_encode /
+ * See test/model_diff.h for the design. This TU links the normal encoder model modules and
+ * drives their internal-test ABI (re_bit / bt_encode / ug_encode / idx_encode / fl_encode /
  * bv_encode / put_raw_bits / w_gz / emit_delta). Each test encodes a deterministic symbol stream
  * with the encoder model, hands the bytes to the matching decoder bridge (md_*, in model_diff_dec.c),
  * and asserts exact symbol recovery. On mismatch it prints model/seed/index/expected/got and exits 1.
@@ -22,7 +20,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "patch_generate.c"   /* no RC_V3_ENC_MAIN => no main(); all encoder models in scope */
+#include "enc_internal.h"
 #include "model_diff.h"
 
 /* ------------------------------------------------------------------------------------------- */
@@ -118,18 +116,18 @@ static Buf flush_wire(REnc *r) {
     return b;
 }
 static Buf enc_bits(int rate, const uint8_t *v, int ns) { REnc r; re_init(&r); uint16_t p = RC_PHALF; for (int i = 0; i < ns; i++) re_bit(&r, &p, v[i] & 1, rate); return flush_wire(&r); }
-static Buf enc_bt(int rate, const uint32_t *v, int ns) { REnc r; re_init(&r); BitTree t; bt_init(&t); for (int i = 0; i < ns; i++) bt_encode(&t, &r, (uint8_t)v[i], rate); return flush_wire(&r); }
-static Buf enc_bv(const int32_t *v, int ns) { REnc r; re_init(&r); BitTree t; bt_init(&t); for (int i = 0; i < ns; i++) bv_encode(&t, &r, (int64_t)v[i]); return flush_wire(&r); }
+static Buf enc_bt(int rate, const uint32_t *v, int ns) { REnc r; re_init(&r); A1BitTree t; a1_bt_init(&t); for (int i = 0; i < ns; i++) bt_encode(&t, &r, (uint8_t)v[i], rate); return flush_wire(&r); }
+static Buf enc_bv(const int32_t *v, int ns) { REnc r; re_init(&r); A1BitTree t; a1_bt_init(&t); for (int i = 0; i < ns; i++) bv_encode(&t, &r, (int64_t)v[i]); return flush_wire(&r); }
 static Buf enc_ugr(int k, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'r', k); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
 static Buf enc_ugg(int depth, const uint32_t *v, int ns) { REnc r; re_init(&r); UGE g; ug_init_e(&g, 'g', 0); if (depth > 0) ug_seed_cont_e(&g, depth); for (int i = 0; i < ns; i++) ug_encode(&g, &r, v[i]); return flush_wire(&r); }
-static Buf enc_idx(const uint32_t *v, int ns) { REnc r; re_init(&r); IdxUnary g; idx_init(&g, RC_IDX_SEED); for (int i = 0; i < ns; i++) idx_encode(&g, &r, v[i]); return flush_wire(&r); }
-static Buf enc_flag(const uint8_t *v, int ns) { REnc r; re_init(&r); Flag1 f; fl_init(&f); for (int i = 0; i < ns; i++) fl_encode(&f, &r, v[i] & 1); return flush_wire(&r); }
+static Buf enc_idx(const uint32_t *v, int ns) { REnc r; re_init(&r); A1IdxUnary g; a1_idx_init(&g, RC_IDX_SEED); for (int i = 0; i < ns; i++) idx_encode(&g, &r, v[i]); return flush_wire(&r); }
+static Buf enc_flag(const uint8_t *v, int ns) { REnc r; re_init(&r); A1Flag1 f; a1_fl_init(&f); for (int i = 0; i < ns; i++) fl_encode(&f, &r, v[i] & 1); return flush_wire(&r); }
 static Buf enc_rep0(const uint8_t *v, int ns) { REnc r; re_init(&r); uint16_t rep0[2]; rep0[0] = rep0[1] = RC_REP0_INIT; int h = 0; for (int i = 0; i < ns; i++) { re_bit(&r, &rep0[h], v[i] & 1, RC_S_BIT_RATE); h = v[i] & 1; } return flush_wire(&r); }
 static Buf enc_rawbits(int nb, const uint32_t *v, int ns) { REnc r; re_init(&r); for (int i = 0; i < ns; i++) put_raw_bits(&r, v[i], nb); return flush_wire(&r); }
 static Buf enc_rawgz(const uint32_t *v, int ns) { REnc r; re_init(&r); for (int i = 0; i < ns; i++) w_gz(&r, v[i]); return flush_wire(&r); }
 static Buf enc_mixed(const uint8_t *ops, const uint32_t *v, int ns) {
     REnc r; re_init(&r);
-    uint16_t p = RC_PHALF; BitTree bt; bt_init(&bt); UGE gr; ug_init_e(&gr, 'r', MX_UGR_K); UGE gg; ug_init_e(&gg, 'g', 0); Flag1 f; fl_init(&f);
+    uint16_t p = RC_PHALF; A1BitTree bt; a1_bt_init(&bt); UGE gr; ug_init_e(&gr, 'r', MX_UGR_K); UGE gg; ug_init_e(&gg, 'g', 0); A1Flag1 f; a1_fl_init(&f);
     for (int i = 0; i < ns; i++) switch (ops[i]) {
         case MX_RAW:  re_raw(&r, (int)(v[i] & 1u));                      break;
         case MX_BIT:  re_bit(&r, &p, (int)(v[i] & 1u), MX_BIT_RATE);     break;
@@ -147,11 +145,11 @@ static Buf enc_mixed(const uint8_t *ops, const uint32_t *v, int ns) {
 static Buf enc_mtf(int kind, const int64_t *v, int m, int *of_during, int *of_after, int64_t extra) {
     Models *M = (Models *)calloc(1, sizeof *M);
     REnc r; re_init(&r);
-    bt_init(&M->dval);
+    a1_bt_init(&M->dval);
     dr_init_e(&M->dr_bl, M->dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M->dr_ex, M->dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    idx_init(&M->dibl, RC_IDX_SEED);
-    idx_init(&M->diex, RC_IDX_SEED);
+    a1_idx_init(&M->dibl, RC_IDX_SEED);
+    a1_idx_init(&M->diex, RC_IDX_SEED);
     g_emit_overflow = 0;
     for (int i = 0; i < m; i++) emit_delta(M, &r, kind, v[i]);
     *of_during = g_emit_overflow;

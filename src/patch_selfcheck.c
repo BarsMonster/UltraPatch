@@ -7,8 +7,8 @@
 /* Encoder self-verification: apply an emitted A1 blob to the `from` image on the
  * REFERENCE decoder (the real, unmodified src/patch_apply.h) against an in-memory
  * NVM row emulator, and require an exact `to` image plus clean NVM write-safety.
- * Compiled ONLY into hy_enc; the device artifact is untouched. This turns
- * "hy_enc succeeded" into "the emitted patch provably applies on the reference
+ * Compiled ONLY into the host tool; the device artifact is untouched. This turns
+ * "encode succeeded" into "the emitted patch provably applies on the reference
  * decoder" — an encoder bug can no longer ship a broken patch silently.
  *
  * The emulator mirrors the SAML22 semantics of patch_apply_demo.c: byte programs
@@ -23,6 +23,9 @@
 /* SAML22 NVM row emulator + write-safety counters, shared byte-for-byte with the gate
  * emulator in patch_apply_demo.c. Provides flash_read()/flash_write()/nvm_init(); must
  * be #included BEFORE patch_apply.h. */
+#define flash_read selfcheck_flash_read
+#define flash_write selfcheck_flash_write
+#define nvm_init selfcheck_nvm_init
 #include "nvm_emu.inc"
 
 #include "patch_apply.h"
@@ -72,3 +75,7 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     if (sc_finv) return "NVM erase frontier inversion";
     return NULL;
 }
+
+#undef flash_read
+#undef flash_write
+#undef nvm_init

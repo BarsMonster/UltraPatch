@@ -3,27 +3,25 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- util/IO: die/allocators, a1_sort stable mergesort, Buf, slurp/write_file, crc32, varints, vector + compare helpers.
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* noreturn: lets the reader AND -fanalyzer know an allocation/parse failure terminates the
  * process, so the `if (!p) die(...); return p;` allocator wrappers below provably never return
  * NULL (without this the analyzer models a NULL return and reports spurious null-arg/OOB). */
-static __attribute__((noreturn)) void die(const char *msg) {
+void die(const char *msg) {
     fprintf(stderr, "patch_generate: %s\n", msg);
     exit(2);
 }
 
-static void *xmalloc(size_t n) {
+void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
     if (!p) die("out of memory");
     return p;
 }
 
-static void *xcalloc(size_t n, size_t s) {
+void *xcalloc(size_t n, size_t s) {
     void *p = calloc(n ? n : 1, s ? s : 1);
     if (!p) die("out of memory");
     return p;
@@ -35,35 +33,34 @@ static void *xcalloc(size_t n, size_t s) {
  * comparators legitimately compare equal on distinct elements (same-address ELF symbols,
  * equal-value b2j entries, equal-boundary map segments); stability pins those ties to
  * insertion order, which every producer in this file generates deterministically. */
-static void a1_sort(void *base, size_t n, size_t esz,
+void a1_sort(void *base, size_t n, size_t esz,
                     int (*cmp)(const void *, const void *)) {
-    unsigned char *src = (unsigned char *)base, *from = src, *to, *tmp;
+    unsigned char *src = (unsigned char *)base, *tmp;
     if (n < 2) return;
     tmp = (unsigned char *)xmalloc(n * esz);
-    to = tmp;
+    memcpy(tmp, src, n * esz);
     for (size_t w = 1; w < n; w *= 2) {
         for (size_t lo = 0; lo < n; lo += 2 * w) {
             size_t mid = lo + w < n ? lo + w : n;
             size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
             size_t i = lo, j = mid, k = lo;
             while (i < mid && j < hi) {
-                if (cmp(from + j * esz, from + i * esz) < 0) {   /* strict <: ties keep LEFT */
-                    memcpy(to + k * esz, from + j * esz, esz); j++;
+                if (cmp(src + j * esz, src + i * esz) < 0) {   /* strict <: ties keep LEFT */
+                    memcpy(tmp + k * esz, src + j * esz, esz); j++;
                 } else {
-                    memcpy(to + k * esz, from + i * esz, esz); i++;
+                    memcpy(tmp + k * esz, src + i * esz, esz); i++;
                 }
                 k++;
             }
-            if (i < mid) memcpy(to + k * esz, from + i * esz, (mid - i) * esz);
-            if (j < hi) memcpy(to + (k + (mid - i)) * esz, from + j * esz, (hi - j) * esz);
+            if (i < mid) { memcpy(tmp + k * esz, src + i * esz, (mid - i) * esz); k += mid - i; }
+            if (j < hi) memcpy(tmp + k * esz, src + j * esz, (hi - j) * esz);
         }
-        { unsigned char *sw = from; from = to; to = sw; }
+        memcpy(src, tmp, n * esz);
     }
-    if (from != src) memcpy(src, from, n * esz);
     free(tmp);
 }
 
-static void *xrealloc(void *p, size_t n) {
+void *xrealloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
     if (!q) die("out of memory");
     return q;
@@ -77,27 +74,27 @@ static void buf_reserve(Buf *b, size_t need) {
     b->cap = nc;
 }
 
-static void buf_put(Buf *b, uint8_t v) {
+void buf_put(Buf *b, uint8_t v) {
     buf_reserve(b, b->n + 1);
     b->d[b->n++] = v;
 }
 
-static void buf_write(Buf *b, const void *p, size_t n) {
+void buf_write(Buf *b, const void *p, size_t n) {
     buf_reserve(b, b->n + n);
     memcpy(b->d + b->n, p, n);
     b->n += n;
 }
 
-static void buf_put_u32le(Buf *b, uint32_t v) {
+void buf_put_u32le(Buf *b, uint32_t v) {
     buf_put(b, (uint8_t)v);
     buf_put(b, (uint8_t)(v >> 8));
     buf_put(b, (uint8_t)(v >> 16));
     buf_put(b, (uint8_t)(v >> 24));
 }
 
-static void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
+void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
 
-static Buf slurp(const char *path) {
+Buf slurp(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); exit(2); }
     if (fseek(f, 0, SEEK_END)) die("seek failed");
@@ -117,14 +114,14 @@ static Buf slurp(const char *path) {
     return b;
 }
 
-static void write_file(const char *path, const void *p, size_t n) {
+void write_file(const char *path, const void *p, size_t n) {
     FILE *f = fopen(path, "wb");
     if (!f) { perror(path); exit(2); }
     if (n && fwrite(p, 1, n, f) != n) die("write failed");
     fclose(f);
 }
 
-static char *join2(const char *a, const char *b) {
+char *join2(const char *a, const char *b) {
     size_t na = strlen(a), nb = strlen(b);
     char *s = (char *)xmalloc(na + nb + 2);
     memcpy(s, a, na);
@@ -133,7 +130,7 @@ static char *join2(const char *a, const char *b) {
     return s;
 }
 
-static uint32_t crc32_buf(const uint8_t *p, size_t n) {
+uint32_t crc32_buf(const uint8_t *p, size_t n) {
     uint32_t c = 0xffffffffu;
     for (size_t i = 0; i < n; i++) {
         c ^= p[i];
@@ -142,13 +139,13 @@ static uint32_t crc32_buf(const uint8_t *p, size_t n) {
     return c ^ 0xffffffffu;
 }
 
-static int bitlen32(uint32_t v) {
+int bitlen32(uint32_t v) {
     int n = 0;
     do { n++; v >>= 1; } while (v);
     return n;
 }
 
-static void put_uleb(Buf *b, uint32_t v) {
+void put_uleb(Buf *b, uint32_t v) {
     for (;;) {
         uint8_t x = (uint8_t)(v & 0x7fu);
         v >>= 7;
@@ -159,7 +156,7 @@ static void put_uleb(Buf *b, uint32_t v) {
 
 /* uLEB with one redundant trailing continuation byte — value-identical, non-canonical.
  * The decoder reads the redundancy as a 1-bit flag (the unnatural apply direction). */
-static void put_uleb_overlong(Buf *b, uint32_t v) {
+void put_uleb_overlong(Buf *b, uint32_t v) {
     for (;;) {
         uint8_t x = (uint8_t)(v & 0x7fu);
         v >>= 7;
@@ -169,7 +166,7 @@ static void put_uleb_overlong(Buf *b, uint32_t v) {
     buf_put(b, 0);
 }
 
-static void ivec_push(IVec *v, int32_t x) {
+void ivec_push(IVec *v, int32_t x) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 16;
         v->v = (int32_t *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
@@ -177,7 +174,7 @@ static void ivec_push(IVec *v, int32_t x) {
     v->v[v->n++] = x;
 }
 
-static void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
+void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 16;
         v->v = (CorrEnt *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
@@ -187,17 +184,17 @@ static void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
     v->n++;
 }
 
-static int cmp_i32(const void *a, const void *b) {
+int cmp_i32(const void *a, const void *b) {
     int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
     return (x > y) - (x < y);
 }
 
-static int cmp_corr(const void *a, const void *b) {
+int cmp_corr(const void *a, const void *b) {
     const CorrEnt *x = (const CorrEnt *)a, *y = (const CorrEnt *)b;
     return (x->off > y->off) - (x->off < y->off);
 }
 
-static void opvec_push(OpVec *v, Op o) {
+void opvec_push(OpVec *v, Op o) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 64;
         v->v = (Op *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
@@ -205,7 +202,7 @@ static void opvec_push(OpVec *v, Op o) {
     v->v[v->n++] = o;
 }
 
-static void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n) {
+void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 8;
         v->v = (Block *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
@@ -224,7 +221,7 @@ static int cmp_fd(const void *a, const void *b) {
     return (x->kind > y->kind) - (x->kind < y->kind);
 }
 
-static void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
+void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 256;
         v->v = (FieldDelta *)xrealloc(v->v, v->cap * sizeof(v->v[0]));
@@ -235,7 +232,7 @@ static void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
     v->n++;
 }
 
-static void fd_finalize(FieldDeltaVec *v) {
+void fd_finalize(FieldDeltaVec *v) {
     if (!v->n) return;
     a1_sort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
     size_t w = 0;
@@ -246,7 +243,7 @@ static void fd_finalize(FieldDeltaVec *v) {
     v->n = w;
 }
 
-static const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind) {
+const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind) {
     size_t lo = 0, hi = v->n;
     while (lo < hi) {
         size_t m = (lo + hi) >> 1;

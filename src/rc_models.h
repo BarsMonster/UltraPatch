@@ -28,19 +28,19 @@
  * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
 #define BT_PROBS 255u
 #define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
-typedef struct { uint8_t p[BT_BYTES + 1u]; } BitTree;  /* +1 lets accessors read/write 3 bytes */
-static inline uint16_t bt_get(const BitTree*t,int idx){
+typedef struct { uint8_t p[BT_BYTES + 1u]; } A1BitTree;  /* +1 lets accessors read/write 3 bytes */
+static inline uint16_t a1_bt_get(const A1BitTree*t,int idx){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
     uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
     return (uint16_t)((v>>sh)&0xfffu);
 }
-static inline void bt_set(BitTree*t,int idx,uint16_t prob){
+static inline void a1_bt_set(A1BitTree*t,int idx,uint16_t prob){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
     uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
     v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
     t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8); t->p[off+2u]=(uint8_t)(v>>16);
 }
-static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) bt_set(t,i,RC_PHALF); }
+static inline void a1_bt_init(A1BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) a1_bt_set(t,i,RC_PHALF); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.
@@ -63,21 +63,23 @@ static inline void bt_init(BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i
  * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: patch_apply and
  * patch_generate share this table (bit-exact wire). LIT0_CTX must equal 1 + max entry. ---- */
 #define LIT0_CTX 5
-static const uint8_t LIT0_MAP[256] = {
-    1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,3,1,0,
-    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
-    3,1,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,0,1,1,3,1,3,1,0,3,0,1,0,0,3,1,
-    3,3,3,3,3,3,3,3,3,3,3,0,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,
-    3,3,3,3,1,1,3,0,3,3,3,1,3,3,3,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
-    0,0,0,0,0,0,0,0,2,2,1,2,2,1,2,1,0,0,0,0,0,1,0,0,1,0,1,0,1,1,1,0,
-    2,0,0,1,0,0,0,2,0,0,0,0,0,2,2,0,1,1,1,1,1,1,0,2,1,1,1,1,1,1,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,
-};
-#define LIT0_SEL(p) (LIT0_MAP[(uint8_t)(p)])
+static inline uint8_t rc_lit0_sel(uint8_t p){
+    return (uint8_t)(
+        "\001\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\001\003\001\000"
+        "\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\000"
+        "\003\001\003\003\003\003\003\001\001\001\001\001\001\001\001\001\001\000\001\001\003\001\003\001\000\003\000\001\000\000\003\001"
+        "\003\003\003\003\003\003\003\003\003\003\003\000\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\003\000"
+        "\003\003\003\003\001\001\003\000\003\003\003\001\003\003\003\001\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002\002"
+        "\000\000\000\000\000\000\000\000\002\002\001\002\002\001\002\001\000\000\000\000\000\001\000\000\001\000\001\000\001\001\001\000"
+        "\002\000\000\001\000\000\000\002\000\000\000\000\000\002\002\000\001\001\001\001\001\001\000\002\001\001\001\001\001\001\000\000"
+        "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\002\000\000\000\000\000\000\004\000\000\000\000\000\000\000\000"
+    )[p];
+}
+#define LIT0_SEL(p) rc_lit0_sel((uint8_t)(p))
 
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
-typedef struct { uint16_t m[4]; int h; } Flag1;
-static inline void fl_init(Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
+typedef struct { uint16_t m[4]; int h; } A1Flag1;
+static inline void a1_fl_init(A1Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
 
 /* =====================================================================================
  * Shared PURE wire semantics — hand-mirrored decoder<->encoder helpers single-sourced here so
@@ -145,10 +147,10 @@ static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
     for(int i=0;i<depth && i<=maxidx;i++) u[i]=(uint16_t)(RC_PBIT/16);
 }
 
-static inline void rc_lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
+static inline void rc_lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++) bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
+    for(int m=1;m<256;m++) a1_bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
 }
 
 /* Thumb BL/BLX local-branch halfword pattern (F000 / D000), tested on pristine source bytes. */
@@ -187,8 +189,8 @@ static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint3
  * index is ~54% zero, so unary fits the concentration; IDX_CTX=5 is the corpus optimum (4/6/8/16 all
  * code worse). Shared struct + seed; the encode/decode loops live in each side. */
 #define IDX_CTX 5
-typedef struct { uint16_t u[IDX_CTX]; } IdxUnary;
-static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+typedef struct { uint16_t u[IDX_CTX]; } A1IdxUnary;
+static inline void a1_idx_init(A1IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
 
 /* =====================================================================================
  * Shared wire constants — single-sourced so the COMPILER (not a "must match" comment)
@@ -200,11 +202,11 @@ static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++
 /* Adaptive-bit rate (probability-update shift) for the Golomb (unary+mantissa), order-2 flag,
  * and MTF rep/hit streams. Tuned to 4 (1/16): these low-cardinality, fast-drifting contexts
  * track better at 4 than the LZMA-classic 5. The literal/dval bit-trees keep their OWN per-tree
- * rate, passed per call (see the BitTree note above), so only this shared default lives here. */
+ * rate, passed per call (see the A1BitTree note above), so only this shared default lives here. */
 #define RC_S_BIT_RATE 4
 
 /* Per-tree adaptation-shift rates for the literal + dval byte-trees. These bit-trees carry their
- * OWN rate (not stored per-tree — see the BitTree note above — but passed at every s_bt/bt_encode
+ * OWN rate (not stored per-tree — see the A1BitTree note above — but passed at every s_bt/bt_encode
  * call site), single-sourced here so encoder and decoder move together. RC_LIT0_RATE (tag0 span
  * literals, order-1 context) adapts slower (1/32); RC_LIT1_RATE (tag1 literals) + RC_DVAL_RATE
  * (MTF escape + [C] correction bytes) track at 1/16. */
@@ -227,7 +229,7 @@ static inline void idx_init(IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++
 
 /* MTF dict-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
  * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
- * corpus optimum. (Shared idx_init seeds both sides.) */
+ * corpus optimum. (Shared a1_idx_init seeds both sides.) */
 #define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"

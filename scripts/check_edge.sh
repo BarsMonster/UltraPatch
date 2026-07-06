@@ -7,15 +7,15 @@
 # empty/tiny/equal images, all-0xFF/all-0x00, incompressible random data, text, page-boundary
 # sizes, and a >384 KiB span (well past the home-corpus 216 KiB maximum).
 #
-# Acceptance model: hy_enc SELF-VERIFIES every emitted patch on the reference decoder, so for
-# each pair either (a) hy_enc succeeds -> the host decoder MUST round-trip the blob
-# byte-exactly (direct pull AND byte-at-a-time via the push adapter), or (b) hy_enc refuses
+# Acceptance model: ultrapatch SELF-VERIFIES every emitted patch on the reference decoder, so for
+# each pair either (a) encode succeeds -> the host decoder MUST round-trip the blob
+# byte-exactly (direct pull AND byte-at-a-time via the push adapter), or (b) encode refuses
 # cleanly (nonzero exit, no blob) -> logged as a refusal. Crashes, hangs, or wrong output
 # anywhere = failure.
 #
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
-# Usage: check_edge.sh   (needs ./hy_enc and ./hy_dec already built)
+# Usage: check_edge.sh   (needs ./ultrapatch already built)
 set -u
 
 tmp="$(mktemp -d)"
@@ -36,11 +36,11 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
   cases=$((cases + 1))
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
-  if ./hy_enc "$tmp/${name}_from" "$tmp/${name}_to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
+  if ./ultrapatch "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
     ok=1
-    for mode in "" "1"; do   # direct pull, then byte-at-a-time via the push adapter
+    for mode in "" "--byte-mode"; do   # direct pull, then byte-at-a-time via the push adapter
       cp "$from" "$tmp/$name.mem"
-      if ! ./hy_dec "$tmp/$name.mem" "$blob" $mode >/dev/null 2>&1; then ok=0; fi
+      if ! ./ultrapatch --decode $mode "$tmp/$name.mem" "$blob" >/dev/null 2>&1; then ok=0; fi
       if ! cmp -s "$tmp/$name.mem" "$to"; then ok=0; fi
     done
     if [ "$ok" = 1 ]; then

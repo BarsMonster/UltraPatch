@@ -1,10 +1,11 @@
 # Device Integration Contract
 
-`src/patch_apply.h` is the production decoder artifact. It is a self-contained
-header-only library: end users compile the decoder by including this single
-header and providing the two flash primitives below. The decoder owns no global
-static state and uses no heap; the integrator owns the `PatchApply` state object
-so the Cortex-M0+ SRAM gate remains meaningful.
+`src/patch_apply.h` is the production decoder entry point. It is a header-only
+library: end users compile the decoder by including this single header, shipping
+`src/rc_models.h` and `src/patch_config.h` beside it on the include path, and
+providing the two flash primitives below. The decoder owns no global static
+state and uses no heap; the integrator owns the `PatchApply` state object so the
+Cortex-M0+ SRAM gate remains meaningful.
 
 The decoder owns the whole patch blob: envelope parsing, both CRC gates, the
 apply direction, and the image span are all derived internally from the pushed
@@ -13,10 +14,11 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 ## Ownership
 
 Include `src/patch_apply.h` in the update translation unit and allocate one
-caller-owned `PatchApply` object for the run. Entropy models, the journal arena,
-and the output row cache live inside that object. There is no coroutine, no
-fiber, no private decode stack, and no heap allocation — the decode runs on the
-caller's stack plus the caller-owned state object.
+caller-owned `PatchApply` object for the run. The support headers are included
+by `patch_apply.h`; application code does not include them directly. Entropy
+models, the journal arena, and the output row cache live inside that object.
+There is no coroutine, no fiber, no private decode stack, and no heap allocation
+-- the decode runs on the caller's stack plus the caller-owned state object.
 
 The target must provide exactly two flash primitives:
 
@@ -224,10 +226,10 @@ compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
 is reserved for a future Thumb-2 wire revision; it may change the wire format
 and is currently rejected at compile time.
 
-The decoder defaults and wire-model helpers are embedded in `src/patch_apply.h`
-so the device artifact is a single header. The encoder keeps its mirror defaults
-in `src/patch_config.h` and wire-model helpers in `src/rc_models.h`; model and
-golden gates enforce that the two copies stay bit-exact.
+The decoder defaults and wire-model helpers are shared through
+`src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only header
+application code includes. The encoder uses the same headers, and model/golden
+gates enforce bit-exactness.
 
 The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
 `PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.
@@ -247,7 +249,7 @@ among deployment targets.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
 intentional reject limits on the decoder. The ENCODER mirrors them
-(`A1_JSLOTS`/`A1_OPC_CAP` in `patch_generate.c` — retune both sides together)
+(`A1_JSLOTS`/`A1_OPC_CAP` in `src/patch_config.h` -- retune both sides together)
 and degrades gracefully instead of refusing where the plan allows it: reads
 that would overflow the journal budget ship as plain extra bytes, and ops
 whose per-op corrections exceed `OPC_CAP` are split — worse compression, never

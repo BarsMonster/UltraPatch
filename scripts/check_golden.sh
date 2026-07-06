@@ -10,7 +10,7 @@
 #
 # On an INTENDED wire change, regenerate the manifest in the same commit:  make golden-update
 #
-# Usage: check_golden.sh [check|update]   (needs ./hy_enc already built)
+# Usage: check_golden.sh [check|update]   (needs ./ultrapatch already built)
 set -eu
 
 MODE="${1:-check}"
@@ -34,7 +34,7 @@ python3 "$(dirname "$0")/synth_gen.py" pins "$SFIX"
 # then the two synthetic degradation pins (appended -> they sort last; existing lines untouched).
 while read -r name from to; do
   [ -n "$name" ] || continue
-  ./hy_enc "$from" "$to" "$tmp/$name.blob" >/dev/null
+  ./ultrapatch "$from/watch.bin" "$to/watch.bin" "$tmp/$name.blob" >/dev/null
 done <<EOF
 oneface_grow $FIX/v0_base $FIX/v1_one_face
 oneface_revert $FIX/v1_one_face $FIX/v0_base

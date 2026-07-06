@@ -58,35 +58,35 @@ int md_bits(const uint8_t *b, size_t n, int rate, int ns, uint8_t *got) {
 int md_bt(const uint8_t *b, size_t n, int rate, int ns, uint32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    BitTree t; bt_init(&t);
+    A1BitTree t; a1_bt_init(&t);
     for (int i = 0; i < ns; i++) got[i] = (uint32_t)(uint8_t)s_bt(pa, &t, rate);
     return pa->g_rcerr;
 }
 int md_bv(const uint8_t *b, size_t n, int ns, int32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    BitTree t; bt_init(&t);
+    A1BitTree t; a1_bt_init(&t);
     for (int i = 0; i < ns; i++) got[i] = s_bv(pa, &t, 4);
     return pa->g_rcerr;
 }
 int md_ugr(const uint8_t *b, size_t n, int k, int ns, uint32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    UGRice g; ugr_init(&g, k);
+    A1UGRice g; ugr_init(&g, k);
     for (int i = 0; i < ns && !pa->g_rcerr; i++) got[i] = s_ug_rice(pa, &g);
     return pa->g_rcerr;
 }
 int md_ugg(const uint8_t *b, size_t n, int depth, int ns, uint32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    UGGamma g; ugg_init(&g); if (depth > 0) ugg_seed_cont(&g, depth);
+    A1UGGamma g; ugg_init(&g); if (depth > 0) ugg_seed_cont(&g, depth);
     for (int i = 0; i < ns && !pa->g_rcerr; i++) got[i] = s_ug_gamma(pa, &g);
     return pa->g_rcerr;
 }
 int md_idx(const uint8_t *b, size_t n, int ns, uint32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    IdxUnary g; idx_init(&g, RC_IDX_SEED);
+    A1IdxUnary g; a1_idx_init(&g, RC_IDX_SEED);
     /* mirror pull_delta's index read: clamp min(pos,IDX_CTX-1), generous run cap */
     for (int i = 0; i < ns && !pa->g_rcerr; i++) got[i] = s_unary(pa, g.u, IDX_CTX - 1u, 1u << 20);
     return pa->g_rcerr;
@@ -94,7 +94,7 @@ int md_idx(const uint8_t *b, size_t n, int ns, uint32_t *got) {
 int md_flag(const uint8_t *b, size_t n, int ns, uint8_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    Flag1 f; fl_init(&f);
+    A1Flag1 f; a1_fl_init(&f);
     for (int i = 0; i < ns; i++) got[i] = (uint8_t)s_flag(pa, &f);
     return pa->g_rcerr;
 }
@@ -122,9 +122,9 @@ static int32_t md_dic[DR_KCAP_BL > DR_KCAP_EX ? DR_KCAP_BL : DR_KCAP_EX];
 int md_mtf(const uint8_t *b, size_t n, int cap, int ns, int32_t *got) {
     md_begin(b, n);
     PatchApply *pa = &md_pa;
-    bt_init(&pa->M_dval);
-    DRStream d; dr_init(&d, md_dic, DR_HIT_INIT);
-    IdxUnary gix; idx_init(&gix, RC_IDX_SEED);
+    a1_bt_init(&pa->M_dval);
+    A1DRStream d; dr_init(&d, md_dic, DR_HIT_INIT);
+    A1IdxUnary gix; a1_idx_init(&gix, RC_IDX_SEED);
     for (int i = 0; i < ns && !pa->g_rcerr; i++) got[i] = pull_delta(pa, &d, &gix, md_dic, (uint32_t)cap);
     return pa->g_rcerr;
 }
@@ -132,10 +132,10 @@ int md_mixed(const uint8_t *b, size_t n, const uint8_t *ops, int ns, uint32_t *g
     md_begin(b, n);
     PatchApply *pa = &md_pa;
     uint16_t p = RC_PHALF;
-    BitTree bt; bt_init(&bt);
-    UGRice gr; ugr_init(&gr, MX_UGR_K);
-    UGGamma gg; ugg_init(&gg);
-    Flag1 f; fl_init(&f);
+    A1BitTree bt; a1_bt_init(&bt);
+    A1UGRice gr; ugr_init(&gr, MX_UGR_K);
+    A1UGGamma gg; ugg_init(&gg);
+    A1Flag1 f; a1_fl_init(&f);
     for (int i = 0; i < ns && !pa->g_rcerr; i++) {
         switch (ops[i]) {
             case MX_RAW:  got[i] = (uint32_t)s_raw(pa);                 break;

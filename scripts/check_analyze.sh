@@ -3,9 +3,8 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 #
-# Static-analysis leg: gcc -fanalyzer over BOTH first-party translation units
-# (host encoder + device decoder) and their helpers. The decoder was already
-# analyzer-clean; this extends the same tool to the previously-uncovered encoder.
+# Static-analysis leg: gcc -fanalyzer over first-party translation units
+# (host encoder CLI/modules + device decoder wrapper + helpers).
 #
 # Curated flag set:
 #   -Wno-analyzer-tainted-assertion : a batch host tool that BY DESIGN validates
@@ -31,14 +30,24 @@ COMMON="-DCORTEX_M0 -std=c99 -I. -Isrc -Ivendor/libdivsufsort -fanalyzer \
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 rc=0
+count=0
 
 analyze() { # analyze <src> <extra-defines>
     echo "  analyzing $1"
+    count=$((count + 1))
     # shellcheck disable=SC2086
     "$CC" $2 $COMMON "$1" 2>>"$log" || rc=1
 }
 
-analyze src/patch_generate.c   "-DRC_V3_ENC_MAIN"          # host encoder (+main)
+analyze src/patch_generate.c   "-DULTRAPATCH_MAIN"         # unified host CLI main
+analyze src/enc_util.c         ""                          # host encoder utilities
+analyze src/enc_elf.c          ""                          # host ELF scanner
+analyze src/enc_bsdiff.c       ""                          # host diff planner
+analyze src/enc_field.c        ""                          # host field/apply planner
+analyze src/enc_rc.c           ""                          # host range encoder models
+analyze src/enc_lz.c           ""                          # host LZ planner/pricer
+analyze src/enc_emit.c         ""                          # host body emitter
+analyze src/enc_plan.c         ""                          # host plan/degrade sweep
 analyze src/arm_cortex_m4.c    ""                          # ARM reloc scanner/packers
 analyze src/patch_selfcheck.c  ""                          # encoder self-verify (includes decoder)
 analyze src/patch_apply_demo.c "-D_POSIX_C_SOURCE=200809L" # device decoder demo
@@ -49,4 +58,4 @@ if [ "$rc" -ne 0 ] || [ "$w" -ne 0 ]; then
     grep -E 'warning:|error:' "$log" | head -60
     exit 1
 fi
-echo "analyze=OK (4 TUs, 0 findings)"
+echo "analyze=OK ($count TUs, 0 findings)"

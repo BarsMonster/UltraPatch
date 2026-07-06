@@ -6,7 +6,7 @@ non-winning masked variants concentrate hundreds of corrections and split).
 This note records the stronger case — a split in the SHIPPED (winning) plan —
 which was proven reachable but deliberately left OUT of the gate.
 
-## Result (stock hy_enc, unmodified source)
+## Result (stock ultrapatch, unmodified source)
 
 `scripts/make_opc_pair.py` (requires `arm-none-eabi-gcc`; tested 14.2.1)
 generates a from/to Cortex-M0+ pair where the winning plan is the masked
@@ -16,7 +16,7 @@ variant (mask BL + literal pools, plan idx 5) with 10 ops over the
 ```
 A1_DEGRADE dir=fwd natural=0 deg_journal=1 pres_needed=5948 converted=5006
            opc_splits=10 opc_splits_sweep=10 budget=1024 opc_cap=80
-blob = 7905 B, 678 ops; hy_dec round-trips byte-exactly.
+blob = 7905 B, 678 ops; `ultrapatch --decode` round-trips byte-exactly.
 ```
 
 ## Why it is not gated

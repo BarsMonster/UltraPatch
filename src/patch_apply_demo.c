@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* Host demo/gate wrapper for the header-only patch_apply decoder.
+/* Host decode mode for the ultrapatch CLI.
  * The reusable device artifact is patch_apply.h; this file owns only file I/O
  * (max-span flash sizing) and the NVM safety checks -- the DECODER performs the
  * authoritative envelope parse, size caps and both CRC gates itself. */
@@ -46,10 +46,8 @@ static void feed_one(void *c){
     else { f->eof_signaled=1; patch_ring_eof(f->r); }
 }
 
-int main(int argc,char**argv){
-    if(argc<3||argc>4){ fprintf(stderr,"usage: %s <memfile> <blob> [byte_mode]\n",argv[0]); return 2; }
-    int byte_mode = (argc==4);   /* arg3 present -> stream via the push adapter, 1 byte per feed */
-    FILE*bf=fopen(argv[2],"rb"); if(!bf){perror("blob");return 2;}
+int decode_a1(const char *image_path, const char *patch_path, int byte_mode){
+    FILE*bf=fopen(patch_path,"rb"); if(!bf){perror("patch");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
     uint8_t*blob=malloc((size_t)bsz);
@@ -59,7 +57,7 @@ int main(int argc,char**argv){
      * owns the envelope parse, size caps and CRC32(from) gate, so the host does NO header
      * pre-parse (a device integration needs none of this — its flash is fixed hardware). One
      * 64 MiB memset+pad-fill per process (~15 ms), negligible even x256 in the corpus leg. */
-    FILE*mf=fopen(argv[1],"r+b"); if(!mf){perror("mem");free(blob);return 2;}
+    FILE*mf=fopen(image_path,"r+b"); if(!mf){perror("image");free(blob);return 2;}
     fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
     { uint32_t span = (uint32_t)fsz>A1_MAX_IMAGE ? (uint32_t)fsz : A1_MAX_IMAGE;
       uint8_t*tmp=(uint8_t*)malloc(fsz?(size_t)fsz:1);
@@ -73,7 +71,10 @@ int main(int argc,char**argv){
     int rc;
     if(byte_mode){
         uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0,0};
-        patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc);
+        if(!patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc)){
+            fprintf(stderr,"patch ring init failed\n");
+            fclose(mf); free(sc_flash); free(blob); return 2;
+        }
         rc=patch_apply_run(&pa, patch_ring_next,&ring);
         if(rc==PATCH_APPLY_DONE){
             if(fc.feeds!=(long)bsz || fc.eof_signaled){
@@ -109,3 +110,31 @@ int main(int argc,char**argv){
     fclose(mf); free(blob);
     return 0;
 }
+
+#ifdef PATCH_APPLY_DEMO_MAIN
+static void decode_usage(const char *prog){
+    fprintf(stderr, "usage: %s --decode [--byte-mode] <image> <patch>\n", prog);
+}
+
+int main(int argc,char**argv){
+    int byte_mode=0;
+    const char *pos[2]={0};
+    int npos=0;
+    for(int i=1;i<argc;i++){
+        if(strcmp(argv[i],"--decode")==0){
+            continue;
+        } else if(strcmp(argv[i],"--byte-mode")==0){
+            byte_mode=1;
+        } else if(strcmp(argv[i],"-h")==0 || strcmp(argv[i],"--help")==0){
+            decode_usage(argv[0]); return 0;
+        } else if(argv[i][0]=='-' && argv[i][1]){
+            decode_usage(argv[0]); return 2;
+        } else {
+            if(npos==2){ decode_usage(argv[0]); return 2; }
+            pos[npos++]=argv[i];
+        }
+    }
+    if(npos!=2){ decode_usage(argv[0]); return 2; }
+    return decode_a1(pos[0],pos[1],byte_mode);
+}
+#endif

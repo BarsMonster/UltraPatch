@@ -27,17 +27,17 @@ DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
-# Shared host-side NVM emulator, #included by patch_selfcheck.c (in hy_enc) and
-# patch_apply_demo.c (hy_dec) before their patch_apply.h.
+# Shared host-side NVM emulator, #included by patch_selfcheck.c and
+# patch_apply_demo.c before their patch_apply.h.
 NVM_EMU := src/nvm_emu.inc
-# patch_generate.c is a thin umbrella TU that #includes the ordered enc_*.inc modules
-# (the host encoder is one translation unit -- see the include block in patch_generate.c).
-# Listed here so editing any module re-triggers every target that compiles the encoder.
-ENC_MODULES := src/enc_util.inc src/enc_elf.inc src/enc_bsdiff.inc src/enc_field.inc \
-               src/enc_rc.inc src/enc_lz.inc src/enc_emit.inc src/enc_plan.inc src/enc_cli.inc
-GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h $(ENC_MODULES)
-ENC_SRCS := src/patch_generate.c src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
+# Host encoder modules. The encoder is a normal CLI tool and may rely on this Makefile;
+# the device decoder remains header-only for integrators.
+ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
+                   src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
+GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h src/enc_internal.h
+ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) src/arm_cortex_m4.c src/patch_selfcheck.c $(DIVSUF)
 DEC_SRCS := src/patch_apply_demo.c
+TOOL_SRCS := $(ENC_SRCS) $(DEC_SRCS)
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
@@ -80,28 +80,32 @@ $(CAPPED): %:
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(A1_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
-all-internal: hy_enc hy_dec
+all-internal: ultrapatch
+	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -c $(DEC_SRCS) -o /dev/null
 
-hy_enc: $(ENC_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU)
-	$(CC) $(CFLAGS) -DRC_V3_ENC_MAIN $(ENC_SRCS) -o $@
-
-# The decoder TU is additionally -Wconversion-clean (the safety-critical artifact carries
-# the stricter bar; the host-side encoder does not). Single decode mode: patch_apply_run()
-# + integrator callback; byte_mode (arg3) streams through the optional push adapter.
-hy_dec: $(DEC_SRCS) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
-	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L $(DEC_SRCS) -o $@
+ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
+	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) -o $@
 
 check-internal: all-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
+	./ultrapatch --help >"$$tmp/help.txt"; \
+	./ultrapatch -h >"$$tmp/help-short.txt"; \
+	grep -q '^usage: .*ultrapatch' "$$tmp/help.txt"; \
+	grep -q '^usage: .*ultrapatch' "$$tmp/help-short.txt"; \
+	grep -q '^  --decode' "$$tmp/help.txt"; \
+	if ./ultrapatch >"$$tmp/noargs.out" 2>"$$tmp/noargs.err"; then \
+		echo "ultrapatch with no arguments unexpectedly succeeded" >&2; exit 1; \
+	fi; \
+	grep -q '^usage: .*ultrapatch' "$$tmp/noargs.err"; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob"; \
-	./hy_dec "$$tmp/mem.bin" "$$tmp/grow.blob" 1 >/dev/null; \
+	./ultrapatch "$(FIXTURES)/v0_base/watch.bin" "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/grow.blob"; \
+	./ultrapatch --decode --byte-mode "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
 	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
-	./hy_enc "$(FIXTURES)/v1_one_face" "$(FIXTURES)/v0_base" "$$tmp/revert.blob"; \
-	./hy_dec "$$tmp/mem.bin" "$$tmp/revert.blob" 1 >/dev/null; \
+	./ultrapatch "$(FIXTURES)/v1_one_face/watch.bin" "$(FIXTURES)/v0_base/watch.bin" "$$tmp/revert.blob"; \
+	./ultrapatch --decode --byte-mode "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
 	revert_sz=$$(wc -c < "$$tmp/revert.blob"); \
@@ -162,14 +166,17 @@ check-stack-internal:
 
 check-decoder-contract-internal:
 	@set -e; \
-	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/patch_apply.h; then \
-		echo "patch_apply.h must be self-contained and not include project headers" >&2; exit 1; \
+	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/patch_apply.h | grep -v '"rc_models.h"'; then \
+		echo "patch_apply.h may include only its shipped support header rc_models.h" >&2; exit 1; \
 	fi; \
-	if grep -nE '\b(malloc|calloc|realloc|free)[[:space:]]*\(' src/patch_apply.h; then \
-		echo "patch_apply.h must not use dynamic memory" >&2; exit 1; \
+	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/rc_models.h | grep -v '"patch_config.h"'; then \
+		echo "rc_models.h may include only its shipped support header patch_config.h" >&2; exit 1; \
 	fi; \
-	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' src/patch_apply.h; then :; else \
-		echo "patch_apply.h must not declare file-scope static variables" >&2; exit 1; \
+	if grep -nE '\b(malloc|calloc|realloc|free)[[:space:]]*\(' src/patch_apply.h src/rc_models.h src/patch_config.h; then \
+		echo "decoder header set must not use dynamic memory" >&2; exit 1; \
+	fi; \
+	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' src/patch_apply.h src/rc_models.h src/patch_config.h; then :; else \
+		echo "decoder header set must not declare file-scope static variables" >&2; exit 1; \
 	fi; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -181,6 +188,32 @@ check-decoder-contract-internal:
 	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 	} > "$$tmp/smoke.c"; \
 	$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$tmp/smoke.c" -o "$$tmp/smoke.o"; \
+	{ printf '%s\n' '#include <stdint.h>'; \
+	  printf '%s\n' '#include "patch_apply_push_adapter.h"'; \
+	  printf '%s\n' 'typedef struct { PatchRing *r; int calls; } WaitCtx;'; \
+	  printf '%s\n' 'static void wait_feed(void *ctx){ WaitCtx *w=(WaitCtx *)ctx; w->calls++; if(w->calls==1) (void)patch_ring_push(w->r,0x44u); else patch_ring_eof(w->r); }'; \
+	  printf '%s\n' 'static void wait_count(void *ctx){ (*(int *)ctx)++; }'; \
+	  printf '%s\n' 'int main(void){'; \
+	  printf '%s\n' '  PatchRing r; uint8_t buf[2], out=0; int waits=0;'; \
+	  printf '%s\n' '  if(patch_ring_init(&r, buf, 3u, wait_count, &waits)) return 1;'; \
+	  printf '%s\n' '  if(patch_ring_init(&r, buf, 2u, 0, &waits)) return 2;'; \
+	  printf '%s\n' '  if(!patch_ring_init(&r, buf, 2u, wait_count, &waits)) return 3;'; \
+	  printf '%s\n' '  if(!patch_ring_push(&r, 0x11u) || !patch_ring_push(&r, 0x22u)) return 4;'; \
+	  printf '%s\n' '  if(patch_ring_push(&r, 0x33u)) return 5;'; \
+	  printf '%s\n' '  patch_ring_eof(&r);'; \
+	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x11u) return 6;'; \
+	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x22u) return 7;'; \
+	  printf '%s\n' '  if(patch_ring_next(&r, &out) || waits != 0) return 8;'; \
+	  printf '%s\n' '  WaitCtx wc; wc.r=&r; wc.calls=0;'; \
+	  printf '%s\n' '  if(!patch_ring_init(&r, buf, 2u, wait_feed, &wc)) return 9;'; \
+	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x44u || wc.calls != 1) return 10;'; \
+	  printf '%s\n' '  if(patch_ring_push(0, 0) || patch_ring_next(0, &out)) return 11;'; \
+	  printf '%s\n' '  patch_ring_eof(0);'; \
+	  printf '%s\n' '  return 0;'; \
+	  printf '%s\n' '}'; \
+	} > "$$tmp/ring.c"; \
+	$(CC) $(CFLAGS) -Isrc "$$tmp/ring.c" -o "$$tmp/ring"; \
+	"$$tmp/ring"; \
 	echo "decoder_contract=OK"
 
 check-assets-internal:
@@ -202,7 +235,7 @@ check-assets-internal:
 # thousands -- i.e. the static call-graph method missed no deep/unbounded path. Informational
 # and STANDALONE (not in `make gate`, which pins the authoritative static bound); auto-skips
 # without the cross-gcc / qemu-user.
-check-stack-qemu-internal: hy_enc
+check-stack-qemu-internal: ultrapatch
 	@set -e; \
 	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
 		echo "stack_probe=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
@@ -212,7 +245,7 @@ check-stack-qemu-internal: hy_enc
 		arm-linux-gnueabi-gcc -static -mthumb -$$o -std=c99 -Wall -Wextra -Werror \
 			-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L -Isrc test/stack_probe.c -o "$$tmp/probe_$$o"; \
 	done; \
-	./hy_enc "$(FIXTURES)/v0_base" "$(FIXTURES)/v1_one_face" "$$tmp/grow.blob" >/dev/null; \
+	./ultrapatch "$(FIXTURES)/v0_base/watch.bin" "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/grow.blob" >/dev/null; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	for o in Os O2; do \
 		out=$$(qemu-arm "$$tmp/probe_$$o" "$$tmp/mem.bin" "$$tmp/grow.blob"); \
@@ -226,7 +259,7 @@ check-malformed-internal: all-internal
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
-# page-boundary/>384KiB-span pairs). hy_enc self-verifies every blob, so each case must
+# page-boundary/>384KiB-span pairs). ultrapatch self-verifies every encoded blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
 check-edge-internal: all-internal
 	@scripts/check_edge.sh
@@ -242,24 +275,24 @@ check-degrade-internal: all-internal
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
 # `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
-check-golden-internal: hy_enc
+check-golden-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check
 
-golden-update-internal: hy_enc
+golden-update-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update
 
 # Model-LEVEL encoder/decoder differential test. The golden gate proves the WHOLE wire is bit-exact
 # for the corpus-exercised symbol values; this proves each entropy-model PAIR is bit-exact across its
 # full value space in isolation, so a future mirror bug localizes to the exact model (not "some blob's
-# sha changed"). test/model_diff.c #includes the host encoder (src/patch_generate.c, no RC_V3_ENC_MAIN
-# => no main, wire untouched) and drives every ENCODER model; test/model_diff_dec.c #includes the REAL
-# decoder (src/patch_apply.h) unchanged and decodes with the mirror DECODER model. --gc-sections drops
-# the encoder's unused planner (and its divsufsort/arm deps), so the test links from just the two TUs.
+# sha changed"). test/model_diff.c links the normal encoder model modules and drives every ENCODER
+# model; test/model_diff_dec.c #includes the REAL decoder (src/patch_apply.h) unchanged and decodes
+# with the mirror DECODER model. --gc-sections drops the encoder emit module's unused planner path.
 # Host-only, deterministic (fixed-seed LCG), wire-neutral, fast (<1 s).
 MODEL_DIFF_SRCS := test/model_diff.c test/model_diff_dec.c
-model_diff: $(MODEL_DIFF_SRCS) test/model_diff.h src/patch_generate.c $(APPLY_HDR) $(GEN_HDR)
+MODEL_DIFF_ENCODER_SRCS := src/enc_util.c src/enc_rc.c src/enc_emit.c
+model_diff: $(MODEL_DIFF_SRCS) $(MODEL_DIFF_ENCODER_SRCS) test/model_diff.h $(APPLY_HDR) $(GEN_HDR)
 	$(CC) $(CFLAGS) -Itest -Wno-unused-function -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		$(MODEL_DIFF_SRCS) -o $@
+		$(MODEL_DIFF_SRCS) $(MODEL_DIFF_ENCODER_SRCS) -o $@
 
 check-models-internal: model_diff
 	@./model_diff
@@ -372,11 +405,11 @@ gate-internal: all-internal model_diff
 	echo "====================================================="; \
 	exit $$rc
 
-# Static-analysis leg: gcc -fanalyzer over BOTH first-party TUs (encoder + decoder + arm + selfcheck)
+# Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
 	@scripts/check_analyze.sh
 
 clean-internal:
-	rm -f hy_enc hy_dec model_diff
+	rm -f ultrapatch hy_enc hy_dec model_diff

@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- minimal ELF32 range extraction (elf_ranges, largest_code_range/largest_data_range, find_data_offset_in_bin).
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* ------------------------------------------------------------------------------------- */
 /* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
@@ -20,8 +18,6 @@ typedef struct { ARange *v; size_t n, cap; } RangeVec;
 
 static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
-static void wr32le(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
-
 static int cmp_sym_val(const void *a, const void *b) {
     const Sym *x = (const Sym *)a, *y = (const Sym *)b;
     if (x->sec != y->sec) return (x->sec > y->sec) - (x->sec < y->sec);
@@ -103,7 +99,7 @@ static uint32_t find_data_offset_in_bin(const Buf *elf, const Shdr *sh, const Bu
     exit(2);
 }
 
-static Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
+Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     Buf e = slurp(elf_path);
     /* -fanalyzer FALSE POSITIVES suppressed within this validated header/section-table parse only
      * (checkers stay active for the rest of the function): the analyzer cannot see through slurp's

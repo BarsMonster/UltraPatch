@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- plan/degrade: degrade_ops_to_journal_budget, plan_encode.
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* ---- journal-budget degradation (encoder-only; wire format and decoder untouched) ----
  * The decoder's never-evict journal holds at most A1_JSLOTS overwritten source bytes. When
  * the ideal op plan needs more, convert the OVER-BUDGET read-after-overwrite copy regions
@@ -95,9 +93,7 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
-typedef struct { int variant, fuzz; } PlanCfg;
-
-static Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                        PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
     int variant = cfg.variant;
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;

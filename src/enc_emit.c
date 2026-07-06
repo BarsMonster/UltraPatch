@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* One field injection (delta escaped into the LZ content stream): cc = byte cursor within its op's
  * content slice, kind = EV_BL/EV_EX, fpk = from-image field address, delta = plain (no-map) wire
  * residual. The map variant derives from delta+fpk (field_residual) without re-walking. */
@@ -29,7 +27,7 @@ static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t del
  * mirror of the decoder sa_apply_op window skeleton. FWD/descending asymmetry is preserved exactly:
  * grow writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
- * cc is a READ-AHEAD cursor: like the decoder LitCur, the next literal's gap+byte is consumed before
+ * cc is a READ-AHEAD cursor: like the decoder A1LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
 static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd, const IVec *ldr,
@@ -77,7 +75,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-static void bv_encode(BitTree *t, REnc *r, int64_t x) {
+void bv_encode(A1BitTree *t, REnc *r, int64_t x) {
     uint32_t v = rc_zz32((int32_t)x);
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
@@ -87,32 +85,19 @@ static void bv_encode(BitTree *t, REnc *r, int64_t x) {
     }
 }
 
-static void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
+void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
     d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->last = 0; d->rh = 0; d->hit = hitseed;
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
-/* tag0 literal tree split by previous-literal range (LIT0_SEL, LIT0_CTX); see definitions above. */
-typedef struct {
-    BitTree lit0[LIT0_CTX], lit1;
-    Flag1 flag;
-    BitTree dval;
-    UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
-    uint16_t outb;
-    IdxUnary dibl, diex;
-    DRE dr_bl, dr_ex;
-    int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
-    uint16_t rep0[2]; int rep0h; int32_t last_dist;   /* rep0 flag (order-1) + last match distance (mirror patch_apply M_rep0/g_lastdist) */
-} Models;
-
 /* Set when an emit exceeds a decoder resource cap (e.g. the MTF dict): the candidate
  * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
-static int g_emit_overflow;
+int g_emit_overflow;
 
-static void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
+void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
     if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
-    IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
+    A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
     int ri = D->rh | (D->last == 0 ? 2 : 0);
     if (delta == D->last) {
         re_bit(r, &D->rep[ri], 1, RC_S_BIT_RATE);
@@ -170,7 +155,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
  * cover the skipped seek). Sum of (dl+adj) — hence fp_end — is invariant. skip[i]=1 marks a dropped
  * op; eff_adj[i] is the adj to emit for a kept op. Returns fp_start. Pure function of `ops`, so the
  * envelope writer (plan_encode) and every emit_body call derive the identical fold. */
-static int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
+int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
     int32_t fp_start = 0;
     int last_kept = -1;
     for (size_t i = 0; i < ops->n; i++) {
@@ -196,8 +181,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     memset(&M, 0, sizeof(M));
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &M.lit1);
-    fl_init(&M.flag);
-    bt_init(&M.dval);
+    a1_fl_init(&M.flag);
+    a1_bt_init(&M.dval);
     ug_init_e(&M.gd, 'r', kd);
     ug_init_e(&M.gl, 'g', 0);
     ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */
@@ -214,8 +199,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                                   * with the seed_cont apply-phase priors after the map, before the token loop. */
     ug_init_e(&M.gel, 'g', 0);
     ug_init_e(&M.gadj, 'g', 0);
-    idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
-    idx_init(&M.diex, RC_IDX_SEED);
+    a1_idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
+    a1_idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
@@ -329,25 +314,25 @@ static uint64_t px_bit(uint16_t *prob, int bit) {
     return c;
 }
 /* MTF dict-index unary (mirror idx_encode) */
-static uint64_t px_idx(IdxUnary *g, uint32_t v) {
+static uint64_t px_idx(A1IdxUnary *g, uint32_t v) {
     uint64_t c = 0;
     for (uint32_t pos = 0; pos < v; pos++) c += px_bit(&g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1);
     return c + px_bit(&g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0);
 }
 /* one byte through the adaptive dval bit-tree (mirror bt_encode, dval rate = 4) */
-static uint64_t px_bt(BitTree *t, uint8_t byte) {
+static uint64_t px_bt(A1BitTree *t, uint8_t byte) {
     int m = 1; uint64_t c = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        uint16_t p = bt_get(t, m - 1);
+        uint16_t p = a1_bt_get(t, m - 1);
         c += bit_price(p, bit);
-        bt_set(t, m - 1, rc_adapt(p, bit, 4));
+        a1_bt_set(t, m - 1, rc_adapt(p, bit, 4));
         m = (m << 1) | bit;
     }
     return c;
 }
 /* zigzag-uLEB escape value through dval (mirror bv_encode) */
-static uint64_t px_bv(BitTree *t, int64_t x) {
+static uint64_t px_bv(A1BitTree *t, int64_t x) {
     uint32_t v = rc_zz32((int32_t)x);
     uint64_t c = 0;
     for (;;) {
@@ -360,7 +345,7 @@ static uint64_t px_bv(BitTree *t, int64_t x) {
 }
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
-static uint64_t px_delta(DRE *D, IdxUnary *gix, BitTree *dval, int64_t delta, int *overflow) {
+static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int64_t delta, int *overflow) {
     int ri = D->rh | (D->last == 0 ? 2 : 0);
     if (delta == D->last) { uint64_t c = px_bit(&D->rep[ri], 1); D->rh = 1; return c; }
     uint64_t c = px_bit(&D->rep[ri], 0);
@@ -402,8 +387,8 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
                              const FieldKey *fk, size_t nfr, int64_t *dic_bl, int64_t *dic_ex) {
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
-    BitTree dval; bt_init(&dval);
+    A1IdxUnary di_bl, di_ex; a1_idx_init(&di_bl, RC_IDX_SEED); a1_idx_init(&di_ex, RC_IDX_SEED);
+    A1BitTree dval; a1_bt_init(&dval);
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < nfr; i++) {
@@ -495,7 +480,7 @@ static int smap_eq(const uint32_t *ab, const int32_t *av, int an,
     return 1;
 }
 
-static Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
                        const FieldDeltaVec *fd, const OpPC *pc) {
     int FWD = ctx->fwd;

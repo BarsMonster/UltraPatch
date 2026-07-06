@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- diff core: SequenceMatcher data blocks (create_patch_block/data_format_encode) + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* ------------------------------------------------------------------------------------- */
 /* SequenceMatcher-style subset for create_patch_block().                                  */
 /* ------------------------------------------------------------------------------------- */
@@ -183,9 +181,9 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     free(ao); free(bo); free(m.v);
 }
 
-static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
+void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 
-static void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                                Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
@@ -281,7 +279,7 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
     *last_offset_p = pos - scan;
 }
 
-static OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
+OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
     OpVec ops = {0};
     int32_t from_size = (int32_t)from->n, to_size = (int32_t)to->n;
     int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(int32_t));

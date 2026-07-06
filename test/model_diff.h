@@ -15,11 +15,9 @@
  * for each model pair it encodes a deterministic random symbol stream with the ENCODER-side
  * model and decodes it with the DECODER-side model, asserting exact symbol recovery.
  *
- * Two TUs, no wire touched:
- *   - test/model_diff.c      #includes src/patch_generate.c (no RC_V3_ENC_MAIN => no main);
- *                            owns the LCG, the value generators, orchestration, and every
- *                            ENCODER-side stream helper (it can reach the file-static encoder
- *                            models directly). Prints the summary and exits.
+ * Two test TUs plus the encoder model modules, no wire touched:
+ *   - test/model_diff.c      owns the LCG, the value generators, orchestration, and every
+ *                            ENCODER-side stream helper. Prints the summary and exits.
  *   - test/model_diff_dec.c  #includes src/patch_apply.h with stub flash primitives; exposes
  *                            the DECODER-side whole-stream bridges below, feeding the encoder
  *                            body straight to the callback (no trailer-withhold ring — CRC32(to)

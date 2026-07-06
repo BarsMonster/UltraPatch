@@ -15,6 +15,7 @@
 /hy_dec_pull
 /hy_enc
 /model_diff
+/ultrapatch
 *.o
 *.a
 *.so

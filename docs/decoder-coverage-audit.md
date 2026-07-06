@@ -52,6 +52,6 @@ must run under a hard memory cap + timeout from the first invocation.
 
 How the campaign was run (harness retired 2026-07-04): `make fuzz` (smoke) or
 `./fuzz_apply -jobs=$(nproc) -max_total_time=3600 fuzz-corpus`; coverage via a
-clang `-fprofile-instr-generate -fcoverage-mapping` build of `hy_dec` +
+clang `-fprofile-instr-generate -fcoverage-mapping` build of the host decode wrapper +
 `fuzz_apply`, replaying `fuzz-corpus` and the check suites, merged with
 `llvm-profdata` and reported with `llvm-cov`.

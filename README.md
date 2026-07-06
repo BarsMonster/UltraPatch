@@ -4,26 +4,21 @@ Final A1 firmware patcher for the Sensor Watch target.
 
 Production code lives under `src/`, with third-party code under `vendor/`:
 
-- `src/patch_apply.h`: reusable self-contained header-only streaming in-place decoder.
+- `src/patch_apply.h`: reusable header-only streaming in-place decoder entry point;
+  ship it with `src/rc_models.h` and `src/patch_config.h`.
 - `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
   (ISR push) producers; not part of the device decoder artifact.
-- `src/patch_apply_demo.c`: host demo/gate wrapper used by `hy_dec`,
-  including the host NVM emulator.
-- `src/patch_generate.c`: host-side C encoder. It is a single translation unit
-  assembled as a thin umbrella: a shared prologue (typedefs + explicit `EncCtx`)
-  followed by an ordered `#include` of the `src/enc_*.inc` subsystem modules
-  (`enc_util`, `enc_elf`, `enc_bsdiff`, `enc_field`, `enc_rc`, `enc_lz`,
-  `enc_emit`, `enc_plan`, `enc_cli`). The single-TU shape preserves whole-program
-  optimization and the byte-exact wire; the modules are not standalone TUs and
-  must stay in include order. `test/model_diff.c` reaches the file-static models
-  by `#include`-ing `patch_generate.c` directly.
+- `src/patch_apply_demo.c`: host decode mode used by the `ultrapatch --decode`
+  path, including the host NVM emulator.
+- `src/patch_generate.c`: host-side `ultrapatch` CLI entry point. The encoder is
+  the default mode and is built from normal internal `src/enc_*.c` modules (`enc_util`,
+  `enc_elf`, `enc_bsdiff`, `enc_field`, `enc_rc`, `enc_lz`, `enc_emit`,
+  `enc_plan`). Encoder complexity is deliberately host-side.
 - `src/patch_selfcheck.c`: reference-decoder self-verification built into
-  `hy_enc` — every emitted patch is proven to apply before it is written.
+  `ultrapatch` — every emitted patch is proven to apply before it is written.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
-- `src/rc_models.h`: encoder-side wire-model constants and packed model helpers,
-  mirrored inside the self-contained decoder header.
-- `src/patch_config.h`: encoder-side build-time configuration defaults and mirror knobs,
-  also mirrored inside the self-contained decoder header.
+- `src/rc_models.h`: shared wire-model constants and packed model helpers.
+- `src/patch_config.h`: shared build-time configuration defaults and mirror knobs.
 
 Build and smoke-test:
 
@@ -31,6 +26,20 @@ Build and smoke-test:
 make
 make check
 ```
+
+CLI:
+
+```sh
+./ultrapatch [--encode] <from_image> <to_image> <patch>
+./ultrapatch --decode [--byte-mode] <image> <patch>
+./ultrapatch --help
+```
+
+`--encode` is the default mode. The encoder takes image file paths, not image
+directories; if a same-basename `.elf` sidecar exists next to an image, it is
+used for range extraction. Running `ultrapatch` without arguments prints usage
+and exits nonzero; `--help` and `-h` print the same usage text and exit
+successfully.
 
 Full release gate:
 
@@ -72,8 +81,8 @@ CI verifies the tracked corpus with `make check-assets` before the same
 
 Device integration contract:
 
-- Include only `src/patch_apply.h` in an update module and allocate a caller-owned
-  `PatchApply` state object.
+- Include `src/patch_apply.h` in an update module, keep its two support headers
+  beside it on the include path, and allocate a caller-owned `PatchApply` state object.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write(uint32_t, uint8_t)`.
 - Authenticate the update, then run the WHOLE blob through

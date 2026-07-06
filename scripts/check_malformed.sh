@@ -12,7 +12,7 @@ one="$FIX/v1_one_face"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-./hy_enc "$base" "$one" "$tmp/grow.blob" >/dev/null 2>&1
+./ultrapatch "$base/watch.bin" "$one/watch.bin" "$tmp/grow.blob" >/dev/null 2>&1
 
 rejects=0
 
@@ -41,7 +41,7 @@ expect_reject_unchanged() {
   blob=$2
   source_bin=$3
   cp "$source_bin" "$tmp/$name.mem"
-  if ./hy_dec "$tmp/$name.mem" "$blob" 1 >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+  if ./ultrapatch --decode --byte-mode "$tmp/$name.mem" "$blob" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
     echo "malformed case accepted: $name" >&2
     cat "$tmp/$name.err" >&2
     exit 1

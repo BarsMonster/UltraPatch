@@ -3,26 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- LZSS DP parse + entropy pricing (out_candidates, measure_prices, lz_parse_priced, lz_candidates_c).
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* ------------------------------------------------------------------------------------- */
 /* LZSS planning and entropy models.                                                       */
 /* ------------------------------------------------------------------------------------- */
-typedef struct { int type; int32_t start, len, dist; } Token;
-typedef struct { Token *v; size_t n, cap; } TokenVec;
-typedef struct { int32_t dist, len; } Cand;
-
-#ifndef LZ_CAND_MAX
-#define LZ_CAND_MAX 128
-#endif
-#if LZ_CAND_MAX < 1
-#error "LZ_CAND_MAX must be at least 1"
-#endif
-
 static void tok_push(TokenVec *v, Token t) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 1024;
@@ -31,7 +18,7 @@ static void tok_push(TokenVec *v, Token t) {
     v->v[v->n++] = t;
 }
 
-static uint64_t gammalen_u32(uint32_t x) { return (uint64_t)(2 * bitlen32(x) - 1); }
+uint64_t gammalen_u32(uint32_t x) { return (uint64_t)(2 * bitlen32(x) - 1); }
 
 static int cand_value(Cand c) {
     int v = c.len * 16;
@@ -70,8 +57,6 @@ static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
  * i (conservative: fixed at the op that consumes position i, valid for the whole token):
  * FWD window is [0, olim[i]) — everything below the op's tp0 is written; grow window is
  * [olim[i], to_size) — everything above the op's output end is written. ---- */
-typedef struct { int32_t pos, len; } OCand;
-#define OC_MAX 4
 static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
     int w = -1;                                    /* keep the OC_MAX longest */
     for (int q = 0; q < *nc; q++) if (row[q].len < len) { w = q; break; }
@@ -104,7 +89,7 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
  *  OLD window (source `frm`): FWD [olim2[i], from_size); grow [0, olim2[i])        — pristine flash
  *    the frontier has not reached (out_read returns it verbatim). OLD regions DECAY as later ops
  *    write, so OLD candidates are clipped to finish inside the op that starts them (ocap[i]). */
-static void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
+void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                            const uint32_t *olim2, const uint32_t *ocap, int FWD,
                            const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
                            OCand (**oc_out)[OC_MAX], uint8_t **noc_out) {
@@ -159,14 +144,12 @@ static void out_candidates(const uint8_t *content, size_t n, const uint32_t *oli
 }
 
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
- * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-BitTree litbits) systematically
+ * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-A1BitTree litbits) systematically
  * mis-prices tokens because the wire uses *adaptive* range-coder models whose steady-state
  * probabilities diverge from the time-0 literal-tree seed and from a flat 1-bit flag. We run a
  * trial encode of the previous-pass token stream, read off the resulting model probabilities,
  * and turn them into static per-symbol prices (PR_SCALE-ths of a bit) for the next DP pass.
  * Encoder-only: the wire bytes are unchanged; only token *selection* improves. */
-#define PR_SCALE 64        /* fixed-point: price units are 1/64 bit */
-
 /* cost in 1/64-bit units of coding a single adaptive bit with P(0)=p/4096. */
 /* log2(1+i/32)*2^16, i=0..32, for the fractional part of the fixed-point log2. */
 static const uint16_t LOG2_FRAC[33] = {
@@ -174,7 +157,7 @@ static const uint16_t LOG2_FRAC[33] = {
     32234,34312,36346,38336,40286,42196,44068,45904,47705,49472,51207,52911,
     54584,56229,57845,59434,60997,62534,64047,65535
 };
-static uint32_t bit_price(uint32_t p, int bit) {
+uint32_t bit_price(uint32_t p, int bit) {
     /* -log2(prob) * PR_SCALE, prob = (bit? 4096-p : p)/4096 = pr/4096. */
     uint32_t pr = bit ? (RC_PBIT - p) : p;
     if (pr < 1) pr = 1;
@@ -190,21 +173,6 @@ static uint32_t bit_price(uint32_t p, int bit) {
 }
 
 /* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
-
-typedef struct {
-    uint32_t fspan_c[4], fmatch_c[4];        /* per-flag-context span/match price (order-2 Flag1) */
-    uint32_t rep0_yes, rep0_no;              /* avg measured rep0-flag price (reuse vs fresh distance) */
-    uint32_t outb_yes, outb_no;              /* avg measured out-bit price (out-match vs ring backref) */
-    uint32_t opos_avg;                       /* avg measured out-match position price (delta-coded) */
-    uint32_t oexp0;                          /* expected-position seed (set by caller BEFORE measure) */
-    int fwd;                                 /* apply direction (set by caller BEFORE measure) */
-    uint32_t lit0[LIT0_CTX][256];            /* tag0 per-prevbyte-context per-byte literal price */
-    uint32_t lit1[256];                      /* tag1 per-byte literal price */
-    UGE gs, gl, gd;                          /* snapshot of length/dist models for value pricing */
-    UGE go, glo;                             /* out-match position/length model snapshots */
-    int dk;
-    int valid;
-} PriceTab;
 
 /* price a ug value under a frozen model snapshot (probabilities held constant across the value) */
 static uint32_t ug_price(const UGE *g, uint32_t v) {
@@ -227,11 +195,11 @@ static uint32_t ug_price(const UGE *g, uint32_t v) {
 }
 
 /* per-byte literal price under a frozen bit-tree snapshot */
-static uint32_t bt_price(const BitTree *t, uint8_t byte) {
+static uint32_t bt_price(const A1BitTree *t, uint8_t byte) {
     int m = 1; uint32_t cost = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        cost += bit_price(bt_get(t, m - 1), bit);
+        cost += bit_price(a1_bt_get(t, m - 1), bit);
         m = (m << 1) | bit;
     }
     return cost;
@@ -246,8 +214,8 @@ static uint32_t bt_price(const BitTree *t, uint8_t byte) {
  * 1/64-bit fixed point (PR_SCALE); round to nearest integer bit (floor 1, like a Huffman length) so
  * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in lz_parse_once and the
  * split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
-static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
-    BitTree t0, t1;
+void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
+    A1BitTree t0, t1;
     lit_tree_seed_e(frm, n, 0, &t0);
     lit_tree_seed_e(frm, n, 1, &t1);
     for (int b = 0; b < 256; b++) {
@@ -260,14 +228,14 @@ static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], u
 
 /* Simulate the real adaptive content models over a token sequence to obtain steady-state
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
-static void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
+void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                            const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
-    BitTree lit0[LIT0_CTX], lit1;        /* mirror the wire's order-1 tag0 trees + single tag1 tree */
-    Flag1 flag;
+    A1BitTree lit0[LIT0_CTX], lit1;        /* mirror the wire's order-1 tag0 trees + single tag1 tree */
+    A1Flag1 flag;
     UGE gs, gl, gd;
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &lit1);
-    fl_init(&flag);
+    a1_fl_init(&flag);
     ug_init_e(&gd, 'r', dk);
     ug_init_e(&gl, 'g', 0);
     ug_seed_cont_e(&gl, RC_SEED_DEPTH_GL);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
@@ -334,7 +302,7 @@ static void measure_prices(const TokenVec *seq, const uint8_t *content, const ui
     }
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
-     * order-2 model on the previous two token kinds (Flag1, 4 contexts); a scalar span/match
+     * order-2 model on the previous two token kinds (A1Flag1, 4 contexts); a scalar span/match
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware
      * DP (which tracks a forward flag history) value match/span transitions accurately. */
     for (int h = 0; h < 4; h++) {
@@ -413,7 +381,7 @@ static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
  * bit (rep0) instead of re-coding the whole gd distance value. That is a forward dependency
  * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
  * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
- * there. The wire's token flag is also an order-2 model (Flag1, 4 contexts on the previous two
+ * there. The wire's token flag is also an order-2 model (A1Flag1, 4 contexts on the previous two
  * token kinds), so the flag history h=(prev2<<1|prev1) is part of the forward state too: we keep
  * one DP state per (position, h) and price each flag under its real context fspan_c[h]/fmatch_c[h]
  * instead of a washed-out scalar average. Cheapest-arrival-per-state keeps it O(n*4); the chosen
@@ -432,7 +400,7 @@ static inline void relax2(uint64_t *cost, int32_t *rep, Token *via, uint8_t *vh,
     }
 }
 
-static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
+TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
@@ -612,7 +580,7 @@ static TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t 
     return tv;
 }
 
-static void merge_adjacent_spans(TokenVec *tv) {
+void merge_adjacent_spans(TokenVec *tv) {
     size_t w = 0;
     for (size_t i = 0; i < tv->n; i++) {
         Token t = tv->v[i];
@@ -633,7 +601,7 @@ static void merge_adjacent_spans(TokenVec *tv) {
 static int fixed_dist_bits(int32_t d, int k) { (void)d; return k; }
 static int rice_dist_bits(int32_t d, int k) { uint32_t v = (uint32_t)d - 1u; return (int)((v >> k) + 1u + (uint32_t)k); }
 
-static int fit_k_tokens(const TokenVec *tv) {
+int fit_k_tokens(const TokenVec *tv) {
     int best = 0;
     uint64_t bestc = UINT64_MAX;
     for (int k = 0; k < 16; k++) {
@@ -647,7 +615,7 @@ static int fit_k_tokens(const TokenVec *tv) {
     return best;
 }
 
-static int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
+int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
     int best = cur, any = 0;
     uint64_t bestc = UINT64_MAX;
     for (int k = 0; k < 16; k++) {
@@ -668,7 +636,7 @@ static int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
  * and an initial rice-DP parse. The caller owns *cands_out / *ncand_out and frees them after the
  * price-feedback loop (which it runs with its own, full-body acceptance gate). */
-static TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
+TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
                                 int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
     int32_t win = 1 << PATHE_W, maxm = 2048;

@@ -5,7 +5,7 @@
  * Coder-faithful re-derivation of rc_models.h LIT0_MAP.
  *
  * Replays the ACTUAL shipped adaptive tag0 literal coder (5 histogram-seeded BitTrees adapting at
- * RC_LIT0_RATE, in wire order) over dumps produced by the A1_LITDUMP scaffold (src/enc_emit.inc):
+ * RC_LIT0_RATE, in wire order) over dumps produced by the A1_LITDUMP scaffold (src/enc_emit.c):
  * each dump segment carries the even-parity from-image seed histogram + the surviving span literals
  * { prevlit, byte, tag } in wire order. The cost of coding a tag0 record under candidate map M is the
  * adaptive bit-tree cost of `byte` through tree M[prevlit] (per-bit price taken from the probability
@@ -35,30 +35,30 @@ static double LOG2[RC_PBIT + 1];
 static void log2_init(void){ for (int i = 1; i <= (int)RC_PBIT; i++) LOG2[i] = log2((double)i); }
 
 /* cost (bits) of coding one byte through an adaptive lit0 tree, price from the pre-update prob. */
-static inline double replay_byte(BitTree *t, uint8_t byte){
+static inline double replay_byte(A1BitTree *t, uint8_t byte){
     int m = 1; double c = 0.0;
     for (int i = 7; i >= 0; i--){
         int bit = (byte >> i) & 1;
-        uint16_t p = bt_get(t, m - 1);
+        uint16_t p = a1_bt_get(t, m - 1);
         uint32_t pr = bit ? (RC_PBIT - p) : p;      /* pr in 1..4095 */
         c += 12.0 - LOG2[pr];                       /* -log2(pr/4096) */
-        bt_set(t, m - 1, rc_adapt(p, bit, RC_LIT0_RATE));
+        a1_bt_set(t, m - 1, rc_adapt(p, bit, RC_LIT0_RATE));
         m = (m << 1) | bit;
     }
     return c;
 }
 
 /* seed a lit0 tree from the even-parity from-image histogram, EXACTLY as lit_tree_seed_e. */
-static void seed_from_hist(BitTree *t, const uint32_t *hist){
+static void seed_from_hist(A1BitTree *t, const uint32_t *hist){
     uint32_t w[512];
     for (int s = 0; s < 256; s++) w[256 + s] = hist[s];
     for (int m = 255; m >= 1; m--) w[m] = w[2*m] + w[2*m+1];
     memset(t->p, 0, sizeof t->p);
-    for (int m = 1; m < 256; m++) bt_set(t, m - 1, rc_lit_seed_prob(w[2*m], w[m]));
+    for (int m = 1; m < 256; m++) a1_bt_set(t, m - 1, rc_lit_seed_prob(w[2*m], w[m]));
 }
 
 typedef struct {
-    BitTree seed;
+    A1BitTree seed;
     uint8_t *prev;   /* tag0 record prevlit, wire order */
     uint8_t *byte;   /* tag0 record byte */
     uint32_t n;      /* tag0 record count */
@@ -114,7 +114,7 @@ static void load_dir(const char *dir, int is_home){
 /* Full per-tree cost of `map` over all files, into ch[5] (home) and cf[5] (foreign). */
 static void cost_all(const uint8_t *map, double *ch, double *cf){
     for (int t = 0; t < LIT0_CTX; t++){ ch[t] = 0; cf[t] = 0; }
-    BitTree tr[LIT0_CTX];
+    A1BitTree tr[LIT0_CTX];
     for (size_t fi = 0; fi < g_nfiles; fi++){
         DFile *f = &g_files[fi];
         double local[LIT0_CTX]; for (int t = 0; t < LIT0_CTX; t++){ tr[t] = f->seed; local[t] = 0; }
@@ -130,7 +130,7 @@ static void cost_one_tree(const uint8_t *map, int t, int rx, int add, double *ph
     double home = 0, fgn = 0;
     for (size_t fi = 0; fi < g_nfiles; fi++){
         DFile *f = &g_files[fi];
-        BitTree tr = f->seed; double loc = 0;
+        A1BitTree tr = f->seed; double loc = 0;
         for (uint32_t i = 0; i < f->n; i++){
             int r = f->prev[i];
             int in = (r == rx) ? add : (map[r] == t);

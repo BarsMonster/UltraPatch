@@ -3,17 +3,16 @@
  * SPDX-License-Identifier: MIT
  *
  * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, collect_fields, build_field_deltas, proxy pricing, split runs, preserve/corrections.
- * Part of the single translation unit rooted at src/patch_generate.c, which
- * #includes the enc_*.inc modules in dependency order. NOT a standalone TU:
- * it relies on the shared prologue (typedefs, EncCtx) and on symbols
- * defined by earlier modules. Umbrella split preserves the single-TU byte-exact
- * wire and model_diff.c's #include "patch_generate.c".
+ * Compiled as a normal internal encoder translation unit.
  */
+
+#include "enc_internal.h"
 /* ------------------------------------------------------------------------------------- */
 /* A1 field and apply planning.                                                            */
 /* ------------------------------------------------------------------------------------- */
 static uint16_t u16le_at(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t u32le_at(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+static void u32le_put(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 
 /* rc_bl_imm24 / rc_bl_pack / rc_bl_pattern (rc_models.h) single-source the decoder-mirrored BL
  * unpack/pack/predicate. unpack_bl_local sign-extends the raw 24-bit immediate (same idiom the
@@ -40,7 +39,7 @@ static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out)
     return 1;
 }
 
-static IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
+IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
     IVec s = {0};
     int32_t lo = fp0, hi = fp0 + dl;
     int32_t a = (lo & 1) ? lo + 1 : lo;
@@ -71,9 +70,6 @@ static int ivec_has(const IVec *v, int32_t x) {
     return lo < v->n && v->v[lo] == x;
 }
 
-enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
-typedef struct { int type; int64_t delta; } Event;
-
 /* o==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
  * EV_SBL) — coerce_reloc_literals uses that to detect fields before their literals are zeroed. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
@@ -98,18 +94,12 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
  * anchor, ev) or one copy position (is_field=0, pos). Direction-parametrized: FWD ascends from 0
  * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
  * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
-typedef struct {
-    int fwd; int32_t dl, k;
-    const uint8_t *frm; uint32_t from_size;
-    const FieldDeltaVec *fd; const IVec *ldr; const Op *o; int32_t fp0;
-    int is_field; int32_t pos; Event ev;
-} FieldWalk;
-static void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
+void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
                     const FieldDeltaVec *fd, const IVec *ldr, const Op *o, int32_t fp0, int32_t dl) {
     w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
     w->frm = frm; w->from_size = from_size; w->fd = fd; w->ldr = ldr; w->o = o; w->fp0 = fp0;
 }
-static int fw_next(FieldWalk *w) {
+int fw_next(FieldWalk *w) {
     if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
     int32_t a0 = w->fwd ? w->k : w->k - 3;
     if (a0 >= 0 && a0 + 4 <= w->dl) {
@@ -127,7 +117,7 @@ static int fw_next(FieldWalk *w) {
  * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
  * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
  * corrections_hybrid absorbs any mask-induced diff mismatch by construction. */
-static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
+void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
     for (size_t a = 0; a + 4 <= n;) {
         uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
         if (rc_bl_pattern(up, lo)) {
@@ -140,7 +130,7 @@ static void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
 /* Op-derived field deltas: for every BL/LDR field candidate inside a copy, the exact delta under
  * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
  * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
-static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
+void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                                   uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
     FieldDeltaVec add = {0};
     int32_t tp = 0, fp = 0;
@@ -185,7 +175,7 @@ static void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uin
 /* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
  * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
  * EX pred is -shift(word value). mn==0 degenerates to residual == delta (no-map wire). */
-static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
+int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
                               const uint32_t *mb, const int32_t *mv, int mn) {
     int32_t pred;
     if (kind == EV_BL) {
@@ -201,13 +191,11 @@ static int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_
     return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
 }
 
-typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
-
 /* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan,
  * walking each op in APPLY direction (mirror op_emit_content / the decoder replay:
  * adjacent windows <4 B apart resolve to a different field set per direction). Entries
  * stay in ascending-fpk order so an unchanged field set fits an identical map. */
-static FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
+FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                 const FieldDeltaVec *fd, size_t *nout) {
     int FWD = ctx->fwd;
     FieldRef *out = NULL; size_t n = 0, cap = 0;
@@ -238,8 +226,6 @@ static int cmp_seg(const void *a, const void *b) {
 }
 
 /* per-field precomputed keys: BL hits iff (g(k1)-g(k2))/2 == need; EX hits iff -g(k2) == need. */
-typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
-
 static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const FieldKey *fk, size_t nfk) {
     size_t hits = 0;
     for (size_t i = 0; i < nfk; i++) {
@@ -258,10 +244,9 @@ static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const Fie
  * candidate map (bsdiff op-walk boundaries + span terminator + exact EX value runs, an oversized
  * pool weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping the later
  * EX-derived value). Shared front half of both fits: the hit-count fit_shift_map (below) and the
- * bits-based fit_shift_map_bits (enc_emit.inc). tb/tv are caller buffers of >= SMAP_POOL_MAX
+ * bits-based fit_shift_map_bits (enc_emit.c). tb/tv are caller buffers of >= SMAP_POOL_MAX
  * entries, fk of >= nfr; returns the full-map entry count. */
-enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
-static int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                            const uint8_t *frm, const FieldRef *fr, size_t nfr,
                            uint32_t *tb, int32_t *tv, FieldKey *fk) {
     size_t nex = 0;
@@ -327,7 +312,7 @@ static int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_siz
  * hits (their wire cost outweighs the few residuals they fix), batched per round with a
  * verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only ships when the
  * exact byte gate says the whole body got smaller, so the fit needs to be good, not perfect. */
-static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                          const uint8_t *frm, const FieldRef *fr, size_t nfr,
                          uint32_t *mb, int32_t *mv) {
     FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
@@ -374,7 +359,7 @@ static int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     return mn;
 }
 
-static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
+FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
     FieldDeltaVec out = {0};
     m4_stream_t st[M4_NSTREAMS];
     if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
@@ -395,7 +380,7 @@ static FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const
     return out;
 }
 
-static void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
+void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                                   uint32_t to_size, const FieldDeltaVec *fd) {
     int FWD = ctx->fwd; (void)to_size;
     int32_t fp0 = 0;
@@ -418,7 +403,7 @@ static void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *
     }
 }
 
-static Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj) {
+Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj) {
     Op o;
     o.diff_len = diff_len;
     o.diff = (uint8_t *)xmalloc((size_t)diff_len);
@@ -458,8 +443,6 @@ static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
 
 typedef struct { int32_t begin, end; } Run;
 
-static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
-
 
 
 /* Dense diff runs can be represented either as literal diff bytes or as an
@@ -469,7 +452,7 @@ static void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], u
  * exact raw geometry code lengths. */
 enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
-static void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to) {
+void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
     from_lit_proxy_bits(from->d, from->n, L0, L1);
     OpVec out = {0};
@@ -589,7 +572,7 @@ static void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *fr
     *ops = out;
 }
 
-static uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size) {
+uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
     for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
@@ -653,7 +636,7 @@ static uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t f
     return pres;
 }
 
-static uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
                                    const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
                                    const uint8_t *presset) {
     int FWD = ctx->fwd;
@@ -682,7 +665,7 @@ static uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const ui
                 pack_bl_local(unpack_bl_local(up, lo) - w.ev.delta, packed);
             } else {
                 uint32_t val = u32le_at(frm + fpk);
-                wr32le(packed, val - (uint32_t)w.ev.delta);
+                u32le_put(packed, val - (uint32_t)w.ev.delta);
             }
             for (int b = 0; b < 4; b++) { ohas[m[oi].tp + k + b] = 1; oval[m[oi].tp + k + b] = packed[b]; }
         }
@@ -728,7 +711,7 @@ static uint8_t *corrections_hybrid(const EncCtx *ctx, const OpVec *ops, const ui
     return corr;
 }
 
-static OpPC *preserve_corr_per_op(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size,
+OpPC *preserve_corr_per_op(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size,
                                   const uint8_t *presset, const uint8_t *corr) {
     int FWD = ctx->fwd; (void)from_size; (void)to_size;
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));

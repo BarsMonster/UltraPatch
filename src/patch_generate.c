@@ -1,107 +1,194 @@
 /*
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
- * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
- */
-
-/*
- * A1 host encoder (C) for the patch_apply decoder wire.
  *
- * This is intentionally a host-side encoder: compression-side memory/CPU are
- * allowed to be large. It emits the final A1 blob consumed by patch_apply.h.
+ * A1 host encoder CLI entry point.
  */
-#include <unistd.h>
-#include <limits.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "enc_internal.h"
 
-#include "arm_cortex_m4.h"
-#include "rc_models.h"
-
-/* patch_selfcheck.c: reference-decoder self-verification of an emitted blob.
- * Returns NULL on success, else a short static error message. */
-extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
-                                const uint8_t *from, size_t from_n,
-                                const uint8_t *to, size_t to_n);
-
-int divsufsort(const uint8_t *T, int32_t *SA, int32_t n);
-
-/* PATHE_W / A1_* encoder mirrors and DR_KCAP_* are configured in patch_config.h. */
-/* DR_HIT_INIT is single-sourced in rc_models.h (shared by decoder dr_init and encoder dr_init_e). */
-
-typedef struct {
-    /* Apply direction for the CURRENT encode attempt (1 = ascending/FWD, 0 = descending).
-     * Direction is an ENCODER CHOICE signaled in the envelope (natural = canonical size-delta
-     * uLEB, unnatural = overlong marker) instead of being derived from the size relation. */
-    int fwd;
-
-    /* WIRE-NEUTRAL scaffold gate: when set, encode_body appends the surviving tag0/tag1
-     * span-literal stream to $A1_LITDUMP.<pid>.bin for tools/lit0map_faithful.c. */
-    int litdump;
-
-    /* Degradation instrumentation (host-side, WIRE-NEUTRAL: these never touch emitted bytes).
-     * plan_encode resets them per plan attempt; encode_a1 snapshots the winning plan. */
-    int    deg_engaged;      /* journal-budget degradation converted >=1 over-budget read */
-    size_t deg_pres_needed;  /* preserves the ideal (pre-degradation) plan required */
-    size_t deg_converted;    /* source bytes converted from journal reads to plain extras */
-    size_t opc_splits;       /* ops split because per-op corrections exceeded A1_OPC_CAP */
-} EncCtx;
-
-/* Row-window oracle mirrors — MUST match decoder OUTROW / OUTROW_DEPTH (encoding-affecting build
- * contract; compatibility is monotone toward larger decoder windows). Shared DEFAULT in patch_config.h;
- * kept SEPARATELY overridable from the decoder knobs (a decoder window may legitimately be a superset). */
-
-/* Row-window oracle: is source address a — already logically overwritten — still OLD in
- * physical flash when the decoder produces output position t? The decoder keeps the last
- * OUTROW_DEPTH rows uncommitted (direct-mapped FIFO); rows are touched in write order, so
- * at read time the uncommitted set always includes rows within (depth-1) of row(t)
- * (conservative by one extra row at row starts). Covered reads return the pristine old
- * byte via plain flash_read — no journal slot, no [P] event, no conversion needed. */
-static int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
-    if (ctx->fwd) return a / A1_OUTROW >= t / A1_OUTROW - (A1_ROW_DEPTH - 1);
-    return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
+static char *elf_sidecar_path(const char *image_path) {
+    const char *slash = strrchr(image_path, '/');
+    const char *base = slash ? slash + 1 : image_path;
+    const char *dot = strrchr(base, '.');
+    size_t stem = dot ? (size_t)(dot - image_path) : strlen(image_path);
+    char *elf = (char *)xmalloc(stem + 5u);
+    memcpy(elf, image_path, stem);
+    memcpy(elf + stem, ".elf", 5u);
+    return elf;
 }
 
-/* Decoder resource-cap mirrors — MUST match patch_apply JSLOTS / OPC_CAP (a deployment that
- * -D-retunes the decoder caps must retune these identically). Shared DEFAULT in patch_config.h.
- * A1_JSLOTS is also the journal budget for plan degradation (degrade_ops_to_journal_budget). */
+void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
+    char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
+    Buf from = slurp(from_image), to = slurp(to_image);
+    /* A same-basename .elf sidecar is OPTIONAL: without it the whole image is treated as opaque data (zeroed
+     * Ranges -> no code/data windows for the disassembler filter; plain bsdiff+LZ path).
+     * A present-but-malformed ELF still dies loudly — only absence is tolerated. This
+     * enables raw-binary pairs (edge gate, foreign firmware without build artifacts). */
+    Ranges fr = {0}, tr = {0};
+    { FILE *fe = fopen(felf, "rb");
+      if (fe) { fclose(fe); fr = elf_ranges(felf, &from, "from"); } }
+    { FILE *te = fopen(telf, "rb");
+      if (te) { fclose(te); tr = elf_ranges(telf, &to, "to"); } }
+    uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
+    /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
+     * ties keep the earliest entry, so added configs can never regress. A config whose plan
+     * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
+     * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
+     * in-family firmware. Every config below won pairs in the corpus sweep (the bsdiff fuzz
+     * axis dominates: 74 pairs preferred fuzz=6, 92 preferred fuzz=20). */
+    static const PlanCfg PLANS[] = {
+        {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
+    };
+    enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
+    EncCtx ctx = {0};
+    Buf body = {0}; int32_t fp_end_s = 0; int32_t fp_start_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
+    size_t best_tot = 0;
+    size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
+    /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
+     * the unnatural direction is swept ONLY when the natural winner engaged journal-budget
+     * degradation or no natural plan was feasible. Measured separator (foreign study +
+     * home corpus): every pair that ever preferred the flip also degraded in the natural
+     * direction (insertion shifts journal-overflow ascending), while home pairs never
+     * degrade — so pruning halves encode time with byte-identical home output. A clean
+     * natural winner that would still lose to the flip is unobserved in any corpus; if one
+     * exists, the cost is a slightly larger blob, never a bad one. */
+    int natdir = rc_natural_desc(from_size, to_size);
+    for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
+        int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
+        if (pass && bestv >= 0 && !st.deg_engaged) break;
+        ctx.fwd = (dir == 0);
+        ctx.litdump = 0;
+        for (int v = 0; v < NPLANS; v++) {
+            int32_t fpe = 0, fps = 0; EncStats stv = {0};
+            Buf b = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
+            if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
+            if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
+            /* judge by SHIPPED total: descending additionally pays the fp_end envelope
+             * varint, and the UNNATURAL direction pays the 1-byte overlong marker. The 7B
+             * initial-seek varint (fp_start) rides both directions equally, so it does not
+             * shift the argmin — accounted in the emitted blob, omitted from this comparison. */
+            size_t tot = b.n + (dir ? (size_t)rc_uleb_len(rc_zz32(fpe - (int32_t)from_size)) : 0u)
+                             + (rc_dir_is_natural(from_size, to_size, dir) ? 0u : 1u);
+            if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
+            else buf_free(&b);
+        }
+    }
+    if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
+    /* WIRE-NEUTRAL scaffold: re-run the WINNING plan once with the literal dump enabled so the dump
+     * file holds exactly the tag0/tag1 span literals that ship (the sweep above ran with dumping off,
+     * so loser configs never pollute it). Deterministic replay reproduces the identical body. */
+    if (getenv("A1_LITDUMP")) {
+        ctx.fwd = (best_desc == 0); ctx.litdump = 1;
+        int32_t fpe = 0, fps = 0; EncStats stv = {0};
+        Buf rb = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[bestv], &fpe, &fps, &stv);
+        buf_free(&rb); ctx.litdump = 0;
+    }
+    /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
+     * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
+    if (getenv("A1_DEGRADE_STATS"))
+        fprintf(stderr,
+                "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
+                best_desc ? "bwd" : "fwd",
+                rc_dir_is_natural(from_size, to_size, best_desc),
+                st.deg_engaged, st.deg_pres_needed, st.deg_converted, st.opc_splits, sweep_opc_splits,
+                (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
+    Buf blob = {0};
+    buf_put_u32le(&blob, crc32_buf(from.d, from.n));
+    /* CRC32(to) rides in the HEADER immediately after CRC32(from) (moved off the old
+     * 4-byte trailer). The decoder reads it up front (g_want_to) and verifies it over the
+     * final image after apply — so there is no trailer-withhold ring. */
+    buf_put_u32le(&blob, crc32_buf(to.d, to.n));
+    put_uleb(&blob, from_size);
+    /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
+     * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
+     * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB.
+     * The apply direction rides the same field: the NATURAL direction (descending iff growing)
+     * is the canonical encoding — byte-identical to the historical envelope — and the unnatural
+     * direction is one redundant continuation byte (overlong uLEB, value-neutral). */
+    { uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
+      if (rc_dir_is_natural(from_size, to_size, best_desc)) put_uleb(&blob, zd);
+      else put_uleb_overlong(&blob, zd); }
+    /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
+     * grow (!FWD) direction. For FWD the decoder computes s->fp incrementally from 0, so fp_end is
+     * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
+     * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
+    if (best_desc) put_uleb(&blob, rc_zz32(fp_end_s - (int32_t)from_size));
+    /* Feature 7B: initial source seek (fp_start). Zero-output pure-seek ops are folded off the wire
+     * (so `nops` can go and the decoder frontier-terminates); a LEADING zero-op's seek is carried
+     * here instead. Seeds the FWD source walk (was implicitly 0) and is the grow landing point
+     * (grow's final fp must equal it). Almost always 0 (1 byte) — a leading zero-op is rare. Shipped
+     * for BOTH directions, right after the (grow-only) fp_end field. */
+    put_uleb(&blob, rc_zz32(fp_start_s));
+    /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
+     * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
+     * information, so it is dropped from the wire.
+     * Bit-exact invariant: body.d[0] is always 0 here. */
+    if (body.n == 0 || body.d[0] != 0) die("range-coder leading byte not 0 — wire invariant broken");
+    if (body.n - 1u > UINT32_MAX) die("range-coded body too large");
+    put_uleb(&blob, (uint32_t)(body.n - 1u));
+    buf_write(&blob, body.d + 1, body.n - 1);
+    /* No trailer: CRC32(to) already sits in the header above. */
+    /* Self-verification (patch_selfcheck.c): apply the finished blob to `from` on the
+     * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
+     * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
+     * cannot prove applies. */
+    { const char *scerr = a1_selfcheck(blob.d, blob.n, from.d, from.n, to.d, to.n);
+      if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
+                   die("emitted patch failed reference-decoder self-verification"); } }
+    write_file(patch_out, blob.d, blob.n);
+    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to);
+    free(felf); free(telf);
+}
 
-enum { STREAM_DATA, STREAM_CODE, STREAM_BL, STREAM_LDR, STREAM_N };
+static void usage(FILE *out, const char *prog) {
+    fprintf(out,
+            "usage: %s [--encode] <from_image> <to_image> <patch>\n"
+            "       %s --decode [--byte-mode] <image> <patch>\n"
+            "\n"
+            "Modes:\n"
+            "  --encode      Create a patch; this is the default mode.\n"
+            "  --decode      Apply a patch to <image> in place using the host decoder wrapper.\n"
+            "\n"
+            "Options:\n"
+            "  --byte-mode   With --decode, stream through the optional push adapter.\n"
+            "  -h, --help    Show this usage text.\n",
+            prog, prog);
+}
 
-typedef struct { uint8_t *d; size_t n, cap; } Buf;
-typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
-typedef struct { Op *v; size_t n, cap; } OpVec;
-typedef struct { int32_t from_offset, to_address, n; int64_t *values; } Block;
-typedef struct { Block *v; size_t n, cap; } BlockVec;
-typedef struct { uint32_t addr; int kind; int64_t delta; } FieldDelta;
-typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
-typedef struct { int32_t *v; size_t n, cap; } IVec;
-typedef struct { int32_t off; uint8_t byte; } CorrEnt;
-typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
-typedef struct { IVec pres; CorrVec corr; } OpPC;
-typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
-typedef struct {
-    /* degradation snapshot (filled unconditionally by plan_encode) */
-    int    deg_engaged;
-    size_t deg_pres_needed, deg_converted, opc_splits;
-} EncStats;
-
-/* ------------------------------------------------------------------------------------- */
-/* Umbrella split (U15): the host encoder is one translation unit assembled from ordered  */
-/* enc_*.inc modules included below. This keeps the single-TU whole-program optimization   */
-/* and byte-exact wire, keeps test/model_diff.c's `#include "patch_generate.c"` and         */
-/* scripts/check_analyze.sh working unchanged, and gives each subsystem its own file.       */
-/* The modules are NOT standalone TUs: they share the prologue above, pass EncCtx for        */
-/* attempt-scoped encoder state, and reference each other in the preserved include order.    */
-/* ------------------------------------------------------------------------------------- */
-#include "enc_util.inc"     /* util/IO, allocators, a1_sort, Buf, crc32, varints           */
-#include "enc_elf.inc"      /* ELF32 range extraction                                      */
-#include "enc_bsdiff.inc"   /* SequenceMatcher data blocks + suffix-sort bsdiff ops        */
-#include "enc_field.inc"    /* field/delta model + apply planning + preserve/corrections   */
-#include "enc_rc.inc"       /* binary range encoder + entropy models                       */
-#include "enc_lz.inc"       /* LZSS DP parse + entropy pricing                             */
-#include "enc_emit.inc"     /* body assembly / range-coder emit                            */
-#include "enc_plan.inc"     /* plan/degrade                                                */
-#include "enc_cli.inc"      /* CLI: encode_a1, main                                        */
+#ifdef ULTRAPATCH_MAIN
+int main(int argc, char **argv) {
+    int decode = 0, mode_set = 0, byte_mode = 0;
+    const char *pos[3] = {0};
+    int npos = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--decode") == 0) {
+            if (mode_set && !decode) { usage(stderr, argv[0]); return 2; }
+            decode = 1; mode_set = 1;
+        } else if (strcmp(argv[i], "--encode") == 0) {
+            if (mode_set && decode) { usage(stderr, argv[0]); return 2; }
+            decode = 0; mode_set = 1;
+        } else if (strcmp(argv[i], "--byte-mode") == 0) {
+            byte_mode = 1;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout, argv[0]);
+            return 0;
+        } else if (argv[i][0] == '-' && argv[i][1]) {
+            usage(stderr, argv[0]);
+            return 2;
+        } else {
+            if (npos == 3) { usage(stderr, argv[0]); return 2; }
+            pos[npos++] = argv[i];
+        }
+    }
+    if (decode) {
+        if (npos != 2) { usage(stderr, argv[0]); return 2; }
+        return decode_a1(pos[0], pos[1], byte_mode);
+    }
+    if (byte_mode || npos != 3) {
+        usage(stderr, argv[0]);
+        return 2;
+    }
+    encode_a1(pos[0], pos[1], pos[2]);
+    return 0;
+}
+#endif
