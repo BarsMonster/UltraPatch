@@ -148,24 +148,35 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
  * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
 int g_emit_overflow;
 
+static uint64_t px_idx(A1IdxUnary *g, uint32_t v);
+static uint64_t px_bv(A1BitTree *t, int32_t x);
+
+static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
+                           REnc *r, int32_t delta, int *overflow) {
+    DRTrans tr = dr_transition(D, delta);
+    if (tr.kind == DR_TR_REP) {
+        if (r) { re_bit(r, &D->rep[tr.ri], 1, RC_S_BIT_RATE); return 0; }
+        return bit_price_update(&D->rep[tr.ri], 1, RC_S_BIT_RATE);
+    }
+    uint64_t c = 0;
+    if (r) re_bit(r, &D->rep[tr.ri], 0, RC_S_BIT_RATE);
+    else c = bit_price_update(&D->rep[tr.ri], 0, RC_S_BIT_RATE);
+    if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
+    if (tr.kind == DR_TR_HIT) {
+        if (r) { re_bit(r, &D->hit, 1, RC_S_BIT_RATE); idx_encode(gix, r, tr.idx); }
+        else { c += bit_price_update(&D->hit, 1, RC_S_BIT_RATE); c += px_idx(gix, tr.idx); }
+    } else {
+        if (r) { re_bit(r, &D->hit, 0, RC_S_BIT_RATE); bv_encode(dval, r, delta); }
+        else { c += bit_price_update(&D->hit, 0, RC_S_BIT_RATE); c += px_bv(dval, delta); }
+    }
+    return c;
+}
+
 void emit_delta(Models *M, REnc *r, int kind, int32_t delta) {
     if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
-    DRTrans tr = dr_transition(D, delta);
-    if (tr.kind == DR_TR_REP) {
-        re_bit(r, &D->rep[tr.ri], 1, RC_S_BIT_RATE);
-        return;
-    }
-    re_bit(r, &D->rep[tr.ri], 0, RC_S_BIT_RATE);
-    if (tr.kind == DR_TR_OVER) { g_emit_overflow = 1; return; }
-    if (tr.kind == DR_TR_HIT) {
-        re_bit(r, &D->hit, 1, RC_S_BIT_RATE);
-        idx_encode(gix, r, tr.idx);
-    } else {
-        re_bit(r, &D->hit, 0, RC_S_BIT_RATE);
-        bv_encode(&M->dval, r, delta);
-    }
+    (void)delta_xfer(D, gix, &M->dval, r, delta, &g_emit_overflow);
 }
 
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
@@ -335,18 +346,7 @@ static uint64_t px_bv(A1BitTree *t, int32_t x) {
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
 static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int32_t delta, int *overflow) {
-    DRTrans tr = dr_transition(D, delta);
-    if (tr.kind == DR_TR_REP) return bit_price_update(&D->rep[tr.ri], 1, RC_S_BIT_RATE);
-    uint64_t c = bit_price_update(&D->rep[tr.ri], 0, RC_S_BIT_RATE);
-    if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
-    if (tr.kind == DR_TR_HIT) {
-        c += bit_price_update(&D->hit, 1, RC_S_BIT_RATE);
-        c += px_idx(gix, tr.idx);
-    } else {
-        c += bit_price_update(&D->hit, 0, RC_S_BIT_RATE);
-        c += px_bv(dval, delta);
-    }
-    return c;
+    return delta_xfer(D, gix, dval, NULL, delta, overflow);
 }
 
 /* map header bits (raw gamma, 1 bit each): count + per entry (gap gamma + zz value gamma), scaled
