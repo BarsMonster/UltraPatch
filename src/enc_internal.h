@@ -108,8 +108,6 @@ typedef struct {
     uint32_t lit1[256];
     UGE gs, gl, gd;
     UGE go, glo;
-    int dk;
-    int valid;
     int fixed_dist_bits;
     int bootstrap_simple;
 } PriceTab;
