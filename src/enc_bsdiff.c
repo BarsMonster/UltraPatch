@@ -234,8 +234,8 @@ static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t fro
 }
 
 static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
-                           const uint8_t *to, int32_t to_size, uint8_t *debuf,
-                           int32_t scan, int32_t pos, int32_t *last_scan_p,
+                           const uint8_t *to, int32_t to_size, int32_t scan,
+                           int32_t pos, int32_t *last_scan_p,
                            int32_t *last_pos_p, int32_t *last_offset_p) {
     int32_t last_scan = *last_scan_p, last_pos = *last_pos_p;
     int32_t s = 0, sf = 0, diff_size = 0;
@@ -265,13 +265,12 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
         diff_size += (lens - overlap);
         lenb -= lens;
     }
-    for (int32_t i = 0; i < diff_size; i++) debuf[i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
     int32_t extra_pos = last_scan + diff_size;
     int32_t extra_size = scan - lenb - extra_pos;
     Op o;
     o.diff_len = diff_size;
     o.diff = (uint8_t *)xmalloc((size_t)diff_size);
-    memcpy(o.diff, debuf, (size_t)diff_size);
+    for (int32_t i = 0; i < diff_size; i++) o.diff[i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
     o.extra_len = extra_size;
     o.extra = (uint8_t *)xmalloc((size_t)extra_size);
     for (int32_t i = 0; i < extra_size; i++) o.extra[i] = to[extra_pos + i];
@@ -288,7 +287,6 @@ OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
     int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(int32_t));
     sa[0] = from_size;
     if (from_size && divsufsort(from->d, &sa[1], from_size) != 0) die("divsufsort failed");
-    uint8_t *debuf = (uint8_t *)xmalloc((size_t)to_size + 1);
     int32_t scan = 0, len = 0, last_scan = 0, last_pos = 0, last_offset = 0, pos = 0;
     while (scan < to_size) {
         int32_t from_score = 0;
@@ -302,9 +300,9 @@ OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
             if ((scan + last_offset < from_size) && (from->d[scan + last_offset] == to->d[scan])) from_score--;
         }
         if ((len != from_score) || (scan == to_size))
-            emit_bsdiff_op(&ops, from->d, from_size, to->d, to_size, debuf, scan, pos,
+            emit_bsdiff_op(&ops, from->d, from_size, to->d, to_size, scan, pos,
                            &last_scan, &last_pos, &last_offset);
     }
-    free(sa); free(debuf);
+    free(sa);
     return ops;
 }
