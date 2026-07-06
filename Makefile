@@ -61,6 +61,8 @@ BASE_ARM_TEXT ?= 6093
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 11360
 BASE_ARM_SOFT_DIV ?= 1
+ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
+ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
 # derives the exact static bound from -fstack-usage frames + the call graph. Measured 400 B
@@ -124,11 +126,8 @@ check-arm-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	{ printf '%s\n' '#include "patch_apply.h"'; \
-	  printf '%s\n' 'static PatchApply g_patch_apply_state;'; \
-	  printf '%s\n' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }'; \
-	} > "$$tmp/patch_apply_arm.c"; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -Os -DCORTEX_M0 -I src -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
+	$(ARM_APPLY_HARNESS); \
+	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -157,11 +156,8 @@ check-stack-internal:
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	{ printf '%s\n' '#include "patch_apply.h"'; \
-	  printf '%s\n' 'static PatchApply g_patch_apply_state;'; \
-	  printf '%s\n' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }'; \
-	} > "$$tmp/patch_apply_arm.c"; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -O2 -DCORTEX_M0 -I src -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
+	$(ARM_APPLY_HARNESS); \
+	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack.txt"; \
 	cat "$$tmp/stack.txt"; \
 	echo "stack_ceiling_o2=$(BASE_STACK_CEIL_O2)"; \
