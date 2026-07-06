@@ -91,7 +91,7 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     *fd = build_field_deltas(pa, blocks);
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
-    coerce_reloc_literals(ctx, &ops, from->d, from_size, to_size, fd);
+    coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
     degrade_ops_to_journal_budget(ctx, &ops, to, from_size, to_size, A1_JSLOTS);
     return ops;
 }

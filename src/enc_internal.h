@@ -46,7 +46,7 @@ enum { STREAM_BL, STREAM_LDR, STREAM_N };
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
-typedef struct { int32_t tp, fp; const Op *o; size_t orig; } OpWalkEnt;
+typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
 typedef void (*OpWalkByteFn)(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte);
 typedef struct { int32_t from_offset, n; int32_t *values; } Block;
 typedef struct { Block *v; size_t n, cap; } BlockVec;
@@ -56,7 +56,7 @@ typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
-typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
+typedef struct { uint32_t data_off_begin, data_begin, data_end, code_begin, code_end; } Ranges;
 typedef struct {
     m4_stream_t from_st[M4_NSTREAMS];
     m4_stream_t to_st[M4_NSTREAMS];
@@ -206,7 +206,7 @@ int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                     uint32_t *tb, int32_t *tv, FieldKey *fk);
 FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                           uint32_t to_size, const FieldDeltaVec *fd);
+                           const FieldDeltaVec *fd);
 Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to);
 size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,

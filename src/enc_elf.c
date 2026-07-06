@@ -10,7 +10,7 @@
 /* ------------------------------------------------------------------------------------- */
 /* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
-typedef struct { uint32_t type, off, addr, size, entsize, link; } Shdr;
+typedef struct { uint32_t type, off, addr, size, entsize; } Shdr;
 typedef struct { uint32_t value, size; uint8_t type; uint16_t sec; } Sym;
 typedef struct { uint32_t begin, end, sec; } ARange;
 typedef struct { Sym *v; size_t n, cap; } SymVec;
@@ -118,7 +118,6 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
         sh[i].addr = rd32le(p + 12);
         sh[i].off = rd32le(p + 16);
         sh[i].size = rd32le(p + 20);
-        sh[i].link = rd32le(p + 24);
         sh[i].entsize = rd32le(p + 36);
     }
 #if defined(__GNUC__) && !defined(__clang__)
@@ -164,7 +163,7 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     ARange code = largest_code_range(&funcs);
     ARange data = largest_data_range(&objs, code);
     uint32_t doff = find_data_offset_in_bin(&e, sh, bin, data, which);
-    Ranges r = { doff, doff + (data.end - data.begin), data.begin, data.end, code.begin, code.end };
+    Ranges r = { doff, data.begin, data.end, code.begin, code.end };
     free(sh); free(syms.v); free(funcs.v); free(objs.v); buf_free(&e);
     return r;
 }

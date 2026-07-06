@@ -133,7 +133,6 @@ typedef struct {
     uint8_t *buf, *jhas, *jval;
     uint32_t from_size;
     OpPC *pc;
-    int32_t wi;
 } PreserveCorrWalk;
 
 static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
@@ -161,7 +160,6 @@ static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int
     uint8_t corr = (uint8_t)(want - produced);
     if (corr) corr_push(&pw->pc->corr, off, corr);
     pw->buf[tp] = want;
-    pw->wi++;
 }
 
 /* o==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
@@ -399,8 +397,8 @@ FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[S
 }
 
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                                  uint32_t to_size, const FieldDeltaVec *fd) {
-    int FWD = ctx->fwd; (void)to_size;
+                                  const FieldDeltaVec *fd) {
+    int FWD = ctx->fwd;
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
@@ -635,7 +633,7 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, ohas, oval, buf, jhas, jval, from_size, NULL, 0 };
+    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, ohas, oval, buf, jhas, jval, from_size, NULL };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
         OpPC *pc = &out[step];

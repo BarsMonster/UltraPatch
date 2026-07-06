@@ -104,7 +104,7 @@ static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
     return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
 }
 
-/* Zigzag values used by the envelope and by adaptive gamma fields. rc_unzz32 rejects the
+/* Zigzag values used by the envelope and by adaptive gamma fields. The decoder rejects the
  * single unrepresentable int32 value (0xffffffff -> -2147483648) instead of relying on
  * implementation-defined casts or signed overflow at call sites. */
 static inline uint32_t rc_zz32(int32_t v){
@@ -114,11 +114,6 @@ static inline uint32_t rc_zz32(int32_t v){
 static inline int rc_unzz32_valid(uint32_t u){ return u!=0xffffffffu; }
 static inline int32_t rc_unzz32_value(uint32_t u){
     return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
-}
-static inline int rc_unzz32(uint32_t u,int32_t*out){
-    if(!rc_unzz32_valid(u)) return 0;
-    *out=rc_unzz32_value(u);
-    return 1;
 }
 static inline int rc_zz_abs(uint32_t base,uint32_t z,uint32_t max,uint32_t*out){
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>base) return 0; *out=base-m; }
@@ -136,9 +131,6 @@ static inline int rc_uleb_overlong(int n,uint8_t last){ return n>1 && last==0u; 
 /* Envelope direction marker. The natural direction is descending iff the image grows;
  * the overlong uLEB marker flips that choice. */
 static inline int rc_natural_desc(uint32_t from_size,uint32_t to_size){ return to_size>from_size; }
-static inline int rc_desc_from_marker(uint32_t from_size,uint32_t to_size,int overlong){
-    return rc_natural_desc(from_size,to_size)!=(overlong!=0);
-}
 static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc){
     return desc==rc_natural_desc(from_size,to_size);
 }

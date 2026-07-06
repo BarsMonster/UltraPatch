@@ -139,7 +139,7 @@ OpWalkEnt *opwalk_build(const OpVec *ops) {
     OpWalkEnt *w = (OpWalkEnt *)xmalloc((ops->n ? ops->n : 1) * sizeof(*w));
     int32_t tp = 0, fp = 0;
     for (size_t i = 0; i < ops->n; i++) {
-        w[i] = (OpWalkEnt){tp, fp, &ops->v[i], i};
+        w[i] = (OpWalkEnt){tp, fp, &ops->v[i]};
         tp += ops->v[i].diff_len + ops->v[i].extra_len;
         fp += ops->v[i].diff_len + ops->v[i].adj;
     }
