@@ -98,11 +98,11 @@ static void preserve_budget_byte(void *user, const OpWalkEnt *we, int32_t off, i
     pw->wi++;
 }
 
-static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, uint32_t from_size) {
+static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, int32_t fp_start, uint32_t from_size) {
     int FWD = ctx->fwd;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
     for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
-    OpWalkEnt *m = opwalk_build(ops);
+    OpWalkEnt *m = opwalk_build(ops, fp_start);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &m[oi];
         for (int32_t k = 0; k < we->o->diff_len; k++) {
@@ -225,7 +225,7 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                                   uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
     FieldDeltaVec add = {0};
-    OpWalkEnt *walk = opwalk_build(ops);
+    OpWalkEnt *walk = opwalk_build(ops, 0);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &walk[oi];
         IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
@@ -294,7 +294,7 @@ static int cmp_seg(const void *a, const void *b) {
  * EX-derived value). Shared front half of both fits: the hit-count fit_shift_map (below) and the
  * bits-based fit_shift_map_bits (enc_emit.c). tb/tv are caller buffers of >= SMAP_POOL_MAX
  * entries, fk of >= nfr; returns the full-map entry count. */
-int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                            const uint8_t *frm, const FieldRef *fr, size_t nfr,
                            uint32_t *tb, int32_t *tv, FieldKey *fk) {
     size_t nex = 0;
@@ -311,7 +311,7 @@ int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
     SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
     uint32_t *pw = (uint32_t *)xmalloc(pcap * sizeof(*pw));
-    { OpWalkEnt *walk = opwalk_build(ops);
+    { OpWalkEnt *walk = opwalk_build(ops, fp_start);
       for (size_t i = 0; i < ops->n; i++) {
           if (walk[i].o->diff_len > 0 && walk[i].fp >= 0) {
               pool[pn].b = (uint32_t)walk[i].fp; pool[pn].v = walk[i].tp - walk[i].fp;
@@ -563,8 +563,8 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
 size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
                               uint32_t to_size, size_t budget, int32_t *cutoff) {
     int FWD = ctx->fwd;
-    int32_t *readarr = preserve_readarr(ctx, ops, from_size);
-    OpWalkEnt *m = opwalk_build(ops);
+    int32_t *readarr = preserve_readarr(ctx, ops, 0, from_size);
+    OpWalkEnt *m = opwalk_build(ops, 0);
     PreserveBudgetWalk bw = { ctx, readarr, from_size, to_size, budget, 0, 0, 0, 0 };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
@@ -576,13 +576,14 @@ size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from
     return bw.total;
 }
 
-OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
+                              const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
-    int32_t *readarr = preserve_readarr(ctx, ops, from_size);
-    OpWalkEnt *m = opwalk_build(ops);
+    int32_t *readarr = preserve_readarr(ctx, ops, fp_start, from_size);
+    OpWalkEnt *m = opwalk_build(ops, fp_start);
     for (size_t idx = 0; idx < ops->n; idx++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, idx)];
         const Op *o = we->o;

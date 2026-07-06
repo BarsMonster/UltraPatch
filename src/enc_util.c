@@ -135,9 +135,9 @@ void blockvec_array_free(BlockVec blocks[STREAM_N]) {
     }
 }
 
-OpWalkEnt *opwalk_build(const OpVec *ops) {
+OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start) {
     OpWalkEnt *w = (OpWalkEnt *)xmalloc((ops->n ? ops->n : 1) * sizeof(*w));
-    int32_t tp = 0, fp = 0;
+    int32_t tp = 0, fp = fp_start;
     for (size_t i = 0; i < ops->n; i++) {
         w[i] = (OpWalkEnt){tp, fp, &ops->v[i]};
         tp += ops->v[i].diff_len + ops->v[i].extra_len;

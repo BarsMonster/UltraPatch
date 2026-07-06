@@ -66,7 +66,6 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
-typedef struct { int32_t fp_start; int32_t *eff_adj; uint8_t *skip; } FoldPlan;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
@@ -160,7 +159,7 @@ void buf_free(Buf *b);
 void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 void blockvec_array_free(BlockVec blocks[STREAM_N]);
-OpWalkEnt *opwalk_build(const OpVec *ops);
+OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
 void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user);
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
@@ -198,7 +197,7 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
 int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
                        const uint32_t *mb, const int32_t *mv, int mn);
-int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const uint8_t *frm, const FieldRef *fr, size_t nfr,
                     uint32_t *tb, int32_t *tv, FieldKey *fk);
 FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]);
@@ -208,7 +207,8 @@ Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to);
 size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
                               uint32_t to_size, size_t budget, int32_t *cutoff);
-OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
+OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
+                              const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size);
 
 void re_init(REnc *r);
@@ -253,10 +253,9 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
 uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
 
-int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip);
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold,
+                const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
 Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,

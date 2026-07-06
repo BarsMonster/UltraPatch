@@ -96,6 +96,28 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     return ops;
 }
 
+/* Fold zero-output pure source seeks out of the plan before PC/body generation. A leading seek becomes
+ * the envelope's fp_start seed; every later seek extends the previous kept op's adj. Kept op source
+ * coordinates are unchanged when walks start from fp_start. */
+static int32_t fold_zero_ops(OpVec *ops) {
+    OpVec out = {0};
+    int32_t fp_start = 0;
+    for (size_t i = 0; i < ops->n; i++) {
+        Op o = ops->v[i];
+        if (o.diff_len == 0 && o.extra_len == 0) {
+            if (out.n) out.v[out.n - 1].adj += o.adj;
+            else fp_start += o.adj;
+            free(o.diff);
+            free(o.extra);
+        } else {
+            opvec_push(&out, o);
+        }
+    }
+    free(ops->v);
+    *ops = out;
+    return fp_start;
+}
+
 static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, int pass) {
     int split_any = 0;
     if (pass >= 12) return 0;
@@ -139,12 +161,12 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
  * op boundaries, which shifts field detection and thus the corrections themselves, so
  * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
  * computes exactly the untransformed plan (bit-identical wire). */
-static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to,
+static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start, const Buf *from, const Buf *to,
                                const FieldDeltaVec *fd) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     OpPC *pc = NULL;
     for (int pass = 0;; pass++) {
-        pc = preserve_corrections_pc(ctx, ops, from->d, to->d, fd, from_size, to_size);
+        pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d, fd, from_size, to_size);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
         if (!split_any) break;
@@ -153,8 +175,8 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, const Buf *from, const B
     return pc;
 }
 
-static int32_t opvec_fp_end(const OpVec *ops) {
-    int32_t fp_end = 0;
+static int32_t opvec_fp_end(const OpVec *ops, int32_t fp_start) {
+    int32_t fp_end = fp_start;
     for (size_t i = 0; i < ops->n; i++) fp_end += ops->v[i].diff_len + ops->v[i].adj;
     return fp_end;
 }
@@ -189,15 +211,9 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     FieldDeltaVec fd = {0};
     OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, blocks, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, from, to, &fd);
-    int32_t fp_end_s = opvec_fp_end(&ops);
-    FoldPlan fold;
-    fold.eff_adj = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
-    fold.skip = (uint8_t *)xmalloc(ops.n ? ops.n : 1);
-    fold.fp_start = fold_zero_ops(&ops, fold.eff_adj, fold.skip);
-    /* Feature 7B initial source seek: leading zero-output ops fold into this shipped seed (see
-     * fold_zero_ops). Derived from the SAME final ops array emit_body folds, so envelope and body
-     * agree bit-for-bit. Sum(dl+adj) is fold-invariant, so fp_end_s above stays correct. */
+    int32_t fp_start_s = fold_zero_ops(&ops);
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd);
+    int32_t fp_end_s = opvec_fp_end(&ops, fp_start_s);
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     encstats_from_ctx(ctx, st_out);
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
@@ -206,7 +222,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     Buf body = {0};
     if (feasible) {
         int emit_overflow = 0;
-        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc, &fold, &emit_overflow);
+        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc, fp_start_s, &emit_overflow);
         if (emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
@@ -219,8 +235,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     opvec_free_deep(&ops);
     blockvec_array_free(blocks);
     buf_free(&from_df); buf_free(&to_df);
-    free(fold.eff_adj); free(fold.skip);
     *fp_end_out = fp_end_s;
-    *fp_start_out = fold.fp_start;
+    *fp_start_out = fp_start_s;
     return body;
 }

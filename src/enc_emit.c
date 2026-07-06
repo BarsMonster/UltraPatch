@@ -86,11 +86,6 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
 static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd, const IVec *ldr,
                             Buf *content, Buf *tags, InjVec *out) {
-    /* Feature 7B: a zero-OUTPUT op (diff_len==0 && extra_len==0) is folded off the wire (its seek is
-     * carried by a neighbor / the initial fp_start), so it contributes NOTHING to the content stream.
-     * Return before emitting even the nl=0 literal-count uLEB — otherwise that stray byte would sit in
-     * content with no op to consume it on decode (emit_body skips the op entirely). */
-    if (o->diff_len == 0 && o->extra_len == 0) return;
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
     Buf tmp = {0};
@@ -208,37 +203,11 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
-/* Feature 7B: fold zero-OUTPUT ops (diff_len==0 && extra_len==0 — pure source seeks that write
- * nothing) out of the wire so `nops` can be dropped and the decoder can frontier-terminate. Such an
- * op only advances the source pointer by its `adj`; that seek is absorbed WITHOUT changing any kept
- * op's source alignment: a LEADING (canonical-order) zero-op folds into the initial source-seek
- * *fp_start* (shipped in the envelope; seeds the FWD walk / is the grow landing point), and every
- * other zero-op folds its adj into the PREVIOUS kept op's effective adj (its post-copy seek grows to
- * cover the skipped seek). Sum of (dl+adj) — hence fp_end — is invariant. skip[i]=1 marks a dropped
- * op; eff_adj[i] is the adj to emit for a kept op. Returns fp_start. Pure function of `ops`, so the
- * envelope writer (plan_encode) and every emit_body call derive the identical fold. */
-int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
-    int32_t fp_start = 0;
-    int last_kept = -1;
-    for (size_t i = 0; i < ops->n; i++) {
-        eff_adj[i] = ops->v[i].adj;
-        skip[i] = 0;
-        if (ops->v[i].diff_len == 0 && ops->v[i].extra_len == 0) {
-            skip[i] = 1;
-            if (last_kept < 0) fp_start += ops->v[i].adj;      /* leading -> initial source seek */
-            else eff_adj[last_kept] += ops->v[i].adj;          /* interior/trailing -> previous kept op */
-        } else {
-            last_kept = (int)i;
-        }
-    }
-    return fp_start;
-}
-
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const size_t *ends, const InjVec *inj,
-                     const uint32_t *mb, const int32_t *mv, int mn, const FoldPlan *fold,
+                     const uint32_t *mb, const int32_t *mv, int mn,
                      int *overflow) {
     Models M;
     memset(&M, 0, sizeof(M));
@@ -290,9 +259,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     content_cursor_init(&ec, seq, content->d, tags->d, content->n, &M, &rc, FWD, out_en, oexp);
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
-        if (fold->skip[oi]) continue;                  /* zero-output op: folded out (adj carried) */
-        Op oe = ops->v[oi]; oe.adj = fold->eff_adj[oi]; /* emit with the fold-adjusted seek */
-        emit_geom_pc(&rc, &M, &oe, &pc[step]);
+        emit_geom_pc(&rc, &M, &ops->v[oi], &pc[step]);
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
             const Inj *ij = &inj[step].v[ii];
@@ -314,7 +281,6 @@ typedef struct {
     const Buf *content;
     const Buf *tags;
     const size_t *ends;
-    const FoldPlan *fold;
     int FWD;
 } EmitBodyMeasure;
 
@@ -322,7 +288,7 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
                              const InjVec *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     int overflow = 0;
     Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
-                         m->content, m->tags, m->ends, inj, mb, mv, mn, m->fold, &overflow);
+                         m->content, m->tags, m->ends, inj, mb, mv, mn, &overflow);
     size_t n = overflow ? (size_t)-1 : body.n;
     buf_free(&body);
     return n;
@@ -435,7 +401,7 @@ static int smap_finish(uint32_t *tb, int32_t *tv, int mn, uint32_t *mb, int32_t 
     return mn;
 }
 
-static int fit_shift_map_scored(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+static int fit_shift_map_scored(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                                 const uint8_t *frm, const FieldRef *fr, size_t nfr,
                                 SMapScoreFn score, void *score_ctx,
                                 uint64_t slack, int strict_improve, int sentinel_mark,
@@ -444,7 +410,7 @@ static int fit_shift_map_scored(const OpVec *ops, uint32_t from_size, uint32_t t
     uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
     uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
     int mark[SMAP_POOL_MAX] = {0};
-    int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
+    int mn = smap_build_full(ops, fp_start, from_size, to_size, frm, fr, nfr, tb, tv, fk);
     if (score == smap_hit_cost) ((SMapHitScore *)score_ctx)->fk = fk;
     else ((SMapBitScore *)score_ctx)->fk = fk;
     uint64_t cur = score(tb, tv, mn, score_ctx);
@@ -482,11 +448,11 @@ static int fit_shift_map_scored(const OpVec *ops, uint32_t from_size, uint32_t t
     return mn;
 }
 
-static int fit_shift_map_hit(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+static int fit_shift_map_hit(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                              const uint8_t *frm, const FieldRef *fr, size_t nfr,
                              uint32_t *mb, int32_t *mv) {
     SMapHitScore sc = { NULL, nfr };
-    return fit_shift_map_scored(ops, from_size, to_size, frm, fr, nfr,
+    return fit_shift_map_scored(ops, fp_start, from_size, to_size, frm, fr, nfr,
                                 smap_hit_cost, &sc, SMAP_MAX_LOSS, 0, 1, mb, mv);
 }
 
@@ -494,13 +460,13 @@ static int fit_shift_map_hit(const OpVec *ops, uint32_t from_size, uint32_t to_s
  * estimated shipped bits for the map header plus BL/EX residual streams. A segment is batch-removed
  * only when its removal strictly reduces the estimate. The final exact byte gate still chooses among
  * no map, hit-count map, and this map, so proxy over-removal cannot regress a pair. */
-static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+static int fit_shift_map_bits(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                               const uint8_t *frm, const FieldRef *fr, size_t nfr,
                               uint32_t *mb, int32_t *mv) {
     int32_t *dic_bl = (int32_t *)xmalloc(DR_KCAP_BL * sizeof(int32_t));
     int32_t *dic_ex = (int32_t *)xmalloc(DR_KCAP_EX * sizeof(int32_t));
     SMapBitScore sc = { NULL, nfr, dic_bl, dic_ex };
-    int mn = fit_shift_map_scored(ops, from_size, to_size, frm, fr, nfr,
+    int mn = fit_shift_map_scored(ops, fp_start, from_size, to_size, frm, fr, nfr,
                                   smap_bit_cost, &sc, 0, 1, 0, mb, mv);
     free(dic_bl); free(dic_ex);
     return mn;
@@ -508,13 +474,13 @@ static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold,
+                       const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
                        int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
-    OpWalkEnt *walk = opwalk_build(ops);
+    OpWalkEnt *walk = opwalk_build(ops, fp_start);
     IVec *ldrs = (IVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*ldrs));
     for (size_t oi = 0; oi < ops->n; oi++)
         ldrs[oi] = op_ldr_set(frm, walk[oi].fp, walk[oi].o->diff_len, from_size);
@@ -543,8 +509,8 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     { size_t nfr = 0;
       FieldRef *frs = field_refs_from_inj(inj, ops->n, FWD, &nfr);
       if (nfr) {
-          map_n = fit_shift_map_hit(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
-          map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
+          map_n = fit_shift_map_hit(ops, fp_start, from_size, to_size, frm, frs, nfr, map_b, map_v);
+          map_n2 = fit_shift_map_bits(ops, fp_start, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
       }
       free(frs); }
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
@@ -570,7 +536,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
       } }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
-    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, fold, FWD };
+    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -643,7 +609,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         inj, sel_b, sel_v, sel_n, fold, overflow_out);
+                         inj, sel_b, sel_v, sel_n, overflow_out);
     injvec_array_free(inj, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
     for (size_t oi = 0; oi < ops->n; oi++) free(ldrs[oi].v);
