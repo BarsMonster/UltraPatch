@@ -76,7 +76,7 @@ BASE_STACK_CEIL_O2 ?= 480
 # an explicit error instead of a bare status 124. One-off override (never commit a
 # longer default): A1_TIMEOUT=<secs> make <target>.
 A1_TIMEOUT ?= 60
-CAPPED := all check check-arm check-stack check-stack-qemu check-assets check-decoder-contract \
+CAPPED := all check check-arm check-stack check-assets check-decoder-contract \
           check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -225,40 +225,12 @@ check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
 	@scripts/verify_corpus.sh "$(FOREIGN_MANIFEST)" foreign_assets
 
-# qemu-based decode validation REMOVED — permanent decision (owner, 2026-07-03): too slow
+# qemu-based decode validation REMOVED - permanent decision (owner, 2026-07-03): too slow
 # for its marginal value (the 260-pair matrix re-encoded every corpus pair just to apply it
 # under emulation; ~45 CPU-min per run). Host-vs-ARM divergence is systematic when it exists,
 # not pair-specific; the ARM cross-build + size/divide gate (check-arm) still compiles the
 # real Thumb-1 decoder every cycle, and a one-time 260-pair qemu study (db6d693) found ZERO
 # divergence. Do not reintroduce qemu legs into the gate.
-
-# Runtime cross-check for the static caller-stack bound (check-stack / scripts/stack_bound.py).
-# Runs a REAL decode under qemu-arm with the stack painted with a sentinel, then reports the
-# measured high-water mark (test/stack_probe.c). This is hosted ARMv7 Thumb, not Cortex-M0+
-# -O2, so the number differs from the pinned static bound by codegen; it exists to confirm a
-# full decode costs a few HUNDRED bytes of caller stack (same order as the static bound), never
-# thousands -- i.e. the static call-graph method missed no deep/unbounded path. Informational
-# and STANDALONE (not in `make gate`, which pins the authoritative static bound); auto-skips
-# without the cross-gcc / qemu-user.
-check-stack-qemu-internal: ultrapatch
-	@set -e; \
-	if ! command -v arm-linux-gnueabi-gcc >/dev/null 2>&1 || ! command -v qemu-arm >/dev/null 2>&1; then \
-		echo "stack_probe=SKIPPED (need gcc-arm-linux-gnueabi + qemu-user)"; exit 0; fi; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
-	for o in Os O2; do \
-		arm-linux-gnueabi-gcc -static -mthumb -$$o -std=c99 -Wall -Wextra -Werror \
-			-DCORTEX_M0 -D_POSIX_C_SOURCE=200809L -Isrc test/stack_probe.c -o "$$tmp/probe_$$o"; \
-	done; \
-	./ultrapatch "$(FIXTURES)/v0_base/watch.bin" "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/grow.blob" >/dev/null; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	for o in Os O2; do \
-		out=$$(qemu-arm "$$tmp/probe_$$o" "$$tmp/mem.bin" "$$tmp/grow.blob"); \
-		rc=$$(printf '%s\n' "$$out" | sed -n 's/^stack_probe_rc=//p'); \
-		hw=$$(printf '%s\n' "$$out" | sed -n 's/^stack_probe_highwater_bytes=//p'); \
-		test "$$rc" = "1"; \
-		echo "stack_probe_highwater_$$o=$$hw (hosted ARMv7 Thumb -$$o, decode=DONE)"; \
-	done
 
 check-malformed-internal: all-internal
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh

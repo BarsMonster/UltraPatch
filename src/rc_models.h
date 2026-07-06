@@ -55,7 +55,7 @@ static inline void a1_bt_init(A1BitTree*t){ memset(t->p,0,sizeof t->p); for(int 
 #define SMAP_CAP 48
 
 /* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by a
- * CODER-FAITHFUL objective (tools/lit0map_faithful.c): greedy coordinate descent that replays the
+ * coder-faithful greedy coordinate descent that replays the
  * ACTUAL shipped adaptive coder -- 5 even-parity from-image histogram-seeded BitTrees adapting at
  * RC_LIT0_RATE in wire order -- over the surviving tag0 span literals of the full home + foreign
  * corpora, accepting a row move only when it strictly cuts home bits and never raises foreign bits.

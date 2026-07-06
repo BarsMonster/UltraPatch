@@ -45,7 +45,7 @@
 #           - toolchain externs   : __aeabi_uidiv / memmove / memset (libgcc/builtins).
 #                                   Leaves, small bounded non-recursive frames; not in the
 #                                   .su, so excluded here and absorbed by the gate ceiling
-#                                   headroom (and validated whole by the qemu high-water leg).
+#                                   headroom.
 #
 # Deterministic: no wall-clock, no randomness; output is a pure function of the object.
 
