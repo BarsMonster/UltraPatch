@@ -30,6 +30,28 @@ static int pull_next(void *c, uint8_t *out){
     *out=p->d[p->i++]; return 1;
 }
 
+typedef struct {
+    PatchApply pa;
+    size_t consumed;
+    int rc;
+} HostApply;
+
+static int host_apply_blob(const uint8_t *blob, size_t blob_n,
+                           const uint8_t *from, uint32_t from_n,
+                           uint32_t span, uint32_t pad_seed,
+                           HostApply *out)
+{
+    if (nvm_init(from, from_n, span, pad_seed)) return -1;
+    PullCtx pc = { blob, blob_n, 0 };
+    out->rc = patch_apply_run(&out->pa, pull_next, &pc);
+    out->consumed = pc.i;
+    return 0;
+}
+
+static int nvm_safety_ok(void){
+    return nvm_rows_amplified()==0 && nvm_max_row_erases()<=1 && nvm_frontier_inversions()==0;
+}
+
 const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
                          const uint8_t *to, size_t to_n)
@@ -37,20 +59,16 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     uint32_t span = from_n > to_n ? (uint32_t)from_n : (uint32_t)to_n;
     uint32_t pad_seed = 0;
     for (int k = 0; k < 8; k++) pad_seed = pad_seed * 1664525u + 1013904223u + blob[k];
-    if (nvm_init(from, (uint32_t)from_n, span, pad_seed)) return "selfcheck out of memory";
-
-    PullCtx pc = { blob, blob_n, 0 };
-    PatchApply pa;
-    int rc = patch_apply_run(&pa, pull_next, &pc);
-    if (rc != PATCH_APPLY_DONE)
-        return patch_apply_reject(&pa) == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
-                                                       : "reference decoder rejected the patch";
-    if (pc.i != blob_n) return "decoder did not consume the whole blob";
-    if (patch_apply_from_size(&pa) != (uint32_t)from_n || patch_apply_to_size(&pa) != (uint32_t)to_n) return "header size mismatch";
+    HostApply ha;
+    if (host_apply_blob(blob, blob_n, from, (uint32_t)from_n, span, pad_seed, &ha)) return "selfcheck out of memory";
+    if (ha.rc != PATCH_APPLY_DONE)
+        return patch_apply_reject(&ha.pa) == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
+                                                          : "reference decoder rejected the patch";
+    if (ha.consumed != blob_n) return "decoder did not consume the whole blob";
+    if (patch_apply_from_size(&ha.pa) != (uint32_t)from_n || patch_apply_to_size(&ha.pa) != (uint32_t)to_n) return "header size mismatch";
     if (to_n && memcmp(sc_flash, to, to_n) != 0) return "decoded image differs from target";
-    for (uint32_t r = 0; r < sc_nrows; r++)
-        if (sc_erasecnt[r] > 1) return "NVM row erased more than once (write amplification)";
-    if (sc_finv) return "NVM erase frontier inversion";
+    if (!nvm_safety_ok()) return nvm_rows_amplified() ? "NVM row erased more than once (write amplification)"
+                                                       : "NVM erase frontier inversion";
     return NULL;
 }
 
@@ -64,21 +82,21 @@ int decode_a1(const char *image_path, const char *patch_path){
 
     FILE*mf=fopen(image_path,"r+b"); if(!mf){perror("image");free(blob);return 2;}
     fseek(mf,0,SEEK_END); long fsz=ftell(mf); fseek(mf,0,SEEK_SET);
+    HostApply ha;
     { uint32_t span = (uint32_t)fsz>A1_MAX_IMAGE ? (uint32_t)fsz : A1_MAX_IMAGE;
       uint8_t*tmp=(uint8_t*)malloc(fsz?(size_t)fsz:1);
       if(!tmp){ fclose(mf); free(blob); return 2; }
       if(fread(tmp,1,(size_t)fsz,mf)!=(size_t)fsz){ fclose(mf); free(tmp); free(blob); return 2; }
-      nvm_init(tmp,(uint32_t)fsz,span,(uint32_t)fsz); free(tmp); }
+      if(host_apply_blob(blob,(size_t)bsz,tmp,(uint32_t)fsz,span,(uint32_t)fsz,&ha)){
+          fclose(mf); free(tmp); free(blob); return 2; }
+      free(tmp); }
 
-    PatchApply pa;
-    PullCtx pc={blob,(size_t)bsz,0};
-    int rc=patch_apply_run(&pa, pull_next,&pc);
-    if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(&pa); if(!rj) rj=REJ_CORRUPT;
+    if(ha.rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(&ha.pa); if(!rj) rj=REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         fclose(mf); free(sc_flash); free(blob); return 1; }
-    uint32_t to_size=patch_apply_to_size(&pa), span=patch_apply_image_span(&pa);
-    if(nvm_rows_amplified()!=0 || nvm_max_row_erases()>1 || nvm_frontier_inversions()!=0){
+    uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
+    if(!nvm_safety_ok()){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
                 nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions());
         fclose(mf); free(sc_flash); free(blob); return 1;
@@ -87,7 +105,7 @@ int decode_a1(const char *image_path, const char *patch_path){
     if(fwrite(sc_flash,1,to_size,mf)!=to_size){ fclose(mf); free(sc_flash); free(blob); return 1; }
     fflush(mf);
     if((long)to_size<fsz){ if(ftruncate(fileno(mf),to_size)){} }
-    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&pa),(unsigned)JSLOTS);
+    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
             nvm_erases(),nvm_rows(),nvm_programs(),nvm_rows_amplified(),nvm_max_row_erases(),nvm_frontier_inversions(),span,(span+255)/256);
     fclose(mf); free(blob);
@@ -100,21 +118,9 @@ static void decode_usage(const char *prog){
 }
 
 int main(int argc,char**argv){
-    const char *pos[2]={0};
-    int npos=0;
-    for(int i=1;i<argc;i++){
-        if(strcmp(argv[i],"--decode")==0){
-            continue;
-        } else if(strcmp(argv[i],"-h")==0 || strcmp(argv[i],"--help")==0){
-            decode_usage(argv[0]); return 0;
-        } else if(argv[i][0]=='-' && argv[i][1]){
-            decode_usage(argv[0]); return 2;
-        } else {
-            if(npos==2){ decode_usage(argv[0]); return 2; }
-            pos[npos++]=argv[i];
-        }
-    }
-    if(npos!=2){ decode_usage(argv[0]); return 2; }
-    return decode_a1(pos[0],pos[1]);
+    if(argc==2 && (strcmp(argv[1],"-h")==0 || strcmp(argv[1],"--help")==0)){ decode_usage(argv[0]); return 0; }
+    if(argc==4 && strcmp(argv[1],"--decode")==0) return decode_a1(argv[2],argv[3]);
+    decode_usage(argv[0]);
+    return 2;
 }
 #endif
