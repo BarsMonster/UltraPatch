@@ -20,12 +20,12 @@ committed separately after its verification passes.
 2. Deduplicate the host decoder backend used by CLI decode and encoder selfcheck.
    - Status: complete.
    - Verification: `make gate`; `nm -S ultrapatch` showed one copy of decoder-local symbols.
-   - Commit: this commit.
+   - Commit: `3a37806`.
 
 3. Remove the `model_diff` harness and raw-gamma test-only code.
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`; `make clean`.
-   - Commit: pending.
+   - Commit: this commit.
 
 4. Remove dead helper APIs (`join2`, `a1_m4_pack` facade).
    - Status: pending.

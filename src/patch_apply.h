@@ -51,13 +51,11 @@
 #if defined(__GNUC__) || defined(__clang__)
 #define A1_NOINLINE __attribute__((noinline))
 #define A1_ALWAYS_INLINE static inline __attribute__((always_inline))
-#define A1_UNUSED __attribute__((unused))
 #define A1_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
 #define A1_SUB_OVERFLOW(a,b,out) __builtin_sub_overflow((a),(b),(out))
 #else
 #define A1_NOINLINE
 #define A1_ALWAYS_INLINE static inline
-#define A1_UNUSED
 static inline int a1_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
     if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
     *out=(int32_t)(a+b);
@@ -355,13 +353,6 @@ enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
  * on ERROR it tells the integrator whether the old image is still intact. */
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(pa); return v; }
-/* raw (no-model) Elias-gamma minus 1: reads gamma value v>=1, returns v-1. After Features 4+7 no
- * raw-gamma header field remains on the wire (shift map is adaptive-gamma; token/op counts dropped),
- * so this is unused in the decoder binary — but model_diff_dec.c still drives it for the raw_gz mirror
- * self-test (check-models), so keep it and silence the per-binary unused-function warning. */
-static uint32_t A1_UNUSED s_raw_gz(PatchApply *pa){
-    int n=0; while(s_raw(pa)==0){ if(++n>RC_UNARY_MAX){ g_rcerr=1; return 0; } }
-    return ((1u<<n) | s_raw_bits(pa,n)) - 1u; }   /* mantissa via s_raw_bits */
 /* ---- bit-tree byte ---- */
 static int s_bt(PatchApply *pa, A1BitTree*t,int rate){
     int m=1;
@@ -1229,7 +1220,6 @@ int  rcv3_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){ return p
 #undef g_psrc_ldr
 #undef A1_NOINLINE
 #undef A1_ALWAYS_INLINE
-#undef A1_UNUSED
 #undef A1_ADD_OVERFLOW
 #undef A1_SUB_OVERFLOW
 #undef RC_RICE_UNARY_MAX

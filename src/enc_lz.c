@@ -248,8 +248,8 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     uint32_t oexp = pt->oexp0;                    /* caller pre-sets oexp0 (FWD ? 0 : to_size) */
     uint64_t op_cost = 0; uint32_t op_n = 0;
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
-    /* token count (seq->n) is no longer on the wire (Feature 7A); w_gz here only emitted raw
-     * bits that touched no adaptive model, so dropping it leaves every price unchanged. */
+    /* token count (seq->n) is no longer on the wire (Feature 7A); the old raw count bits touched
+     * no adaptive model, so dropping them leaves every price unchanged. */
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
     uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;

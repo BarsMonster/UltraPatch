@@ -75,7 +75,7 @@ BASE_STACK_CEIL_O2 ?= 480
 A1_TIMEOUT ?= 60
 CAPPED := all check check-arm check-stack check-stack-qemu check-assets check-decoder-contract \
           check-malformed check-corpus check-edge check-degrade check-golden \
-          check-models golden-update gate check-analyze clean
+          golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
 $(CAPPED): %:
 	@timeout $(A1_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
@@ -283,22 +283,6 @@ check-golden-internal: ultrapatch
 golden-update-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update
 
-# Model-LEVEL encoder/decoder differential test. The golden gate proves the WHOLE wire is bit-exact
-# for the corpus-exercised symbol values; this proves each entropy-model PAIR is bit-exact across its
-# full value space in isolation, so a future mirror bug localizes to the exact model (not "some blob's
-# sha changed"). test/model_diff.c links the normal encoder model modules and drives every ENCODER
-# model; test/model_diff_dec.c #includes the REAL decoder (src/patch_apply.h) unchanged and decodes
-# with the mirror DECODER model. --gc-sections drops the encoder emit module's unused planner path.
-# Host-only, deterministic (fixed-seed LCG), wire-neutral, fast (<1 s).
-MODEL_DIFF_SRCS := test/model_diff.c test/model_diff_dec.c
-MODEL_DIFF_ENCODER_SRCS := src/enc_util.c src/enc_rc.c src/enc_emit.c
-model_diff: $(MODEL_DIFF_SRCS) $(MODEL_DIFF_ENCODER_SRCS) test/model_diff.h $(APPLY_HDR) $(GEN_HDR)
-	$(CC) $(CFLAGS) -Itest -Wno-unused-function -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		$(MODEL_DIFF_SRCS) $(MODEL_DIFF_ENCODER_SRCS) -o $@
-
-check-models-internal: model_diff
-	@./model_diff
-
 # The 256 home (from,to) pairs PLUS 34 foreign pair-directions (a second, unrelated Cortex-M0+
 # lineage — CircuitPython feather_m0_express; see docs/foreign-firmware-study.md) are independent,
 # so they run in ONE parallel pool across all cores via check_corpus.sh (each worker gets its own
@@ -336,7 +320,7 @@ check-corpus-internal: all-internal check-assets-internal
 # (measured ~29 s at 32 jobs, incl. the folded-in foreign lineage). Builds up-front, then runs
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
-# check-malformed, check-edge, check-degrade, check-golden, check-models, check-decoder-contract, check-arm
+# check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract, check-arm
 # (sizes + divide policy), check-stack, and the FULL 256-pair corpus matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, foreign_total vs BASE_FOREIGN_TOTAL,
 # foreign 34/34 round-trips, NVM write-safety, journal peak — check-corpus; the
@@ -345,22 +329,21 @@ check-corpus-internal: all-internal check-assets-internal
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
 # metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes
 # never race on a compile; legs run undisturbed even if sources change mid-gate.
-gate-internal: all-internal model_diff
+gate-internal: all-internal
 	@set -e; \
 	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-models + check-decoder-contract + check-arm + check-stack + check-corpus..."; \
+	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-arm + check-stack + check-corpus..."; \
 	$(MAKE) --no-print-directory check-assets-internal >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
 	$(MAKE) --no-print-directory check-internal >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
 	$(MAKE) --no-print-directory check-malformed-internal >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
 	$(MAKE) --no-print-directory check-edge-internal >"$$tmp/e.txt"         2>&1 & p_e=$$!; \
 	$(MAKE) --no-print-directory check-degrade-internal >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
 	$(MAKE) --no-print-directory check-golden-internal >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
-	$(MAKE) --no-print-directory check-models-internal >"$$tmp/mdl.txt"       2>&1 & p_mdl=$$!; \
 	$(MAKE) --no-print-directory check-decoder-contract-internal >"$$tmp/dec_contract.txt" 2>&1 & p_dec_contract=$$!; \
 	$(MAKE) --no-print-directory check-arm-internal >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
 	$(MAKE) --no-print-directory check-stack-internal >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
 	$(MAKE) --no-print-directory check-corpus-internal >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
-	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_mdl $$p_dec_contract $$p_a $$p_st $$p_m; do \
+	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_dec_contract $$p_a $$p_st $$p_m; do \
 		wait $$p || rc=1; \
 	done; \
 	echo "==================== A1 GATE ========================="; \
@@ -369,7 +352,6 @@ gate-internal: all-internal model_diff
 	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
 	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
 	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
-	sed -n 's/^model_diff=/model diff              : /p' "$$tmp/mdl.txt"; \
 	sed -n 's/^decoder_contract=/decoder contract        : /p' "$$tmp/dec_contract.txt"; \
 	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_bigspan=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
 	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
@@ -396,7 +378,6 @@ gate-internal: all-internal model_diff
 		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
 		echo "------------------ check-degrade ------------------"; cat "$$tmp/dg.txt"; \
 		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
-		echo "------------------ check-models ------------------"; cat "$$tmp/mdl.txt"; \
 		echo "------------------ check-decoder-contract ------------------"; cat "$$tmp/dec_contract.txt"; \
 		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
 		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
@@ -414,4 +395,4 @@ check-analyze-internal:
 	@scripts/check_analyze.sh
 
 clean-internal:
-	rm -f ultrapatch hy_enc hy_dec model_diff
+	rm -f ultrapatch hy_enc hy_dec

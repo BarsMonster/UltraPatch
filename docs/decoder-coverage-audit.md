@@ -45,8 +45,7 @@ loops (corrupt-stream cap `RC_RICE_UNARY_MAX` = 2^20) and bit-blasts symbolic
 range-coder state into a SAT instance that consumed >64 GB and repeatedly took
 the host down. Taming it (nondet-bit abstractions, cgroup-guarded runners,
 per-proof unwind tables) is real ongoing maintenance for kernels that are
-already covered by the 5M+-exec sanitized fuzz campaign, the model-level
-encoder/decoder differential tests (`make check-models`), and the deterministic
+already covered by the 5M+-exec sanitized fuzz campaign and the deterministic
 suites. Cost/benefit negative — do not retry. Any future formal-methods attempt
 must run under a hard memory cap + timeout from the first invocation.
 

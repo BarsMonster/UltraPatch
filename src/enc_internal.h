@@ -17,11 +17,9 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define ENC_NORETURN __attribute__((noreturn))
-#define ENC_UNUSED __attribute__((unused))
 #define ENC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #else
 #define ENC_NORETURN
-#define ENC_UNUSED
 #define ENC_ALWAYS_INLINE static inline
 #endif
 
@@ -194,7 +192,6 @@ void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
 void re_raw(REnc *r, int bit);
 Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
-void w_gz(REnc *r, uint32_t x);
 void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
 void ug_init_e(UGE *g, char code, int k);

@@ -467,7 +467,7 @@ static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int64_t delta
 /* map header bits (raw gamma, 1 bit each): count + per entry (gap gamma + zz value gamma), scaled
  * to PR_SCALE units so it adds to the residual price. Mirrors the emit_body map-header writer. */
 static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
-    uint64_t bits = gammalen_u32((uint32_t)mn + 1u);   /* w_gz(mn) => gamma(mn+1) */
+    uint64_t bits = gammalen_u32((uint32_t)mn + 1u);   /* raw gamma proxy for count */
     uint32_t prev = 0;
     for (int i = 0; i < mn; i++) {
         uint32_t gap = mb[i] - prev;
