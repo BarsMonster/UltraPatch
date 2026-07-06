@@ -239,9 +239,8 @@ static void emit_cursor_start_token(EmitCursor *ec) {
         re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
         M->rep0h = 0;
         re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
-        ug_encode(&M->go, rc, rc_zz32((int32_t)((uint32_t)ec->cur.dist - ec->oexp)));
-        ec->oexp = ec->FWD ? (uint32_t)ec->cur.dist + (uint32_t)ec->cur.len
-                           : (uint32_t)ec->cur.dist - (uint32_t)ec->cur.len;
+        ug_encode(&M->go, rc, rc_outmatch_delta((uint32_t)ec->cur.dist, ec->oexp));
+        ec->oexp = rc_outmatch_next_expect(ec->FWD, (uint32_t)ec->cur.dist, (uint32_t)ec->cur.len);
         ug_encode(&M->glo, rc, (uint32_t)ec->cur.len - RC_OUTMATCH_MIN);
         ec->tok_mode = 'R';
         ec->tok_left = ec->cur.len;

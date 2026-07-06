@@ -274,11 +274,10 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
             re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
             oy_cost += bit_price(outb, 1); oy_n++;
             re_bit(&r, &outb, 1, RC_S_BIT_RATE);
-            { uint32_t zv = rc_zz32((int32_t)((uint32_t)t.dist - oexp));
+            { uint32_t zv = rc_outmatch_delta((uint32_t)t.dist, oexp);
               op_cost += ug_price(&go, zv); op_n++;
               ug_encode(&go, &r, zv);
-              oexp = pt->fwd ? (uint32_t)t.dist + (uint32_t)t.len
-                             : (uint32_t)t.dist - (uint32_t)t.len; }
+              oexp = rc_outmatch_next_expect(pt->fwd, (uint32_t)t.dist, (uint32_t)t.len); }
             ug_encode(&glo, &r, (uint32_t)t.len - RC_OUTMATCH_MIN);
         } else {
             if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
@@ -623,9 +622,8 @@ int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
         uint32_t exp = oexp0;
         for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'O') {
             any = 1;
-            uint32_t v = rc_zz32((int32_t)((uint32_t)tv->v[i].dist - exp));
-            exp = fwd ? (uint32_t)tv->v[i].dist + (uint32_t)tv->v[i].len
-                      : (uint32_t)tv->v[i].dist - (uint32_t)tv->v[i].len;
+            uint32_t v = rc_outmatch_delta((uint32_t)tv->v[i].dist, exp);
+            exp = rc_outmatch_next_expect(fwd, (uint32_t)tv->v[i].dist, (uint32_t)tv->v[i].len);
             c += (v >> k) + 1u + (uint32_t)k;
         }
         if (c < bestc) { bestc = c; best = k; }

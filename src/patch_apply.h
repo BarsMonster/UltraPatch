@@ -732,12 +732,12 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
             if(rb){ d=g_lastdist; }                         /* rep0: reuse last distance */
             else if(g_out_en && s_bit(pa,&M_outb)){         /* fresh + out-bit: long-range OUTPUT match */
                 int32_t dpos=bb_unzz(pa,s_ug_rice(pa,&M_go)); /* position as zigzag delta vs expected */
-                uint32_t p=g_oexp+(uint32_t)dpos;
+                uint32_t p=rc_outmatch_pos(g_oexp,dpos);
                 uint32_t ln=s_ug_gamma(pa,&M_glo)+RC_OUTMATCH_MIN;
                 /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
                  * grow content (whose extras are byte-reversed) still matches produced output. */
                 if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
-                g_oexp=g_FWD?p+ln:p-ln;                     /* sequential runs keep deltas tiny */
+                g_oexp=rc_outmatch_next_expect(g_FWD,p,ln);  /* sequential runs keep deltas tiny */
                 s->tok_mode=3; s->o_src=p; s->o_left=ln; s->last_span=0;
                 continue;
             }

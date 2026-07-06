@@ -248,6 +248,16 @@ static inline void a1_idx_init(A1IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CT
  * so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
 #define RC_OUTMATCH_MIN 4u
 
+static inline uint32_t rc_outmatch_delta(uint32_t pos, uint32_t expected){
+    return rc_zz32((int32_t)(pos - expected));
+}
+static inline uint32_t rc_outmatch_pos(uint32_t expected, int32_t delta){
+    return expected + (uint32_t)delta;
+}
+static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t len){
+    return fwd ? pos + len : pos - len;
+}
+
 /* Header raw k-field width: the distance rice parameter kd and (when out-matches are enabled) the
  * out-position rice parameter ko each ship as a fixed RC_KFIELD_BITS-bit raw field. */
 #define RC_KFIELD_BITS 4
