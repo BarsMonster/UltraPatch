@@ -284,8 +284,8 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
  * so no previous-byte context need be chosen here -- adaptation (and the real pricing refinement)
  * happen later in the price-feedback loop, which this proxy only bootstraps. Units: bt_price is
  * 1/64-bit fixed point (PR_SCALE); round to nearest integer bit (floor 1, like a Huffman length) so
- * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in lz_parse_once and the
- * split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
+ * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in the bootstrap parse
+ * and the split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
     A1BitTree t0, t1;
     lit_tree_seed_e(frm, n, 0, &t0);
@@ -335,58 +335,9 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price_static(&M.lit0[c], (uint8_t)b);
     for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price_static(&M.lit1, (uint8_t)b);
     pt->gs = M.gs; pt->gl = M.gl; pt->gd = M.gd; pt->dk = dk;
+    pt->fixed_dist_bits = -1;
+    pt->bootstrap_simple = 0;
     pt->valid = 1;
-}
-
-static TokenVec lz_parse_once(size_t n, const uint16_t *litbits,
-                              Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand, int (*dist_bits)(int32_t, int),
-                              int dk) {
-    uint32_t maxrun = 1024;
-    uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-    Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
-    /* litbits prefix sums + span ends restricted to candidate positions (same argument as
-     * lz_parse_priced: spans ending in a literal desert fold into a longer span). */
-    uint64_t *lsum = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-    lsum[0] = 0;
-    for (size_t i = 0; i < n; i++) lsum[i + 1] = lsum[i] + litbits[i];
-    size_t *ntok = (size_t *)xmalloc((n + 2) * sizeof(size_t));
-    ntok[n] = n; ntok[n + 1] = n;
-    for (size_t j = n; j-- > 0;) ntok[j] = ncand[j] ? j : ntok[j + 1];
-    const uint64_t INF = UINT64_MAX / 4;
-    cost[n] = 0;
-    for (size_t ri = n; ri-- > 0;) {
-        uint64_t best = INF;
-        Token bt = {0};
-        size_t lim = n < ri + maxrun ? n : ri + maxrun;
-        size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
-        for (size_t j = ri + 1; j <= dense_end; j++) {
-            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + (lsum[j] - lsum[ri]) + cost[j];
-            if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-        }
-        for (size_t j = ntok[dense_end + 1]; j <= lim; j = ntok[j + 1]) {
-            uint64_t c = 1 + gammalen_u32((uint32_t)(j - ri)) + (lsum[j] - lsum[ri]) + cost[j];
-            if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-            if (j >= n) break;
-        }
-        for (int ci = 0; ci < ncand[ri]; ci++) {
-            int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
-            uint64_t db = (uint64_t)dist_bits(bd, dk);
-            for (int32_t l = 3; l <= bl; l++) {
-                uint64_t c = 1 + db + gammalen_u32((uint32_t)l) + cost[ri + (size_t)l];
-                if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
-            }
-        }
-        cost[ri] = best;
-        nxt[ri] = bt;
-    }
-    TokenVec tv = {0};
-    for (size_t i = 0; i < n;) {
-        Token t = nxt[i];
-        tok_push(&tv, t);
-        i += (size_t)t.len;
-    }
-    free(cost); free(nxt); free(lsum); free(ntok);
-    return tv;
 }
 
 /* DP parse using measured fractional prices (PR_SCALE-ths of a bit), made rep0-aware:
@@ -418,6 +369,57 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
     uint32_t maxrun = 1024, win = 1u << PATHE_W;
+    if (pt->bootstrap_simple) {
+        uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+        Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
+        uint64_t *lsum = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+        size_t *ntok = (size_t *)xmalloc((n + 2) * sizeof(size_t));
+        lsum[0] = 0;
+        for (size_t i = 0; i < n; i++) {
+            uint8_t byte = content[i];
+            uint32_t c = tags[i] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(i ? content[i - 1] : 0)][byte];
+            lsum[i + 1] = lsum[i] + c;
+        }
+        ntok[n] = n; ntok[n + 1] = n;
+        for (size_t j = n; j-- > 0;) ntok[j] = ncand[j] ? j : ntok[j + 1];
+        const uint64_t INF = UINT64_MAX / 4;
+        cost[n] = 0;
+        for (size_t ri = n; ri-- > 0;) {
+            uint64_t best = INF;
+            Token bt = {0};
+            size_t lim = n < ri + maxrun ? n : ri + maxrun;
+            size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
+            for (size_t j = ri + 1; j <= dense_end; j++) {
+                uint64_t c = PR_SCALE + gammalen_u32((uint32_t)(j - ri)) * PR_SCALE + (lsum[j] - lsum[ri]) + cost[j];
+                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+            }
+            for (size_t j = ntok[dense_end + 1]; j <= lim; j = ntok[j + 1]) {
+                uint64_t c = PR_SCALE + gammalen_u32((uint32_t)(j - ri)) * PR_SCALE + (lsum[j] - lsum[ri]) + cost[j];
+                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+                if (j >= n) break;
+            }
+            for (int ci = 0; ci < ncand[ri]; ci++) {
+                int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
+                uint32_t dv = (uint32_t)bd - 1u;
+                uint64_t db = pt->fixed_dist_bits >= 0 ? (uint64_t)pt->fixed_dist_bits * PR_SCALE
+                                                       : (uint64_t)((dv >> pt->gd.k) + 1u + pt->gd.k) * PR_SCALE;
+                for (int32_t l = 3; l <= bl; l++) {
+                    uint64_t c = PR_SCALE + db + gammalen_u32((uint32_t)l) * PR_SCALE + cost[ri + (size_t)l];
+                    if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
+                }
+            }
+            cost[ri] = best;
+            nxt[ri] = bt;
+        }
+        TokenVec tv = {0};
+        for (size_t i = 0; i < n;) {
+            Token t = nxt[i];
+            tok_push(&tv, t);
+            i += (size_t)t.len;
+        }
+        free(cost); free(nxt); free(lsum); free(ntok);
+        return tv;
+    }
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. */
     size_t maxlen = n + 1;
@@ -611,9 +613,6 @@ void merge_adjacent_spans(TokenVec *tv) {
     tv->n = w;
 }
 
-static int fixed_dist_bits(int32_t d, int k) { (void)d; return k; }
-static int rice_dist_bits(int32_t d, int k) { uint32_t v = (uint32_t)d - 1u; return (int)((v >> k) + 1u + (uint32_t)k); }
-
 int fit_k_tokens(const TokenVec *tv) {
     int best = 0;
     uint64_t bestc = UINT64_MAX;
@@ -645,10 +644,20 @@ int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
     return any ? best : cur;
 }
 
+static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t L1[256]) {
+    memset(pt, 0, sizeof(*pt));
+    for (int c = 0; c < LIT0_CTX; c++)
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint32_t)L0[b] * PR_SCALE;
+    for (int b = 0; b < 256; b++) pt->lit1[b] = (uint32_t)L1[b] * PR_SCALE;
+    pt->bootstrap_simple = 1;
+    pt->valid = 1;
+}
+
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
  * and an initial rice-DP parse. The caller owns *cands_out / *ncand_out and frees them after the
  * price-feedback loop (which it runs with its own, full-body acceptance gate). */
-TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
+TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
+                                const uint8_t L0[256], const uint8_t L1[256],
                                 int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
     int32_t win = 1 << PATHE_W, maxm = 2048;
@@ -688,12 +697,18 @@ TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
         }
     }
     free(head); free(prev);
-    TokenVec seq = lz_parse_once(n, litbits, cands, ncand, fixed_dist_bits, PATHE_W);
+    PriceTab pt;
+    bootstrap_prices(&pt, L0, L1);
+    pt.gd.k = PATHE_W;
+    pt.fixed_dist_bits = PATHE_W;
+    TokenVec seq = lz_parse_priced(n, data, tags, cands, ncand, NULL, NULL, &pt);
     int k = fit_k_tokens(&seq);
     int parsed_k = -1;
     for (int pass = 0; pass < 8; pass++) {
         free(seq.v);
-        seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
+        pt.gd.k = (uint8_t)k;
+        pt.fixed_dist_bits = -1;
+        seq = lz_parse_priced(n, data, tags, cands, ncand, NULL, NULL, &pt);
         parsed_k = k;
         int nk = fit_k_tokens(&seq);
         if (nk == k) break;
@@ -701,7 +716,9 @@ TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
     }
     if (parsed_k != k) {
         free(seq.v);
-        seq = lz_parse_once(n, litbits, cands, ncand, rice_dist_bits, k);
+        pt.gd.k = (uint8_t)k;
+        pt.fixed_dist_bits = -1;
+        seq = lz_parse_priced(n, data, tags, cands, ncand, NULL, NULL, &pt);
     }
     *k_out = k;
     *cands_out = cands;

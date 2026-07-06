@@ -534,12 +534,10 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     }
     uint8_t L0[256], L1[256];
     from_lit_proxy_bits(frm, from_size, L0, L1);
-    uint16_t *litbits = (uint16_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint16_t));
-    for (size_t i = 0; i < content.n; i++) litbits[i] = tags.d[i] ? L1[content.d[i]] : L0[content.d[i]];
     int kd = 0;
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
-    TokenVec seq = lz_candidates_c(content.d, content.n, litbits, &kd, &cands, &ncand);
+    TokenVec seq = lz_candidates_c(content.d, tags.d, content.n, L0, L1, &kd, &cands, &ncand);
     /* ---- D1 shift map: fit TWO candidate maps from the op walk — the hit-count fit and the
      * bits-based fit (C6) — and build each one's residual-space injection variant. The LZ parse is
      * map-independent (inj values never touch content bytes), so the pipeline below runs on the
@@ -665,6 +663,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     injvec_array_free(inj_m, ops->n);
     injvec_array_free(inj_m2, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
-    free(walk); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
+    free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }

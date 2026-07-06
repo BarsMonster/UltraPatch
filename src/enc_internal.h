@@ -110,6 +110,8 @@ typedef struct {
     UGE go, glo;
     int dk;
     int valid;
+    int fixed_dist_bits;
+    int bootstrap_simple;
 } PriceTab;
 
 typedef struct {
@@ -249,7 +251,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
 void merge_adjacent_spans(TokenVec *tv);
 int fit_k_tokens(const TokenVec *tv);
 int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd);
-TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
+TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
+                         const uint8_t L0[256], const uint8_t L1[256],
                          int *k_out, Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out);
 uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
