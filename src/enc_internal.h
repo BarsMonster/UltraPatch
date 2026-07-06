@@ -211,7 +211,8 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, ui
                            uint32_t to_size, const FieldDeltaVec *fd);
 Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to);
-uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size);
+size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
+                              uint32_t to_size, size_t budget, int32_t *cutoff);
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size);
 

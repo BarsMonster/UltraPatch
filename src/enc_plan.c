@@ -24,21 +24,11 @@
 static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to, uint32_t from_size,
                                           uint32_t to_size, size_t budget) {
     int FWD = ctx->fwd;
-    uint8_t *pres = preserve_indices(ctx, ops, from_size, to_size);
-    size_t total = 0;
-    for (uint32_t wi = 0; wi < to_size; wi++) total += pres[wi];
-    ctx->deg_pres_needed = total;
-    if (total <= budget) { free(pres); return; }
-    /* cutoff C = position of the first preserve past the budget, in apply order. pres[] is
-     * indexed by apply-order write index: wi == position for FWD, to_size-1-wi for grow. */
     int32_t C = 0;
-    { size_t cnt = 0;
-      for (uint32_t wi = 0; wi < to_size; wi++) {
-          if (!pres[wi]) continue;
-          if (cnt == budget) { C = FWD ? (int32_t)wi : (int32_t)(to_size - 1u - wi); break; }
-          cnt++;
-      } }
-    free(pres);
+    size_t total = preserve_budget_cutoff(ctx, ops, from_size, to_size, budget, &C);
+    ctx->deg_pres_needed = total;
+    if (total <= budget) return;
+    /* C is the output position of the first preserve past the budget, in apply order. */
     OpVec out = {0};
     int32_t tp0 = 0, fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {

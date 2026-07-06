@@ -73,21 +73,26 @@ static int ivec_has(const IVec *v, int32_t x) {
 typedef struct {
     const EncCtx *ctx;
     const int32_t *readarr;
-    uint32_t from_size;
-    uint8_t *pres;
-    int32_t wi;
-} PreserveIndexWalk;
+    uint32_t from_size, to_size;
+    size_t budget, total;
+    int32_t cutoff, wi;
+    int found_cutoff;
+} PreserveBudgetWalk;
 
-static void preserve_index_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
-    PreserveIndexWalk *pw = (PreserveIndexWalk *)user;
+static void preserve_budget_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
+    PreserveBudgetWalk *pw = (PreserveBudgetWalk *)user;
     int32_t tpw = we->tp + off;
     (void)is_diff;
     (void)byte;
     if (0 <= tpw && (uint32_t)tpw < pw->from_size) {
-        if (pw->ctx->fwd) {
-            if (pw->readarr[tpw] > tpw) pw->pres[pw->wi] = 1;
-        } else {
-            if (pw->readarr[tpw] >= 0 && pw->readarr[tpw] < tpw) pw->pres[pw->wi] = 1;
+        int preserve = pw->ctx->fwd ? (pw->readarr[tpw] > tpw)
+                                    : (pw->readarr[tpw] >= 0 && pw->readarr[tpw] < tpw);
+        if (preserve) {
+            if (!pw->found_cutoff && pw->total == pw->budget) {
+                pw->cutoff = pw->ctx->fwd ? pw->wi : (int32_t)(pw->to_size - 1u - (uint32_t)pw->wi);
+                pw->found_cutoff = 1;
+            }
+            pw->total++;
         }
     }
     pw->wi++;
@@ -582,19 +587,20 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
     *ops = out;
 }
 
-uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_size, uint32_t to_size) {
+size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
+                              uint32_t to_size, size_t budget, int32_t *cutoff) {
     int FWD = ctx->fwd;
     int32_t *readarr = preserve_readarr(ctx, ops, from_size);
-    uint8_t *pres = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
     OpWalkEnt *m = opwalk_build(ops);
-    PreserveIndexWalk iw = { ctx, readarr, from_size, pres, 0 };
+    PreserveBudgetWalk bw = { ctx, readarr, from_size, to_size, budget, 0, 0, 0, 0 };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
-        opwalk_each_byte(FWD, we, preserve_index_byte, &iw);
+        opwalk_each_byte(FWD, we, preserve_budget_byte, &bw);
     }
     free(m);
     free(readarr);
-    return pres;
+    *cutoff = bw.cutoff;
+    return bw.total;
 }
 
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, const uint8_t *true_to,
