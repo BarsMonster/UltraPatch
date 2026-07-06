@@ -498,58 +498,113 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     return c;
 }
 
-/* Bits-based shift-map fit: from the full candidate map (smap_build_full), backward-eliminate any
- * segment whose removal STRICTLY reduces the total priced bits (header saved > residual increase =>
- * the segment is not paying for its own wire cost), batched per round with recompute, then enforce
- * SMAP_CAP by least-cost removal. Same buffer/round discipline as fit_shift_map; each per-segment
- * probe is one px_map_total pass, bounded by the SMAP_POOL_MAX pool and <=8 rounds. Over-removal is
- * harmless: encode_body ships the smallest of {no map, hit-count map, this map} by exact bytes. */
-static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_size,
-                              const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                              uint32_t *mb, int32_t *mv) {
+typedef uint64_t (*SMapScoreFn)(const uint32_t *mb, const int32_t *mv, int mn, void *ctx);
+
+typedef struct { const FieldKey *fk; size_t nfr; } SMapHitScore;
+typedef struct { const FieldKey *fk; size_t nfr; int64_t *dic_bl, *dic_ex; } SMapBitScore;
+
+static uint64_t smap_hit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
+    SMapHitScore *s = (SMapHitScore *)ctx;
+    size_t hits = 0;
+    for (size_t i = 0; i < s->nfr; i++) {
+        int32_t pred = s->fk[i].kind == EV_BL
+            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k2)) / 2
+            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k2));
+        if (pred == s->fk[i].need) hits++;
+    }
+    return (uint64_t)(s->nfr - hits);
+}
+
+static uint64_t smap_bit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
+    SMapBitScore *s = (SMapBitScore *)ctx;
+    return px_map_total(mb, mv, mn, s->fk, s->nfr, s->dic_bl, s->dic_ex);
+}
+
+static void smap_without(const uint32_t *tb, const int32_t *tv, int mn, int drop,
+                         uint32_t *b2, int32_t *v2) {
+    int w = 0;
+    for (int i = 0; i < mn; i++) if (i != drop) { b2[w] = tb[i]; v2[w] = tv[i]; w++; }
+}
+
+static int smap_finish(uint32_t *tb, int32_t *tv, int mn, uint32_t *mb, int32_t *mv) {
+    int w = 0;
+    for (int i = 0; i < mn; i++) {
+        if (w && tv[w - 1] == tv[i]) continue;
+        tb[w] = tb[i]; tv[w] = tv[i]; w++;
+    }
+    mn = (w == 1 && tv[0] == 0) ? 0 : w;
+    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
+    return mn;
+}
+
+static int fit_shift_map_scored(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                                const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                                SMapScoreFn score, void *score_ctx,
+                                uint64_t slack, int strict_improve, int sentinel_mark,
+                                uint32_t *mb, int32_t *mv) {
     FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
-    int64_t *dic_bl = (int64_t *)xmalloc(DR_KCAP_BL * sizeof(int64_t));
-    int64_t *dic_ex = (int64_t *)xmalloc(DR_KCAP_EX * sizeof(int64_t));
     uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
     uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
     int mark[SMAP_POOL_MAX];
     int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
-    #define PX_WITHOUT(I) do { int _w = 0; for (int _a = 0; _a < mn; _a++) if (_a != (I)) { b2[_w] = tb[_a]; v2[_w] = tv[_a]; _w++; } } while (0)
-    uint64_t cur = px_map_total(tb, tv, mn, fk, nfr, dic_bl, dic_ex);
-    /* backward elimination by net bits: mark every segment whose removal strictly reduces total */
+    if (score == smap_hit_cost) ((SMapHitScore *)score_ctx)->fk = fk;
+    else ((SMapBitScore *)score_ctx)->fk = fk;
+    uint64_t cur = score(tb, tv, mn, score_ctx);
     for (int round = 0; round < 8 && mn > 1; round++) {
         int removed = 0;
         for (int i = 0; i < mn; i++) {
-            PX_WITHOUT(i);
-            uint64_t t = px_map_total(b2, v2, mn - 1, fk, nfr, dic_bl, dic_ex);
-            mark[i] = (t < cur);
-            if (mark[i]) removed++;
+            smap_without(tb, tv, mn, i, b2, v2);
+            uint64_t t = score(b2, v2, mn - 1, score_ctx);
+            uint64_t limit = cur > UINT64_MAX - slack ? UINT64_MAX : cur + slack;
+            mark[i] = strict_improve ? (t < cur) : (t <= limit);
+            if (mark[i]) { removed++; if (sentinel_mark) tv[i] = INT32_MIN; }
         }
         if (!removed) break;
         int w = 0;
-        for (int i = 0; i < mn; i++) if (!mark[i]) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
-        mn = w; cur = px_map_total(tb, tv, mn, fk, nfr, dic_bl, dic_ex);
+        for (int i = 0; i < mn; i++) {
+            int keep = sentinel_mark ? (tv[i] != INT32_MIN) : !mark[i];
+            if (keep) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
+        }
+        mn = w; cur = score(tb, tv, mn, score_ctx);
     }
-    /* cap enforcement: drop the segment whose removal costs the fewest bits, one at a time */
     while (mn > SMAP_CAP) {
         int drop = 0; uint64_t best = UINT64_MAX;
         for (int i = 0; i < mn; i++) {
-            PX_WITHOUT(i);
-            uint64_t t = px_map_total(b2, v2, mn - 1, fk, nfr, dic_bl, dic_ex);
+            smap_without(tb, tv, mn, i, b2, v2);
+            uint64_t t = score(b2, v2, mn - 1, score_ctx);
             if (t < best) { best = t; drop = i; }
         }
         memmove(tb + drop, tb + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tb));
         memmove(tv + drop, tv + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tv));
-        mn--;
+        mn--; cur = best;
     }
-    #undef PX_WITHOUT
-    /* merge adjacent equal values (pure wire savings; lookups unchanged) */
-    { int w = 0;
-      for (int i = 0; i < mn; i++) { if (w && tv[w - 1] == tv[i]) continue; tb[w] = tb[i]; tv[w] = tv[i]; w++; }
-      mn = w; }
-    if (mn == 1 && tv[0] == 0) mn = 0;
-    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
-    free(fk); free(dic_bl); free(dic_ex);
+    (void)cur;
+    mn = smap_finish(tb, tv, mn, mb, mv);
+    free(fk);
+    return mn;
+}
+
+static int fit_shift_map_hit(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                             const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                             uint32_t *mb, int32_t *mv) {
+    SMapHitScore sc = { NULL, nfr };
+    return fit_shift_map_scored(ops, from_size, to_size, frm, fr, nfr,
+                                smap_hit_cost, &sc, SMAP_MAX_LOSS, 0, 1, mb, mv);
+}
+
+/* Bits-based shift-map fit: same prune/cap/finish engine as the hit-count fit, but the score is
+ * estimated shipped bits for the map header plus BL/EX residual streams. A segment is batch-removed
+ * only when its removal strictly reduces the estimate. The final exact byte gate still chooses among
+ * no map, hit-count map, and this map, so proxy over-removal cannot regress a pair. */
+static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_size,
+                              const uint8_t *frm, const FieldRef *fr, size_t nfr,
+                              uint32_t *mb, int32_t *mv) {
+    int64_t *dic_bl = (int64_t *)xmalloc(DR_KCAP_BL * sizeof(int64_t));
+    int64_t *dic_ex = (int64_t *)xmalloc(DR_KCAP_EX * sizeof(int64_t));
+    SMapBitScore sc = { NULL, nfr, dic_bl, dic_ex };
+    int mn = fit_shift_map_scored(ops, from_size, to_size, frm, fr, nfr,
+                                  smap_bit_cost, &sc, 0, 1, 0, mb, mv);
+    free(dic_bl); free(dic_ex);
     return mn;
 }
 
@@ -613,7 +668,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     { size_t nfr = 0;
       FieldRef *frs = collect_fields(ctx, ops, frm, from_size, fd, &nfr);
       if (nfr) {
-          map_n = fit_shift_map(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
+          map_n = fit_shift_map_hit(ops, from_size, to_size, frm, frs, nfr, map_b, map_v);
           map_n2 = fit_shift_map_bits(ops, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
           if (smap_eq(map_b2, map_v2, map_n2, map_b, map_v, map_n)) map_n2 = 0;   /* duplicate */
       }

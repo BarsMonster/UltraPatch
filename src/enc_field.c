@@ -225,21 +225,6 @@ static int cmp_seg(const void *a, const void *b) {
     return (x->b > y->b) - (x->b < y->b);
 }
 
-/* per-field precomputed keys: BL hits iff (g(k1)-g(k2))/2 == need; EX hits iff -g(k2) == need. */
-static size_t smap_hits(const uint32_t *mb, const int32_t *mv, int mn, const FieldKey *fk, size_t nfk) {
-    size_t hits = 0;
-    for (size_t i = 0; i < nfk; i++) {
-        /* mod-2^32 arithmetic mirrors field_residual / the decoder's smap_at (a degenerate
-         * map value can be INT32_MIN; the signed subtract/negate would be UB, the unsigned
-         * wrap is defined and is the exact wire semantics). */
-        int32_t pred = fk[i].kind == EV_BL
-            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2)) / 2
-            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2));
-        if (pred == fk[i].need) hits++;
-    }
-    return hits;
-}
-
 /* Build the per-field key table (BL: k1,k2,need; EX: k2=word value, need) and the FULL deduped
  * candidate map (bsdiff op-walk boundaries + span terminator + exact EX value runs, an oversized
  * pool weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping the later
@@ -304,58 +289,6 @@ int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
         tb[mn] = pool[i].b; tv[mn] = pool[i].v; mn++;
     }
     free(pool); free(pw);
-    return mn;
-}
-
-/* Fit the piecewise shift map by EXACT-HIT count: from the full candidate map (smap_build_full),
- * prune by BACKWARD elimination — remove segments whose removal costs at most SMAP_MAX_LOSS exact
- * hits (their wire cost outweighs the few residuals they fix), batched per round with a
- * verify-and-fallback, then enforce SMAP_CAP by cheapest-loss removal. The map only ships when the
- * exact byte gate says the whole body got smaller, so the fit needs to be good, not perfect. */
-int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
-                         const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                         uint32_t *mb, int32_t *mv) {
-    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
-    uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
-    uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
-    int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
-    size_t cur = smap_hits(tb, tv, mn, fk, nfr);
-    /* backward elimination: batch-remove <=SMAP_MAX_LOSS-loss segments, verify, fall back */
-    for (int round = 0; round < 8 && mn > 1; round++) {
-        int removed = 0;
-        for (int i = 0; i < mn; i++) {                    /* per-segment loss in full-map context */
-            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
-            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
-            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
-            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
-            if (h + SMAP_MAX_LOSS >= cur) { removed++; tv[i] = INT32_MIN; }  /* mark */
-        }
-        if (!removed) break;
-        int w = 0;
-        for (int i = 0; i < mn; i++) if (tv[i] != INT32_MIN) { tb[w] = tb[i]; tv[w] = tv[i]; w++; }
-        mn = w; cur = smap_hits(tb, tv, w, fk, nfr);
-    }
-    /* cap enforcement: cheapest-loss removal one at a time */
-    while (mn > SMAP_CAP) {
-        int drop = 0; size_t besth = 0;
-        for (int i = 0; i < mn; i++) {
-            memcpy(b2, tb, (size_t)i * sizeof(*tb)); memcpy(v2, tv, (size_t)i * sizeof(*tv));
-            memcpy(b2 + i, tb + i + 1, (size_t)(mn - i - 1) * sizeof(*tb));
-            memcpy(v2 + i, tv + i + 1, (size_t)(mn - i - 1) * sizeof(*tv));
-            size_t h = smap_hits(b2, v2, mn - 1, fk, nfr);
-            if (h > besth) { besth = h; drop = i; }
-        }
-        memmove(tb + drop, tb + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tb));
-        memmove(tv + drop, tv + drop + 1, (size_t)(mn - drop - 1) * sizeof(*tv));
-        mn--; cur = besth;
-    }
-    /* merge adjacent equal values (pure wire savings; lookups unchanged) */
-    { int w = 0;
-      for (int i = 0; i < mn; i++) { if (w && tv[w - 1] == tv[i]) continue; tb[w] = tb[i]; tv[w] = tv[i]; w++; }
-      mn = w; }
-    if (mn == 1 && tv[0] == 0) mn = 0;
-    for (int i = 0; i < mn; i++) { mb[i] = tb[i]; mv[i] = tv[i]; }
-    free(fk);
     return mn;
 }
 

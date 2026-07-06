@@ -171,9 +171,6 @@ FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm
 int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                     const uint8_t *frm, const FieldRef *fr, size_t nfr,
                     uint32_t *tb, int32_t *tv, FieldKey *fk);
-int fit_shift_map(const OpVec *ops, uint32_t from_size, uint32_t to_size,
-                  const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                  uint32_t *mb, int32_t *mv);
 FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                            uint32_t to_size, const FieldDeltaVec *fd);

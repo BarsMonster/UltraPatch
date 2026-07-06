@@ -30,12 +30,12 @@ committed separately after its verification passes.
 4. Remove dead helper APIs (`join2`, `a1_m4_pack` facade).
    - Status: complete.
    - Verification: `make gate`.
-   - Commit: this commit.
+   - Commit: `35c57f9`.
 
 5. Unify shift-map fitter prune/cap/merge mechanics.
-   - Status: pending.
+   - Status: complete.
    - Verification: `make gate`.
-   - Commit: pending.
+   - Commit: this commit.
 
 6. Fuse preserve/correction planning and remove the redundant `chas` bitmap.
    - Status: pending.
