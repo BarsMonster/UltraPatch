@@ -90,15 +90,15 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
 }
 
 static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
-                                 const Ranges *fr, const Ranges *tr, PlanCfg cfg,
+                                 const PairAnalysis *pa, PlanCfg cfg,
                                  BlockVec blocks[STREAM_N], Buf *from_df, Buf *to_df,
                                  FieldDeltaVec *fd) {
     int variant = cfg.variant;
-    data_format_encode(from, to, fr, tr, from_df, to_df, blocks,
+    data_format_encode(from, to, pa, from_df, to_df, blocks,
                        variant >= 2 ? 1 : 0);
     OpVec ops = bsdiff_ops(from_df, to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    *fd = build_field_deltas(from, fr, blocks);
+    *fd = build_field_deltas(pa, blocks);
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, to_size, fd);
@@ -172,14 +172,6 @@ static int32_t opvec_fp_end(const OpVec *ops) {
     return fp_end;
 }
 
-static int32_t opvec_fp_start(const OpVec *ops) {
-    int32_t *ea = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    uint8_t *sk = (uint8_t *)xmalloc(ops->n ? ops->n : 1);
-    int32_t fp_start = fold_zero_ops(ops, ea, sk);
-    free(ea); free(sk);
-    return fp_start;
-}
-
 static int plan_caps_feasible(const OpVec *ops, const OpPC *pc) {
     int feasible = 1;
     size_t tpres = 0;
@@ -202,20 +194,23 @@ static void encstats_from_ctx(const EncCtx *ctx, EncStats *st) {
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
-Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,
                        PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     FieldDeltaVec fd = {0};
-    OpVec ops = build_candidate_ops(ctx, from, to, fr, tr, cfg, blocks, &from_df, &to_df, &fd);
+    OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, blocks, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     OpPC *pc = build_pc_fixpoint(ctx, &ops, from, to, &fd);
     int32_t fp_end_s = opvec_fp_end(&ops);
+    FoldPlan fold;
+    fold.eff_adj = (int32_t *)xmalloc((ops.n ? ops.n : 1) * sizeof(int32_t));
+    fold.skip = (uint8_t *)xmalloc(ops.n ? ops.n : 1);
+    fold.fp_start = fold_zero_ops(&ops, fold.eff_adj, fold.skip);
     /* Feature 7B initial source seek: leading zero-output ops fold into this shipped seed (see
      * fold_zero_ops). Derived from the SAME final ops array emit_body folds, so envelope and body
      * agree bit-for-bit. Sum(dl+adj) is fold-invariant, so fp_end_s above stays correct. */
-    int32_t fp_start_s = opvec_fp_start(&ops);
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     encstats_from_ctx(ctx, st_out);
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
@@ -223,7 +218,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
     int feasible = plan_caps_feasible(&ops, pc);
     Buf body = {0};
     if (feasible) {
-        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc);
+        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc, &fold);
         if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
@@ -236,7 +231,8 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
     opvec_free_deep(&ops);
     blockvec_array_free(blocks);
     buf_free(&from_df); buf_free(&to_df);
+    free(fold.eff_adj); free(fold.skip);
     *fp_end_out = fp_end_s;
-    *fp_start_out = fp_start_s;
+    *fp_start_out = fold.fp_start;
     return body;
 }

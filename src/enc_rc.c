@@ -136,3 +136,50 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     m->rep0h = 0;
     m->last_dist = 0;
 }
+
+uint32_t ug_price(const UGE *g, uint32_t v) {
+    uint32_t cl, cost = 0;
+    if (g->code == 'r') {
+        cl = v >> g->k;
+        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
+        cost += bit_price(g->u[ug_c((int)cl)], 0);
+        for (int pos = 0; pos < g->k; pos++)
+            cost += bit_price(g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
+    } else {
+        uint32_t mm = v + 1u;
+        cl = (uint32_t)bitlen32(mm) - 1u;
+        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
+        cost += bit_price(g->u[ug_c((int)cl)], 0);
+        for (uint32_t pos = 0; pos < cl; pos++)
+            cost += bit_price(g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
+    }
+    return cost;
+}
+
+uint32_t bt_price_static(const A1BitTree *t, uint8_t byte) {
+    int m = 1; uint32_t cost = 0;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        cost += bit_price(a1_bt_get(t, m - 1), bit);
+        m = (m << 1) | bit;
+    }
+    return cost;
+}
+
+uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
+    uint32_t cost = bit_price(*prob, bit);
+    *prob = rc_adapt(*prob, bit, rate);
+    return cost;
+}
+
+uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate) {
+    int m = 1; uint64_t cost = 0;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        uint16_t p = a1_bt_get(t, m - 1);
+        cost += bit_price(p, bit);
+        a1_bt_set(t, m - 1, rc_adapt(p, bit, rate));
+        m = (m << 1) | bit;
+    }
+    return cost;
+}

@@ -29,6 +29,8 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
       if (fe) { fclose(fe); fr = elf_ranges(felf, &from, "from"); } }
     { FILE *te = fopen(telf, "rb");
       if (te) { fclose(te); tr = elf_ranges(telf, &to, "to"); } }
+    PairAnalysis pa;
+    pair_analysis_init(&pa, &from, &to, &fr, &tr);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
      * ties keep the earliest entry, so added configs can never regress. A config whose plan
@@ -59,7 +61,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             int32_t fpe = 0, fps = 0; EncStats stv = {0};
-            Buf b = plan_encode(&ctx, &from, &to, &fr, &tr, PLANS[v], &fpe, &fps, &stv);
+            Buf b = plan_encode(&ctx, &from, &to, &pa, PLANS[v], &fpe, &fps, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
             /* judge by SHIPPED total: descending additionally pays the fp_end envelope
@@ -127,6 +129,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(patch_out, blob.d, blob.n);
     buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to);
+    pair_analysis_free(&pa);
     free(felf); free(telf);
 }
 

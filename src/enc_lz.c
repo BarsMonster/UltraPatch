@@ -192,35 +192,89 @@ uint32_t bit_price(uint32_t p, int bit) {
 
 /* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 
-/* price a ug value under a frozen model snapshot (probabilities held constant across the value) */
-static uint32_t ug_price(const UGE *g, uint32_t v) {
-    uint32_t cl, cost = 0;
-    if (g->code == 'r') {
-        cl = v >> g->k;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
-        cost += bit_price(g->u[ug_c((int)cl)], 0);
-        for (int pos = 0; pos < g->k; pos++)  /* rice: LSB-anchored ctx, mirror ug_encode */
-            cost += bit_price(g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
-    } else {
-        uint32_t mm = v + 1u;
-        cl = (uint32_t)bitlen32(mm) - 1u;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
-        cost += bit_price(g->u[ug_c((int)cl)], 0);
-        for (uint32_t pos = 0; pos < cl; pos++)
-            cost += bit_price(g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
-    }
-    return cost;
+void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
+                         const uint8_t *content, const uint8_t *tags, size_t content_n,
+                         Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp) {
+    *cc = (ContentCursor){
+        .seq = seq, .content = content, .tags = tags, .content_n = content_n,
+        .M = m, .rc = rc, .fwd = fwd, .out_en = out_en, .oexp = oexp,
+    };
 }
 
-/* per-byte literal price under a frozen bit-tree snapshot */
-static uint32_t bt_price(const A1BitTree *t, uint8_t byte) {
-    int m = 1; uint32_t cost = 0;
-    for (int i = 7; i >= 0; i--) {
-        int bit = (byte >> i) & 1;
-        cost += bit_price(a1_bt_get(t, m - 1), bit);
-        m = (m << 1) | bit;
+static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
+    Models *M = cc->M;
+    REnc *rc = cc->rc;
+    if (cc->tok_i >= cc->seq->n) die("content token underrun");
+    cc->cur = cc->seq->v[cc->tok_i++];
+    if (cc->cur.type == 'S') {
+        if (cc->last_span) die("adjacent span tokens on wire");
+        fl_encode(&M->flag, rc, 0);
+        ug_encode(&M->gs, rc, (uint32_t)cc->cur.len - 1u);
+        cc->tok_mode = 'S';
+        cc->tok_left = cc->cur.len;
+        cc->span_pos = 0;
+        cc->last_span = 1;
+    } else if (cc->cur.type == 'O') {
+        if (cc->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        else fl_encode(&M->flag, rc, 1);
+        if (stats) { stats->r0n_cost += bit_price(M->rep0[M->rep0h], 0); stats->r0n_n++; }
+        re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+        M->rep0h = 0;
+        if (stats) { stats->oy_cost += bit_price(M->outb, 1); stats->oy_n++; }
+        re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
+        { uint32_t zv = rc_outmatch_delta((uint32_t)cc->cur.dist, cc->oexp);
+          if (stats) { stats->op_cost += ug_price(&M->go, zv); stats->op_n++; }
+          ug_encode(&M->go, rc, zv);
+          cc->oexp = rc_outmatch_next_expect(cc->fwd, (uint32_t)cc->cur.dist, (uint32_t)cc->cur.len); }
+        ug_encode(&M->glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
+        cc->tok_mode = 'R';
+        cc->tok_left = cc->cur.len;
+    } else {
+        if (cc->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        else fl_encode(&M->flag, rc, 1);
+        if (cc->cur.dist == M->last_dist) {
+            if (stats) { stats->r0y_cost += bit_price(M->rep0[M->rep0h], 1); stats->r0y_n++; }
+            re_bit(rc, &M->rep0[M->rep0h], 1, RC_S_BIT_RATE);
+            M->rep0h = 1;
+        } else {
+            if (stats) { stats->r0n_cost += bit_price(M->rep0[M->rep0h], 0); stats->r0n_n++; }
+            re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+            M->rep0h = 0;
+            if (cc->out_en) {
+                if (stats) { stats->on_cost += bit_price(M->outb, 0); stats->on_n++; }
+                re_bit(rc, &M->outb, 0, RC_S_BIT_RATE);
+            }
+            ug_encode(&M->gd, rc, (uint32_t)cc->cur.dist - 1u);
+            M->last_dist = cc->cur.dist;
+        }
+        ug_encode(&M->gl, rc, (uint32_t)cc->cur.len - 1u);
+        cc->tok_mode = 'R';
+        cc->tok_left = cc->cur.len;
     }
-    return cost;
+}
+
+void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
+    if (end < cc->pos || end > cc->content_n) die("invalid content cursor");
+    while (cc->pos < end) {
+        if (!cc->tok_mode) content_cursor_start_token(cc, stats);
+        size_t nn = (size_t)cc->tok_left < (end - cc->pos) ? (size_t)cc->tok_left : (end - cc->pos);
+        if (cc->tok_mode == 'S') {
+            for (size_t i = 0; i < nn; i++) {
+                uint8_t byte = cc->content[(size_t)cc->cur.start + cc->span_pos + i];
+                int tag = cc->tags[cc->pos];
+                bt_encode(tag ? &cc->M->lit1 : &cc->M->lit0[LIT0_SEL(cc->prevlit)],
+                          cc->rc, byte, tag ? RC_LIT1_RATE : RC_LIT0_RATE);
+                cc->prevlit = byte;
+                cc->pos++;
+            }
+            cc->span_pos += nn;
+        } else {
+            cc->pos += nn;
+            if (nn) cc->prevlit = cc->content[cc->pos - 1u];
+        }
+        cc->tok_left -= (int32_t)nn;
+        if (cc->tok_left == 0) cc->tok_mode = 0;
+    }
 }
 
 /* Per-byte integer bit-length literal proxy from the wire's time-0 seeded literal BitTrees -- the
@@ -237,8 +291,8 @@ void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t 
     lit_tree_seed_e(frm, n, 0, &t0);
     lit_tree_seed_e(frm, n, 1, &t1);
     for (int b = 0; b < 256; b++) {
-        uint32_t p0 = (bt_price(&t0, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
-        uint32_t p1 = (bt_price(&t1, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        uint32_t p0 = (bt_price_static(&t0, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        uint32_t p1 = (bt_price_static(&t1, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
         L0[b] = (uint8_t)(p0 < 1 ? 1 : (p0 > 255 ? 255 : p0));
         L1[b] = (uint8_t)(p1 < 1 ? 1 : (p1 > 255 ? 255 : p1));
     }
@@ -251,61 +305,14 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, frm, (uint32_t)from_size, dk, ko);
-    uint64_t oy_cost = 0, on_cost = 0; uint32_t oy_n = 0, on_n = 0;
-    uint32_t oexp = pt->oexp0;                    /* caller pre-sets oexp0 (FWD ? 0 : to_size) */
-    uint64_t op_cost = 0; uint32_t op_n = 0;
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
     /* token count (seq->n) is no longer on the wire (Feature 7A); the old raw count bits touched
      * no adaptive model, so dropping them leaves every price unchanged. */
-    /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
-    uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
-    uint8_t prevlit = 0;                 /* true previous content-stream byte (order-1 tag0 context) */
-    int last_span = 0;                   /* mirror the wire: match flag implicit after a span */
-    for (size_t i = 0; i < seq->n; i++) {
-        Token t = seq->v[i];
-        if (t.type == 'S') {
-            fl_encode(&M.flag, &r, 0);
-            last_span = 1;
-            ug_encode(&M.gs, &r, (uint32_t)t.len - 1u);
-            for (int32_t j = 0; j < t.len; j++) {
-                size_t cp = (size_t)t.start + (size_t)j;
-                uint8_t byte = content[cp];
-                bt_encode(tags[cp] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &r, byte,
-                          tags[cp] ? RC_LIT1_RATE : RC_LIT0_RATE);
-                prevlit = byte;
-            }
-        } else if (t.type == 'O') {
-            if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; }
-            else fl_encode(&M.flag, &r, 1);
-            r0n_cost += bit_price(M.rep0[M.rep0h], 0); r0n_n++;
-            re_bit(&r, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0;
-            oy_cost += bit_price(M.outb, 1); oy_n++;
-            re_bit(&r, &M.outb, 1, RC_S_BIT_RATE);
-            { uint32_t zv = rc_outmatch_delta((uint32_t)t.dist, oexp);
-              op_cost += ug_price(&M.go, zv); op_n++;
-              ug_encode(&M.go, &r, zv);
-              oexp = rc_outmatch_next_expect(pt->fwd, (uint32_t)t.dist, (uint32_t)t.len); }
-            ug_encode(&M.glo, &r, (uint32_t)t.len - RC_OUTMATCH_MIN);
-        } else {
-            if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; }
-            else fl_encode(&M.flag, &r, 1);
-            if (t.dist == M.last_dist) {
-                r0y_cost += bit_price(M.rep0[M.rep0h], 1); r0y_n++;
-                re_bit(&r, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1;
-            } else {
-                r0n_cost += bit_price(M.rep0[M.rep0h], 0); r0n_n++;
-                re_bit(&r, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0;
-                on_cost += bit_price(M.outb, 0); on_n++;
-                re_bit(&r, &M.outb, 0, RC_S_BIT_RATE);
-                ug_encode(&M.gd, &r, (uint32_t)t.dist - 1u);
-                M.last_dist = t.dist;
-            }
-            ug_encode(&M.gl, &r, (uint32_t)t.len - 1u);
-        }
-        /* order-1 context: prevlit = the last content byte this token produced (t.start is the
-         * content position of every token kind; spans set it per-byte above to the same value). */
-        prevlit = content[(size_t)t.start + (size_t)t.len - 1u];
-    }
+    ContentStats st = {0};
+    ContentCursor cc;
+    content_cursor_init(&cc, seq, content, tags, seq->n ? (size_t)seq->v[seq->n - 1u].start + (size_t)seq->v[seq->n - 1u].len : 0,
+                        &M, &r, pt->fwd, 1, pt->oexp0);
+    content_cursor_to(&cc, cc.content_n, &st);
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
      * order-2 model on the previous two token kinds (A1Flag1, 4 contexts); a scalar span/match
@@ -316,17 +323,17 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
         pt->fmatch_c[h] = bit_price(M.flag.m[h], 1);
     }
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
-    pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
-    pt->rep0_no  = r0n_n ? (uint32_t)(r0n_cost / r0n_n) : bit_price(RC_REP0_INIT, 0);
-    pt->outb_yes = oy_n ? (uint32_t)(oy_cost / oy_n) : bit_price(RC_PHALF, 1);
-    pt->outb_no  = on_n ? (uint32_t)(on_cost / on_n) : bit_price(RC_PHALF, 0);
+    pt->rep0_yes = st.r0y_n ? (uint32_t)(st.r0y_cost / st.r0y_n) : bit_price(RC_REP0_INIT, 1);
+    pt->rep0_no  = st.r0n_n ? (uint32_t)(st.r0n_cost / st.r0n_n) : bit_price(RC_REP0_INIT, 0);
+    pt->outb_yes = st.oy_n ? (uint32_t)(st.oy_cost / st.oy_n) : bit_price(RC_PHALF, 1);
+    pt->outb_no  = st.on_n ? (uint32_t)(st.on_cost / st.on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
-    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&M.go, rc_zz32(256));
+    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ug_price(&M.go, rc_zz32(256));
     pt->go = M.go; pt->glo = M.glo;
     for (int c = 0; c < LIT0_CTX; c++)
-        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&M.lit0[c], (uint8_t)b);
-    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price(&M.lit1, (uint8_t)b);
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price_static(&M.lit0[c], (uint8_t)b);
+    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price_static(&M.lit1, (uint8_t)b);
     pt->gs = M.gs; pt->gl = M.gl; pt->gd = M.gd; pt->dk = dk;
     pt->valid = 1;
 }

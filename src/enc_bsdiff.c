@@ -152,14 +152,15 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
         int32_t fo = m.v[mi].a, to = m.v[mi].b, sz = m.v[mi].size;
         if (sz < 6) continue;
         sz += 1;
-            int64_t *vals = (int64_t *)xmalloc((size_t)sz * sizeof(int64_t));
-            int nz = 0;
-            for (int32_t k = 0; k < sz; k++) {
-            vals[k] = (int64_t)from_s->a[fo + k].val - (int64_t)to_s->a[to + k].val;
-            if (vals[k] != 0) nz++;
+        int32_t *vals = out ? (int32_t *)xmalloc((size_t)sz * sizeof(int32_t)) : NULL;
+        int nz = 0;
+        for (int32_t k = 0; k < sz; k++) {
+            int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
+            if (vals) vals[k] = delta;
+            if (delta != 0) nz++;
         }
         if (nz < 5) { free(vals); continue; }
-        blockvec_push(out, fo, (int32_t)to_s->a[to].addr, vals, sz);
+        if (out) blockvec_push(out, fo, vals, sz);
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
@@ -173,26 +174,38 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 
-void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
+                        const Ranges *fr, const Ranges *tr) {
+    memset(pa, 0, sizeof(*pa));
+    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                          fr->code_begin, fr->code_end, pa->from_st)) die("from disassemble failed");
+    if (a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
+                          tr->code_begin, tr->code_end, pa->to_st)) {
+        a1_m4_free_streams(pa->from_st);
+        die("to disassemble failed");
+    }
+}
+
+void pair_analysis_free(PairAnalysis *pa) {
+    if (!pa) return;
+    a1_m4_free_streams(pa->from_st);
+    a1_m4_free_streams(pa->to_st);
+}
+
+void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
                                Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
     if (to->n) memcpy(to_mut->d, to->d, to->n);
-    m4_stream_t fs[M4_NSTREAMS], ts[M4_NSTREAMS];
-    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                          fr->code_begin, fr->code_end, fs)) die("from disassemble failed");
-    if (a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                          tr->code_begin, tr->code_end, ts)) die("to disassemble failed");
-    create_patch_block(from_mut, to_mut, &fs[M4_DATA], &ts[M4_DATA], &blocks[STREAM_DATA]);
-    create_patch_block(from_mut, to_mut, &fs[M4_CODE], &ts[M4_CODE], &blocks[STREAM_CODE]);
-    create_patch_block(from_mut, to_mut, &fs[M4_BL], &ts[M4_BL], &blocks[STREAM_BL]);
-    create_patch_block(from_mut, to_mut, &fs[M4_LDR], &ts[M4_LDR], &blocks[STREAM_LDR]);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_DATA], &pa->to_st[M4_DATA], NULL);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_CODE], &pa->to_st[M4_CODE], NULL);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_BL], &pa->to_st[M4_BL], &blocks[STREAM_BL]);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_LDR], &pa->to_st[M4_LDR], &blocks[STREAM_LDR]);
     if (mask_bl) {
         mask_bl_imms(from->d, from_mut->d, from->n);
         mask_bl_imms(to->d, to_mut->d, to->n);
     }
-    a1_m4_free_streams(fs); a1_m4_free_streams(ts);
 }
 
 /* ------------------------------------------------------------------------------------- */

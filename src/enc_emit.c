@@ -10,10 +10,10 @@
 /* One field injection (delta escaped into the LZ content stream): cc = byte cursor within its op's
  * content slice, kind = EV_BL/EV_EX, fpk = from-image field address, delta = plain (no-map) wire
  * residual. The map variant derives from delta+fpk (field_residual) without re-walking. */
-typedef struct { uint32_t cc; int kind; uint32_t fpk; int64_t delta; } Inj;
+typedef struct { uint32_t cc; int kind; uint32_t fpk; int32_t delta; } Inj;
 typedef struct { Inj *v; size_t n, cap; } InjVec;
 
-static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t delta) {
+static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int32_t delta) {
     v->v = (Inj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
     v->v[v->n++] = (Inj){cc, kind, fpk, delta};
 }
@@ -103,8 +103,8 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-void bv_encode(A1BitTree *t, REnc *r, int64_t x) {
-    uint32_t v = rc_zz32((int32_t)x);
+void bv_encode(A1BitTree *t, REnc *r, int32_t x) {
+    uint32_t v = rc_zz32(x);
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
         v >>= 7;
@@ -113,23 +113,22 @@ void bv_encode(A1BitTree *t, REnc *r, int64_t x) {
     }
 }
 
-void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed) {
-    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->last = 0; d->rh = 0; d->hit = hitseed;
+void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
+    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->rh = 0; d->hit = hitseed;
     for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
 }
 
 enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC, DR_TR_OVER };
 typedef struct { uint8_t kind, ri; uint32_t idx; } DRTrans;
 
-static DRTrans dr_transition(DRE *D, int64_t delta) {
-    DRTrans tr = { DR_TR_REP, (uint8_t)(D->rh | (D->last == 0 ? 2 : 0)), 0 };
-    if (delta == D->last) { D->rh = 1; return tr; }
+static DRTrans dr_transition(DRE *D, int32_t delta) {
+    DRTrans tr = { DR_TR_REP, (uint8_t)(D->rh | (D->dic[0] == 0 ? 2 : 0)), 0 };
+    if (delta == D->dic[0]) { D->rh = 1; return tr; }
     D->rh = 0;
-    D->last = delta;
     int j = -1;
     for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
     if (j > 0) {
-        int64_t t = D->dic[j];
+        int32_t t = D->dic[j];
         for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
         D->dic[0] = t;
         tr.kind = DR_TR_HIT;
@@ -149,7 +148,7 @@ static DRTrans dr_transition(DRE *D, int64_t delta) {
  * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
 int g_emit_overflow;
 
-void emit_delta(Models *M, REnc *r, int kind, int64_t delta) {
+void emit_delta(Models *M, REnc *r, int kind, int32_t delta) {
     if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
@@ -215,95 +214,11 @@ int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
     return fp_start;
 }
 
-typedef struct {
-    const TokenVec *seq;
-    const Buf *content;
-    const Buf *tags;
-    Models *M;
-    REnc *rc;
-    int FWD;
-    int out_en;
-    uint32_t oexp;
-    size_t tok_i, pos, span_pos;
-    int tok_mode;
-    int32_t tok_left;
-    int last_span;
-    uint8_t prevlit;
-    Token cur;
-} EmitCursor;
-
-static void emit_cursor_start_token(EmitCursor *ec) {
-    Models *M = ec->M;
-    REnc *rc = ec->rc;
-    if (ec->tok_i >= ec->seq->n) die("content token underrun");
-    ec->cur = ec->seq->v[ec->tok_i++];
-    if (ec->cur.type == 'S') {
-        if (ec->last_span) die("adjacent span tokens on wire");
-        fl_encode(&M->flag, rc, 0);
-        ug_encode(&M->gs, rc, (uint32_t)ec->cur.len - 1u);
-        ec->tok_mode = 'S';
-        ec->tok_left = ec->cur.len;
-        ec->span_pos = 0;
-        ec->last_span = 1;
-    } else if (ec->cur.type == 'O') {
-        if (ec->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; ec->last_span = 0; }
-        else fl_encode(&M->flag, rc, 1);
-        re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
-        M->rep0h = 0;
-        re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
-        ug_encode(&M->go, rc, rc_outmatch_delta((uint32_t)ec->cur.dist, ec->oexp));
-        ec->oexp = rc_outmatch_next_expect(ec->FWD, (uint32_t)ec->cur.dist, (uint32_t)ec->cur.len);
-        ug_encode(&M->glo, rc, (uint32_t)ec->cur.len - RC_OUTMATCH_MIN);
-        ec->tok_mode = 'R';
-        ec->tok_left = ec->cur.len;
-    } else {
-        if (ec->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; ec->last_span = 0; }
-        else fl_encode(&M->flag, rc, 1);
-        if ((int32_t)ec->cur.dist == M->last_dist) {
-            re_bit(rc, &M->rep0[M->rep0h], 1, RC_S_BIT_RATE);
-            M->rep0h = 1;
-        } else {
-            re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
-            M->rep0h = 0;
-            if (ec->out_en) re_bit(rc, &M->outb, 0, RC_S_BIT_RATE);
-            ug_encode(&M->gd, rc, (uint32_t)ec->cur.dist - 1u);
-            M->last_dist = (int32_t)ec->cur.dist;
-        }
-        ug_encode(&M->gl, rc, (uint32_t)ec->cur.len - 1u);
-        ec->tok_mode = 'R';
-        ec->tok_left = ec->cur.len;
-    }
-}
-
-static void emit_cursor_to(EmitCursor *ec, size_t end) {
-    if (end < ec->pos || end > ec->content->n) die("invalid content cursor");
-    while (ec->pos < end) {
-        if (!ec->tok_mode) emit_cursor_start_token(ec);
-        size_t nn = (size_t)ec->tok_left < (end - ec->pos) ? (size_t)ec->tok_left : (end - ec->pos);
-        if (ec->tok_mode == 'S') {
-            for (size_t i = 0; i < nn; i++) {
-                uint8_t byte = ec->content->d[(size_t)ec->cur.start + ec->span_pos + i];
-                int tag = ec->tags->d[ec->pos];
-                bt_encode(tag ? &ec->M->lit1 : &ec->M->lit0[LIT0_SEL(ec->prevlit)],
-                          ec->rc, byte, tag ? RC_LIT1_RATE : RC_LIT0_RATE);
-                ec->prevlit = byte;
-                ec->pos++;
-            }
-            ec->span_pos += nn;
-        } else {
-            ec->pos += nn;
-            if (nn) ec->prevlit = ec->content->d[ec->pos - 1u];
-        }
-        ec->tok_left -= (int32_t)nn;
-        if (ec->tok_left == 0) ec->tok_mode = 0;
-    }
-}
-
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const size_t *ends, const InjVec *inj,
-                     const uint32_t *mb, const int32_t *mv, int mn) {
+                     const uint32_t *mb, const int32_t *mv, int mn, const FoldPlan *fold) {
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, frm, from_size, kd, ko);
@@ -348,28 +263,22 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
      * op loop bounds it (Feature 7, part A). */
     put_raw_bits(&rc, (uint32_t)kd, RC_KFIELD_BITS);
     if (out_en) put_raw_bits(&rc, (uint32_t)ko, RC_KFIELD_BITS);
-    /* op count (ops->n) is NO LONGER shipped (Feature 7B): the decoder frontier-terminates the op
-     * loop (FWD tp==to_size / grow tp==0). Zero-output ops are folded out below so every emitted op
-     * advances the frontier by >=1 — which is exactly what makes the frontier loop bounded. */
-    int32_t *eff_adj = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    uint8_t *zskip = (uint8_t *)xmalloc(ops->n ? ops->n : 1);
-    fold_zero_ops(ops, eff_adj, zskip);
     /* true previous content-stream byte (order-1 tag0 context): updated on EVERY content byte --
      * span literal, backref, out-match copy. */
-    EmitCursor ec = { seq, content, tags, &M, &rc, FWD, out_en, oexp, 0, 0, 0, 0, 0, 0, 0, {0} };
+    ContentCursor ec;
+    content_cursor_init(&ec, seq, content->d, tags->d, content->n, &M, &rc, FWD, out_en, oexp);
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
-        if (zskip[oi]) continue;                       /* zero-output op: folded out (adj carried) */
-        Op oe = ops->v[oi]; oe.adj = eff_adj[oi];      /* emit with the fold-adjusted seek */
+        if (fold->skip[oi]) continue;                  /* zero-output op: folded out (adj carried) */
+        Op oe = ops->v[oi]; oe.adj = fold->eff_adj[oi]; /* emit with the fold-adjusted seek */
         emit_geom_pc(&rc, &M, &oe, &pc[step]);
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
-            emit_cursor_to(&ec, base + inj[step].v[ii].cc);
+            content_cursor_to(&ec, base + inj[step].v[ii].cc, NULL);
             emit_delta(&M, &rc, inj[step].v[ii].kind, inj[step].v[ii].delta);
         }
-        emit_cursor_to(&ec, op_end);
+        content_cursor_to(&ec, op_end, NULL);
     }
-    free(eff_adj); free(zskip);
     if (ec.pos != content->n || ec.tok_i != seq->n || ec.tok_mode) die("content token cursor out of sync");
     return re_flush_opt(&rc);
 }
@@ -382,13 +291,14 @@ typedef struct {
     const Buf *content;
     const Buf *tags;
     const size_t *ends;
+    const FoldPlan *fold;
     int FWD;
 } EmitBodyMeasure;
 
 static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
                              const InjVec *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
-                         m->content, m->tags, m->ends, inj, mb, mv, mn);
+                         m->content, m->tags, m->ends, inj, mb, mv, mn, m->fold);
     size_t n = g_emit_overflow ? (size_t)-1 : body.n;
     buf_free(&body);
     return n;
@@ -404,54 +314,36 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
  * second-order); the final map choice is always settled by encode_body's exact full-body byte
  * gate, which competes this map against the hit-count map and the no-map body. ---- */
 
-/* one adaptive range-coder bit, priced (-log2 prob, PR_SCALE units) with the real update rule */
-static uint64_t px_bit(uint16_t *prob, int bit) {
-    uint64_t c = bit_price(*prob, bit);
-    *prob = rc_adapt(*prob, bit, RC_S_BIT_RATE);
-    return c;
-}
 /* MTF dict-index unary (mirror idx_encode) */
 static uint64_t px_idx(A1IdxUnary *g, uint32_t v) {
     uint64_t c = 0;
-    for (uint32_t pos = 0; pos < v; pos++) c += px_bit(&g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1);
-    return c + px_bit(&g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0);
-}
-/* one byte through the adaptive dval bit-tree (mirror bt_encode, dval rate = 4) */
-static uint64_t px_bt(A1BitTree *t, uint8_t byte) {
-    int m = 1; uint64_t c = 0;
-    for (int i = 7; i >= 0; i--) {
-        int bit = (byte >> i) & 1;
-        uint16_t p = a1_bt_get(t, m - 1);
-        c += bit_price(p, bit);
-        a1_bt_set(t, m - 1, rc_adapt(p, bit, 4));
-        m = (m << 1) | bit;
-    }
-    return c;
+    for (uint32_t pos = 0; pos < v; pos++) c += bit_price_update(&g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
+    return c + bit_price_update(&g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
 }
 /* zigzag-uLEB escape value through dval (mirror bv_encode) */
-static uint64_t px_bv(A1BitTree *t, int64_t x) {
-    uint32_t v = rc_zz32((int32_t)x);
+static uint64_t px_bv(A1BitTree *t, int32_t x) {
+    uint32_t v = rc_zz32(x);
     uint64_t c = 0;
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
         v >>= 7;
-        c += px_bt(t, v ? (uint8_t)(b | 0x80u) : b);
+        c += bt_price_update(t, v ? (uint8_t)(b | 0x80u) : b, RC_DVAL_RATE);
         if (!v) break;
     }
     return c;
 }
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
-static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int64_t delta, int *overflow) {
+static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int32_t delta, int *overflow) {
     DRTrans tr = dr_transition(D, delta);
-    if (tr.kind == DR_TR_REP) return px_bit(&D->rep[tr.ri], 1);
-    uint64_t c = px_bit(&D->rep[tr.ri], 0);
+    if (tr.kind == DR_TR_REP) return bit_price_update(&D->rep[tr.ri], 1, RC_S_BIT_RATE);
+    uint64_t c = bit_price_update(&D->rep[tr.ri], 0, RC_S_BIT_RATE);
     if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
-        c += px_bit(&D->hit, 1);
+        c += bit_price_update(&D->hit, 1, RC_S_BIT_RATE);
         c += px_idx(gix, tr.idx);
     } else {
-        c += px_bit(&D->hit, 0);
+        c += bit_price_update(&D->hit, 0, RC_S_BIT_RATE);
         c += px_bv(dval, delta);
     }
     return c;
@@ -473,7 +365,7 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 
 /* total priced bits (header + BL/EX residual streams) of a candidate map over the field keys */
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
-                             const FieldKey *fk, size_t nfr, int64_t *dic_bl, int64_t *dic_ex) {
+                             const FieldKey *fk, size_t nfr, int32_t *dic_bl, int32_t *dic_ex) {
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     A1IdxUnary di_bl, di_ex; a1_idx_init(&di_bl, RC_IDX_SEED); a1_idx_init(&di_ex, RC_IDX_SEED);
     A1BitTree dval; a1_bt_init(&dval);
@@ -483,7 +375,7 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
         int32_t pred = fk[i].kind == EV_BL
             ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2)) / 2
             : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2));
-        int64_t resid = (int64_t)(int32_t)((uint32_t)fk[i].need - (uint32_t)pred);
+        int32_t resid = (int32_t)((uint32_t)fk[i].need - (uint32_t)pred);
         c += px_delta(fk[i].kind == EV_BL ? &bl : &ex, fk[i].kind == EV_BL ? &di_bl : &di_ex,
                       &dval, resid, &overflow);
         if (overflow) return UINT64_MAX / 2;
@@ -494,7 +386,7 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
 typedef uint64_t (*SMapScoreFn)(const uint32_t *mb, const int32_t *mv, int mn, void *ctx);
 
 typedef struct { const FieldKey *fk; size_t nfr; } SMapHitScore;
-typedef struct { const FieldKey *fk; size_t nfr; int64_t *dic_bl, *dic_ex; } SMapBitScore;
+typedef struct { const FieldKey *fk; size_t nfr; int32_t *dic_bl, *dic_ex; } SMapBitScore;
 
 static uint64_t smap_hit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
     SMapHitScore *s = (SMapHitScore *)ctx;
@@ -538,7 +430,7 @@ static int fit_shift_map_scored(const OpVec *ops, uint32_t from_size, uint32_t t
     FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
     uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
     uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
-    int mark[SMAP_POOL_MAX];
+    int mark[SMAP_POOL_MAX] = {0};
     int mn = smap_build_full(ops, from_size, to_size, frm, fr, nfr, tb, tv, fk);
     if (score == smap_hit_cost) ((SMapHitScore *)score_ctx)->fk = fk;
     else ((SMapBitScore *)score_ctx)->fk = fk;
@@ -592,8 +484,8 @@ static int fit_shift_map_hit(const OpVec *ops, uint32_t from_size, uint32_t to_s
 static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                               const uint8_t *frm, const FieldRef *fr, size_t nfr,
                               uint32_t *mb, int32_t *mv) {
-    int64_t *dic_bl = (int64_t *)xmalloc(DR_KCAP_BL * sizeof(int64_t));
-    int64_t *dic_ex = (int64_t *)xmalloc(DR_KCAP_EX * sizeof(int64_t));
+    int32_t *dic_bl = (int32_t *)xmalloc(DR_KCAP_BL * sizeof(int32_t));
+    int32_t *dic_ex = (int32_t *)xmalloc(DR_KCAP_EX * sizeof(int32_t));
     SMapBitScore sc = { NULL, nfr, dic_bl, dic_ex };
     int mn = fit_shift_map_scored(ops, from_size, to_size, frm, fr, nfr,
                                   smap_bit_cost, &sc, 0, 1, 0, mb, mv);
@@ -625,7 +517,7 @@ static int smap_eq(const uint32_t *ab, const int32_t *av, int an,
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc) {
+                       const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
@@ -694,7 +586,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
       free(tp0s); }
     OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
-    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, FWD };
+    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, fold, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -768,7 +660,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         sel_inj, sel_b, sel_v, sel_n);
+                         sel_inj, sel_b, sel_v, sel_n, fold);
     injvec_array_free(inj, ops->n);
     injvec_array_free(inj_m, ops->n);
     injvec_array_free(inj_m2, ops->n);

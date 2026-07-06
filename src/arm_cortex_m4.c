@@ -89,8 +89,8 @@ static int32_t unpack_bl(uint16_t up, uint16_t lo) {
 
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
 typedef struct {
-    map_t bl, ldr, ldr_w, data_ptr, code_ptr;
-    uset_t lit;   /* every addr pushed to ldr/ldr_w — for O(1) literal-pool skip during the scan */
+    map_t bl, ldr, data_ptr, code_ptr;
+    uset_t lit;   /* every literal target addr — for O(1) literal-pool skip during the scan */
 } dis_t;
 
 static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_t imm,
@@ -100,6 +100,12 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
     if ((size_t)address + 4 > fsize) return;
     int32_t v = (int32_t)rd32(f + address);
     if (map_push(ldr, address, v) == 0) uset_add(lit, address);
+}
+
+static void ldr_literal_only(size_t fsize, uint32_t address, uint32_t imm, uset_t *lit) {
+    if ((address % 4) == 2) address -= 2;
+    address += imm;
+    if ((size_t)address + 4 <= fsize) uset_add(lit, address);
 }
 
 /* The scanner records literal-pool target addresses as it finds them, then skips
@@ -141,7 +147,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
             } else if (up == 0xf8df) {                /* ldr.w */
                 if ((size_t)addr + 2 > fsize) continue;
                 uint16_t lo = rd16(f + addr); addr += 2;
-                ldr_common(f, fsize, ins, (lo & 0xfff) + 4, &d->ldr_w, &d->lit);
+                ldr_literal_only(fsize, ins, (lo & 0xfff) + 4, &d->lit);
             } else if ((up & 0xfff0) == 0xfbb0 || (up & 0xfff0) == 0xfb90 ||
                        (up & 0xfff0) == 0xf8d0 || (up & 0xfff0) == 0xf850) {
                 addr += 2;
@@ -152,8 +158,6 @@ static void disassemble(const uint8_t *f, size_t fsize,
             }
         }
     }
-    /* ldr.w targets feed the in-scan literal-pool membership set (d->lit) only; the ldr_w map
-     * itself is never returned, so it is not finalized. */
     uset_free(&d->lit);   /* only needed during the scan */
     map_finalize(&d->bl); map_finalize(&d->ldr);
     map_finalize(&d->data_ptr); map_finalize(&d->code_ptr);
@@ -181,7 +185,7 @@ int a1_m4_disassemble(const uint8_t *from, size_t from_size,
         }
     }
     if (rc) a1_m4_free_streams(streams);   /* release any partial allocation on OOM */
-    map_free(&d.bl); map_free(&d.ldr); map_free(&d.ldr_w);
+    map_free(&d.bl); map_free(&d.ldr);
     map_free(&d.data_ptr); map_free(&d.code_ptr);
     return rc;
 }

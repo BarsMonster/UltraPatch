@@ -41,16 +41,16 @@ static inline int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
     return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
 }
 
-enum { STREAM_DATA, STREAM_CODE, STREAM_BL, STREAM_LDR, STREAM_N };
+enum { STREAM_BL, STREAM_LDR, STREAM_N };
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; size_t orig; } OpWalkEnt;
 typedef void (*OpWalkByteFn)(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte);
-typedef struct { int32_t from_offset, to_address, n; int64_t *values; } Block;
+typedef struct { int32_t from_offset, n; int32_t *values; } Block;
 typedef struct { Block *v; size_t n, cap; } BlockVec;
-typedef struct { uint32_t addr; int kind; int64_t delta; } FieldDelta;
+typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
 typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
@@ -58,14 +58,19 @@ typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
 typedef struct { uint32_t data_off_begin, data_off_end, data_begin, data_end, code_begin, code_end; } Ranges;
 typedef struct {
+    m4_stream_t from_st[M4_NSTREAMS];
+    m4_stream_t to_st[M4_NSTREAMS];
+} PairAnalysis;
+typedef struct {
     int    deg_engaged;
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
+typedef struct { int32_t fp_start; int32_t *eff_adj; uint8_t *skip; } FoldPlan;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
-typedef struct { int64_t *dic; uint16_t cap, K; int64_t last; uint16_t rep[4], hit; uint8_t rh; } DRE;
+typedef struct { int32_t *dic; uint16_t cap, K; uint16_t rep[4], hit; uint8_t rh; } DRE;
 
 typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
@@ -81,14 +86,14 @@ typedef struct { int32_t pos, len; } OCand;
 enum { PR_SCALE = 64 };
 
 enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
-typedef struct { int type; int64_t delta; } Event;
+typedef struct { int type; int32_t delta; } Event;
 typedef struct {
     int fwd; int32_t dl, k;
     const uint8_t *frm; uint32_t from_size;
     const FieldDeltaVec *fd; const IVec *ldr; const Op *o; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
-typedef struct { int kind; uint32_t fpk; int64_t delta; } FieldRef;
+typedef struct { int kind; uint32_t fpk; int32_t delta; } FieldRef;
 typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
 enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
 
@@ -115,11 +120,33 @@ typedef struct {
     uint16_t outb;
     A1IdxUnary dibl, diex;
     DRE dr_bl, dr_ex;
-    int64_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
+    int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
     uint16_t rep0[2];
     int rep0h;
     int32_t last_dist;
 } Models;
+
+typedef struct {
+    uint64_t oy_cost, on_cost, op_cost, r0y_cost, r0n_cost;
+    uint32_t oy_n, on_n, op_n, r0y_n, r0n_n;
+} ContentStats;
+
+typedef struct {
+    const TokenVec *seq;
+    const uint8_t *content;
+    const uint8_t *tags;
+    size_t content_n;
+    Models *M;
+    REnc *rc;
+    int fwd, out_en;
+    uint32_t oexp;
+    size_t tok_i, pos, span_pos;
+    int tok_mode;
+    int32_t tok_left;
+    int last_span;
+    uint8_t prevlit;
+    Token cur;
+} ContentCursor;
 
 void die(const char *msg) ENC_NORETURN;
 void *xmalloc(size_t n);
@@ -150,13 +177,16 @@ void corr_push(CorrVec *v, int32_t off, uint8_t byte);
 int cmp_i32(const void *a, const void *b);
 int cmp_corr(const void *a, const void *b);
 void opvec_push(OpVec *v, Op o);
-void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n);
-void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta);
+void blockvec_push(BlockVec *v, int32_t fo, const int32_t *vals, int32_t n);
+void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta);
 void fd_finalize(FieldDeltaVec *v);
 const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
 
 Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which);
-void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
+                        const Ranges *fr, const Ranges *tr);
+void pair_analysis_free(PairAnalysis *pa);
+void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
                         Buf *from_df, Buf *to_df, BlockVec blocks[STREAM_N], int mask_bl);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
@@ -167,14 +197,14 @@ void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
 int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
-int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
+int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
                        const uint32_t *mb, const int32_t *mv, int mn);
 FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                          const FieldDeltaVec *fd, size_t *nout);
 int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
                     const uint8_t *frm, const FieldRef *fr, size_t nfr,
                     uint32_t *tb, int32_t *tv, FieldKey *fk);
-FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]);
+FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                            uint32_t to_size, const FieldDeltaVec *fd);
 Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj);
@@ -198,8 +228,16 @@ void ug_encode(UGE *g, REnc *r, uint32_t v);
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
+uint32_t ug_price(const UGE *g, uint32_t v);
+uint32_t bt_price_static(const A1BitTree *t, uint8_t byte);
+uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
+uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate);
 
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
+void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
+                         const uint8_t *content, const uint8_t *tags, size_t content_n,
+                         Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp);
+void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats);
 void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                     const uint32_t *olim2, const uint32_t *ocap, int FWD,
                     const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
@@ -219,15 +257,15 @@ uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
 
 extern int g_emit_overflow;
-void bv_encode(A1BitTree *t, REnc *r, int64_t x);
-void dr_init_e(DRE *d, int64_t *dic, int cap, uint16_t hitseed);
-void emit_delta(Models *M, REnc *r, int kind, int64_t delta);
+void bv_encode(A1BitTree *t, REnc *r, int32_t x);
+void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed);
+void emit_delta(Models *M, REnc *r, int kind, int32_t delta);
 int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip);
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const FieldDeltaVec *fd, const OpPC *pc);
+                const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold);
 
-Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
+Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,
                 PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out);
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);

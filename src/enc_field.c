@@ -206,11 +206,11 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                 if (rc_bl_pattern(tu, tl)) {
                     uint16_t fu = u16le_at(frm + fpk), fl2 = u16le_at(frm + fpk + 2);
                     fd_put(&add, fpk, STREAM_BL,
-                           (int64_t)unpack_bl_local(fu, fl2) - unpack_bl_local(tu, tl));
+                           (int32_t)((uint32_t)unpack_bl_local(fu, fl2) - (uint32_t)unpack_bl_local(tu, tl)));
                 }
             } else if (ivec_has(&ldr, (int32_t)fpk)) {
                 fd_put(&add, fpk, STREAM_LDR,
-                       (int64_t)(int32_t)u32le_at(frm + fpk) - (int64_t)(int32_t)u32le_at(tob + (size_t)tpk));
+                       (int32_t)(u32le_at(frm + fpk) - u32le_at(tob + (size_t)tpk)));
             }
         }
         free(ldr.v);
@@ -234,7 +234,7 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
 /* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
  * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
  * EX pred is -shift(word value). mn==0 degenerates to residual == delta (no-map wire). */
-int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta,
+int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
                               const uint32_t *mb, const int32_t *mv, int mn) {
     int32_t pred;
     if (kind == EV_BL) {
@@ -247,7 +247,7 @@ int64_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int64_t delta
     } else {
         pred = (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, u32le_at(frm + fpk)));
     }
-    return (int64_t)(int32_t)((uint32_t)delta - (uint32_t)pred);
+    return (int32_t)((uint32_t)delta - (uint32_t)pred);
 }
 
 /* collect every BL/EX field (kind, from-address, shipped delta) over the fixed op plan,
@@ -351,14 +351,11 @@ int smap_build_full(const OpVec *ops, uint32_t from_size, uint32_t to_size,
     return mn;
 }
 
-FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockVec blocks[STREAM_N]) {
+FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]) {
     FieldDeltaVec out = {0};
-    m4_stream_t st[M4_NSTREAMS];
-    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                          fr->code_begin, fr->code_end, st)) die("M0 disassemble failed");
-    /* STREAM_* and M4_* share the same order, so blocks[s] pairs with st[s] directly. */
+    const int m4_stream_for_field[STREAM_N] = { M4_BL, M4_LDR };
     for (int s = 0; s < STREAM_N; s++) {
-        const m4_stream_t *ms = &st[s];
+        const m4_stream_t *ms = &pa->from_st[m4_stream_for_field[s]];
         for (size_t bi = 0; bi < blocks[s].n; bi++) {
             const Block *b = &blocks[s].v[bi];
             for (int32_t k = 0; k < b->n; k++) {
@@ -367,7 +364,6 @@ FieldDeltaVec build_field_deltas(const Buf *from, const Ranges *fr, const BlockV
             }
         }
     }
-    a1_m4_free_streams(st);
     fd_finalize(&out);
     return out;
 }

@@ -257,14 +257,13 @@ void opvec_push(OpVec *v, Op o) {
     v->v[v->n++] = o;
 }
 
-void blockvec_push(BlockVec *v, int32_t fo, int32_t ta, const int64_t *vals, int32_t n) {
+void blockvec_push(BlockVec *v, int32_t fo, const int32_t *vals, int32_t n) {
     v->v = (Block *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 8);
     Block *b = &v->v[v->n++];
     b->from_offset = fo;
-    b->to_address = ta;
     b->n = n;
-    b->values = (int64_t *)xmalloc((size_t)n * sizeof(int64_t));
-    memcpy(b->values, vals, (size_t)n * sizeof(int64_t));
+    b->values = (int32_t *)xmalloc((size_t)n * sizeof(int32_t));
+    memcpy(b->values, vals, (size_t)n * sizeof(int32_t));
 }
 
 static int cmp_fd(const void *a, const void *b) {
@@ -273,7 +272,7 @@ static int cmp_fd(const void *a, const void *b) {
     return (x->kind > y->kind) - (x->kind < y->kind);
 }
 
-void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int64_t delta) {
+void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta) {
     v->v = (FieldDelta *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 256);
     v->v[v->n].addr = addr;
     v->v[v->n].kind = kind;
