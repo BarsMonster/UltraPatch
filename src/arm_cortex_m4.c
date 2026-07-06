@@ -102,19 +102,17 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
     if (map_push(ldr, address, v) == 0) uset_add(lit, address);
 }
 
+#ifdef A1_ENABLE_M4_FUTURE
 static void ldr_literal_only(size_t fsize, uint32_t address, uint32_t imm, uset_t *lit) {
     if ((address % 4) == 2) address -= 2;
     address += imm;
     if ((size_t)address + 4 <= fsize) uset_add(lit, address);
 }
+#endif
 
 /* The scanner records literal-pool target addresses as it finds them, then skips
    those words later in the same pass. */
 
-/* Thumb-2 B.W / LDR.W *recognition* stays in the walk (the ldr.w pool membership and the 32-bit
- * instruction skips below): B.W and LDR.W cannot occur in real Thumb-1/ARMv6-M (M0+) code, but
- * byte consumption defines field classification and the CORTEX_M0 wire is frozen against it. No
- * wide stream is emitted — bl/ldr/data/code are the only returned streams. */
 static void disassemble(const uint8_t *f, size_t fsize,
                         uint32_t data_off_begin, uint32_t data_off_end,
                         uint32_t data_begin, uint32_t data_end,
@@ -138,12 +136,14 @@ static void disassemble(const uint8_t *f, size_t fsize,
             addr += 2;
             if ((up & 0xf800) == 0xf000) {            /* bl / b.w */
                 if ((size_t)addr + 2 > fsize) continue;
-                uint16_t lo = rd16(f + addr); addr += 2;
-                if ((lo & 0xd000) == 0xd000) map_push(&d->bl, ins, unpack_bl(up, lo));
-                /* B.W (lo & 0xc000)==0x8000 is recognized structurally by consuming the second
-                 * halfword above, but never emitted on CORTEX_M0. */
+                uint16_t lo = rd16(f + addr);
+                if ((lo & 0xd000) == 0xd000) { addr += 2; map_push(&d->bl, ins, unpack_bl(up, lo)); }
+#ifdef A1_ENABLE_M4_FUTURE
+                else addr += 2;                       /* future Thumb-2 B.W/reserved wide prefix */
+#endif
             } else if ((up & 0xf800) == 0x4800) {     /* ldr (literal) */
                 ldr_common(f, fsize, ins, 4 * (up & 0xff) + 4, &d->ldr, &d->lit);
+#ifdef A1_ENABLE_M4_FUTURE
             } else if (up == 0xf8df) {                /* ldr.w */
                 if ((size_t)addr + 2 > fsize) continue;
                 uint16_t lo = rd16(f + addr); addr += 2;
@@ -155,6 +155,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
                 addr += 2;
             } else if ((up & 0xffc0) == 0xe900) {
                 addr += 2;
+#endif
             }
         }
     }
