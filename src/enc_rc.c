@@ -87,8 +87,6 @@ void ug_init_e(UGE *g, char code, int k) {
     for (int i = 0; i <= UG_CTX; i++) { g->u[i] = RC_PHALF; for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF; }
 }
 
-static inline int ug_c(int x) { return x < UG_CTX ? x : UG_CTX; }
-
 /* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
 void ug_seed_cont_e(UGE *g, int depth) {
     rc_seed_cont_u(g->u, UG_CTX, depth);
@@ -98,23 +96,23 @@ void ug_encode(UGE *g, REnc *r, uint32_t v) {
     uint32_t cl;
     if (g->code == 'r') {
         cl = v >> g->k;
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, RC_S_BIT_RATE);
-        re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
-        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);  /* rice: LSB-anchored ctx */
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[UG_C((int)pos)], 1, RC_S_BIT_RATE);
+        re_bit(r, &g->u[UG_C((int)cl)], 0, RC_S_BIT_RATE);
+        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);  /* rice: LSB-anchored ctx */
     } else {
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[ug_c((int)pos)], 1, RC_S_BIT_RATE);
-        re_bit(r, &g->u[ug_c((int)cl)], 0, RC_S_BIT_RATE);
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[UG_C((int)pos)], 1, RC_S_BIT_RATE);
+        re_bit(r, &g->u[UG_C((int)cl)], 0, RC_S_BIT_RATE);
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[UG_C((int)cl)][UG_C((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
     }
 }
 
 /* MTF dict-index model: IDX_CTX / A1IdxUnary / a1_idx_init single-sourced in rc_models.h (decoder mirror).
  * The encoded index value v is ~54% zero; unary fits that concentration and drops the per-stream A1UGGamma. */
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v) {
-    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
-    re_bit(r, &g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
+    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[rc_idx_ctx(pos)], 1, RC_S_BIT_RATE);
+    re_bit(r, &g->u[rc_idx_ctx(v)], 0, RC_S_BIT_RATE);
 }
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
@@ -141,17 +139,17 @@ uint32_t ug_price(const UGE *g, uint32_t v) {
     uint32_t cl, cost = 0;
     if (g->code == 'r') {
         cl = v >> g->k;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
-        cost += bit_price(g->u[ug_c((int)cl)], 0);
+        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[UG_C((int)pos)], 1);
+        cost += bit_price(g->u[UG_C((int)cl)], 0);
         for (int pos = 0; pos < g->k; pos++)
-            cost += bit_price(g->m[ug_c((int)cl)][ug_c(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
+            cost += bit_price(g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
     } else {
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[ug_c((int)pos)], 1);
-        cost += bit_price(g->u[ug_c((int)cl)], 0);
+        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[UG_C((int)pos)], 1);
+        cost += bit_price(g->u[UG_C((int)cl)], 0);
         for (uint32_t pos = 0; pos < cl; pos++)
-            cost += bit_price(g->m[ug_c((int)cl)][ug_c((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
+            cost += bit_price(g->m[UG_C((int)cl)][UG_C((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
     }
     return cost;
 }

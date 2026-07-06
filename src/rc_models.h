@@ -191,6 +191,15 @@ static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint3
 #define IDX_CTX 5
 typedef struct { uint16_t u[IDX_CTX]; } A1IdxUnary;
 static inline void a1_idx_init(A1IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+static inline int rc_idx_ctx(uint32_t pos){ return pos<IDX_CTX ? (int)pos : IDX_CTX-1; }
+
+static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
+    if(j){ int32_t t=dic[j]; memmove(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
+}
+static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,int32_t v){
+    memmove(&dic[1],&dic[0],(size_t)(*K)*sizeof(dic[0]));
+    dic[0]=v; (*K)++;
+}
 
 /* =====================================================================================
  * Shared wire constants — single-sourced so the COMPILER (not a "must match" comment)

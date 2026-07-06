@@ -616,12 +616,11 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
         uint32_t j=s_unary(pa,gix->u,IDX_CTX-1,cap)+1u;    /* cmp-1: dict idx 0 unreachable -> encode j-1 */
         if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
         v=dic[j];
-        if(j){ int32_t t=dic[j]; memmove(&dic[1], &dic[0], (size_t)j * sizeof(dic[0])); dic[0]=t; }
+        rc_mtf_promote_i32(dic,j);
     } else {
         v=s_bv(pa,&M_dval, RC_DVAL_RATE);
         if((uint32_t)d->K>=cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
-        memmove(&dic[1], &dic[0], (size_t)d->K * sizeof(dic[0]));
-        dic[0]=v; d->K++;
+        rc_mtf_insert_i32(dic,&d->K,v);
     }
     return v;
 }

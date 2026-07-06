@@ -128,17 +128,13 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
     int j = -1;
     for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
     if (j > 0) {
-        int32_t t = D->dic[j];
-        for (int i = j; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = t;
+        rc_mtf_promote_i32(D->dic, (uint32_t)j);
         tr.kind = DR_TR_HIT;
         tr.idx = (uint32_t)(j - 1);
     } else {
         if (j == 0) die("unexpected delta dict index 0");
         if (D->K >= D->cap) { tr.kind = DR_TR_OVER; return tr; }
-        for (int i = D->K; i > 0; i--) D->dic[i] = D->dic[i - 1];
-        D->dic[0] = delta;
-        D->K++;
+        rc_mtf_insert_i32(D->dic, &D->K, delta);
         tr.kind = DR_TR_ESC;
     }
     return tr;
@@ -328,8 +324,8 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
 /* MTF dict-index unary (mirror idx_encode) */
 static uint64_t px_idx(A1IdxUnary *g, uint32_t v) {
     uint64_t c = 0;
-    for (uint32_t pos = 0; pos < v; pos++) c += bit_price_update(&g->u[pos < IDX_CTX ? pos : IDX_CTX - 1], 1, RC_S_BIT_RATE);
-    return c + bit_price_update(&g->u[v < IDX_CTX ? v : IDX_CTX - 1], 0, RC_S_BIT_RATE);
+    for (uint32_t pos = 0; pos < v; pos++) c += bit_price_update(&g->u[rc_idx_ctx(pos)], 1, RC_S_BIT_RATE);
+    return c + bit_price_update(&g->u[rc_idx_ctx(v)], 0, RC_S_BIT_RATE);
 }
 /* zigzag-uLEB escape value through dval (mirror bv_encode) */
 static uint64_t px_bv(A1BitTree *t, int32_t x) {
