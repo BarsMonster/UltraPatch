@@ -23,9 +23,8 @@ void    flash_write(uint32_t a, uint8_t v) { (void)a; (void)v; }
 /* ---- byte-source priming ------------------------------------------------------------------
  * rc_init() and next_byte() pull straight from the callback (no trailer-withhold ring anymore —
  * CRC32(to) rides in the header on the real wire, so the range body is the last thing on the
- * stream and is consumed to EOF). We feed the range coder the encoder body directly; reads past
- * the body zero-fill (pull_raw latches EOF), exactly matching the encoder's re_flush_opt, which
- * strips trailing zero bytes. This mirrors how patch_selfcheck.c / patch_apply_run drive it. */
+ * stream). We feed the range coder the encoder body directly; the self-terminating range flush
+ * carries its final zero bytes, matching patch_selfcheck.c / patch_apply_run. */
 static uint8_t *md_src;
 static size_t   md_cap;
 static PatchApply md_pa;

@@ -37,13 +37,13 @@ static int pull_next(void *c, uint8_t *out){
 }
 
 /* byte_mode: exercise the optional push adapter with a tiny ring. The wait hook plays the
- * event-driven producer, feeding ONE blob byte per invocation (then EOF) — proving the
- * decoder streams byte-by-byte through the adapter with an 8-byte buffer. */
-typedef struct { const uint8_t *d; size_t n, i; PatchRing *r; long feeds; } FeedCtx;
+ * event-driven producer, feeding ONE blob byte per invocation — proving the decoder streams
+ * byte-by-byte through the adapter with an 8-byte buffer and completes without transport EOF. */
+typedef struct { const uint8_t *d; size_t n, i; PatchRing *r; long feeds; int eof_signaled; } FeedCtx;
 static void feed_one(void *c){
     FeedCtx *f=(FeedCtx*)c;
     if(f->i < f->n){ if(patch_ring_push(f->r, f->d[f->i])){ f->i++; f->feeds++; } }
-    else patch_ring_eof(f->r);
+    else { f->eof_signaled=1; patch_ring_eof(f->r); }
 }
 
 int main(int argc,char**argv){
@@ -72,12 +72,12 @@ int main(int argc,char**argv){
     PatchApply pa;
     int rc;
     if(byte_mode){
-        uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0};
+        uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0,0};
         patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc);
         rc=patch_apply_run(&pa, patch_ring_next,&ring);
         if(rc==PATCH_APPLY_DONE){
-            if(fc.feeds!=(long)bsz){
-                fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes\n",fc.feeds,bsz);
+            if(fc.feeds!=(long)bsz || fc.eof_signaled){
+                fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes, eof=%d\n",fc.feeds,bsz,fc.eof_signaled);
                 fclose(mf); free(sc_flash); free(blob); return 1;
             }
             fprintf(stderr,"adapter streaming OK: %ld single-byte feeds over %ld blob bytes\n",fc.feeds,bsz);

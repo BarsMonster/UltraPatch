@@ -158,7 +158,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
 }
 
 /* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)
- * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
+ * for a given parse `seq` and rice parameter `kd`, finalize with the self-terminating flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
 /* Feature 7B: fold zero-OUTPUT ops (diff_len==0 && extra_len==0 — pure source seeks that write
@@ -307,9 +307,12 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     }
     free(eff_adj); free(zskip);
     if (pos != content->n || tok_i != seq->n || tok_mode) die("content token cursor out of sync");
+    /* Logical end-of-body marker. The self-contained range flush below makes this valid:
+     * valid decodes finish without transport EOF or an exact blob length. */
+    re_raw(&rc, 1);
     #undef START_TOKEN
     #undef EMIT_TO
-    return re_flush_opt(&rc);
+    return re_flush_selfterm(&rc);
 }
 
 /* ---- bits-based shift-map fit (D1, C6). The hit-count fit above scores a candidate map by the

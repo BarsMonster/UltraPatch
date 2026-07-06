@@ -62,7 +62,8 @@ CRC32(to)[4]
 from_size uLEB
 zigzag(to_size - from_size) uLEB  # overlong encoding = unnatural apply direction
 zigzag(fp_end - from_size) uLEB   # present only when the apply is DESCENDING
-range-coded body bytes
+zigzag(fp_start) uLEB
+range-coded body bytes            # final raw EOF marker + consumed range flush bytes
 ```
 
 The apply direction is an encoder choice. The NATURAL direction (descending iff
@@ -79,11 +80,12 @@ image at the end of the same `patch_apply_run()` call. Because `CRC32(to)`
 gates the *result*, a wrong `CRC32(to)` is detected only AFTER the image has
 been written to flash — the same order as a wrong trailer in the previous wire
 revision; only `CRC32(from)` protects flash from being touched. The
-range-coded body is the last thing on the wire and its length is implicit, so
-the decoder consumes it to EOF; `PATCH_APPLY_DONE` is returned only after both
-CRC gates pass AND no trailing bytes remain (any leftover byte is appended
-garbage and is rejected as `REJ_CORRUPT`). Header sizes above 64 MiB are
-rejected as implausible.
+range-coded body is the last thing on the wire and its length is implicit. It
+terminates itself with one final raw range-coded EOF marker and carries the
+range-flush bytes the decoder consumes, so `PATCH_APPLY_DONE` does not require
+a transport EOF or exact blob length. Bytes after the logical body are outside
+the decoder contract and must be handled by the authenticated outer
+framing/session. Header sizes above 64 MiB are rejected as implausible.
 
 CRC32 is an integrity check against accidental corruption. It is not an
 authenticity mechanism. A production OTA flow should authenticate the whole
@@ -100,13 +102,13 @@ add one.
 ## Integration
 
 Supply a callback that returns the next blob byte (it may poll a UART/BLE
-buffer internally) or 0 at end-of-blob, allocate a `PatchApply`, and call
+buffer internally) or 0 to abort/end a truncated source, allocate a `PatchApply`, and call
 `patch_apply_run(&state, callback, ctx)`. The whole decode runs synchronously on the
 caller's stack: no coroutine, no fiber stack, no platform context-switch code,
 no compiler-specific stack sizing.
 
 ```c
-/* return 1 and write one blob byte to *out; return 0 at end-of-blob.
+/* return 1 and write one blob byte to *out; return 0 to abort/end a truncated source.
  * May block internally (e.g. wait on a UART ring buffer) before returning. */
 int next_byte(void *ctx, uint8_t *out);
 
@@ -126,26 +128,26 @@ around the single `patch_apply_run` call.
 
 **Event-driven producers (ISR push)** adapt through the optional
 single-producer/single-consumer byte ring in `src/patch_apply_push_adapter.h`:
-the RX interrupt calls `patch_ring_push(&ring, byte)` (then `patch_ring_eof()`
-after the last byte), and the update task calls
+the RX interrupt calls `patch_ring_push(&ring, byte)`, and the update task calls
 `patch_apply_run(&state, patch_ring_next, &ring)`. While the ring is empty the adapter
 invokes an integrator wait hook (typically WFI/WFE, an RTOS yield, or a
 transport poll) — the hook must allow the producer to run; never call
 `patch_apply_run` from the producer's own context. The adapter is deliberately
 not part of the device decoder artifact: `patch_apply.h` compiles and gets sized
-without it.
+without it. `patch_ring_eof()` is only for abort/timeout paths; a valid patch
+finishes from the body marker before the adapter needs EOF.
 
 ### Aborting a transfer
 
 To abandon a decode mid-blob — a lost link, a user cancel, a transport timeout —
-the byte callback simply returns 0. The decoder latches EOF, zero-fills the rest
-of the body, and terminates in BOUNDED time (an `O(to_size)` wind-down at worst,
-never an unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been
-modified when the abort lands, so recovery follows the same terminal-state matrix
-as any other mid-apply error (the Call Sequence table below). No special code
-path is needed: the abort return is the ordinary end-of-blob signal, so it is
-already load-bearing and gate-exercised — the truncated-blob cases in `make gate`
-drive exactly this wind-down and reject.
+the byte callback returns 0 or the push adapter's wait hook calls
+`patch_ring_eof()`. The decoder latches EOF, zero-fills any later range reads,
+and terminates in BOUNDED time (an `O(to_size)` wind-down at worst, never an
+unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been modified
+when the abort lands, so recovery follows the same terminal-state matrix as any
+other mid-apply error (the Call Sequence table below). No special code path is
+needed; the truncated-blob cases in `make gate` drive exactly this wind-down and
+reject.
 
 ## Stack Budget
 

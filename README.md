@@ -50,7 +50,7 @@ runs `make check-assets` before the matrix so a stale or partial corpus fails
 early.
 `make gate` also runs `make check-decoder-contract` (single-header/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
-suite for malformed envelopes, truncations, appended garbage, and wrong-base
+suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
 random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
 representative blobs — any wire drift fails the gate), `make check-degrade`,

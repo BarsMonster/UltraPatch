@@ -15,18 +15,19 @@
  *   producer (ISR / event handler)          consumer (update task / main loop)
  *   ------------------------------          ----------------------------------
  *   patch_ring_push(&ring, byte);           patch_ring_init(&ring, buf, cap, wait, wctx);
- *   ... last byte ...                       rc = patch_apply_run(&pa, patch_ring_next, &ring);
- *   patch_ring_eof(&ring);
+ *   ... body marker terminates ...          rc = patch_apply_run(&pa, patch_ring_next, &ring);
  *
  * patch_ring_next blocks by invoking the integrator `wait` hook while the ring is empty —
  * on a device typically WFI/WFE, an RTOS yield, or a poll of the transport. The hook MUST
  * allow the producer to run (never call patch_apply_run from the producer's own context).
+ * A valid patch completes from its range-coded body marker before EOF is needed; use
+ * patch_ring_eof() only to abort a stalled/truncated transfer.
  *
  * Concurrency contract: exactly one producer and one consumer. `w` is written only by the
- * producer, `r` only by the consumer; `eof` is the producer's too, with one sanctioned
- * exception — the consumer-side WAIT HOOK may call patch_ring_eof() on a transport timeout to
+ * producer, `r` only by the consumer; `eof` is the abort flag, normally set by the
+ * consumer-side WAIT HOOK on a transport timeout via patch_ring_eof() to
  * abort a stalled decode (setting eof is the only exit from patch_ring_next's wait loop;
- * benign, both contexts only ever store the constant 1). The indices are free-running uint32
+ * benign, all callers only ever store the constant 1). The indices are free-running uint32
  * so empty is w==r and full is w-r==cap (cap MUST be a power of two). `volatile` is sufficient
  * on single-core Cortex-M (no store reordering visible to the other context); on an SMP
  * host test drive both sides from one thread via the wait hook, or add real fences.
@@ -40,7 +41,7 @@ typedef struct {
     uint8_t *buf;                     /* caller-owned storage, cap bytes */
     uint32_t cap;                     /* power of two */
     volatile uint32_t r, w;           /* consumer-owned / producer-owned free-running indices */
-    volatile uint8_t eof;             /* producer: no more bytes after the last push */
+    volatile uint8_t eof;             /* abort/timeout: no more bytes will arrive */
     void (*wait)(void *);             /* consumer-side idle hook while the ring is empty */
     void *wait_ctx;
 } PatchRing;
@@ -60,9 +61,8 @@ static inline int patch_ring_push(PatchRing *g, uint8_t b) {
     return 1;
 }
 
-/* producer: signal end-of-blob. Call AFTER the last successful push. The consumer-side wait
- * hook may also call this to abort a stalled decode on a transport timeout (see the
- * concurrency contract above) — the store is idempotent, so either caller is safe. */
+/* Signal abort/end-of-source for a stalled or truncated transfer. A valid patch normally
+ * completes from its body marker before this is needed; the store is idempotent. */
 static inline void patch_ring_eof(PatchRing *g) { g->eof = 1; }
 
 /* consumer: the patch_apply_run callback. Pass the PatchRing as ctx.

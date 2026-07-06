@@ -105,13 +105,13 @@ static void fill_mixed(uint8_t *ops, uint32_t *v, int ns) {
 }
 
 /* ------------------------------------------------------------------------------------------- */
-/* encoder-side stream helpers (each is a full re_init -> encode -> re_flush_opt session)         */
+/* encoder-side stream helpers (each is a full re_init -> encode -> re_flush_selfterm session)    */
 /* ------------------------------------------------------------------------------------------- */
-/* Wire body = re_flush_opt() output with the always-zero LZMA leading cache byte dropped, exactly
+/* Wire body = re_flush_selfterm() output with the always-zero LZMA leading cache byte dropped, exactly
  * as the real blob assembly does (patch_generate.c: "body.d[0] is always 0 here" -> buf_write(body+1)).
  * The decoder's rc_init reads its 4 code bytes directly, assuming that drop. Assert the invariant. */
 static Buf flush_wire(REnc *r) {
-    Buf b = re_flush_opt(r);
+    Buf b = re_flush_selfterm(r);
     if (b.n == 0 || b.d[0] != 0) { fprintf(stderr, "model_diff: range-coder leading byte not 0 (n=%zu)\n", b.n); exit(1); }
     memmove(b.d, b.d + 1, b.n - 1);
     b.n--;

@@ -11,14 +11,14 @@
  * Production solution; integration and release gates are documented under docs/.
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
- * callback (which may block internally — e.g. poll a UART ring) and passes the WHOLE blob —
- * envelope (both CRCs in the header) followed by the range-coded body — through one
+ * callback (which may block internally — e.g. poll a UART ring) and passes the blob —
+ * envelope (both CRCs in the header) followed by the self-terminating range-coded body — through one
  * patch_apply_run(state, callback, ctx) call whose return is the DONE/ERROR verdict; the whole decode
  * runs synchronously on the CALLER's stack (no coroutine, no fiber, no private decode stack).
  * The decoder itself parses the envelope (sizes, direction, span) and gates on CRC32(from)
  * BEFORE the first flash write and CRC32(to) after the apply. The body is the last thing on the
- * wire (implicit length), so there is no trailer and no withhold ring — the decoder consumes to
- * EOF and rejects any trailing byte as appended garbage. A single divide-free binary range coder (LZMA bound; no
+ * wire and ends with a logical EOF marker inside the range-coded stream, so there is no trailer,
+ * length field, or withhold ring. A single divide-free binary range coder (LZMA bound; no
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
  * Event-driven producers (ISR push) integrate via the optional SPSC ring adapter in
@@ -434,12 +434,11 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 /* byte source: the integrator supplies a (possibly blocking) callback and calls           */
 /* patch_apply_run() — the whole decode runs on the caller's stack, plain calls only.      */
 /* CRC32(to) rides in the header (g_want_to), so the range-coded body is the LAST thing on  */
-/* the wire and the decoder simply consumes it to EOF — NO trailer-withhold ring. The body  */
-/* length stays implicit (optimal flush): rc_init reads 4 bytes + one per renorm, while the  */
-/* encoder's re_flush_opt trims trailing flush zeros and the wire drops the leading cache    */
-/* byte, so the decoder zero-fills the small shortfall past EOF (see next_byte) and consumes  */
-/* the entire blob. patch_apply_run then drains the callback: any byte left over is appended  */
-/* garbage (strict reject). */
+/* the wire — NO trailer-withhold ring. The body length stays implicit: after the frontier   */
+/* reaches the target image size the decoder requires one final raw range-coded EOF marker.  */
+/* The encoder also carries the range-flush bytes consumed by the decoder, so a valid blob   */
+/* finishes without asking the byte source for transport EOF; EOF from the callback is only  */
+/* the truncation/abort path.                                                                */
 /* ===================================================================================== */
 static int decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
@@ -454,7 +453,7 @@ static int pull_raw(PatchApply *pa, uint8_t*out){
     if(!g_pull_fn(g_pull_ctx,out)){ g_pull_eof=1; return 0; }
     return 1;
 }
-static uint8_t next_byte(PatchApply *pa){ uint8_t b; return pull_raw(pa,&b)?b:0; }  /* body: zero-fill past EOF */
+static uint8_t next_byte(PatchApply *pa){ uint8_t b; return pull_raw(pa,&b)?b:0; }  /* abort/truncation: zero-fill past EOF */
 static int env_byte(PatchApply *pa, uint8_t*out){ return pull_raw(pa,out); }             /* envelope: strict */
 
 static int env_u32le(PatchApply *pa, uint32_t*out){
@@ -1282,11 +1281,12 @@ static int decode_body(PatchApply *pa){
        * is not shipped for FWD — CRC32(to) validates). */
       if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=g_fp_start))) g_rcerr=1;
       if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
+      if(!g_rcerr && s_raw(pa)!=1) g_rcerr=1;  /* logical end-of-body marker */
       if(g_rcerr) return 0;
       orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
     }
-    /* body complete: the caller (patch_apply_run) still drains any appended garbage and
-     * verifies CRC32(to) (g_want_to) over the final image before declaring DONE. */
+    /* body complete: the caller verifies CRC32(to) (g_want_to) over the final image before
+     * declaring DONE. Bytes after the logical body marker belong to outer framing. */
     return 1;
 }
 
@@ -1298,24 +1298,15 @@ static void __attribute__((noinline)) lit_tree_from_hist(BitTree*t,const uint32_
 }
 
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
- * byte, or 0 at end-of-blob (it may block internally — e.g. poll a UART — before returning;
- * the decoder consumes bytes strictly in order). Returns PATCH_APPLY_DONE (image written,
- * both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds the reason). */
+ * byte, or 0 when the source aborts/ends early (it may block internally — e.g. poll a UART —
+ * before returning; the decoder consumes bytes strictly in order). Valid patches terminate at
+ * the logical EOF marker in the range-coded body and do not require callback EOF. Returns
+ * PATCH_APPLY_DONE (image written, both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds
+ * the reason). */
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
     g_pull_fn=next; g_pull_ctx=ctx; g_pull_eof=0; g_flash_touched=0;
     if(!decode_body(pa)) return PATCH_APPLY_ERROR;
-    /* APPENDED-GARBAGE STRICT REJECT (flush-slack bound = 0). A valid blob is consumed
-     * EXACTLY to EOF: the range decoder reads rc_init's 4 bytes + one byte per renorm, i.e.
-     * the same byte count the encoder produced (its renorm count is identical) plus the 4
-     * init bytes; the encoder's re_flush_opt rounds `low` up and TRIMS trailing flush zeros,
-     * and the wire drops the always-zero leading cache byte, so the encoder emits no MORE
-     * wire body bytes than the decoder reads — the decoder zero-fills the small (>=0) byte
-     * shortfall past EOF (next_byte). Hence a well-formed blob leaves ZERO callback bytes;
-     * any byte still available here is trailing garbage -> REJ_CORRUPT. (Proven by the gate:
-     * hy_enc self-verifies every emitted blob on this decoder, so a false reject here would
-     * fail the whole matrix + edge + degrade set.) */
-    { uint8_t b; if(pull_raw(pa,&b)){ g_reject=REJ_CORRUPT; return PATCH_APPLY_ERROR; } }
     if(crc32_flash(g_to_size)!=g_want_to){
         if(!g_reject) g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }

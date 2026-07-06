@@ -52,13 +52,14 @@ static void re_raw(REnc *r, int bit) {
     while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
 }
 
-static Buf re_flush_opt(REnc *r) {
+static Buf re_flush_selfterm(REnc *r) {
     int t = bitlen32(r->range) - 1;
     uint64_t mask = (1ull << t) - 1ull;
     if (r->low & mask) r->low = (r->low + (1ull << t)) & ~mask;
-    size_t base = r->out.n;
     for (int i = 0; i < 5; i++) re_shift_low(r);
-    while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
+    /* Keep trailing zero flush bytes. Older EOF-terminated blobs trimmed them and let the
+     * decoder synthesize zero-fill from callback EOF; the self-terminating body must carry
+     * those bytes so a valid decode never asks the transport for EOF. */
     Buf b = r->out;
     r->out = (Buf){0};
     return b;

@@ -109,14 +109,6 @@ expect_reject_unchanged body_flip "$tmp/body_flip.blob" "$base_bin"
 head -c "$(( $(wc -c < "$tmp/grow.blob") - 4 ))" "$tmp/grow.blob" > "$tmp/trunc_tail4.blob"
 expect_reject_unchanged trunc_tail4 "$tmp/trunc_tail4.blob" "$base_bin"
 
-# Appended garbage: the range body is the last thing on the wire; a valid blob is consumed
-# exactly to EOF, so patch_apply_run drains the callback and rejects any leftover byte. Append
-# well past the range-coder flush zero-fill window (<=4 bytes; see patch_apply.h) so the drain
-# sees leftover bytes and rejects (REJ_CORRUPT) regardless of that window.
-cp "$tmp/grow.blob" "$tmp/appended.blob"
-zeros 16 >> "$tmp/appended.blob"
-expect_reject_unchanged appended_garbage "$tmp/appended.blob" "$base_bin"
-
 expect_reject_unchanged wrong_current_image "$tmp/grow.blob" "$one_bin"
 
 printf 'malformed_rejects=%u\n' "$rejects"
