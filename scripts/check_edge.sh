@@ -9,7 +9,7 @@
 #
 # Acceptance model: ultrapatch SELF-VERIFIES every emitted patch on the reference decoder, so for
 # each pair either (a) encode succeeds -> the host decoder MUST round-trip the blob
-# byte-exactly (direct pull AND byte-at-a-time via the push adapter), or (b) encode refuses
+# byte-exactly, or (b) encode refuses
 # cleanly (nonzero exit, no blob) -> logged as a refusal. Crashes, hangs, or wrong output
 # anywhere = failure.
 #
@@ -37,13 +37,8 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
   if ./ultrapatch "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
-    ok=1
-    for mode in "" "--byte-mode"; do   # direct pull, then byte-at-a-time via the push adapter
-      cp "$from" "$tmp/$name.mem"
-      if ! ./ultrapatch --decode $mode "$tmp/$name.mem" "$blob" >/dev/null 2>&1; then ok=0; fi
-      if ! cmp -s "$tmp/$name.mem" "$to"; then ok=0; fi
-    done
-    if [ "$ok" = 1 ]; then
+    cp "$from" "$tmp/$name.mem"
+    if ./ultrapatch --decode "$tmp/$name.mem" "$blob" >/dev/null 2>&1 && cmp -s "$tmp/$name.mem" "$to"; then
       roundtrips=$((roundtrips + 1))
     else
       echo "edge FAILURE: $name encoded but did not round-trip" >&2

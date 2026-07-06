@@ -22,20 +22,12 @@ static uint32_t nvm_max_row_erases(void){ uint32_t m=0; for(uint32_t i=0;i<sc_nr
 static long nvm_frontier_inversions(void){ return sc_finv; }
 
 #include "patch_apply.h"
-#include "patch_apply_push_adapter.h"
 
 typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
 static int pull_next(void *c, uint8_t *out){
     PullCtx *p=(PullCtx*)c;
     if(p->i>=p->n) return 0;
     *out=p->d[p->i++]; return 1;
-}
-
-typedef struct { const uint8_t *d; size_t n, i; PatchRing *r; long feeds; int eof_signaled; } FeedCtx;
-static void feed_one(void *c){
-    FeedCtx *f=(FeedCtx*)c;
-    if(f->i < f->n){ if(patch_ring_push(f->r, f->d[f->i])){ f->i++; f->feeds++; } }
-    else { f->eof_signaled=1; patch_ring_eof(f->r); }
 }
 
 const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
@@ -62,7 +54,7 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     return NULL;
 }
 
-int decode_a1(const char *image_path, const char *patch_path, int byte_mode){
+int decode_a1(const char *image_path, const char *patch_path){
     FILE*bf=fopen(patch_path,"rb"); if(!bf){perror("patch");return 2;}
     fseek(bf,0,SEEK_END); long bsz=ftell(bf); fseek(bf,0,SEEK_SET);
     if(bsz<12){ fprintf(stderr,"blob too short\n"); fclose(bf); return 1; }
@@ -79,24 +71,8 @@ int decode_a1(const char *image_path, const char *patch_path, int byte_mode){
       nvm_init(tmp,(uint32_t)fsz,span,(uint32_t)fsz); free(tmp); }
 
     PatchApply pa;
-    int rc;
-    if(byte_mode){
-        uint8_t rbuf[8]; PatchRing ring; FeedCtx fc={blob,(size_t)bsz,0,&ring,0,0};
-        if(!patch_ring_init(&ring, rbuf, sizeof rbuf, feed_one, &fc)){
-            fprintf(stderr,"patch ring init failed\n");
-            fclose(mf); free(sc_flash); free(blob); return 2;
-        }
-        rc=patch_apply_run(&pa, patch_ring_next,&ring);
-        if(rc==PATCH_APPLY_DONE){
-            if(fc.feeds!=(long)bsz || fc.eof_signaled){
-                fprintf(stderr,"adapter streaming check FAILED: fed %ld of %ld bytes, eof=%d\n",fc.feeds,bsz,fc.eof_signaled);
-                fclose(mf); free(sc_flash); free(blob); return 1;
-            }
-            fprintf(stderr,"adapter streaming OK: %ld single-byte feeds over %ld blob bytes\n",fc.feeds,bsz);
-        }
-    } else {
-        PullCtx pc={blob,(size_t)bsz,0}; rc=patch_apply_run(&pa, pull_next,&pc);
-    }
+    PullCtx pc={blob,(size_t)bsz,0};
+    int rc=patch_apply_run(&pa, pull_next,&pc);
     if(rc==PATCH_APPLY_ERROR){ int rj=patch_apply_reject(&pa); if(!rj) rj=REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
@@ -120,18 +96,15 @@ int decode_a1(const char *image_path, const char *patch_path, int byte_mode){
 
 #ifdef PATCH_APPLY_DEMO_MAIN
 static void decode_usage(const char *prog){
-    fprintf(stderr, "usage: %s --decode [--byte-mode] <image> <patch>\n", prog);
+    fprintf(stderr, "usage: %s --decode <image> <patch>\n", prog);
 }
 
 int main(int argc,char**argv){
-    int byte_mode=0;
     const char *pos[2]={0};
     int npos=0;
     for(int i=1;i<argc;i++){
         if(strcmp(argv[i],"--decode")==0){
             continue;
-        } else if(strcmp(argv[i],"--byte-mode")==0){
-            byte_mode=1;
         } else if(strcmp(argv[i],"-h")==0 || strcmp(argv[i],"--help")==0){
             decode_usage(argv[0]); return 0;
         } else if(argv[i][0]=='-' && argv[i][1]){
@@ -142,6 +115,6 @@ int main(int argc,char**argv){
         }
     }
     if(npos!=2){ decode_usage(argv[0]); return 2; }
-    return decode_a1(pos[0],pos[1],byte_mode);
+    return decode_a1(pos[0],pos[1]);
 }
 #endif

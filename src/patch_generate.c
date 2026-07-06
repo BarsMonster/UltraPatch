@@ -133,21 +133,20 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
 static void usage(FILE *out, const char *prog) {
     fprintf(out,
             "usage: %s [--encode] <from_image> <to_image> <patch>\n"
-            "       %s --decode [--byte-mode] <image> <patch>\n"
+            "       %s --decode <image> <patch>\n"
             "\n"
             "Modes:\n"
             "  --encode      Create a patch; this is the default mode.\n"
             "  --decode      Apply a patch to <image> in place using the host decoder wrapper.\n"
             "\n"
             "Options:\n"
-            "  --byte-mode   With --decode, stream through the optional push adapter.\n"
             "  -h, --help    Show this usage text.\n",
             prog, prog);
 }
 
 #ifdef ULTRAPATCH_MAIN
 int main(int argc, char **argv) {
-    int decode = 0, mode_set = 0, byte_mode = 0;
+    int decode = 0, mode_set = 0;
     const char *pos[3] = {0};
     int npos = 0;
     for (int i = 1; i < argc; i++) {
@@ -157,8 +156,6 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--encode") == 0) {
             if (mode_set && decode) { usage(stderr, argv[0]); return 2; }
             decode = 0; mode_set = 1;
-        } else if (strcmp(argv[i], "--byte-mode") == 0) {
-            byte_mode = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout, argv[0]);
             return 0;
@@ -172,9 +169,9 @@ int main(int argc, char **argv) {
     }
     if (decode) {
         if (npos != 2) { usage(stderr, argv[0]); return 2; }
-        return decode_a1(pos[0], pos[1], byte_mode);
+        return decode_a1(pos[0], pos[1]);
     }
-    if (byte_mode || npos != 3) {
+    if (npos != 3) {
         usage(stderr, argv[0]);
         return 2;
     }

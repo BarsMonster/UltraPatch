@@ -119,3 +119,20 @@ void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v) {
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
 void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
+
+void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko) {
+    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &m->lit0[c]);
+    lit_tree_seed_e(frm, from_size, 1, &m->lit1);
+    a1_fl_init(&m->flag);
+    ug_init_e(&m->gd, 'r', kd);
+    ug_init_e(&m->gl, 'g', 0);
+    ug_seed_cont_e(&m->gl, RC_SEED_DEPTH_GL);
+    ug_init_e(&m->gs, 'g', 0);
+    ug_init_e(&m->go, 'r', ko);
+    ug_init_e(&m->glo, 'g', 0);
+    m->outb = RC_PHALF;
+    m->rep0[0] = RC_REP0_INIT;
+    m->rep0[1] = RC_REP0_INIT;
+    m->rep0h = 0;
+    m->last_dist = 0;
+}

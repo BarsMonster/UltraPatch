@@ -306,17 +306,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                      const uint32_t *mb, const int32_t *mv, int mn) {
     Models M;
     memset(&M, 0, sizeof(M));
-    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &M.lit0[c]);
-    lit_tree_seed_e(frm, from_size, 1, &M.lit1);
-    a1_fl_init(&M.flag);
+    models_init_content(&M, frm, from_size, kd, ko);
     a1_bt_init(&M.dval);
-    ug_init_e(&M.gd, 'r', kd);
-    ug_init_e(&M.gl, 'g', 0);
-    ug_seed_cont_e(&M.gl, RC_SEED_DEPTH_GL);   /* matches len>=3 => M_gl first unary bit always continue; depth in rc_models.h */
-    ug_init_e(&M.gs, 'g', 0);
-    ug_init_e(&M.go, 'r', ko);
-    ug_init_e(&M.glo, 'g', 0);
-    M.outb = RC_PHALF;
     ug_init_e(&M.pg, 'g', 0);
     ug_init_e(&M.pgn, 'g', 0);
     ug_init_e(&M.pg2, 'g', 0);
@@ -330,7 +321,6 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     a1_idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    M.rep0[0] = M.rep0[1] = RC_REP0_INIT; M.rep0h = 0; M.last_dist = 0;   /* rep0 prior toward 0; mirror patch_apply */
     g_emit_overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }

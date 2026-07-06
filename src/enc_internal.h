@@ -47,6 +47,7 @@ typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; size_t orig; } OpWalkEnt;
+typedef void (*OpWalkByteFn)(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte);
 typedef struct { int32_t from_offset, to_address, n; int64_t *values; } Block;
 typedef struct { Block *v; size_t n, cap; } BlockVec;
 typedef struct { uint32_t addr; int kind; int64_t delta; } FieldDelta;
@@ -134,6 +135,7 @@ void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 void blockvec_array_free(BlockVec blocks[STREAM_N]);
 OpWalkEnt *opwalk_build(const OpVec *ops);
+void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user);
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
 }
@@ -195,6 +197,7 @@ void ug_seed_cont_e(UGE *g, int depth);
 void ug_encode(UGE *g, REnc *r, uint32_t v);
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
+void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
 
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
@@ -228,6 +231,6 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
                 PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out);
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
-int decode_a1(const char *image_path, const char *patch_path, int byte_mode);
+int decode_a1(const char *image_path, const char *patch_path);
 
 #endif /* A1_ENC_INTERNAL_H */

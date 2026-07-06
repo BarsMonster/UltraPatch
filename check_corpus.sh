@@ -44,7 +44,7 @@ cm_work() {
   ./ultrapatch "$from/watch.bin" "$to/watch.bin" "$d/p.blob" >/dev/null 2>&1
   sz=$(wc -c < "$d/p.blob")
   cp "$from/watch.bin" "$d/mem.bin"
-  ./ultrapatch --decode --byte-mode "$d/mem.bin" "$d/p.blob" >/dev/null 2>"$d/log"
+  ./ultrapatch --decode "$d/mem.bin" "$d/p.blob" >/dev/null 2>"$d/log"
   if cmp -s "$d/mem.bin" "$to/watch.bin"; then ok=1; else ok=0; fi
   j=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$d/log")
   v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$d/log")

@@ -9,7 +9,7 @@ Usage:  python3 make_opc_pair.py OUTDIR
 Then:   A1_DEGRADE_STATS=1 ./ultrapatch OUTDIR/from/watch.bin OUTDIR/to/watch.bin blob
                                                                     # prints opc_splits_sweep>=1
         cp OUTDIR/from/watch.bin mem.bin
-        ./ultrapatch --decode --byte-mode mem.bin blob              # rc 0, mem == to/watch.bin
+        ./ultrapatch --decode mem.bin blob                          # rc 0, mem == to/watch.bin
 
 Mechanism (why it works):
   - The image is a big BL-dense `dispatch` (988 calls) over 247 leaf functions, each doing K=8

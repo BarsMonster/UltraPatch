@@ -99,11 +99,11 @@ JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0
 [ -n "$JBUDGET" ] || { echo "check_degrade: RC_JSLOTS_DEFAULT not found in src/patch_config.h" >&2; exit 2; }
 
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
-# production D=2 build. Same source (patch_apply_demo.c), its own binary. Used only to prove
+# production D=2 build. Same source as the host backend, its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
 D1="$tmp/ultrapatch_d1_decode"
 if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -DOUTROW_DEPTH=1 -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L \
-      -Isrc src/patch_apply_demo.c -o "$D1" 2>"$tmp/d1build.log"; then
+      -Isrc src/patch_host_backend.c -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
 fi
@@ -120,10 +120,10 @@ dpin jdeg synth_journal_degrade            # == golden pin (swap 2048 88); fixtu
 if enc jdeg; then
   dj=$(sed -n 's/.*deg_journal=\([0-9]\).*/\1/p' "$tmp/jdeg.deg")
   pn=$(sed -n 's/.*pres_needed=\([0-9]*\).*/\1/p' "$tmp/jdeg.deg")
-  r1=$(dec ./ultrapatch jdeg --byte-mode); r0=$(dec ./ultrapatch jdeg "")   # push adapter + direct pull
-  j_peak=${r1#* }
+  r0=$(dec ./ultrapatch jdeg "")
+  j_peak=${r0#* }
   [ "$dj" = 1 ] || bad "journal degradation did not engage (deg_journal=$dj, pres_needed=$pn)"
-  [ "${r1%% *}" = OK ] && [ "${r0%% *}" = OK ] || bad "journal-degraded blob did not round-trip ($r1 / $r0)"
+  [ "${r0%% *}" = OK ] || bad "journal-degraded blob did not round-trip ($r0)"
   [ "$j_peak" = "$JBUDGET" ] || bad "journal peak $j_peak != budget $JBUDGET on the degraded blob"
   note "(a) journal degrade: deg_journal=$dj pres_needed=$pn journal_peak=$j_peak/$JBUDGET blob=$(wc -c <"$tmp/jdeg.blob")B"
 else
@@ -148,7 +148,7 @@ if A1_DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/w
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")
   cp "$IMG/img_00_n3/watch.bin" "$tmp/opc.mem"
-  if ./ultrapatch --decode --byte-mode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
+  if ./ultrapatch --decode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
   opc_n=$opc_sweep
   [ "${opc_sweep:-0}" -ge 1 ] || bad "OPC op-split never engaged in the plan sweep (opc_splits_sweep=$opc_sweep)"
   [ "$rt" = OK ] || bad "OPC pair did not round-trip ($rt)"
@@ -181,7 +181,7 @@ print("OVERLONG" if (n > 1 and last == 0) else "canonical")
 EOF
 )
   natflag=$(sed -n 's/.*natural=\([0-9]\).*/\1/p' "$tmp/dir.deg")
-  r=$(dec ./ultrapatch dir --byte-mode)
+  r=$(dec ./ultrapatch dir "")
   dir_flip=$ov
   [ "$ov" = OVERLONG ] || bad "direction pair did not emit the overlong size-delta uLEB ($ov)"
   [ "$natflag" = 0 ] || bad "encoder reports natural=$natflag for the flipped pair (expected 0)"
@@ -200,8 +200,8 @@ fi
 # =========================================================================================
 dpair rowwin rshift 8192 555 128 6000 32
 if enc rowwin; then
-  r2=$(dec ./ultrapatch rowwin --byte-mode)
-  r1=$(dec "$D1" rowwin --byte-mode)
+  r2=$(dec ./ultrapatch rowwin "")
+  r1=$(dec "$D1" rowwin "")
   rw="D2:${r2%% *}_D1:${r1%% *}"
   [ "${r2%% *}" = OK ] || bad "row-window blob did not round-trip on the production D=2 decoder ($r2)"
   [ "${r2#* }" = 0 ] || bad "row-window blob used the journal (peak ${r2#* }); expected pure window reliance (0)"
@@ -220,7 +220,7 @@ fi
 # =========================================================================================
 dpair bigspan highswap 393216 4096 88
 if enc bigspan; then
-  r=$(dec ./ultrapatch bigspan --byte-mode)
+  r=$(dec ./ultrapatch bigspan "")
   bigspan="${r%% *}_j${r#* }"
   [ "${r%% *}" = OK ] || bad "big-span blob did not round-trip ($r)"
   note "(e) big span: roundtrip=${r%% *} journal_peak=${r#* }/$JBUDGET blob=$(wc -c <"$tmp/bigspan.blob")B"

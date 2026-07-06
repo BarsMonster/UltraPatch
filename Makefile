@@ -34,11 +34,11 @@ NVM_EMU := src/nvm_emu.inc
 ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h src/enc_internal.h
-# The host backend owns the single reference-decoder copy used by both encode
-# selfcheck and CLI decode. patch_apply_demo.c is only a standalone wrapper.
+# The host backend owns the single reference-decoder copy used by encode
+# selfcheck, CLI decode, and standalone decoder builds.
 HOST_BACKEND_SRC := src/patch_host_backend.c
 ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) src/arm_cortex_m4.c $(HOST_BACKEND_SRC) $(DIVSUF)
-DEC_SRCS := src/patch_apply_demo.c
+DEC_SRCS := $(HOST_BACKEND_SRC)
 TOOL_SRCS := $(ENC_SRCS)
 
 FIXTURES ?= test-bench/fixtures
@@ -103,11 +103,11 @@ check-internal: all-internal
 	grep -q '^usage: .*ultrapatch' "$$tmp/noargs.err"; \
 	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
 	./ultrapatch "$(FIXTURES)/v0_base/watch.bin" "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/grow.blob"; \
-	./ultrapatch --decode --byte-mode "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
+	./ultrapatch --decode "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
 	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
 	./ultrapatch "$(FIXTURES)/v1_one_face/watch.bin" "$(FIXTURES)/v0_base/watch.bin" "$$tmp/revert.blob"; \
-	./ultrapatch --decode --byte-mode "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
+	./ultrapatch --decode "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
 	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
 	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
 	revert_sz=$$(wc -c < "$$tmp/revert.blob"); \

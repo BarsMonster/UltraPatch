@@ -7,18 +7,14 @@ Production code lives under `src/`, with third-party code under `vendor/`:
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder entry point;
   ship it with `src/rc_models.h` and `src/patch_config.h`.
 - `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
-  (ISR push) producers; not part of the device decoder artifact.
+  (ISR push) producers; not part of the device decoder artifact or host CLI.
 - `src/patch_host_backend.c`: shared host reference-decoder backend used by
   `ultrapatch --decode` and encoder self-verification, including the host NVM
   emulator.
-- `src/patch_apply_demo.c`: standalone compatibility wrapper for building a
-  decode-only host harness.
 - `src/patch_generate.c`: host-side `ultrapatch` CLI entry point. The encoder is
   the default mode and is built from normal internal `src/enc_*.c` modules (`enc_util`,
   `enc_elf`, `enc_bsdiff`, `enc_field`, `enc_rc`, `enc_lz`, `enc_emit`,
   `enc_plan`). Encoder complexity is deliberately host-side.
-- `src/patch_selfcheck.c`: compatibility wrapper for direct builds of the
-  historical selfcheck source.
 - `vendor/libdivsufsort/`: vendored C suffix sorter used by the encoder.
 - `src/rc_models.h`: shared wire-model constants and packed model helpers.
 - `src/patch_config.h`: shared build-time configuration defaults and mirror knobs.
@@ -34,7 +30,7 @@ CLI:
 
 ```sh
 ./ultrapatch [--encode] <from_image> <to_image> <patch>
-./ultrapatch --decode [--byte-mode] <image> <patch>
+./ultrapatch --decode <image> <patch>
 ./ultrapatch --help
 ```
 

@@ -70,6 +70,65 @@ static int ivec_has(const IVec *v, int32_t x) {
     return lo < v->n && v->v[lo] == x;
 }
 
+typedef struct {
+    const EncCtx *ctx;
+    const int32_t *readarr;
+    uint32_t from_size;
+    uint8_t *pres;
+    int32_t wi;
+} PreserveIndexWalk;
+
+static void preserve_index_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
+    PreserveIndexWalk *pw = (PreserveIndexWalk *)user;
+    int32_t tpw = we->tp + off;
+    (void)is_diff;
+    (void)byte;
+    if (0 <= tpw && (uint32_t)tpw < pw->from_size) {
+        if (pw->ctx->fwd) {
+            if (pw->readarr[tpw] > tpw) pw->pres[pw->wi] = 1;
+        } else {
+            if (pw->readarr[tpw] >= 0 && pw->readarr[tpw] < tpw) pw->pres[pw->wi] = 1;
+        }
+    }
+    pw->wi++;
+}
+
+typedef struct {
+    const EncCtx *ctx;
+    const uint8_t *frm, *true_to, *presset, *ohas, *oval;
+    uint8_t *buf, *jhas, *jval;
+    uint32_t from_size;
+    OpPC *pc;
+    int32_t wi;
+} PreserveCorrWalk;
+
+static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
+    PreserveCorrWalk *pw = (PreserveCorrWalk *)user;
+    int32_t tp = we->tp + off;
+    int32_t fp = is_diff ? we->fp + off : -1;
+    if (pw->presset[pw->wi]) ivec_push(&pw->pc->pres, off);
+    if (pw->presset[pw->wi] && 0 <= tp && (uint32_t)tp < pw->from_size && !pw->jhas[tp]) {
+        pw->jhas[tp] = 1;
+        pw->jval[tp] = pw->buf[tp];
+    }
+    uint8_t produced;
+    if (pw->ohas[tp]) produced = pw->oval[tp];
+    else {
+        uint8_t src = 0;
+        if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
+            int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
+            src = pw->jhas[fp] ? pw->jval[fp]
+                : ((behind && a1_row_covered(pw->ctx, fp, tp)) ? pw->frm[fp] : pw->buf[fp]);
+        }
+        produced = (uint8_t)(byte + src);
+    }
+    uint8_t want = pw->true_to[tp];
+    uint8_t corr = (uint8_t)(want - produced);
+    if (corr) corr_push(&pw->pc->corr, off, corr);
+    pw->buf[tp] = want;
+    pw->wi++;
+}
+
 /* o==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
  * EV_SBL) — coerce_reloc_literals uses that to detect fields before their literals are zeroed. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
@@ -524,37 +583,13 @@ uint8_t *preserve_indices(const EncCtx *ctx, const OpVec *ops, uint32_t from_siz
         fp += o->diff_len + o->adj;
     }
     uint8_t *pres = (uint8_t *)xcalloc(to_size ? to_size : 1, 1);
-    int32_t wi = 0;
-    if (FWD) {
-        tp = fp = 0;
-        for (size_t oi = 0; oi < ops->n; oi++) {
-            const Op *o = &ops->v[oi];
-            for (int32_t k = 0; k < o->diff_len; k++, wi++) {
-                int32_t tpw = tp + k;
-                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
-            }
-            for (int32_t e = 0; e < o->extra_len; e++, wi++) {
-                int32_t tpw = tp + o->diff_len + e;
-                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] > tpw) pres[wi] = 1;
-            }
-            tp += o->diff_len + o->extra_len;
-            fp += o->diff_len + o->adj;
-        }
-    } else {
-        OpWalkEnt *m = opwalk_build(ops);
-        for (size_t rr = ops->n; rr-- > 0;) {
-            const Op *o = m[rr].o;
-            for (int32_t e = o->extra_len - 1; e >= 0; e--, wi++) {
-                int32_t tpw = m[rr].tp + o->diff_len + e;
-                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
-            }
-            for (int32_t k = o->diff_len - 1; k >= 0; k--, wi++) {
-                int32_t tpw = m[rr].tp + k;
-                if (0 <= tpw && (uint32_t)tpw < from_size && readarr[tpw] >= 0 && readarr[tpw] < tpw) pres[wi] = 1;
-            }
-        }
-        free(m);
+    OpWalkEnt *m = opwalk_build(ops);
+    PreserveIndexWalk iw = { ctx, readarr, from_size, pres, 0 };
+    for (size_t step = 0; step < ops->n; step++) {
+        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
+        opwalk_each_byte(FWD, we, preserve_index_byte, &iw);
     }
+    free(m);
     free(readarr);
     return pres;
 }
@@ -591,47 +626,17 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, const uint8_t
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    int32_t wi = 0;
-#define SIM_WRITE(TP, FP, ISD, DB, OFF) do { \
-        int32_t _tp = (TP), _fp = (FP); \
-        int32_t _off = (OFF); \
-        if (presset[wi]) ivec_push(&pc->pres, _off); \
-        if (presset[wi] && 0 <= _tp && (uint32_t)_tp < from_size && !jhas[_tp]) { jhas[_tp] = 1; jval[_tp] = buf[_tp]; } \
-        uint8_t produced; \
-        if (ohas[_tp]) produced = oval[_tp]; \
-        else { uint8_t src = 0; if ((ISD) && 0 <= _fp && (uint32_t)_fp < from_size) { \
-                 int _beh = FWD ? (_fp < _tp) : (_fp > _tp); \
-                 src = jhas[_fp] ? jval[_fp] \
-                     : ((_beh && a1_row_covered(ctx, _fp, _tp)) ? frm[_fp] : buf[_fp]); } \
-               produced = (uint8_t)((DB) + src); } \
-        uint8_t want = true_to[_tp]; \
-        uint8_t c = (uint8_t)(want - produced); \
-        if (c) corr_push(&pc->corr, _off, c); \
-        buf[_tp] = want; wi++; \
-    } while (0)
+    PreserveCorrWalk cw = { ctx, frm, true_to, presset, ohas, oval, buf, jhas, jval, from_size, NULL, 0 };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
-        const Op *o = we->o;
         OpPC *pc = &out[step];
-        if (FWD) {
-            for (int32_t k = 0; k < o->diff_len; k++)
-                SIM_WRITE(we->tp + k, we->fp + k, 1, o->diff[k], k);
-            for (int32_t e = 0; e < o->extra_len; e++) {
-                int32_t off = o->diff_len + e;
-                SIM_WRITE(we->tp + off, -1, 0, o->extra[e], off);
-            }
-        } else {
-            for (int32_t e = o->extra_len - 1; e >= 0; e--) {
-                int32_t off = o->diff_len + e;
-                SIM_WRITE(we->tp + off, -1, 0, o->extra[e], off);
-            }
-            for (int32_t k = o->diff_len - 1; k >= 0; k--)
-                SIM_WRITE(we->tp + k, we->fp + k, 1, o->diff[k], k);
+        cw.pc = pc;
+        opwalk_each_byte(FWD, we, preserve_corr_byte, &cw);
+        if (!FWD) {
             if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-#undef SIM_WRITE
     free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m);
     return out;
 }

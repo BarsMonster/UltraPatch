@@ -49,6 +49,28 @@ static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
     if (cv > worstv || (cv == worstv && c.dist < cands[worst].dist)) cands[worst] = c;
 }
 
+enum { HASH3_SIZE = 1u << 24 };
+
+static int32_t *hash3_heads_new(void) {
+    int32_t *head = (int32_t *)xmalloc(HASH3_SIZE * sizeof(*head));
+    for (size_t i = 0; i < HASH3_SIZE; i++) head[i] = -1;
+    return head;
+}
+
+static int32_t *hash3_prev_new(size_t n) {
+    int32_t *prev = (int32_t *)xmalloc((n ? n : 1) * sizeof(*prev));
+    for (size_t i = 0; i < n; i++) prev[i] = -1;
+    return prev;
+}
+
+static uint32_t hash3_key_fwd(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+}
+
+static uint32_t hash3_key_rev(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[-1] << 8) | ((uint32_t)p[-2] << 16);
+}
+
 /* ---- out-match candidates (D2): matches of the content stream against the ALREADY-PRODUCED
  * output image. olim[i] bounds the usable output window for a token starting at content position
  * i (conservative: fixed at the op that consumes position i, valid for the whole token):
@@ -64,17 +86,16 @@ static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
 /* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for grow —
  * grow content carries extras byte-REVERSED and the decoder replays in write direction). */
 static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_out, int32_t **prev_out) {
-    int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
-    for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
-    int32_t *prev = (int32_t *)xmalloc((src_n ? src_n : 1) * sizeof(int32_t));
+    int32_t *head = hash3_heads_new();
+    int32_t *prev = hash3_prev_new(src_n);
     if (FWD) {
         for (size_t i = 0; i + 3 < src_n; i++) {
-            uint32_t key = (uint32_t)src[i] | ((uint32_t)src[i + 1] << 8) | ((uint32_t)src[i + 2] << 16);
+            uint32_t key = hash3_key_fwd(src + i);
             prev[i] = head[key]; head[key] = (int32_t)i;
         }
     } else {
         for (size_t i = 2; i < src_n; i++) {
-            uint32_t key = (uint32_t)src[i] | ((uint32_t)src[i - 1] << 8) | ((uint32_t)src[i - 2] << 16);
+            uint32_t key = hash3_key_rev(src + i);
             prev[i] = head[key]; head[key] = (int32_t)i;
         }
     }
@@ -97,7 +118,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
         oc_index(to, to_n, FWD, &head, &prev);
         oc_index(frm, from_n, FWD, &fhead, &fprev);
         for (size_t i = 0; i + 4 <= n; i++) {
-            uint32_t key = (uint32_t)content[i] | ((uint32_t)content[i + 1] << 8) | ((uint32_t)content[i + 2] << 16);
+            uint32_t key = hash3_key_fwd(content + i);
             int visits = 0;
             uint32_t lim = olim[i];
             for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
@@ -227,20 +248,9 @@ void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t 
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                            const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
-    A1BitTree lit0[LIT0_CTX], lit1;        /* mirror the wire's order-1 tag0 trees + single tag1 tree */
-    A1Flag1 flag;
-    UGE gs, gl, gd;
-    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &lit0[c]);
-    lit_tree_seed_e(frm, from_size, 1, &lit1);
-    a1_fl_init(&flag);
-    ug_init_e(&gd, 'r', dk);
-    ug_init_e(&gl, 'g', 0);
-    ug_seed_cont_e(&gl, RC_SEED_DEPTH_GL);   /* mirror the wire: matches are len>=3, so M_gl's first unary bit is always continue */
-    ug_init_e(&gs, 'g', 0);
-    UGE go, glo;
-    ug_init_e(&go, 'r', ko);
-    ug_init_e(&glo, 'g', 0);
-    uint16_t outb = RC_PHALF;
+    Models M;
+    memset(&M, 0, sizeof(M));
+    models_init_content(&M, frm, (uint32_t)from_size, dk, ko);
     uint64_t oy_cost = 0, on_cost = 0; uint32_t oy_n = 0, on_n = 0;
     uint32_t oexp = pt->oexp0;                    /* caller pre-sets oexp0 (FWD ? 0 : to_size) */
     uint64_t op_cost = 0; uint32_t op_n = 0;
@@ -248,49 +258,49 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     /* token count (seq->n) is no longer on the wire (Feature 7A); the old raw count bits touched
      * no adaptive model, so dropping them leaves every price unchanged. */
     /* Mirror the rep0 last-distance flag so its price reflects real adaptation. */
-    uint16_t rep0[2] = { RC_REP0_INIT, RC_REP0_INIT }; int rep0h = 0; int32_t last_dist = 0;
     uint64_t r0y_cost = 0, r0n_cost = 0; uint32_t r0y_n = 0, r0n_n = 0;
     uint8_t prevlit = 0;                 /* true previous content-stream byte (order-1 tag0 context) */
     int last_span = 0;                   /* mirror the wire: match flag implicit after a span */
     for (size_t i = 0; i < seq->n; i++) {
         Token t = seq->v[i];
         if (t.type == 'S') {
-            fl_encode(&flag, &r, 0);
+            fl_encode(&M.flag, &r, 0);
             last_span = 1;
-            ug_encode(&gs, &r, (uint32_t)t.len - 1u);
+            ug_encode(&M.gs, &r, (uint32_t)t.len - 1u);
             for (int32_t j = 0; j < t.len; j++) {
                 size_t cp = (size_t)t.start + (size_t)j;
                 uint8_t byte = content[cp];
-                bt_encode(tags[cp] ? &lit1 : &lit0[LIT0_SEL(prevlit)], &r, byte, tags[cp] ? RC_LIT1_RATE : RC_LIT0_RATE);
+                bt_encode(tags[cp] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &r, byte,
+                          tags[cp] ? RC_LIT1_RATE : RC_LIT0_RATE);
                 prevlit = byte;
             }
         } else if (t.type == 'O') {
-            if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
-            else fl_encode(&flag, &r, 1);
-            r0n_cost += bit_price(rep0[rep0h], 0); r0n_n++;
-            re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
-            oy_cost += bit_price(outb, 1); oy_n++;
-            re_bit(&r, &outb, 1, RC_S_BIT_RATE);
+            if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; }
+            else fl_encode(&M.flag, &r, 1);
+            r0n_cost += bit_price(M.rep0[M.rep0h], 0); r0n_n++;
+            re_bit(&r, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0;
+            oy_cost += bit_price(M.outb, 1); oy_n++;
+            re_bit(&r, &M.outb, 1, RC_S_BIT_RATE);
             { uint32_t zv = rc_outmatch_delta((uint32_t)t.dist, oexp);
-              op_cost += ug_price(&go, zv); op_n++;
-              ug_encode(&go, &r, zv);
+              op_cost += ug_price(&M.go, zv); op_n++;
+              ug_encode(&M.go, &r, zv);
               oexp = rc_outmatch_next_expect(pt->fwd, (uint32_t)t.dist, (uint32_t)t.len); }
-            ug_encode(&glo, &r, (uint32_t)t.len - RC_OUTMATCH_MIN);
+            ug_encode(&M.glo, &r, (uint32_t)t.len - RC_OUTMATCH_MIN);
         } else {
-            if (last_span) { flag.h = ((flag.h << 1) | 1) & 3; last_span = 0; }
-            else fl_encode(&flag, &r, 1);
-            if (t.dist == last_dist) {
-                r0y_cost += bit_price(rep0[rep0h], 1); r0y_n++;
-                re_bit(&r, &rep0[rep0h], 1, RC_S_BIT_RATE); rep0h = 1;
+            if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; }
+            else fl_encode(&M.flag, &r, 1);
+            if (t.dist == M.last_dist) {
+                r0y_cost += bit_price(M.rep0[M.rep0h], 1); r0y_n++;
+                re_bit(&r, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1;
             } else {
-                r0n_cost += bit_price(rep0[rep0h], 0); r0n_n++;
-                re_bit(&r, &rep0[rep0h], 0, RC_S_BIT_RATE); rep0h = 0;
-                on_cost += bit_price(outb, 0); on_n++;
-                re_bit(&r, &outb, 0, RC_S_BIT_RATE);
-                ug_encode(&gd, &r, (uint32_t)t.dist - 1u);
-                last_dist = t.dist;
+                r0n_cost += bit_price(M.rep0[M.rep0h], 0); r0n_n++;
+                re_bit(&r, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0;
+                on_cost += bit_price(M.outb, 0); on_n++;
+                re_bit(&r, &M.outb, 0, RC_S_BIT_RATE);
+                ug_encode(&M.gd, &r, (uint32_t)t.dist - 1u);
+                M.last_dist = t.dist;
             }
-            ug_encode(&gl, &r, (uint32_t)t.len - 1u);
+            ug_encode(&M.gl, &r, (uint32_t)t.len - 1u);
         }
         /* order-1 context: prevlit = the last content byte this token produced (t.start is the
          * content position of every token kind; spans set it per-byte above to the same value). */
@@ -302,8 +312,8 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware
      * DP (which tracks a forward flag history) value match/span transitions accurately. */
     for (int h = 0; h < 4; h++) {
-        pt->fspan_c[h]  = bit_price(flag.m[h], 0);
-        pt->fmatch_c[h] = bit_price(flag.m[h], 1);
+        pt->fspan_c[h]  = bit_price(M.flag.m[h], 0);
+        pt->fmatch_c[h] = bit_price(M.flag.m[h], 1);
     }
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
     pt->rep0_yes = r0y_n ? (uint32_t)(r0y_cost / r0y_n) : bit_price(RC_REP0_INIT, 1);
@@ -312,12 +322,12 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     pt->outb_no  = on_n ? (uint32_t)(on_cost / on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
-    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&go, rc_zz32(256));
-    pt->go = go; pt->glo = glo;
+    pt->opos_avg = op_n ? (uint32_t)(op_cost / op_n) : ug_price(&M.go, rc_zz32(256));
+    pt->go = M.go; pt->glo = M.glo;
     for (int c = 0; c < LIT0_CTX; c++)
-        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&lit0[c], (uint8_t)b);
-    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price(&lit1, (uint8_t)b);
-    pt->gs = gs; pt->gl = gl; pt->gd = gd; pt->dk = dk;
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price(&M.lit0[c], (uint8_t)b);
+    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price(&M.lit1, (uint8_t)b);
+    pt->gs = M.gs; pt->gl = M.gl; pt->gd = M.gd; pt->dk = dk;
     pt->valid = 1;
 }
 
@@ -637,13 +647,11 @@ TokenVec lz_candidates_c(const uint8_t *data, size_t n, const uint16_t *litbits,
     int32_t win = 1 << PATHE_W, maxm = 2048;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
-    int32_t *head = (int32_t *)xmalloc((1u << 24) * sizeof(int32_t));
-    for (size_t i = 0; i < (1u << 24); i++) head[i] = -1;
-    int32_t *prev = (int32_t *)xmalloc((n ? n : 1) * sizeof(int32_t));
-    for (size_t i = 0; i < n; i++) prev[i] = -1;
+    int32_t *head = hash3_heads_new();
+    int32_t *prev = hash3_prev_new(n);
     for (size_t i = 0; i < n; i++) {
         if (i + 3 <= n) {
-            uint32_t key = (uint32_t)data[i] | ((uint32_t)data[i+1] << 8) | ((uint32_t)data[i+2] << 16);
+            uint32_t key = hash3_key_fwd(data + i);
             int32_t ml = (int32_t)((n - i) < (size_t)maxm ? (n - i) : (size_t)maxm);
             int32_t lbest = 0;   /* longest len RETAINED at i (only lens >= 3 reach cands[i]) */
             for (int32_t pj = head[key]; pj >= 0; pj = prev[pj]) {

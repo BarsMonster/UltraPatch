@@ -41,7 +41,7 @@ expect_reject_unchanged() {
   blob=$2
   source_bin=$3
   cp "$source_bin" "$tmp/$name.mem"
-  if ./ultrapatch --decode --byte-mode "$tmp/$name.mem" "$blob" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+  if ./ultrapatch --decode "$tmp/$name.mem" "$blob" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
     echo "malformed case accepted: $name" >&2
     cat "$tmp/$name.err" >&2
     exit 1

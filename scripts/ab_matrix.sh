@@ -14,7 +14,7 @@
 #
 # Usage: scripts/ab_matrix.sh <enc_baseline> <enc_candidate> <dec_candidate> [jobs]
 # Encoder commands must accept: <from_image> <to_image> <patch>.
-# Decoder commands must accept: --decode [--byte-mode] <image> <patch>.
+# Decoder commands must accept: --decode <image> <patch>.
 # Env:   IMAGES, FIXTURES (as for check_corpus.sh),
 #        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face gates; default: the Makefile pins).
 # Exit:  0 on a structurally sound run (the accept decision is the caller's),
@@ -44,7 +44,7 @@ ab_work() {
   sb=$(wc -c < "$d/b.blob" 2>/dev/null || echo 0)
   cp "$from/watch.bin" "$d/mem.bin"
   ok=0
-  "$AB_DEC_B" --decode --byte-mode "$d/mem.bin" "$d/b.blob" >/dev/null 2>&1 \
+  "$AB_DEC_B" --decode "$d/mem.bin" "$d/b.blob" >/dev/null 2>&1 \
     && cmp -s "$d/mem.bin" "$to/watch.bin" && ok=1
   printf '%s %s %s %s %s\n' "$sa" "$sb" "$ok" "$(basename "$from")" "$(basename "$to")"
   rm -rf "$d"
@@ -82,7 +82,7 @@ for p in g r; do
   from="$FIX/v0_base"; to="$FIX/v1_one_face"
   [ "$p" = r ] && { from="$FIX/v1_one_face"; to="$FIX/v0_base"; }
   cp "$from/watch.bin" "$d/mem.bin"
-  "$DEC_B" --decode --byte-mode "$d/mem.bin" "$d/${p}b.blob" >/dev/null 2>&1 && cmp -s "$d/mem.bin" "$to/watch.bin" \
+  "$DEC_B" --decode "$d/mem.bin" "$d/${p}b.blob" >/dev/null 2>&1 && cmp -s "$d/mem.bin" "$to/watch.bin" \
     || { echo "ab_matrix.sh: one-face candidate round-trip failed ($p)" >&2; exit 3; }
 done
 ga=$(wc -c < "$d/ga.blob"); ra=$(wc -c < "$d/ra.blob")
