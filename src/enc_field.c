@@ -283,16 +283,15 @@ int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta
  * walking each op in APPLY direction (mirror op_emit_content / the decoder replay:
  * adjacent windows <4 B apart resolve to a different field set per direction). Entries
  * stay in ascending-fpk order so an unchanged field set fits an identical map. */
-FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                                const FieldDeltaVec *fd, size_t *nout) {
+FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const OpWalkEnt *walk,
+                         const IVec *ldrs, const uint8_t *frm, uint32_t from_size,
+                         const FieldDeltaVec *fd, size_t *nout) {
     int FWD = ctx->fwd;
     FieldRef *out = NULL; size_t n = 0, cap = 0;
-    OpWalkEnt *walk = opwalk_build(ops);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &walk[oi];
-        IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
         size_t n0 = n;
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, we->o, we->fp, we->o->diff_len);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldrs[oi], we->o, we->fp, we->o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
             out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
@@ -300,9 +299,7 @@ FieldRef *collect_fields(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm
         }
         if (!FWD)                                        /* grow yields descending; restore ascending fpk */
             for (size_t a = n0, b = n; a + 1 < b; a++, b--) { FieldRef t = out[a]; out[a] = out[b - 1]; out[b - 1] = t; }
-        free(ldr.v);
     }
-    free(walk);
     *nout = n;
     return out;
 }
