@@ -156,8 +156,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
         }
         if (!split_any) break;
         free(presset); free(corr);
-        for (size_t i = 0; i < old_n; i++) { free(pc[i].pres.v); free(pc[i].corr.v); }
-        free(pc);
+        oppc_array_free(pc, old_n);
     }
     int32_t fp_end_s = 0;
     for (size_t i = 0; i < ops.n; i++) fp_end_s += ops.v[i].diff_len + ops.v[i].adj;
@@ -191,9 +190,9 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const Ranges *fr, c
      * foreign firmware: config 0 over-journal while fuzz variants fit). encode_a1 dies only
      * when EVERY config is infeasible. */
     free(presset); free(corr); free(fd.v);
-    for (size_t i = 0; i < ops.n; i++) { free(ops.v[i].diff); free(ops.v[i].extra); free(pc[i].pres.v); free(pc[i].corr.v); }
-    free(pc); free(ops.v);
-    for (int s2 = 0; s2 < STREAM_N; s2++) { for (size_t i = 0; i < blocks[s2].n; i++) free(blocks[s2].v[i].values); free(blocks[s2].v); }
+    oppc_array_free(pc, ops.n);
+    opvec_free_deep(&ops);
+    blockvec_array_free(blocks);
     buf_free(&from_df); buf_free(&to_df);
     *fp_end_out = fp_end_s;
     *fp_start_out = fp_start_s;

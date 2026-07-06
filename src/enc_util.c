@@ -94,6 +94,36 @@ void buf_put_u32le(Buf *b, uint32_t v) {
 
 void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
 
+void opvec_free_deep(OpVec *v) {
+    if (!v) return;
+    for (size_t i = 0; i < v->n; i++) {
+        free(v->v[i].diff);
+        free(v->v[i].extra);
+    }
+    free(v->v);
+    v->v = NULL;
+    v->n = v->cap = 0;
+}
+
+void oppc_array_free(OpPC *pc, size_t n) {
+    if (!pc) return;
+    for (size_t i = 0; i < n; i++) {
+        free(pc[i].pres.v);
+        free(pc[i].corr.v);
+    }
+    free(pc);
+}
+
+void blockvec_array_free(BlockVec blocks[STREAM_N]) {
+    if (!blocks) return;
+    for (int s = 0; s < STREAM_N; s++) {
+        for (size_t i = 0; i < blocks[s].n; i++) free(blocks[s].v[i].values);
+        free(blocks[s].v);
+        blocks[s].v = NULL;
+        blocks[s].n = blocks[s].cap = 0;
+    }
+}
+
 Buf slurp(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); exit(2); }

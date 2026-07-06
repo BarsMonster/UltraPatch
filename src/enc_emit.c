@@ -21,6 +21,12 @@ static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int64_t del
     v->v[v->n++] = (Inj){cc, kind, fpk, delta};
 }
 
+static void injvec_array_free(InjVec *v, size_t n) {
+    if (!v) return;
+    for (size_t i = 0; i < n; i++) free(v[i].v);
+    free(v);
+}
+
 /* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
  * uLEB-gap+byte + extras) AND record the field-injection cursors (Inj.cc) in the same pass, so the
  * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
@@ -638,10 +644,10 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          sel_inj, sel_b, sel_v, sel_n);
-    for (size_t i = 0; i < ops->n; i++) free(inj[i].v);
-    if (inj_m) { for (size_t i = 0; i < ops->n; i++) free(inj_m[i].v); free(inj_m); }
-    if (inj_m2) { for (size_t i = 0; i < ops->n; i++) free(inj_m2[i].v); free(inj_m2); }
+    injvec_array_free(inj, ops->n);
+    injvec_array_free(inj_m, ops->n);
+    injvec_array_free(inj_m2, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
-    free(inj); free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
+    free(fp0s); free(ends); free(litbits); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
