@@ -178,6 +178,91 @@ int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip) {
     return fp_start;
 }
 
+typedef struct {
+    const TokenVec *seq;
+    const Buf *content;
+    const Buf *tags;
+    Models *M;
+    REnc *rc;
+    int FWD;
+    int out_en;
+    uint32_t oexp;
+    size_t tok_i, pos, span_pos;
+    int tok_mode;
+    int32_t tok_left;
+    int last_span;
+    uint8_t prevlit;
+    Token cur;
+} EmitCursor;
+
+static void emit_cursor_start_token(EmitCursor *ec) {
+    Models *M = ec->M;
+    REnc *rc = ec->rc;
+    if (ec->tok_i >= ec->seq->n) die("content token underrun");
+    ec->cur = ec->seq->v[ec->tok_i++];
+    if (ec->cur.type == 'S') {
+        if (ec->last_span) die("adjacent span tokens on wire");
+        fl_encode(&M->flag, rc, 0);
+        ug_encode(&M->gs, rc, (uint32_t)ec->cur.len - 1u);
+        ec->tok_mode = 'S';
+        ec->tok_left = ec->cur.len;
+        ec->span_pos = 0;
+        ec->last_span = 1;
+    } else if (ec->cur.type == 'O') {
+        if (ec->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; ec->last_span = 0; }
+        else fl_encode(&M->flag, rc, 1);
+        re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+        M->rep0h = 0;
+        re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
+        ug_encode(&M->go, rc, rc_zz32((int32_t)((uint32_t)ec->cur.dist - ec->oexp)));
+        ec->oexp = ec->FWD ? (uint32_t)ec->cur.dist + (uint32_t)ec->cur.len
+                           : (uint32_t)ec->cur.dist - (uint32_t)ec->cur.len;
+        ug_encode(&M->glo, rc, (uint32_t)ec->cur.len - RC_OUTMATCH_MIN);
+        ec->tok_mode = 'R';
+        ec->tok_left = ec->cur.len;
+    } else {
+        if (ec->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; ec->last_span = 0; }
+        else fl_encode(&M->flag, rc, 1);
+        if ((int32_t)ec->cur.dist == M->last_dist) {
+            re_bit(rc, &M->rep0[M->rep0h], 1, RC_S_BIT_RATE);
+            M->rep0h = 1;
+        } else {
+            re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+            M->rep0h = 0;
+            if (ec->out_en) re_bit(rc, &M->outb, 0, RC_S_BIT_RATE);
+            ug_encode(&M->gd, rc, (uint32_t)ec->cur.dist - 1u);
+            M->last_dist = (int32_t)ec->cur.dist;
+        }
+        ug_encode(&M->gl, rc, (uint32_t)ec->cur.len - 1u);
+        ec->tok_mode = 'R';
+        ec->tok_left = ec->cur.len;
+    }
+}
+
+static void emit_cursor_to(EmitCursor *ec, size_t end) {
+    if (end < ec->pos || end > ec->content->n) die("invalid content cursor");
+    while (ec->pos < end) {
+        if (!ec->tok_mode) emit_cursor_start_token(ec);
+        size_t nn = (size_t)ec->tok_left < (end - ec->pos) ? (size_t)ec->tok_left : (end - ec->pos);
+        if (ec->tok_mode == 'S') {
+            for (size_t i = 0; i < nn; i++) {
+                uint8_t byte = ec->content->d[(size_t)ec->cur.start + ec->span_pos + i];
+                int tag = ec->tags->d[ec->pos];
+                bt_encode(tag ? &ec->M->lit1 : &ec->M->lit0[LIT0_SEL(ec->prevlit)],
+                          ec->rc, byte, tag ? RC_LIT1_RATE : RC_LIT0_RATE);
+                ec->prevlit = byte;
+                ec->pos++;
+            }
+            ec->span_pos += nn;
+        } else {
+            ec->pos += nn;
+            if (nn) ec->prevlit = ec->content->d[ec->pos - 1u];
+        }
+        ec->tok_left -= (int32_t)nn;
+        if (ec->tok_left == 0) ec->tok_mode = 0;
+    }
+}
+
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
@@ -243,47 +328,9 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     int32_t *eff_adj = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
     uint8_t *zskip = (uint8_t *)xmalloc(ops->n ? ops->n : 1);
     fold_zero_ops(ops, eff_adj, zskip);
-    size_t tok_i = 0, pos = 0, span_pos = 0;
-    int tok_mode = 0;
-    int32_t tok_left = 0;
-    int last_span = 0;     /* previous token was a span: the match flag is implicit (mirror patch_apply) */
-    uint8_t prevlit = 0;   /* true previous content-stream byte (order-1 tag0 context): updated on
-                            * EVERY content byte -- span literal, backref, out-match copy. */
-    Token cur = {0};
-    #define START_TOKEN() do { \
-        if (tok_i >= seq->n) die("content token underrun"); \
-        cur = seq->v[tok_i++]; \
-        if (cur.type == 'S') { if (last_span) die("adjacent span tokens on wire"); \
-            fl_encode(&M.flag, &rc, 0); ug_encode(&M.gs, &rc, (uint32_t)cur.len - 1u); tok_mode = 'S'; tok_left = cur.len; span_pos = 0; last_span = 1; } \
-        else if (cur.type == 'O') { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
-            re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; \
-            re_bit(&rc, &M.outb, 1, RC_S_BIT_RATE); \
-            ug_encode(&M.go, &rc, rc_zz32((int32_t)((uint32_t)cur.dist - oexp))); \
-            oexp = FWD ? (uint32_t)cur.dist + (uint32_t)cur.len : (uint32_t)cur.dist - (uint32_t)cur.len; \
-            ug_encode(&M.glo, &rc, (uint32_t)cur.len - RC_OUTMATCH_MIN); tok_mode = 'R'; tok_left = cur.len; } \
-        else { if (last_span) { M.flag.h = ((M.flag.h << 1) | 1) & 3; last_span = 0; } else fl_encode(&M.flag, &rc, 1); \
-            if ((int32_t)cur.dist == M.last_dist) { re_bit(&rc, &M.rep0[M.rep0h], 1, RC_S_BIT_RATE); M.rep0h = 1; } \
-            else { re_bit(&rc, &M.rep0[M.rep0h], 0, RC_S_BIT_RATE); M.rep0h = 0; if (out_en) re_bit(&rc, &M.outb, 0, RC_S_BIT_RATE); ug_encode(&M.gd, &rc, (uint32_t)cur.dist - 1u); M.last_dist = (int32_t)cur.dist; } \
-            ug_encode(&M.gl, &rc, (uint32_t)cur.len - 1u); tok_mode = 'R'; tok_left = cur.len; } \
-    } while (0)
-    #define EMIT_TO(ENDPOS) do { \
-        size_t _end = (ENDPOS); \
-        if (_end < pos || _end > content->n) die("invalid content cursor"); \
-        while (pos < _end) { \
-            if (!tok_mode) START_TOKEN(); \
-            size_t nn = (size_t)tok_left < (_end - pos) ? (size_t)tok_left : (_end - pos); \
-            if (tok_mode == 'S') { \
-                for (size_t _em_i = 0; _em_i < nn; _em_i++) { \
-                    uint8_t byte = content->d[(size_t)cur.start + span_pos + _em_i]; \
-                    bt_encode(tags->d[pos] ? &M.lit1 : &M.lit0[LIT0_SEL(prevlit)], &rc, byte, tags->d[pos] ? RC_LIT1_RATE : RC_LIT0_RATE); \
-                    prevlit = byte; pos++; \
-                } \
-                span_pos += nn; \
-            } else { pos += nn; if (nn) prevlit = content->d[pos - 1]; } \
-            tok_left -= (int32_t)nn; \
-            if (tok_left == 0) tok_mode = 0; \
-        } \
-    } while (0)
+    /* true previous content-stream byte (order-1 tag0 context): updated on EVERY content byte --
+     * span literal, backref, out-match copy. */
+    EmitCursor ec = { seq, content, tags, &M, &rc, FWD, out_en, oexp, 0, 0, 0, 0, 0, 0, 0, {0} };
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
         if (zskip[oi]) continue;                       /* zero-output op: folded out (adj carried) */
@@ -291,15 +338,13 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         emit_geom_pc(&rc, &M, &oe, &pc[step]);
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
-            EMIT_TO(base + inj[step].v[ii].cc);
+            emit_cursor_to(&ec, base + inj[step].v[ii].cc);
             emit_delta(&M, &rc, inj[step].v[ii].kind, inj[step].v[ii].delta);
         }
-        EMIT_TO(op_end);
+        emit_cursor_to(&ec, op_end);
     }
     free(eff_adj); free(zskip);
-    if (pos != content->n || tok_i != seq->n || tok_mode) die("content token cursor out of sync");
-    #undef START_TOKEN
-    #undef EMIT_TO
+    if (ec.pos != content->n || ec.tok_i != seq->n || ec.tok_mode) die("content token cursor out of sync");
     return re_flush_opt(&rc);
 }
 
