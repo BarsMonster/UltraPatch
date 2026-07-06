@@ -27,6 +27,40 @@ static void injvec_array_free(InjVec *v, size_t n) {
     free(v);
 }
 
+typedef struct {
+    const Op *o;
+    const IVec *lits;
+    Buf *tmp;
+    Buf *content;
+    Buf *tags;
+    uint32_t cc;
+    int FWD;
+    int32_t base, cprev, nextpos;
+    size_t li;
+} EncLitCursor;
+
+static void enc_litcur_step(EncLitCursor *lc) {
+    if (lc->li < lc->lits->n) {
+        int32_t p = lc->FWD ? lc->lits->v[lc->li] : lc->lits->v[lc->lits->n - 1u - lc->li];
+        lc->cc += (uint32_t)rc_uleb_len((uint32_t)(lc->FWD ? p - lc->base : lc->base - p)) + 1u;
+        lc->base = p;
+        lc->nextpos = p;
+        lc->li++;
+    } else {
+        lc->nextpos = -1;
+    }
+}
+
+static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
+    lc->tmp->n = 0;
+    put_uleb(lc->tmp, (uint32_t)(lc->FWD ? k - lc->cprev : lc->cprev - k));
+    buf_write(lc->content, lc->tmp->d, lc->tmp->n);
+    for (size_t i = 0; i < lc->tmp->n; i++) buf_put(lc->tags, 0);
+    buf_put(lc->content, lc->o->diff[k]);
+    buf_put(lc->tags, 0);
+    lc->cprev = k;
+}
+
 /* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
  * uLEB-gap+byte + extras) AND record the field-injection cursors (Inj.cc) in the same pass, so the
  * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
@@ -52,29 +86,20 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     int32_t exstart = tp0 + o->diff_len;
     if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
         for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-    uint32_t cc = (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len);
-    int32_t base = FWD ? 0 : o->diff_len;   /* read-ahead gap base (next uncoded literal) */
-    int32_t cprev = FWD ? 0 : o->diff_len;  /* emitted-literal gap base */
-    size_t li = 0; int32_t nextpos = -1;
-    #define LC_STEP() do { if (li < lits.n) { int32_t p = FWD ? lits.v[li] : lits.v[lits.n - 1 - li]; \
-        cc += (uint32_t)rc_uleb_len((uint32_t)(FWD ? p - base : base - p)) + 1u; base = p; nextpos = p; li++; } else nextpos = -1; } while (0)
-    #define EMIT_LIT(K) do { int32_t _k = (K); \
-        tmp.n = 0; put_uleb(&tmp, (uint32_t)(FWD ? _k - cprev : cprev - _k)); \
-        buf_write(content, tmp.d, tmp.n); for (size_t _i = 0; _i < tmp.n; _i++) buf_put(tags, 0); \
-        buf_put(content, o->diff[_k]); buf_put(tags, 0); cprev = _k; } while (0)
-    LC_STEP();   /* prime: read-ahead the first literal (mirror litcur_init) */
+    EncLitCursor lc = { o, &lits, &tmp, content, tags,
+        (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len),
+        FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
+    enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
     FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, o, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
-            inj_push(out, cc, w.ev.type, (uint32_t)(fp0 + w.pos),
+            inj_push(out, lc.cc, w.ev.type, (uint32_t)(fp0 + w.pos),
                      field_residual(w.ev.type, frm, (uint32_t)(fp0 + w.pos), w.ev.delta, NULL, NULL, 0));
         } else if (w.is_field) {   /* EV_SBL still-dirty window: its bytes ship as ordinary literals */
-            if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == nextpos) { EMIT_LIT(w.pos + b); LC_STEP(); } }
-            else     for (int b = 3; b >= 0; b--) { if (w.pos + b == nextpos) { EMIT_LIT(w.pos + b); LC_STEP(); } }
-        } else if (w.pos == nextpos) { EMIT_LIT(w.pos); LC_STEP(); }
+            if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
+            else     for (int b = 3; b >= 0; b--) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
+        } else if (w.pos == lc.nextpos) { enc_litcur_emit(&lc, w.pos); enc_litcur_step(&lc); }
     }
-    #undef LC_STEP
-    #undef EMIT_LIT
     if (FWD)
         for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
     free(lits.v); buf_free(&tmp);
