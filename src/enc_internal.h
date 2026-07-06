@@ -256,12 +256,11 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
 uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
 
-extern int g_emit_overflow;
-void emit_delta(Models *M, REnc *r, int kind, int32_t delta);
 int32_t fold_zero_ops(const OpVec *ops, int32_t *eff_adj, uint8_t *skip);
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold);
+                const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold,
+                int *overflow_out);
 
 Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,
                 PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out);

@@ -205,8 +205,9 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     int feasible = plan_caps_feasible(&ops, pc);
     Buf body = {0};
     if (feasible) {
-        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc, &fold);
-        if (g_emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
+        int emit_overflow = 0;
+        body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size, &fd, pc, &fold, &emit_overflow);
+        if (emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
      * and the sweep tries the remaining configs — different bsdiff alignments need different

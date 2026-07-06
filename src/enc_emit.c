@@ -144,10 +144,6 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
     return tr;
 }
 
-/* Set when an emit exceeds a decoder resource cap (e.g. the MTF dict): the candidate
- * plan/parse is infeasible on the wire; callers treat the emitted size as +infinity. */
-int g_emit_overflow;
-
 static uint64_t px_idx(A1IdxUnary *g, uint32_t v);
 static uint64_t px_bv(A1BitTree *t, int32_t x);
 
@@ -172,11 +168,11 @@ static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
     return c;
 }
 
-void emit_delta(Models *M, REnc *r, int kind, int32_t delta) {
-    if (g_emit_overflow) return;   /* stream already infeasible: state frozen, output discarded */
+static void emit_delta(Models *M, REnc *r, int kind, int32_t delta, int *overflow) {
+    if (*overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
-    (void)delta_xfer(D, gix, &M->dval, r, delta, &g_emit_overflow);
+    (void)delta_xfer(D, gix, &M->dval, r, delta, overflow);
 }
 
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
@@ -229,7 +225,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const size_t *ends, const InjVec *inj,
-                     const uint32_t *mb, const int32_t *mv, int mn, const FoldPlan *fold) {
+                     const uint32_t *mb, const int32_t *mv, int mn, const FoldPlan *fold,
+                     int *overflow) {
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, frm, from_size, kd, ko);
@@ -247,7 +244,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     a1_idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    g_emit_overflow = 0;
+    *overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
     uint32_t oexp = 0;
@@ -288,7 +285,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
             const Inj *ij = &inj[step].v[ii];
             int32_t delta = mn ? field_residual(ij->kind, frm, ij->fpk, ij->delta, mb, mv, mn) : ij->delta;
             content_cursor_to(&ec, base + ij->cc, NULL);
-            emit_delta(&M, &rc, ij->kind, delta);
+            emit_delta(&M, &rc, ij->kind, delta, overflow);
         }
         content_cursor_to(&ec, op_end, NULL);
     }
@@ -310,9 +307,10 @@ typedef struct {
 
 static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
                              const InjVec *inj, const uint32_t *mb, const int32_t *mv, int mn) {
+    int overflow = 0;
     Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
-                         m->content, m->tags, m->ends, inj, mb, mv, mn, m->fold);
-    size_t n = g_emit_overflow ? (size_t)-1 : body.n;
+                         m->content, m->tags, m->ends, inj, mb, mv, mn, m->fold, &overflow);
+    size_t n = overflow ? (size_t)-1 : body.n;
     buf_free(&body);
     return n;
 }
@@ -497,7 +495,8 @@ static int fit_shift_map_bits(const OpVec *ops, uint32_t from_size, uint32_t to_
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                        const uint8_t *tob, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold) {
+                       const FieldDeltaVec *fd, const OpPC *pc, const FoldPlan *fold,
+                       int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
@@ -634,7 +633,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
     int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         inj, sel_b, sel_v, sel_n, fold);
+                         inj, sel_b, sel_v, sel_n, fold, overflow_out);
     injvec_array_free(inj, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
     for (size_t oi = 0; oi < ops->n; oi++) free(ldrs[oi].v);
