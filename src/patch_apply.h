@@ -123,8 +123,8 @@ typedef struct {
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } A1ApplyState;
-/* SA_ARENA: hand-rounded byte reservation for the apply-phase A1ApplyState. */
-#define SA_ARENA ((1u<<SA_W) + 4u*OPC_CAP + 36u)
+/* SA_ARENA: apply-phase reservation follows the actual state object. */
+#define SA_ARENA ((uint32_t)sizeof(A1ApplyState))
 #define ARENA_BYTES (JREGION + SA_ARENA)
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
