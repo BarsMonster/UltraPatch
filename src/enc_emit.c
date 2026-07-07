@@ -488,9 +488,8 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     OpWalkEnt *walk = opwalk_build(ops, fp_start);
     /* Fused build: one decoder-order walk per op emits content/tags AND records the field-injection
      * cursors (Inj) in the same pass -- byte layout and cursors can never disagree by construction. */
-    for (size_t step = 0; step < ops->n; step++) {
-        size_t oi = opwalk_apply_index(ops->n, FWD, step);
-        const OpWalkEnt *we = &walk[oi];
+    const OpWalkEnt *we;
+    OP_EVENT_FOR(we, walk, ops->n, FWD, step) {
         op_emit_content(we->o, FWD, frm, from_size, we->fp, we->tp, fd, &content, &tags, &inj[step]);
         ends[step] = content.n;
     }
@@ -524,10 +523,9 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     uint32_t *olim2 = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
     uint32_t *ocap = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
     { size_t prev_end = 0;
-      for (size_t step = 0; step < ops->n; step++) {
-          size_t oi = FWD ? step : ops->n - 1 - step;
-          int32_t tp0 = walk[oi].tp;
-          uint32_t tpe = (uint32_t)(tp0 + ops->v[oi].diff_len + ops->v[oi].extra_len);
+      OP_EVENT_FOR(we, walk, ops->n, FWD, step) {
+          int32_t tp0 = we->tp;
+          uint32_t tpe = (uint32_t)(tp0 + we->o->diff_len + we->o->extra_len);
           uint32_t lim = FWD ? (uint32_t)tp0 : tpe;
           /* OLD window edge: FWD [tp_end, from_size) stays pristine through this op; grow
            * [0, min(tp0, from_size)) likewise (beyond from_size is erased/undefined flash). */

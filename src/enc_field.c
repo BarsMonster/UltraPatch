@@ -501,8 +501,8 @@ size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from
     int32_t *readarr = preserve_readarr(ctx, ops, 0, from_size);
     OpWalkEnt *m = opwalk_build(ops, 0);
     PreserveBudgetWalk bw = { ctx, readarr, from_size, to_size, budget, 0, 0, 0, 0 };
-    for (size_t step = 0; step < ops->n; step++) {
-        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
+    const OpWalkEnt *we;
+    OP_EVENT_FOR(we, m, ops->n, FWD, step) {
         opwalk_each_byte(FWD, we, preserve_budget_byte, &bw);
     }
     free(m);
@@ -519,8 +519,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
     int32_t *readarr = preserve_readarr(ctx, ops, fp_start, from_size);
     OpWalkEnt *m = opwalk_build(ops, fp_start);
-    for (size_t idx = 0; idx < ops->n; idx++) {
-        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, idx)];
+    const OpWalkEnt *we;
+    OP_EVENT_FOR(we, m, ops->n, FWD, idx) {
         const Op *o = we->o;
         FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, we->fp, o->diff_len);
         while (fw_next(&w)) {
@@ -543,8 +543,7 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
     PreserveCorrWalk cw = { ctx, readarr, frm, true_to, ohas, oval, buf, jhas, jval, from_size, NULL };
-    for (size_t step = 0; step < ops->n; step++) {
-        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
+    OP_EVENT_FOR(we, m, ops->n, FWD, step) {
         OpPC *pc = &out[step];
         cw.pc = pc;
         opwalk_each_byte(FWD, we, preserve_corr_byte, &cw);

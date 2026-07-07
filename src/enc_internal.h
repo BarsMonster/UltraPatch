@@ -170,6 +170,8 @@ void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user)
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
 }
+#define OP_EVENT_FOR(we_, walk_, n_, fwd_, step_) \
+    for (size_t step_ = 0; step_ < (n_) && (((we_) = &(walk_)[opwalk_apply_index((n_), (fwd_), step_)]), 1); step_++)
 Buf slurp(const char *path);
 void write_file(const char *path, const void *p, size_t n);
 uint32_t crc32_buf(const uint8_t *p, size_t n);
