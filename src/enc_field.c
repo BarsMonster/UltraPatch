@@ -41,21 +41,22 @@ typedef struct {
     int found_cutoff;
 } PreserveBudgetWalk;
 
+static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
+    if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
+    return ctx->fwd ? (readarr[tpw] > tpw) : (readarr[tpw] >= 0 && readarr[tpw] < tpw);
+}
+
 static void preserve_budget_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
     PreserveBudgetWalk *pw = (PreserveBudgetWalk *)user;
     int32_t tpw = we->tp + off;
     (void)is_diff;
     (void)byte;
-    if (0 <= tpw && (uint32_t)tpw < pw->from_size) {
-        int preserve = pw->ctx->fwd ? (pw->readarr[tpw] > tpw)
-                                    : (pw->readarr[tpw] >= 0 && pw->readarr[tpw] < tpw);
-        if (preserve) {
-            if (!pw->found_cutoff && pw->total == pw->budget) {
-                pw->cutoff = pw->ctx->fwd ? pw->wi : (int32_t)(pw->to_size - 1u - (uint32_t)pw->wi);
-                pw->found_cutoff = 1;
-            }
-            pw->total++;
+    if (preserve_needed_at(pw->ctx, pw->readarr, pw->from_size, tpw)) {
+        if (!pw->found_cutoff && pw->total == pw->budget) {
+            pw->cutoff = pw->ctx->fwd ? pw->wi : (int32_t)(pw->to_size - 1u - (uint32_t)pw->wi);
+            pw->found_cutoff = 1;
         }
+        pw->total++;
     }
     pw->wi++;
 }
@@ -81,11 +82,6 @@ static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, int32_t fp
     }
     free(m);
     return readarr;
-}
-
-static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
-    if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
-    return ctx->fwd ? (readarr[tpw] > tpw) : (readarr[tpw] >= 0 && readarr[tpw] < tpw);
 }
 
 typedef struct {
@@ -327,8 +323,7 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, ui
         while (fw_next(&w)) {
             if (!w.is_field) continue;
             int32_t k = w.pos;
-            uint32_t fpk = 0;
-            (void)field_addr(fp0, k, from_size, &fpk);
+            uint32_t fpk = (uint32_t)(fp0 + k);
             const FieldDelta *real = fd_find_kind(fd, fpk, w.ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
             if (real && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) memset(o->diff + k, 0, 4);
         }

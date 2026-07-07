@@ -21,6 +21,15 @@
  * overwritten read still goes through the journal — the invariant that keeps the wire
  * independent of the deployment's NVM row size. Correctness of the transformed plan is
  * still proven per blob by the reference-decoder self-verification. */
+static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_t k,
+                             uint32_t from_size, uint32_t to_size, int32_t cutoff) {
+    int64_t a = (int64_t)fp0 + k, t = (int64_t)tp0 + k;
+    return a >= 0 &&
+           (ctx->fwd ? (a < (int64_t)to_size && a >= cutoff)
+                     : (a < (int64_t)from_size && a <= cutoff)) &&
+           !a1_row_covered(ctx, a, t);
+}
+
 static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to, uint32_t from_size,
                                           uint32_t to_size, size_t budget) {
     int FWD = ctx->fwd;
@@ -42,19 +51,11 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
              * row window does NOT cover. Coverage is periodic within each output row, so
              * hazard runs fragment; every maximal run becomes exact extra bytes (source
              * skipped via adj), splitting the op into copy/extra alternations. */
-            int64_t a = (int64_t)fp0 + k, t = (int64_t)tp0 + k;
-            int hz = a >= 0 &&
-                     (FWD ? (a < (int64_t)to_size && a >= C)
-                          : (a < (int64_t)from_size && a <= C)) &&
-                     !a1_row_covered(ctx, a, t);
+            int hz = degrade_hazard_at(ctx, fp0, tp0, k, from_size, to_size, C);
             if (!hz) { k++; continue; }
             int32_t rs = k;
             while (k < dl) {
-                a = (int64_t)fp0 + k; t = (int64_t)tp0 + k;
-                hz = a >= 0 &&
-                     (FWD ? (a < (int64_t)to_size && a >= C)
-                          : (a < (int64_t)from_size && a <= C)) &&
-                     !a1_row_covered(ctx, a, t);
+                hz = degrade_hazard_at(ctx, fp0, tp0, k, from_size, to_size, C);
                 if (!hz) break;
                 k++;
             }
