@@ -5,7 +5,8 @@ Final A1 firmware patcher for the Sensor Watch target.
 Production code lives under `src/`, with third-party code under `vendor/`:
 
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder entry point;
-  ship it with `src/rc_models.h` and `src/patch_config.h`.
+  ship it with `src/rc_models.h` and `src/patch_config.h`, or generate the
+  single public decoder header with `make decoder-header`.
 - `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
   (ISR push) producers; not part of the device decoder artifact or host CLI.
 - `src/patch_host_backend.c`: shared host reference-decoder backend used by
@@ -28,6 +29,16 @@ Build and smoke-test:
 make
 make check
 ```
+
+Generate the standalone public decoder header:
+
+```sh
+make decoder-header
+```
+
+By default this writes `artifacts/patch_apply_single.h`, containing
+`patch_config.h`, `rc_models.h`, and `patch_apply.h` in dependency order. The
+contract test compiles this artifact without the `src/` include path.
 
 CLI:
 
@@ -62,7 +73,8 @@ them with `IMAGES=...`, `FIXTURES=...`, `FOREIGN=...`, and matching manifest
 variables when running checks elsewhere. The expected contents are pinned by
 `test-bench/corpus.sha256` and `test-bench/foreign.sha256`; `make gate` runs
 `make check-assets` before the matrix so stale or partial corpora fail early.
-`make gate` also runs `make check-decoder-contract` (single-header/no-globals/no-heap
+`make gate` also runs `make check-decoder-contract` (source-header-set and
+generated-single-header/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
@@ -87,8 +99,9 @@ CI verifies the tracked corpus with `make check-assets` before the same
 
 Device integration contract:
 
-- Include `src/patch_apply.h` in an update module, keep its two support headers
-  beside it on the include path, and allocate a caller-owned `PatchApply` state object.
+- Include either generated `artifacts/patch_apply_single.h`, or
+  `src/patch_apply.h` with its two support headers beside it on the include
+  path, in one update module. Allocate a caller-owned `PatchApply` state object.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write(uint32_t, uint8_t)`.
 - Authenticate the update, then run the WHOLE blob through

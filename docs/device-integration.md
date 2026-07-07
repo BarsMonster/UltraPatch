@@ -1,11 +1,16 @@
 # Device Integration Contract
 
-`src/patch_apply.h` is the production decoder entry point. It is a header-only
-library: end users compile the decoder by including this single header, shipping
-`src/rc_models.h` and `src/patch_config.h` beside it on the include path, and
-providing the two flash primitives below. The decoder owns no global static
-state and uses no heap; the integrator owns the `PatchApply` state object so the
-Cortex-M0+ SRAM gate remains meaningful.
+The production decoder is header-only. Integrators have two supported packaging
+choices:
+
+- Include the generated public single header from `make decoder-header`
+  (`artifacts/patch_apply_single.h` by default).
+- Include the source header set rooted at `src/patch_apply.h`, with
+  `src/rc_models.h` and `src/patch_config.h` beside it on the include path.
+
+Both forms compile the same decoder and require the two flash primitives below.
+The decoder owns no global static state and uses no heap; the integrator owns
+the `PatchApply` state object so the Cortex-M0+ SRAM gate remains meaningful.
 
 The repository also builds `ultrapatch`, a unified host CLI. Its default mode is
 encode, and its `--decode` mode is a reference/debug path that uses the same host
@@ -18,12 +23,18 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 
 ## Ownership
 
-Include `src/patch_apply.h` in the update translation unit and allocate one
-caller-owned `PatchApply` object for the run. The support headers are included
-by `patch_apply.h`; application code does not include them directly. Entropy
-models, the journal arena, and the output row cache live inside that object.
-There is no coroutine, no fiber, no private decode stack, and no heap allocation
--- the decode runs on the caller's stack plus the caller-owned state object.
+Include the decoder from one update translation unit and allocate one
+caller-owned `PatchApply` object for the run. With the source-header-set form,
+application code includes only `patch_apply.h`; the support headers are included
+by it. Entropy models, the journal arena, and the output row cache live inside
+the `PatchApply` object. There is no coroutine, no fiber, no private decode
+stack, and no heap allocation -- the decode runs on the caller's stack plus the
+caller-owned state object.
+
+The decoder implementation has internal header-only linkage by default. To avoid
+accidental duplicate decoder text in final firmware, include the decoder from a
+single update `.c` file and route other application modules through that update
+module's local API.
 
 The target must provide exactly two flash primitives:
 
@@ -231,9 +242,18 @@ is reserved for a future Thumb-2 wire revision; it may change the wire format
 and is currently rejected at compile time.
 
 The decoder defaults and wire-model helpers are shared through
-`src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only header
-application code includes. The encoder uses the same headers, and model/golden
-gates enforce bit-exactness.
+`src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only source
+header application code includes. To ship one physical public header, run:
+
+```sh
+make decoder-header
+```
+
+The generated `artifacts/patch_apply_single.h` inlines the source header set and
+must not include any local decoder support header. `make check-decoder-contract`
+compiles both packaging forms and verifies the generated header without `-Isrc`.
+The encoder uses the same source headers, and model/golden gates enforce
+bit-exactness.
 
 The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
 `PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.

@@ -30,6 +30,8 @@ DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
 ADAPTER_HDR := src/patch_apply_push_adapter.h
+DECODER_PUBLIC_HDRS := $(CONFIG_HDR) src/rc_models.h $(APPLY_HDR)
+DECODER_SINGLE_HDR ?= artifacts/patch_apply_single.h
 # Shared host-side NVM emulator, #included by patch_host_backend.c before patch_apply.h.
 NVM_EMU := src/nvm_emu.inc
 # Host encoder modules. The encoder is a normal CLI tool and may rely on this Makefile;
@@ -79,7 +81,7 @@ BASE_STACK_CEIL_O2 ?= 480
 # an explicit error instead of a bare status 124. One-off override (never commit a
 # longer default): A1_TIMEOUT=<secs> make <target>.
 A1_TIMEOUT ?= 60
-CAPPED := all check check-arm check-stack check-assets check-decoder-contract \
+CAPPED := all decoder-header check check-arm check-stack check-assets check-decoder-contract \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -90,6 +92,10 @@ $(CAPPED): %:
 
 all-internal: ultrapatch
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN -c $(DEC_SRCS) -o /dev/null
+
+decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
+	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)"
+	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
@@ -173,6 +179,11 @@ check-decoder-contract-internal:
 	fi; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
+	single="$$tmp/patch_apply_single.h"; \
+	python3 scripts/gen_single_header.py "$$single"; \
+	if grep -nE '^[[:space:]]*#include[[:space:]]*"' "$$single" | grep -E '"(patch_config|rc_models|patch_apply)\.h"'; then \
+		echo "generated single decoder header must not include local decoder support headers" >&2; exit 1; \
+	fi; \
 	{ printf '%s\n' '#include <stdint.h>'; \
 	  printf '%s\n' '#include "patch_apply.h"'; \
 	  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
@@ -181,6 +192,14 @@ check-decoder-contract-internal:
 	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 	} > "$$tmp/smoke.c"; \
 	$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$tmp/smoke.c" -o "$$tmp/smoke.o"; \
+	{ printf '%s\n' '#include <stdint.h>'; \
+	  printf '%s\n' '#include "patch_apply_single.h"'; \
+	  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
+	  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
+	  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
+	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
+	} > "$$tmp/single_smoke.c"; \
+	$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$tmp" -c "$$tmp/single_smoke.c" -o "$$tmp/single_smoke.o"; \
 	{ printf '%s\n' '#include <stdint.h>'; \
 	  printf '%s\n' '#include "patch_apply_push_adapter.h"'; \
 	  printf '%s\n' 'typedef struct { PatchRing *r; int calls; } WaitCtx;'; \

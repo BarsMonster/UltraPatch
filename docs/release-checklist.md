@@ -47,6 +47,7 @@ Also run before release (not part of `make gate`):
 - A clang leg (`make CC=clang -B all && make check check-malformed check-golden`)
   — CI runs this on every push; the golden check proves the clang-built encoder
   emits byte-identical blobs.
+- `make decoder-header` if publishing a one-file device decoder artifact.
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
@@ -66,17 +67,20 @@ deterministic for a fixed `test-bench/corpus.sha256` manifest.
 ## Artifacts
 
 The release source artifact is the Git commit. The device decoder artifact is
-the decoder header set rooted at `src/patch_apply.h`. The host tool is the
-unified `ultrapatch` CLI built from `src/patch_generate.c`, the `src/enc_*.c`
-subsystem modules, `src/arm_cortex_m4.c`, `src/patch_host_backend.c`, and the
-vendored `vendor/libdivsufsort/` sources; encode is its default mode, while
-`--decode` is the host reference/debug mode.
+either the generated single header from `make decoder-header` or the decoder
+source header set rooted at `src/patch_apply.h`. The host tool is the unified
+`ultrapatch` CLI built from `src/patch_generate.c`, the `src/enc_*.c` subsystem
+modules, `src/arm_cortex_m4.c`, `src/patch_host_backend.c`, and the vendored
+`vendor/libdivsufsort/` sources; encode is its default mode, while `--decode`
+is the host reference/debug mode.
 
 For traceability, release notes should include:
 
 - Git commit SHA.
 - `sha256sum test-bench/corpus.sha256`.
 - `sha256sum test-bench/foreign.sha256`.
+- `sha256sum artifacts/patch_apply_single.h` when a one-file decoder header is
+  published.
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
 - `make gate` output.
 - Toolchain package/version used for `check-arm`.
