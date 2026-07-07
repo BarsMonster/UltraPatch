@@ -50,16 +50,17 @@ static void cand_add(Cand cands[LZ_CAND_MAX], uint8_t *ncand, Cand c) {
 }
 
 enum { HASH3_SIZE = 1u << 24 };
+_Static_assert((int32_t)~(uint32_t)0 == -1, "hash sentinel uses all-bits-one int32_t");
 
 static int32_t *hash3_heads_new(void) {
     int32_t *head = (int32_t *)xmalloc(HASH3_SIZE * sizeof(*head));
-    for (size_t i = 0; i < HASH3_SIZE; i++) head[i] = -1;
+    memset(head, 0xff, HASH3_SIZE * sizeof(*head));
     return head;
 }
 
 static int32_t *hash3_prev_new(size_t n) {
     int32_t *prev = (int32_t *)xmalloc((n ? n : 1) * sizeof(*prev));
-    for (size_t i = 0; i < n; i++) prev[i] = -1;
+    memset(prev, 0xff, n * sizeof(*prev));
     return prev;
 }
 
@@ -124,20 +125,20 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
             for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
                 size_t maxl;
                 if (FWD) {
-                    if ((uint32_t)pj + 4 > lim) continue;      /* too high: keep walking down */
+                    if ((uint32_t)pj + RC_OUTMATCH_MIN > lim) continue; /* too high: keep walking down */
                     maxl = (size_t)(lim - (uint32_t)pj);
                 } else {
-                    if ((uint32_t)pj < lim + 3u) break;        /* run [pj-l+1, pj] must stay >= lim */
+                    if ((uint32_t)pj < lim + RC_OUTMATCH_MIN - 1u) break; /* run [pj-l+1, pj] must stay >= lim */
                     maxl = (size_t)((uint32_t)pj - lim + 1u);
                 }
                 if (maxl > n - i) maxl = n - i;
                 size_t l = 0;
                 if (FWD) while (l < maxl && to[(size_t)pj + l] == content[i + l]) l++;
                 else     while (l < maxl && to[(size_t)pj - l] == content[i + l]) l++;
-                if (l >= 4) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
+                if (l >= RC_OUTMATCH_MIN) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
             }
             uint32_t lim2 = olim2[i], cap = ocap[i];
-            if (cap < 4) continue;
+            if (cap < RC_OUTMATCH_MIN) continue;
             visits = 0;
             for (int32_t pj = fhead[key]; pj >= 0 && visits < 1024; pj = fprev[pj], visits++) {
                 size_t maxl;
@@ -145,7 +146,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                     if ((uint32_t)pj < lim2) break;            /* below the OLD window: chain descends */
                     maxl = from_n - (size_t)pj;
                 } else {
-                    if ((uint32_t)pj + 1 > lim2) continue;     /* run [pj-l+1, pj] must stay < lim2 */
+                    if ((uint32_t)pj + 1u > lim2) continue;    /* run [pj-l+1, pj] must stay < lim2 */
                     maxl = (size_t)pj + 1u;
                 }
                 if (maxl > n - i) maxl = n - i;
@@ -153,7 +154,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                 size_t l = 0;
                 if (FWD) while (l < maxl && frm[(size_t)pj + l] == content[i + l]) l++;
                 else     while (l < maxl && frm[(size_t)pj - l] == content[i + l]) l++;
-                if (l >= 4) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
+                if (l >= RC_OUTMATCH_MIN) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
             }
         }
         free(head); free(prev); free(fhead); free(fprev);
@@ -545,7 +546,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                 int32_t opos = ocands[i][cix].pos, olm = ocands[i][cix].len;
                 uint64_t obase = ci + out_extra[h] + pt->opos_avg;
                 (void)opos;
-                for (int32_t l = 4; l <= olm; l++) {
+                for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= olm; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = obase + olen[l];
                     size_t jb = j * 4 + (size_t)hm;
