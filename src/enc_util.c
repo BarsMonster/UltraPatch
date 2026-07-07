@@ -253,13 +253,12 @@ void opvec_push(OpVec *v, Op o) {
     v->v[v->n++] = o;
 }
 
-void blockvec_push(BlockVec *v, int32_t fo, const int32_t *vals, int32_t n) {
+void blockvec_push(BlockVec *v, int32_t fo, int32_t *vals, int32_t n) {
     v->v = (Block *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 8);
     Block *b = &v->v[v->n++];
     b->from_offset = fo;
     b->n = n;
-    b->values = (int32_t *)xmalloc((size_t)n * sizeof(int32_t));
-    memcpy(b->values, vals, (size_t)n * sizeof(int32_t));
+    b->values = vals;
 }
 
 static int cmp_fd(const void *a, const void *b) {

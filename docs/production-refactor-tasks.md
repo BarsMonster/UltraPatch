@@ -56,7 +56,7 @@ header set.
   Transfer finalized scanner maps directly to `m4_stream_t` and replace the
   literal-pool hash set with smaller host-only storage.
 
-- [ ] 10. Flatten SequenceMatcher and block ownership.
+- [x] 10. Flatten SequenceMatcher and block ownership.
   Replace nested `B2J` vectors with a flat stable sorted index and make block
   value ownership explicit without duplicate heap copies.
 

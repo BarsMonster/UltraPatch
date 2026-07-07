@@ -10,34 +10,32 @@
 /* ------------------------------------------------------------------------------------- */
 /* SequenceMatcher-style subset for create_patch_block().                                  */
 /* ------------------------------------------------------------------------------------- */
-typedef struct { int32_t val; int32_t *idx; size_t n, cap; int popular; } B2J;
-typedef struct { B2J *v; size_t n, cap; } B2JVec;
+typedef struct { int32_t val, idx; } B2JEnt;
+typedef struct { int32_t val; size_t off, n; int popular; } B2J;
+typedef struct { B2JEnt *ent; B2J *v; size_t n, cap; } B2JIndex;
 typedef struct { int32_t a, b, size; } Match;
 typedef struct { Match *v; size_t n, cap; } MatchVec;
 
-static int cmp_b2j_val(const void *a, const void *b) {
-    const B2J *x = (const B2J *)a, *y = (const B2J *)b;
-    return (x->val > y->val) - (x->val < y->val);
+static int cmp_b2j_ent(const void *a, const void *b) {
+    const B2JEnt *x = (const B2JEnt *)a, *y = (const B2JEnt *)b;
+    if (x->val != y->val) return (x->val > y->val) - (x->val < y->val);
+    return (x->idx > y->idx) - (x->idx < y->idx);
 }
 
-static void b2j_add(B2JVec *m, int32_t val, int32_t idx) {
-    for (size_t i = 0; i < m->n; i++) {
-        if (m->v[i].val == val) {
-            B2J *e = &m->v[i];
-            e->idx = (int32_t *)vec_reserve(e->idx, &e->cap, e->n + 1, sizeof(e->idx[0]), 8);
-            e->idx[e->n++] = idx;
-            return;
-        }
+static void b2j_build(B2JIndex *m, const int32_t *b, int32_t lb) {
+    m->ent = (B2JEnt *)xmalloc((size_t)(lb ? lb : 1) * sizeof(*m->ent));
+    for (int32_t i = 0; i < lb; i++) m->ent[i] = (B2JEnt){ b[i], i };
+    a1_sort(m->ent, (size_t)lb, sizeof(*m->ent), cmp_b2j_ent);
+    for (int32_t i = 0; i < lb;) {
+        int32_t j = i + 1;
+        while (j < lb && m->ent[j].val == m->ent[i].val) j++;
+        m->v = (B2J *)vec_reserve(m->v, &m->cap, m->n + 1, sizeof(m->v[0]), 64);
+        m->v[m->n++] = (B2J){ m->ent[i].val, (size_t)i, (size_t)(j - i), 0 };
+        i = j;
     }
-    m->v = (B2J *)vec_reserve(m->v, &m->cap, m->n + 1, sizeof(m->v[0]), 64);
-    B2J *e = &m->v[m->n++];
-    memset(e, 0, sizeof(*e));
-    e->val = val;
-    e->idx = (int32_t *)vec_reserve(e->idx, &e->cap, e->n + 1, sizeof(e->idx[0]), 8);
-    e->idx[e->n++] = idx;
 }
 
-static B2J *b2j_find(B2JVec *m, int32_t val) {
+static B2J *b2j_find(B2JIndex *m, int32_t val) {
     size_t lo = 0, hi = m->n;
     while (lo < hi) {
         size_t mid = (lo + hi) >> 1;
@@ -61,7 +59,7 @@ static int cmp_match(const void *a, const void *b) {
 }
 
 static Match find_longest_match(const int32_t *a, int32_t la, const int32_t *b, int32_t lb,
-                                B2JVec *b2j, int32_t alo, int32_t ahi, int32_t blo, int32_t bhi) {
+                                B2JIndex *b2j, int32_t alo, int32_t ahi, int32_t blo, int32_t bhi) {
     (void)la;
     int32_t besti = alo, bestj = blo, bestsize = 0;
     int32_t *prev = (int32_t *)xcalloc((size_t)lb + 1, sizeof(int32_t));
@@ -71,7 +69,7 @@ static Match find_longest_match(const int32_t *a, int32_t la, const int32_t *b, 
         B2J *e = b2j_find(b2j, a[i]);
         if (e) {
             for (size_t jj = 0; jj < e->n; jj++) {
-                int32_t j = e->idx[jj];
+                int32_t j = b2j->ent[e->off + jj].idx;
                 if (j < blo) continue;
                 if (j >= bhi) break;
                 int32_t k = cur[j] = (j > 0 ? prev[j - 1] : 0) + 1;
@@ -92,13 +90,12 @@ static Match find_longest_match(const int32_t *a, int32_t la, const int32_t *b, 
 }
 
 static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int32_t *b, int32_t lb) {
-    B2JVec b2j = {0};
-    for (int32_t i = 0; i < lb; i++) b2j_add(&b2j, b[i], i);
+    B2JIndex b2j = {0};
+    b2j_build(&b2j, b, lb);
     if (lb >= 200) {
         int32_t ntest = lb / 100 + 1;
         for (size_t i = 0; i < b2j.n; i++) if ((int32_t)b2j.v[i].n > ntest) b2j.v[i].popular = 1;
     }
-    a1_sort(b2j.v, b2j.n, sizeof(b2j.v[0]), cmp_b2j_val);
     typedef struct { int32_t alo, ahi, blo, bhi; } Region;
     Region *q = (Region *)xmalloc(64 * sizeof(*q));
     size_t qn = 1, qcap = 64;
@@ -133,8 +130,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
     }
     if (k1) match_push(&out, (Match){ i1, j1, k1 });
     match_push(&out, (Match){ la, lb, 0 });
-    for (size_t i = 0; i < b2j.n; i++) free(b2j.v[i].idx);
-    free(b2j.v); free(raw.v); free(q);
+    free(b2j.ent); free(b2j.v); free(raw.v); free(q);
     return out;
 }
 
@@ -160,7 +156,7 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
             if (delta != 0) nz++;
         }
         if (nz < 5) { free(vals); continue; }
-        if (out) blockvec_push(out, fo, vals, sz);
+        if (out) { blockvec_push(out, fo, vals, sz); vals = NULL; }
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);

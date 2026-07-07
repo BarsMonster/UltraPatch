@@ -177,7 +177,7 @@ void corr_push(CorrVec *v, int32_t off, uint8_t byte);
 int cmp_i32(const void *a, const void *b);
 int cmp_corr(const void *a, const void *b);
 void opvec_push(OpVec *v, Op o);
-void blockvec_push(BlockVec *v, int32_t fo, const int32_t *vals, int32_t n);
+void blockvec_push(BlockVec *v, int32_t fo, int32_t *vals, int32_t n);
 void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta);
 void fd_finalize(FieldDeltaVec *v);
 const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
