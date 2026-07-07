@@ -60,7 +60,7 @@ BASE_ONEFACE_GROW ?= 574
 BASE_ONEFACE_REVERT ?= 287
 BASE_ARM_TEXT ?= 6093
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10852
+BASE_ARM_BSS ?= 10540
 BASE_ARM_SOFT_DIV ?= 1
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"

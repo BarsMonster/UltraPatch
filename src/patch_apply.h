@@ -36,7 +36,7 @@
  * once (no write amplification).
  *
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
- * + the packed 576 B ldr-derive pristine metadata; the image lives ONLY in flash (0 image bytes in RAM).
+ * + the packed FWD ldr-target metadata; the image lives ONLY in flash (0 image bytes in RAM).
  *
  * Embedded target: NO 64-bit integers ANYWHERE in the decoder — all positions/sizes are 32-bit and
  * every bounds/overflow guard is done in 32-bit (headroom tests plus __builtin_add/sub_overflow), so
@@ -181,7 +181,8 @@ typedef struct PatchApply {
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
     A1DRStream DR_BL, DR_EX;
 
-    uint8_t g_psrc_imm[512], g_psrc_ldr[64];
+    uint8_t g_psrc_ldr[256], g_psrc_lo;
+    uint32_t g_psrc_even;
 } PatchApply;
 
 #define g_image_span (pa->g_image_span)
@@ -236,8 +237,9 @@ typedef struct PatchApply {
 #define DR_DIC_EX (pa->DR_DIC_EX)
 #define DR_BL (pa->DR_BL)
 #define DR_EX (pa->DR_EX)
-#define g_psrc_imm (pa->g_psrc_imm)
 #define g_psrc_ldr (pa->g_psrc_ldr)
+#define g_psrc_lo (pa->g_psrc_lo)
+#define g_psrc_even (pa->g_psrc_even)
 
 _Static_assert(sizeof(A1ApplyState) <= SA_ARENA, "A1ApplyState apply state exceeds its ARENA reservation");
 _Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
@@ -649,38 +651,36 @@ static int32_t corr_take(A1ApplyState*s, A1CorrCur*c, int32_t off){
     }
     return 0;
 }
-/* A1 ldr-derive: for FWD, a 1024-byte pristine window is represented as 512 even-halfword slots:
- * imm8 byte + one "is Thumb LDR literal" bit. The ldr back-scan never needs the full instruction
- * halfword after classification. Field probes PEEK at the current 4-byte field before recording it.
- * Grow reads via the journal-aware source path because lower instruction-window bytes may be
- * clobbered. */
-#define PSRC_HW_MASK 511u
+/* A1 ldr-derive: for FWD, each op records the future 4-aligned literal-pool targets of Thumb
+ * LDR-literal halfwords already copied in this op. The target span is <=1024 B, so a 256-byte ring
+ * keyed by target>>2 is enough when each slot is consumed before the current field bytes can record
+ * a same-slot target 1024 B ahead. Grow reads via the journal-aware source path because lower
+ * instruction-window bytes may be clobbered. */
+#define PSRC_TGT_MASK 255u
 static uint8_t hy_src(PatchApply *pa, int32_t fp);   /* fwd decl: journal-aware pristine source read */
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
  * fpk+4<=fp0+dl. Reads PRISTINE source: the FWD and grow apply directions share ONE back-scan and
- * differ ONLY in the halfword source — FWD reads the packed LDR metadata recorded at read-time, grow
- * reads via hy_src() (journal-aware: instr-window bytes the output frontier already clobbered are
- * preserved copy source, so raw flash would be wrong). s==NULL selects the FWD metadata path. Kept
- * static-inline so the per-direction branch folds away at each call site (no indirect call / no text
- * bloat on Cortex-M0+). No resident target store. */
-static inline int ldr_targets(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t dl, uint32_t fpk){
+ * differ ONLY in the halfword source — FWD consumes the packed target metadata recorded at read-time,
+ * grow reads via hy_src() (journal-aware: instr-window bytes the output frontier already clobbered are
+ * preserved copy source, so raw flash would be wrong). */
+static inline int psrc_ldr_take(PatchApply *pa, uint32_t fpk){
+    uint32_t i=(fpk>>2)&PSRC_TGT_MASK;
+    int hit=g_psrc_ldr[i]!=0;
+    g_psrc_ldr[i]=0;
+    return hit;
+}
+static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
     /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
      * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
      * skips any pristine read/record for an impossible target). */
     if(!rc_ldr_target_in_op(fp0,dl,fpk)) return 0;
     for(int32_t a=rc_ldr_scan_first(fp0,fpk); a+2<=(int32_t)fpk; a+=2){
         int32_t imm;
-        if(s){
-            uint16_t up=(uint16_t)(hy_src(pa,a) | (hy_src(pa,a+1)<<8));
-            if(!rc_thumb_ldr_lit(up)) continue;
-            imm=(int32_t)(up&0xff);
-        } else {
-            uint32_t i=((uint32_t)a>>1)&PSRC_HW_MASK;
-            if(!(g_psrc_ldr[i>>3]&(uint8_t)(1u<<(i&7u)))) continue;
-            imm=(int32_t)g_psrc_imm[i];
-        }
+        uint16_t up=(uint16_t)(hy_src(pa,a) | (hy_src(pa,a+1)<<8));
+        if(!rc_thumb_ldr_lit(up)) continue;
+        imm=(int32_t)(up&0xff);
         if(rc_ldr_target(a,imm)==(int32_t)fpk) return 1;
     }
     return 0;
@@ -758,22 +758,23 @@ static uint8_t hy_src_peek(PatchApply *pa, int32_t fp){
     return 0;
 }
 static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
-    uint32_t i=(a>>1)&PSRC_HW_MASK;
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
-    g_psrc_imm[i]=lo;
-    if(rc_thumb_ldr_lit(up)) g_psrc_ldr[i>>3]|=(uint8_t)(1u<<(i&7u));
-    else g_psrc_ldr[i>>3]&=(uint8_t)~(1u<<(i&7u));
+    if(rc_thumb_ldr_lit(up)){
+        uint32_t i=((uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo)>>2)&PSRC_TGT_MASK;
+        g_psrc_ldr[i]=1;
+    }
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
 static void hy_src_rec(PatchApply *pa, int32_t fp, uint8_t v){
     if(fp>=0 && (uint32_t)fp<g_from_size){
-        uint32_t a=(uint32_t)fp, i=(a>>1)&PSRC_HW_MASK;
-        if(a&1u) hy_half_rec(pa,a-1u, g_psrc_imm[i], v);
-        /* even fp: the low byte of the halfword. hy_half_rec(a,v,0) stores imm=v and, since the high
-         * byte 0 makes up=v<256 never match the 0xf800==0x4800 ldr pattern, clears the ldr bit —
-         * identical to the inlined store+clear, and lets the two record paths share one body. */
-        else hy_half_rec(pa,a, v, 0);
+        uint32_t a=(uint32_t)fp;
+        if(a&1u){
+            if(g_psrc_even==a-1u) hy_half_rec(pa,a-1u,g_psrc_lo,v);
+        } else {
+            g_psrc_lo=v;
+            g_psrc_even=a;
+        }
     }
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
@@ -808,7 +809,7 @@ static void hy_word4_rec(PatchApply *pa, uint32_t fpk, uint32_t w){
  * order: local-BL first (Thumb F000/D000 pattern, 2-aligned), else a same-op LDR-literal target.
  * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
  * stream, and record nothing into the ring). */
-static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
+static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
     /* fpk = fp0 + ks, range-checked in pure 32-bit. ks >= 0 (op-local field offset) and image sizes are
      * < 2^31 (hard design invariant), so fpk < 0 iff fp0 < -ks (no overflow: -ks is a valid int32 for
      * ks >= 0), and once fpk >= 0 the unsigned sum fp0+ks cannot wrap (0 <= fp0+ks < 2^32). */
@@ -819,8 +820,10 @@ static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uin
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(pa,fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
+    int fwd_ldr_hit=(g_FWD && !(fpk&3u)) ? psrc_ldr_take(pa,fpk) : 0;
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
     if(rc_bl_pattern(up,lo)){
+        if(g_FWD && (fpk&2u)) (void)psrc_ldr_take(pa,fpk+2u);
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t res=pull_delta(pa,&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
         if(g_rcerr) return 0;
@@ -835,7 +838,7 @@ static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uin
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
      * mirrors the encoder's pure(k) + op_ldr_set; positions are derived, not shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
-    if(pure && ldr_targets(pa,g_FWD?NULL:s, fp0, dl, fpk)){
+    if(pure && (g_FWD ? fwd_ldr_hit : ldr_targets(pa, fp0, dl, fpk))){
         int32_t res=pull_delta(pa,&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
         if(g_rcerr) return 0;
         int32_t pred=rc_smap_pred_ex(g_smap_b,g_smap_v,(int)g_smap_n,w); /* pointer words move by the value's shift */
@@ -958,6 +961,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     if(nl<0||nl>dl){ g_rcerr=1; return; }
     uint8_t packed[4];
     int fwd=g_FWD; int32_t step=fwd?1:-1;
+    if(fwd){ memset(g_psrc_ldr,0,sizeof g_psrc_ldr); g_psrc_even=UINT32_MAX; }
     A1LitCur lc;
     A1CorrCur cc; corr_cur_init(&cc,s,fwd);
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
@@ -967,7 +971,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
         int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
         if(a0>=0 && a0+4<=dl){
             int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
-            int fa=field_at(pa,s, fp0, a0, packed, pure, dl);
+            int fa=field_at(pa, fp0, a0, packed, pure, dl);
             if(fa){
                 for(int b=fwd?0:3; b>=0 && b<4; b+=step){
                     if(fa==2) wr_copy(pa,s, &lc, &cc, tp0, fp0, nl, a0+b);
@@ -1202,8 +1206,9 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef DR_DIC_EX
 #undef DR_BL
 #undef DR_EX
-#undef g_psrc_imm
 #undef g_psrc_ldr
+#undef g_psrc_lo
+#undef g_psrc_even
 #undef A1_NOINLINE
 #undef A1_ALWAYS_INLINE
 #undef A1_ADD_OVERFLOW
@@ -1218,6 +1223,6 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef A1_ULEB32_OVERFLOW
 #undef OROW_NONE
 #undef OROW_SLOT
-#undef PSRC_HW_MASK
+#undef PSRC_TGT_MASK
 
 #endif /* PATCH_APPLY_H */
