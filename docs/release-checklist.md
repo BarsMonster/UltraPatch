@@ -9,9 +9,10 @@ hardware flash validation are external integration work.
 
 - Release commit on `main`.
 - Clean working tree.
-- Pinned corpus assets committed under `test-bench/images` and
-  `test-bench/fixtures`.
-- `test-bench/corpus.sha256` committed with the release.
+- Pinned corpus assets committed under `test-bench/images`,
+  `test-bench/fixtures`, and `test-bench/foreign`.
+- `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
+  release.
 - ARM GCC/binutils available as documented in `install.md`.
 
 ## Gate
@@ -25,6 +26,7 @@ make gate
 Record the complete output in the release notes. The gate must report:
 
 - `corpus assets`: verified through `test-bench/corpus.sha256`
+- `foreign assets`: verified through `test-bench/foreign.sha256`
 - `malformed rejects`: nonzero deterministic reject count
 - `edge inputs`: all synthetic edge cases round-tripped or cleanly refused
 - `golden wire`: OK against the committed `test-bench/golden.sha256` (the wire
@@ -33,6 +35,7 @@ Record the complete output in the release notes. The gate must report:
 - ARM soft-divide count
 - `matrix round-trips`: `256/256`
 - corpus `full_total`
+- foreign `full_total`
 - real one-face grow/revert patch sizes
 - NVM row amplification, max erases-per-row, frontier inversions
 - journal peak slots
@@ -62,15 +65,17 @@ deterministic for a fixed `test-bench/corpus.sha256` manifest.
 ## Artifacts
 
 The release source artifact is the Git commit. The device decoder artifact is
-the decoder header set rooted at `src/patch_apply.h`; the host encoder is built from
-`src/patch_generate.c`, the `src/enc_*.c` subsystem modules, `src/arm_cortex_m4.c`,
-`src/patch_host_backend.c`, and the vendored
-`vendor/libdivsufsort/` sources.
+the decoder header set rooted at `src/patch_apply.h`. The host tool is the
+unified `ultrapatch` CLI built from `src/patch_generate.c`, the `src/enc_*.c`
+subsystem modules, `src/arm_cortex_m4.c`, `src/patch_host_backend.c`, and the
+vendored `vendor/libdivsufsort/` sources; encode is its default mode, while
+`--decode` is the host reference/debug mode.
 
 For traceability, release notes should include:
 
 - Git commit SHA.
 - `sha256sum test-bench/corpus.sha256`.
+- `sha256sum test-bench/foreign.sha256`.
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
 - `make gate` output.
 - Toolchain package/version used for `check-arm`.

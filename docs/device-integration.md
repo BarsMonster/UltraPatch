@@ -7,6 +7,11 @@ providing the two flash primitives below. The decoder owns no global static
 state and uses no heap; the integrator owns the `PatchApply` state object so the
 Cortex-M0+ SRAM gate remains meaningful.
 
+The repository also builds `ultrapatch`, a unified host CLI. Its default mode is
+encode, and its `--decode` mode is a reference/debug path that uses the same host
+backend as encoder self-verification. That host CLI is not part of the device
+decoder artifact; embedded integrations include only the decoder header set.
+
 The decoder owns the whole patch blob: envelope parsing, both CRC gates, the
 apply direction, and the image span are all derived internally from the pushed
 bytes. The integrator does not parse the envelope and cannot get it wrong.
