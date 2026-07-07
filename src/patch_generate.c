@@ -17,17 +17,28 @@ static char *elf_sidecar_path(const char *image_path) {
     return elf;
 }
 
-static size_t candidate_wire_size(uint32_t from_size, uint32_t to_size, int desc,
-                                  int32_t fp_end, int32_t fp_start, size_t body_n) {
-    if (body_n == 0 || body_n - 1u > UINT32_MAX) return SIZE_MAX;
+static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
+                             uint32_t from_size, uint32_t to_size, int desc,
+                             int32_t fp_end, int32_t fp_start, const Buf *body) {
+    if (body->n == 0 || body->d[0] != 0 || body->n - 1u > UINT32_MAX) return SIZE_MAX;
     uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
     size_t n = 8u;                                      /* CRC32(from), CRC32(to) */
     n += (size_t)rc_uleb_len(from_size);
     n += (size_t)rc_uleb_len(zd) + (rc_dir_is_natural(from_size, to_size, desc) ? 0u : 1u);
     if (desc) n += (size_t)rc_uleb_len(rc_zz32(fp_end - (int32_t)from_size));
     n += (size_t)rc_uleb_len(rc_zz32(fp_start));
-    n += (size_t)rc_uleb_len((uint32_t)(body_n - 1u));
-    n += body_n - 1u;                                  /* range coder leading cache byte is dropped */
+    n += (size_t)rc_uleb_len((uint32_t)(body->n - 1u));
+    n += body->n - 1u;                                  /* range coder leading cache byte is dropped */
+    if (!blob) return n;
+    buf_put_u32le(blob, from_crc);
+    buf_put_u32le(blob, to_crc);
+    put_uleb(blob, from_size);
+    if (rc_dir_is_natural(from_size, to_size, desc)) put_uleb(blob, zd);
+    else put_uleb_overlong(blob, zd);
+    if (desc) put_uleb(blob, rc_zz32(fp_end - (int32_t)from_size));
+    put_uleb(blob, rc_zz32(fp_start));
+    put_uleb(blob, (uint32_t)(body->n - 1u));
+    buf_write(blob, body->d + 1, body->n - 1);
     return n;
 }
 
@@ -78,7 +89,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
             Buf b = plan_encode(&ctx, &from, &to, &pa, PLANS[v], &fpe, &fps, &stv);
             if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
             if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
-            size_t tot = candidate_wire_size(from_size, to_size, dir, fpe, fps, b.n);
+            size_t tot = emit_wire_blob(NULL, 0, 0, from_size, to_size, dir, fpe, fps, &b);
             if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
             else buf_free(&b);
         }
@@ -94,42 +105,9 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                 st.deg_engaged, st.deg_pres_needed, st.deg_converted, st.opc_splits, sweep_opc_splits,
                 (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
     Buf blob = {0};
-    buf_put_u32le(&blob, crc32_buf(from.d, from.n));
-    /* CRC32(to) rides in the HEADER immediately after CRC32(from) (moved off the old
-     * 4-byte trailer). The decoder reads it up front (g_want_to) and verifies it over the
-     * final image after apply — so there is no trailer-withhold ring. */
-    buf_put_u32le(&blob, crc32_buf(to.d, to.n));
-    put_uleb(&blob, from_size);
-    /* to_size and fp_end are zigzag-delta-coded against from_size. A real firmware update keeps the
-     * image size nearly constant and the FWD walk ends near from_size, so both signed deltas are tiny
-     * (to_size delta is exactly 0 on an equal-size update) — far cheaper than the absolute uLEB.
-     * The apply direction rides the same field: the NATURAL direction (descending iff growing)
-     * is the canonical encoding — byte-identical to the historical envelope — and the unnatural
-     * direction is one redundant continuation byte (overlong uLEB, value-neutral). */
-    { uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
-      if (rc_dir_is_natural(from_size, to_size, best_desc)) put_uleb(&blob, zd);
-      else put_uleb_overlong(&blob, zd); }
-    /* fp_end is the source position at the end of the (FWD) op walk = the seed s->fp for the
-     * grow (!FWD) direction. For FWD the decoder computes s->fp incrementally from 0, so fp_end is
-     * only a redundant end-check there (CRC32(to) already validates) — omit it. For grow it is the
-     * load-bearing start seed, so emit it (delta-coded against from_size: it lands near from_size). */
-    if (best_desc) put_uleb(&blob, rc_zz32(fp_end_s - (int32_t)from_size));
-    /* Feature 7B: initial source seek (fp_start). Zero-output pure-seek ops are folded off the wire
-     * (so `nops` can go and the decoder frontier-terminates); a LEADING zero-op's seek is carried
-     * here instead. Seeds the FWD source walk (was implicitly 0) and is the grow landing point
-     * (grow's final fp must equal it). Almost always 0 (1 byte) — a leading zero-op is rare. Shipped
-     * for BOTH directions, right after the (grow-only) fp_end field. */
-    put_uleb(&blob, rc_zz32(fp_start_s));
-    /* The LZMA-style range coder always emits a leading 0x00 cache byte (re_init sets
-     * cache=0/csz=1, so the first re_shift_low outputs cache+0 = 0). It carries no
-     * information, so it is dropped from the wire.
-     * Bit-exact invariant: body.d[0] is always 0 here. */
-    if (body.n == 0 || body.d[0] != 0) die("range-coder leading byte not 0 — wire invariant broken");
-    if (body.n - 1u > UINT32_MAX) die("range-coded body too large");
-    put_uleb(&blob, (uint32_t)(body.n - 1u));
-    buf_write(&blob, body.d + 1, body.n - 1);
-    /* No trailer: CRC32(to) already sits in the header above. */
-    if (blob.n != best_tot) die("candidate size accounting drifted from emitted blob");
+    size_t wire_n = emit_wire_blob(&blob, crc32_buf(from.d, from.n), crc32_buf(to.d, to.n),
+                                   from_size, to_size, best_desc, fp_end_s, fp_start_s, &body);
+    if (wire_n == SIZE_MAX || blob.n != best_tot) die("candidate size accounting drifted from emitted blob");
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
