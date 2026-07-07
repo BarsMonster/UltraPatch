@@ -74,6 +74,10 @@ Acceptance rule for every code task:
   Share host file helpers, enforce decoded `from_size == image_size` in CLI
   decode, check writeback/flush/truncate/close failures, and add checked array
   allocation helpers for repeated `count * sizeof(T)` allocation patterns.
+  Host decode/writeback validation subset completed: CLI decode now rejects
+  `from_size` mismatches before opening the image for write, checks file commit
+  failures, and treats output `fclose` failure as fatal. Checked array
+  allocation remains.
 
 - [ ] 11. Refactor gate metrics into one owner.
   Make edge fixture setup failures fatal, pin expected edge accepted/refused

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "nvm_emu.inc"
@@ -23,15 +24,36 @@ static void host_file_free(HostFile *b){
 static int host_read_file(const char *path, HostFile *out){
     FILE *f = fopen(path, "rb");
     if(!f){ perror(path); return 2; }
-    if(fseek(f,0,SEEK_END)){ perror(path); fclose(f); return 2; }
+    if(fseek(f,0,SEEK_END)){ perror(path); if(fclose(f)) perror(path); return 2; }
     long sz = ftell(f);
-    if(sz < 0){ perror(path); fclose(f); return 2; }
-    if(fseek(f,0,SEEK_SET)){ perror(path); fclose(f); return 2; }
+    if(sz < 0){ perror(path); if(fclose(f)) perror(path); return 2; }
+    if(fseek(f,0,SEEK_SET)){ perror(path); if(fclose(f)) perror(path); return 2; }
     out->d = (uint8_t*)malloc(sz ? (size_t)sz : 1u);
-    if(!out->d){ fclose(f); return 2; }
+    if(!out->d){ if(fclose(f)) perror(path); return 2; }
     out->n = (size_t)sz;
-    if(out->n && fread(out->d,1,out->n,f)!=out->n){ perror(path); fclose(f); host_file_free(out); return 2; }
-    fclose(f);
+    if(out->n && fread(out->d,1,out->n,f)!=out->n){ perror(path); if(fclose(f)) perror(path); host_file_free(out); return 2; }
+    if(fclose(f)){ perror(path); host_file_free(out); return 2; }
+    return 0;
+}
+
+static int host_close_file(FILE **fp, const char *path){
+    if(!*fp) return 0;
+    FILE *f = *fp;
+    *fp = NULL;
+    if(fclose(f)){ perror(path); return 2; }
+    return 0;
+}
+
+static int host_commit_image(FILE *mf, const char *image_path, const uint8_t *data,
+                             uint32_t to_size, size_t old_size){
+    if(fseek(mf,0,SEEK_SET)){ perror(image_path); return 2; }
+    if(to_size && fwrite(data,1,to_size,mf)!=(size_t)to_size){ perror(image_path); return 2; }
+    if(fflush(mf)){ perror(image_path); return 2; }
+    if((size_t)to_size<old_size){
+        int fd = fileno(mf);
+        if(fd < 0){ perror(image_path); return 2; }
+        if(ftruncate(fd,(off_t)to_size)){ perror(image_path); return 2; }
+    }
     return 0;
 }
 
@@ -117,7 +139,6 @@ int decode_a1(const char *image_path, const char *patch_path){
     if(blob.n<12){ fprintf(stderr,"blob too short\n"); rc = 1; goto out; }
     rc = host_read_file(image_path, &image); if(rc) goto out;
     if(image.n > UINT32_MAX){ fprintf(stderr,"image too large for host decoder: %zu\n", image.n); rc = 2; goto out; }
-    mf=fopen(image_path,"r+b"); if(!mf){perror("image");goto out;}
     HostApply ha;
     { uint32_t image_n = (uint32_t)image.n;
       uint32_t span = image_n>A1_MAX_IMAGE ? image_n : A1_MAX_IMAGE;
@@ -131,6 +152,11 @@ int decode_a1(const char *image_path, const char *patch_path){
         fprintf(stderr,"decode error - trailing bytes after counted patch body\n");
         rc = 1; goto out;
     }
+    if(patch_apply_from_size(&ha.pa)!=(uint32_t)image.n){
+        fprintf(stderr,"decode error - patch from_size=%u does not match current image size=%zu\n",
+                patch_apply_from_size(&ha.pa), image.n);
+        rc = 1; goto out;
+    }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
     NvmStats st = nvm_stats();
     if(!nvm_safety_ok(&st)){
@@ -138,16 +164,18 @@ int decode_a1(const char *image_path, const char *patch_path){
                 st.amplified,st.max_row_erases,st.inversions);
         rc = 1; goto out;
     }
-    fseek(mf,0,SEEK_SET);
-    if(fwrite(sc_flash,1,to_size,mf)!=to_size){ rc = 1; goto out; }
-    fflush(mf);
-    if((size_t)to_size<image.n){ if(ftruncate(fileno(mf),to_size)){} }
+    mf=fopen(image_path,"r+b"); if(!mf){perror(image_path);goto out;}
+    rc = host_commit_image(mf, image_path, sc_flash, to_size, image.n);
+    if(rc) goto out;
+    rc = host_close_file(&mf, image_path);
+    if(rc) goto out;
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
             st.erases,st.rows,st.programs,st.amplified,st.max_row_erases,st.inversions,span,(span+255)/256);
     rc = 0;
 out:
-    if(mf) fclose(mf);
+    if(mf && !rc) rc = host_close_file(&mf, image_path);
+    else if(mf) (void)host_close_file(&mf, image_path);
     nvm_free();
     host_file_free(&image); host_file_free(&blob);
     return rc;

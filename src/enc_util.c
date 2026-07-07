@@ -187,7 +187,7 @@ void write_file(const char *path, const void *p, size_t n) {
     FILE *f = fopen(path, "wb");
     if (!f) { perror(path); exit(2); }
     if (n && fwrite(p, 1, n, f) != n) die("write failed");
-    fclose(f);
+    if (fclose(f)) die("close failed");
 }
 
 uint32_t crc32_buf(const uint8_t *p, size_t n) {
