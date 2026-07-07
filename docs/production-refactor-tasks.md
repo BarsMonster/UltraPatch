@@ -24,6 +24,66 @@ Acceptance rule for every code task:
 
 ## Tasks
 
+- [ ] 10. Remove dead DATA/CODE ARM stream outputs.
+  Preserve the data-region skip in the Cortex-M scanner, but stop exporting and
+  freeing unused DATA/CODE streams. Bundle the static `create_patch_block()`
+  nullable-output cleanup only if the combined patch keeps corpus, foreign, and
+  one-face sizes unchanged or better. Temporary review measurement: host text
+  `121302 -> 120318`, corpus `4151558`, foreign `1333407`, one-face `574/287`.
+
+- [ ] 11. Stream per-op corrections instead of storing `op_corr[OPC_CAP]`.
+  Intentional wire-change candidate: emit and decode correction bytes in apply
+  order so the decoder keeps only the next correction offset/value. Must mirror
+  `M_dval` history and grow ordering exactly, then regenerate golden and size
+  baselines if accepted. Target decoder saving: about 324 B `.bss`.
+
+- [ ] 12. Replace or overlay FWD LDR pristine metadata.
+  Reduce `g_psrc_imm[512] + g_psrc_ldr[64]` without dropping EX/LDR
+  derelocation. Preferred direction is a smaller same-op target structure; a
+  journal overlay is acceptable only if encoder budgeting accounts for the
+  reduced effective journal capacity. Target saving: roughly 500 B `.bss`.
+
+- [ ] 13. Overlay shift-map storage with journal/apply arena.
+  Move `g_smap_b[]`/`g_smap_v[]` out of permanent decoder state where possible,
+  and make encoder feasibility/degradation use the effective journal budget
+  after the map reserve. Target saving: about 388 B `.bss`.
+
+- [ ] 14. Collapse the LZ bootstrap/full parser split.
+  Replace the bootstrap/simple parser path with the full parser configured by
+  bootstrap prices. Pre-sort immutable candidate metadata once if it reduces
+  linked host text. Compression-affecting: require A/B better/worse/equal,
+  corpus/foreign totals, and real one-face grow/revert sizes.
+
+- [ ] 15. Fix and deduplicate out-match candidate retention.
+  Correct `oc_keep()` so the retained row really keeps the best out-match
+  candidates, and share the NEW/OLD source scan extension logic. This must not
+  remove out-match models or disable any token class.
+
+- [ ] 16. Create one encoder op-event iterator.
+  Replace repeated decoder-order field walks in op-derived field deltas,
+  relocation-literal coercion, preserve/correction simulation, and content
+  emission with one event iterator that yields copy bytes, BL/EX fields,
+  suppressed BL bytes, extras, and content cursor positions.
+
+- [ ] 17. Replace ELF symbol/raw-byte range inference.
+  Stop deriving data file offsets by raw byte search over the `.bin`. Prefer
+  validated program-header/file-backed ranges, with explicit overflow checks and
+  preserved code/data scan windows. Any range change is compression-affecting.
+
+- [ ] 18. Single-source wire grammar pieces.
+  Share the body prologue/model-reset order, UG init/bit ordering, delta MTF
+  transition, and per-op geometry/P/C grammar with no resident decoder tables
+  and no function-pointer callbacks. Accept only if linked size is neutral or
+  smaller while reducing drift risk.
+
+- [ ] 19. Fix compression metric ownership.
+  Make the release gate enforce or report the required per-pair
+  better/worse/equal split for compression changes, single-source one-face
+  metrics, and tighten the ARM `.bss` ratchet to the measured baseline while
+  keeping the separate 12 KiB hard cap visible.
+
+## Earlier Tasks
+
 - [x] 1. Unify and harden all uLEB readers.
   Replace the duplicated envelope, dval, and content uLEB readers with one
   checked uLEB32 core that rejects fifth-byte overflow and exposes explicit
