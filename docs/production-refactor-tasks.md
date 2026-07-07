@@ -62,7 +62,7 @@ Acceptance rule for every code task:
   Carry VM and file offsets in one file-backed loadable range object and remove
   raw byte-search/reconstruction logic.
 
-- [ ] 11. Consolidate host file/NVM helpers and envelope preflight.
+- [x] 11. Consolidate host file/NVM helpers and envelope preflight.
   Share file loading and NVM statistics helpers, and reject oversized or invalid
   image/envelope inputs before narrowing sizes or starting analysis.
 

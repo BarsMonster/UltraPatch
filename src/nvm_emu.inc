@@ -22,17 +22,23 @@ static long sc_erases, sc_programs, sc_finv;
 static uint32_t sc_last_erow;
 static int sc_edir, sc_ecount;
 
+static void nvm_free(void){
+    free(sc_flash); free(sc_erasecnt);
+    sc_flash = NULL; sc_erasecnt = NULL;
+    sc_flash_n = sc_nrows = 0;
+}
+
 /* Load `from` into a fresh span-sized flash and reset every counter. The beyond-`from`
  * span is filled with a deterministic LCG pad (NOT 0xFF) seeded by pad_seed, so a decode
  * that reads not-yet-written output cannot coast on the 0xFF that both this emulator and
  * 0xFF-erased firmware would return -- each user seeds pad_seed its own way (task 3).
  * Returns -1 on allocation failure. */
 static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_t pad_seed){
-    free(sc_flash); free(sc_erasecnt);
+    nvm_free();
     sc_flash_n = span; sc_nrows = (span+NVM_ROW-1)/NVM_ROW;
     sc_flash = (uint8_t*)malloc(span?span:1);
     sc_erasecnt = (uint8_t*)calloc(sc_nrows?sc_nrows:1, 1);
-    if(!sc_flash || !sc_erasecnt) return -1;
+    if(!sc_flash || !sc_erasecnt){ nvm_free(); return -1; }
     if(from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
     if(span>from_n){ uint32_t r=pad_seed;
         for(uint32_t a=from_n;a<span;a++){ r=r*1664525u+1013904223u; sc_flash[a]=(uint8_t)(r>>24); } }

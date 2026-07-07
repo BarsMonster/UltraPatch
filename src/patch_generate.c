@@ -4,6 +4,8 @@
  *
  * A1 host encoder CLI entry point.
  */
+#include <errno.h>
+
 #include "enc_internal.h"
 
 static char *elf_sidecar_path(const char *image_path) {
@@ -17,10 +19,27 @@ static char *elf_sidecar_path(const char *image_path) {
     return elf;
 }
 
+static int optional_sidecar_present(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return 1; }
+    if (errno == ENOENT || errno == ENOTDIR) return 0;
+    perror(path);
+    exit(2);
+}
+
+static uint32_t checked_image_size(const Buf *b, const char *name) {
+    if (b->n > A1_MAX_IMAGE) {
+        fprintf(stderr, "%s image too large for this decoder build: %zu > %u\n",
+                name, b->n, (unsigned)A1_MAX_IMAGE);
+        exit(2);
+    }
+    return (uint32_t)b->n;
+}
+
 static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
                              uint32_t from_size, uint32_t to_size, int desc,
                              int32_t fp_end, int32_t fp_start, const Buf *body) {
-    if (body->n == 0 || body->d[0] != 0 || body->n - 1u > UINT32_MAX) return SIZE_MAX;
+    if (body->n < 5u || body->d[0] != 0 || body->n - 1u > UINT32_MAX) return SIZE_MAX;
     uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
     size_t n = 8u;                                      /* CRC32(from), CRC32(to) */
     n += (size_t)rc_uleb_len(from_size);
@@ -45,18 +64,16 @@ static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
     char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
     Buf from = slurp(from_image), to = slurp(to_image);
+    uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");
     /* A same-basename .elf sidecar is OPTIONAL: without it the whole image is treated as opaque data (zeroed
      * Ranges -> no code/data windows for the disassembler filter; plain bsdiff+LZ path).
      * A present-but-malformed ELF still dies loudly — only absence is tolerated. This
      * enables raw-binary pairs (edge gate, foreign firmware without build artifacts). */
     Ranges fr = {0}, tr = {0};
-    { FILE *fe = fopen(felf, "rb");
-      if (fe) { fclose(fe); fr = elf_ranges(felf, &from, "from"); } }
-    { FILE *te = fopen(telf, "rb");
-      if (te) { fclose(te); tr = elf_ranges(telf, &to, "to"); } }
+    if (optional_sidecar_present(felf)) fr = elf_ranges(felf, &from, "from");
+    if (optional_sidecar_present(telf)) tr = elf_ranges(telf, &to, "to");
     PairAnalysis pa;
     pair_analysis_init(&pa, &from, &to, &fr, &tr);
-    uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
      * ties keep the earliest entry, so added configs can never regress. A config whose plan
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
