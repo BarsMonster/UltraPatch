@@ -34,8 +34,6 @@ static void map_finalize(map_t *m) {
     }
     m->n = w;
 }
-static void map_free(map_t *m){ free(m->a); m->a=NULL; m->n=m->cap=0; }
-
 /* ---------- literal-pool address bitset (host-only; one bit per 4-byte word) ---------- */
 typedef struct { uint8_t *bits; size_t nbits; } litset_t;
 static void litset_init(litset_t *s, size_t fsize) {
@@ -98,7 +96,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
         }
     }
     litset_free(&d->lit);   /* only needed during the scan */
-    map_finalize(&d->bl); map_finalize(&d->ldr);
+    map_finalize(&d->ldr);
 }
 
 void a1_m4_disassemble(const uint8_t *from, size_t from_size,
@@ -107,14 +105,8 @@ void a1_m4_disassemble(const uint8_t *from, size_t from_size,
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
     disassemble(from, from_size, data_offset, data_off_end, &d);
-    map_t *src[M4_NSTREAMS] = { &d.bl, &d.ldr };
-    for (int s = 0; s < M4_NSTREAMS; s++) { streams[s].a = NULL; streams[s].n = 0; }
-    for (int s = 0; s < M4_NSTREAMS; s++) {
-        streams[s].a = src[s]->a;
-        streams[s].n = src[s]->n;
-        src[s]->a = NULL; src[s]->n = src[s]->cap = 0;
-    }
-    map_free(&d.bl); map_free(&d.ldr);
+    streams[M4_BL].a = d.bl.a;   streams[M4_BL].n = d.bl.n;
+    streams[M4_LDR].a = d.ldr.a; streams[M4_LDR].n = d.ldr.n;
 }
 void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
     for (int s = 0; s < M4_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }
