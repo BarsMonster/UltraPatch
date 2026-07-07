@@ -181,7 +181,8 @@ typedef struct PatchApply {
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
     A1DRStream DR_BL, DR_EX;
 
-    uint8_t g_psrc_ldr[256], g_psrc_lo;
+    uint32_t g_psrc_ldr[8];
+    uint8_t  g_psrc_lo;
     uint32_t g_psrc_even;
 } PatchApply;
 
@@ -652,7 +653,7 @@ static int32_t corr_take(A1ApplyState*s, A1CorrCur*c, int32_t off){
     return 0;
 }
 /* A1 ldr-derive: for FWD, each op records the future 4-aligned literal-pool targets of Thumb
- * LDR-literal halfwords already copied in this op. The target span is <=1024 B, so a 256-byte ring
+ * LDR-literal halfwords already copied in this op. The target span is <=1024 B, so a 256-bit ring
  * keyed by target>>2 is enough when each slot is consumed before the current field bytes can record
  * a same-slot target 1024 B ahead. Grow reads via the journal-aware source path because lower
  * instruction-window bytes may be clobbered. */
@@ -667,8 +668,9 @@ static uint8_t hy_src(PatchApply *pa, int32_t fp);   /* fwd decl: journal-aware 
  * preserved copy source, so raw flash would be wrong). */
 static inline int psrc_ldr_take(PatchApply *pa, uint32_t fpk){
     uint32_t i=(fpk>>2)&PSRC_TGT_MASK;
-    int hit=g_psrc_ldr[i]!=0;
-    g_psrc_ldr[i]=0;
+    uint32_t bit=1u<<(i&31u);
+    int hit=(g_psrc_ldr[i>>5]&bit)!=0;
+    g_psrc_ldr[i>>5]&=~bit;
     return hit;
 }
 static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
@@ -761,7 +763,7 @@ static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
     if(rc_thumb_ldr_lit(up)){
         uint32_t i=((uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo)>>2)&PSRC_TGT_MASK;
-        g_psrc_ldr[i]=1;
+        g_psrc_ldr[i>>5]|=1u<<(i&31u);
     }
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
