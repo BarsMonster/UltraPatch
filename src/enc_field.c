@@ -296,9 +296,8 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
 
 FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]) {
     FieldDeltaVec out = {0};
-    const int m4_stream_for_field[STREAM_N] = { M4_BL, M4_LDR };
     for (int s = 0; s < STREAM_N; s++) {
-        const m4_stream_t *ms = &pa->from_st[m4_stream_for_field[s]];
+        const m4_stream_t *ms = &pa->from_st[s];
         for (size_t bi = 0; bi < blocks[s].n; bi++) {
             const Block *b = &blocks[s].v[bi];
             for (int32_t k = 0; k < b->n; k++) {

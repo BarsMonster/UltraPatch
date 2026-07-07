@@ -54,7 +54,7 @@ static void litset_free(litset_t *s){ free(s->bits); s->bits=NULL; s->nbits=0; }
 
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
 typedef struct {
-    map_t bl, ldr, data_ptr, code_ptr;
+    map_t bl, ldr;
     litset_t lit;   /* every literal target addr, skipped later in the same scan */
 } dis_t;
 
@@ -73,8 +73,6 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
 
 static void disassemble(const uint8_t *f, size_t fsize,
                         uint32_t data_off_begin, uint32_t data_off_end,
-                        uint32_t data_begin, uint32_t data_end,
-                        uint32_t code_begin, uint32_t code_end,
                         dis_t *d) {
     memset(d, 0, sizeof(*d));
     litset_init(&d->lit, fsize);
@@ -82,9 +80,6 @@ static void disassemble(const uint8_t *f, size_t fsize,
     while (addr < fsize) {
         if (data_off_begin <= addr && addr < data_off_end) {
             if ((size_t)addr + 4 > fsize) break;
-            uint32_t value = rc_u32le(f + addr);
-            if (data_begin <= value && value < data_end) map_push(&d->data_ptr, addr, value);
-            else if (code_begin <= value && value < code_end) map_push(&d->code_ptr, addr, value);
             addr += 4;
         } else if (litset_has(&d->lit, addr)) {
             addr += 4;
@@ -104,18 +99,15 @@ static void disassemble(const uint8_t *f, size_t fsize,
     }
     litset_free(&d->lit);   /* only needed during the scan */
     map_finalize(&d->bl); map_finalize(&d->ldr);
-    map_finalize(&d->data_ptr); map_finalize(&d->code_ptr);
 }
 
 void a1_m4_disassemble(const uint8_t *from, size_t from_size,
                        uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
-                       uint32_t code_begin, uint32_t code_end,
                        m4_stream_t streams[M4_NSTREAMS]) {
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
-    disassemble(from, from_size, data_offset, data_off_end, data_begin, data_end,
-                code_begin, code_end, &d);
-    map_t *src[M4_NSTREAMS] = { &d.data_ptr, &d.code_ptr, &d.bl, &d.ldr };
+    disassemble(from, from_size, data_offset, data_off_end, &d);
+    map_t *src[M4_NSTREAMS] = { &d.bl, &d.ldr };
     for (int s = 0; s < M4_NSTREAMS; s++) { streams[s].a = NULL; streams[s].n = 0; }
     for (int s = 0; s < M4_NSTREAMS; s++) {
         streams[s].a = src[s]->a;
@@ -123,7 +115,6 @@ void a1_m4_disassemble(const uint8_t *from, size_t from_size,
         src[s]->a = NULL; src[s]->n = src[s]->cap = 0;
     }
     map_free(&d.bl); map_free(&d.ldr);
-    map_free(&d.data_ptr); map_free(&d.code_ptr);
 }
 void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
     for (int s = 0; s < M4_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }

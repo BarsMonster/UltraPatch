@@ -148,15 +148,16 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
         int32_t fo = m.v[mi].a, to = m.v[mi].b, sz = m.v[mi].size;
         if (sz < 6) continue;
         sz += 1;
-        int32_t *vals = out ? (int32_t *)xmalloc((size_t)sz * sizeof(int32_t)) : NULL;
+        int32_t *vals = (int32_t *)xmalloc((size_t)sz * sizeof(int32_t));
         int nz = 0;
         for (int32_t k = 0; k < sz; k++) {
             int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
-            if (vals) vals[k] = delta;
+            vals[k] = delta;
             if (delta != 0) nz++;
         }
         if (nz < 5) { free(vals); continue; }
-        if (out) { blockvec_push(out, fo, vals, sz); vals = NULL; }
+        blockvec_push(out, fo, vals, sz);
+        vals = NULL;
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
@@ -174,9 +175,9 @@ void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
                         const Ranges *fr, const Ranges *tr) {
     memset(pa, 0, sizeof(*pa));
     a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                      fr->code_begin, fr->code_end, pa->from_st);
+                      pa->from_st);
     a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                      tr->code_begin, tr->code_end, pa->to_st);
+                      pa->to_st);
 }
 
 void pair_analysis_free(PairAnalysis *pa) {
