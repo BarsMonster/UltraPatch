@@ -63,15 +63,28 @@ void put_raw_bits(REnc *r, uint32_t v, int nb) {
     for (int sh = nb - 1; sh >= 0; sh--) re_raw(r, (int)((v >> sh) & 1u));
 }
 
-void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate) {
+enum { BT_XFER_ENC, BT_XFER_PRICE, BT_XFER_PRICE_UPDATE };
+
+static uint64_t bt_xfer(A1BitTree *t, REnc *r, uint8_t byte, int rate, int mode) {
     int m = 1;
+    uint64_t cost = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
         uint16_t p = a1_bt_get(t, m - 1);
-        re_bit(r, &p, bit, rate);
-        a1_bt_set(t, m - 1, p);
+        if (mode == BT_XFER_ENC) {
+            re_bit(r, &p, bit, rate);
+            a1_bt_set(t, m - 1, p);
+        } else {
+            cost += bit_price(p, bit);
+            if (mode == BT_XFER_PRICE_UPDATE) a1_bt_set(t, m - 1, rc_adapt(p, bit, rate));
+        }
         m = (m << 1) | bit;
     }
+    return cost;
+}
+
+void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate) {
+    (void)bt_xfer(t, r, byte, rate, BT_XFER_ENC);
 }
 
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t) {
@@ -186,20 +199,8 @@ uint32_t ug_price(const void *vg, uint32_t v) {
     return ug_xfer((void *)vg, NULL, v);
 }
 
-static uint64_t bt_price_xfer(A1BitTree *t, uint8_t byte, int rate, int update) {
-    int m = 1; uint64_t cost = 0;
-    for (int i = 7; i >= 0; i--) {
-        int bit = (byte >> i) & 1;
-        uint16_t p = a1_bt_get(t, m - 1);
-        cost += bit_price(p, bit);
-        if (update) a1_bt_set(t, m - 1, rc_adapt(p, bit, rate));
-        m = (m << 1) | bit;
-    }
-    return cost;
-}
-
 uint32_t bt_price_static(const A1BitTree *t, uint8_t byte) {
-    return (uint32_t)bt_price_xfer((A1BitTree *)t, byte, 0, 0);
+    return (uint32_t)bt_xfer((A1BitTree *)t, NULL, byte, 0, BT_XFER_PRICE);
 }
 
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
@@ -209,5 +210,5 @@ uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
 }
 
 uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate) {
-    return bt_price_xfer(t, byte, rate, 1);
+    return bt_xfer(t, NULL, byte, rate, BT_XFER_PRICE_UPDATE);
 }

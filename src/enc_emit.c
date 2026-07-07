@@ -126,15 +126,34 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     free(lits.v); buf_free(&tmp);
 }
 
+static uint64_t bit_xfer(REnc *r, uint16_t *prob, int bit) {
+    if (r) {
+        re_bit(r, prob, bit, RC_S_BIT_RATE);
+        return 0;
+    }
+    return bit_price_update(prob, bit, RC_S_BIT_RATE);
+}
+
+static uint64_t idx_xfer(A1IdxUnary *g, REnc *r, uint32_t v) {
+    uint64_t c = 0;
+    for (uint32_t pos = 0; pos < v; pos++)
+        c += bit_xfer(r, &g->u[rc_idx_ctx(pos)], 1);
+    return c + bit_xfer(r, &g->u[rc_idx_ctx(v)], 0);
+}
+
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-static void bv_encode(A1BitTree *t, REnc *r, int32_t x) {
+static uint64_t bv_xfer(A1BitTree *t, REnc *r, int32_t x) {
     uint32_t v = rc_zz32(x);
+    uint64_t c = 0;
     for (;;) {
         uint8_t b = (uint8_t)(v & 0x7fu);
         v >>= 7;
-        bt_encode(t, r, v ? (uint8_t)(b | 0x80u) : b, RC_DVAL_RATE);
+        uint8_t wb = v ? (uint8_t)(b | 0x80u) : b;
+        if (r) bt_encode(t, r, wb, RC_DVAL_RATE);
+        else c += bt_price_update(t, wb, RC_DVAL_RATE);
         if (!v) break;
     }
+    return c;
 }
 
 static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
@@ -164,26 +183,20 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
     return tr;
 }
 
-static uint64_t px_idx(A1IdxUnary *g, uint32_t v);
-static uint64_t px_bv(A1BitTree *t, int32_t x);
-
 static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
                            REnc *r, int32_t delta, int *overflow) {
     DRTrans tr = dr_transition(D, delta);
     if (tr.kind == DR_TR_REP) {
-        if (r) { re_bit(r, &D->rep[tr.ri], 1, RC_S_BIT_RATE); return 0; }
-        return bit_price_update(&D->rep[tr.ri], 1, RC_S_BIT_RATE);
+        return bit_xfer(r, &D->rep[tr.ri], 1);
     }
-    uint64_t c = 0;
-    if (r) re_bit(r, &D->rep[tr.ri], 0, RC_S_BIT_RATE);
-    else c = bit_price_update(&D->rep[tr.ri], 0, RC_S_BIT_RATE);
+    uint64_t c = bit_xfer(r, &D->rep[tr.ri], 0);
     if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
-        if (r) { re_bit(r, &D->hit, 1, RC_S_BIT_RATE); idx_encode(gix, r, tr.idx); }
-        else { c += bit_price_update(&D->hit, 1, RC_S_BIT_RATE); c += px_idx(gix, tr.idx); }
+        c += bit_xfer(r, &D->hit, 1);
+        c += idx_xfer(gix, r, tr.idx);
     } else {
-        if (r) { re_bit(r, &D->hit, 0, RC_S_BIT_RATE); bv_encode(dval, r, delta); }
-        else { c += bit_price_update(&D->hit, 0, RC_S_BIT_RATE); c += px_bv(dval, delta); }
+        c += bit_xfer(r, &D->hit, 0);
+        c += bv_xfer(dval, r, delta);
     }
     return c;
 }
@@ -316,24 +329,6 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
  * second-order); the final map choice is always settled by encode_body's exact full-body byte
  * gate, which competes this map against the hit-count map and the no-map body. ---- */
 
-/* MTF dict-index unary (mirror idx_encode) */
-static uint64_t px_idx(A1IdxUnary *g, uint32_t v) {
-    uint64_t c = 0;
-    for (uint32_t pos = 0; pos < v; pos++) c += bit_price_update(&g->u[rc_idx_ctx(pos)], 1, RC_S_BIT_RATE);
-    return c + bit_price_update(&g->u[rc_idx_ctx(v)], 0, RC_S_BIT_RATE);
-}
-/* zigzag-uLEB escape value through dval (mirror bv_encode) */
-static uint64_t px_bv(A1BitTree *t, int32_t x) {
-    uint32_t v = rc_zz32(x);
-    uint64_t c = 0;
-    for (;;) {
-        uint8_t b = (uint8_t)(v & 0x7fu);
-        v >>= 7;
-        c += bt_price_update(t, v ? (uint8_t)(b | 0x80u) : b, RC_DVAL_RATE);
-        if (!v) break;
-    }
-    return c;
-}
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
 static uint64_t px_delta(DRE *D, A1IdxUnary *gix, A1BitTree *dval, int32_t delta, int *overflow) {
