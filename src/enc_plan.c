@@ -175,31 +175,31 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start, const 
     return pc;
 }
 
-static int32_t opvec_fp_end(const OpVec *ops, int32_t fp_start) {
-    int32_t fp_end = fp_start;
-    for (size_t i = 0; i < ops->n; i++) fp_end += ops->v[i].diff_len + ops->v[i].adj;
-    return fp_end;
-}
-
-static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *pc, int32_t fp_start) {
-    int feasible = 1;
+static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *pc,
+                              int32_t fp_start, uint32_t to_size, int32_t *fp_endp) {
+    int ok = 1;
     size_t tpres = 0;
-    OpWalkEnt *walk = opwalk_build(ops, fp_start);
+    int32_t fp_end = fp_start;
+    int32_t tp = ctx->fwd ? 0 : (int32_t)to_size;
     for (size_t step = 0; step < ops->n; step++) {
         const OpPC *p = &pc[step];
-        const OpWalkEnt *we = &walk[opwalk_apply_index(ops->n, ctx->fwd, step)];
-        if (p->corr.n > A1_OPC_CAP) feasible = 0;
+        size_t oi = opwalk_apply_index(ops->n, ctx->fwd, step);
+        const Op *o = &ops->v[oi];
+        if (!ctx->fwd) tp -= o->diff_len + o->extra_len;
+        fp_end += o->diff_len + o->adj;
+        if (p->corr.n > A1_OPC_CAP) ok = 0;
         for (size_t i = 0; i < p->corr.n; i++)
-            if (p->corr.v[i].off < 0 || (uint32_t)p->corr.v[i].off >= RC_PACKED_POS_LIMIT) feasible = 0;
+            if ((uint32_t)p->corr.v[i].off >= RC_PACKED_POS_LIMIT) ok = 0;
         for (size_t i = 0; i < p->pres.n; i++) {
-            int64_t pos = (int64_t)we->tp + p->pres.v[i];
-            if (pos < 0 || pos >= (int64_t)RC_PACKED_POS_LIMIT) feasible = 0;
+            uint32_t pos = (uint32_t)tp + (uint32_t)p->pres.v[i];
+            if (pos >= RC_PACKED_POS_LIMIT) ok = 0;
         }
+        if (ctx->fwd) tp += o->diff_len + o->extra_len;
         tpres += p->pres.n;
     }
-    free(walk);
-    if (tpres > A1_JSLOTS) feasible = 0;
-    return feasible;
+    if (tpres > A1_JSLOTS) ok = 0;
+    *fp_endp = fp_end;
+    return ok;
 }
 
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
@@ -216,12 +216,12 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
     OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd);
-    int32_t fp_end_s = opvec_fp_end(&ops, fp_start_s);
+    int32_t fp_end_s;
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
-    int feasible = plan_caps_feasible(ctx, &ops, pc, fp_start_s);
+    int feasible = plan_caps_feasible(ctx, &ops, pc, fp_start_s, to_size, &fp_end_s);
     Buf body = {0};
     if (feasible) {
         int emit_overflow = 0;
