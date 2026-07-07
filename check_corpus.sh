@@ -26,15 +26,15 @@
 set -u
 JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
-FIX="${FIXTURES:-test-bench/fixtures}"
 FGN="${FOREIGN:-test-bench/foreign}"
+SIZE_BASE="${CORPUS_SIZE_BASELINE:-test-bench/home-size-baseline.tsv}"
 
 # Foreign lineage, pinned release order; adjacent pairs are the update steps. Two contiguous
 # families (2.2.x/2.3.x/3.0.x, then 10.0.x/10.1.x) joined by the cross-major 3.0.3 -> 10.0.0 jump.
 FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
-#   "<tag> <blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions>"
+#   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions>"
 # tag is C (home matrix) or F (foreign) so the aggregator can total each set separately while
 # taking NVM write-safety maxima across BOTH. (A single short printf is < PIPE_BUF, so parallel
 # workers' lines never interleave.)
@@ -48,7 +48,7 @@ cm_work() {
   if cmp -s "$d/mem.bin" "$to/watch.bin"; then ok=1; else ok=0; fi
   j=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$d/log")
   v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$d/log")
-  printf '%s %s %s %s %s\n' "$tag" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA}"
+  printf '%s %s %s %s %s %s %s\n' "$tag" "${from##*/}" "${to##*/}" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA}"
   rm -rf "$d"
 }
 export -f cm_work
@@ -76,31 +76,62 @@ foreign_jobs() {
   done
 }
 
+if [ ! -f "$SIZE_BASE" ]; then
+  echo "check_corpus.sh: missing home size baseline: $SIZE_BASE" >&2
+  exit 3
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+{
+  foreign_jobs
+  for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf 'C\t%s\t%s\n' "$from" "$to"; done; done
+} \
+| xargs -P "$JOBS" -L1 bash -c 'cm_work "$0" "$1" "$2"' > "$tmp/pairs.txt"
+
 agg=$(
-  {
-    foreign_jobs
-    for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf 'C\t%s\t%s\n' "$from" "$to"; done; done
-  } \
-  | xargs -P "$JOBS" -L1 bash -c 'cm_work "$0" "$1" "$2"' \
-  | awk '{ tag=$1; sz=$2; ok=$3; j=$4; amp=$5; row=$6; inv=$7;
-           if(j=="NA"||amp=="NA"){bad++; next}
-           if(tag=="C"){cfull+=sz; cok+=ok; cn++}
-           else if(tag=="F"){ffull+=sz; fok+=ok; fn++}
-           if(j>mj)mj=j; if(amp>ma)ma=amp; if(row>mr)mr=row; if(inv>mi)mi=inv }
-         END{ printf "%d %d %d %d %d %d %d %d %d %d %d\n", cok,cfull,cn, fok,ffull,fn, mj,ma,mr,mi, bad+0 }'
+  awk '{ tag=$1; sz=$4; ok=$5; j=$6; amp=$7; row=$8; inv=$9;
+         if(j=="NA"||amp=="NA"){bad++; next}
+         if(tag=="C"){cfull+=sz; cok+=ok; cn++}
+         else if(tag=="F"){ffull+=sz; fok+=ok; fn++}
+         if(j>mj)mj=j; if(amp>ma)ma=amp; if(row>mr)mr=row; if(inv>mi)mi=inv }
+       END{ printf "%d %d %d %d %d %d %d %d %d %d %d\n", cok,cfull,cn, fok,ffull,fn, mj,ma,mr,mi, bad+0 }' "$tmp/pairs.txt"
+)
+split=$(
+  awk '
+    FNR==NR {
+      if($0 ~ /^[[:space:]]*$/ || $1 ~ /^#/) next
+      key=$1 SUBSEP $2
+      base[key]=$3
+      bcount++
+      next
+    }
+    $1=="C" {
+      key=$2 SUBSEP $3
+      if(!(key in base)){missing++; next}
+      seen[key]=1
+      sz=$4 + 0
+      ref=base[key] + 0
+      if(sz < ref) better++
+      else if(sz > ref) worse++
+      else equal++
+    }
+    END {
+      for(key in base) if(!(key in seen)) missing++
+      printf "%d %d %d %d %d\n", better+0,worse+0,equal+0,missing+0,bcount+0
+    }' "$SIZE_BASE" "$tmp/pairs.txt"
 )
 read cok cfull cn fok ffull fn mj ma mr mi bad <<EOF
 $agg
 EOF
-if [ "$cn" -ne 256 ] || [ "$fn" -ne 34 ] || [ "$bad" -ne 0 ]; then
-  echo "check_corpus.sh: structural error (home=$cn/256 foreign=$fn/34 bad_parse=$bad)" >&2
+read hbetter hworse hequal hmissing hbase <<EOF
+$split
+EOF
+if [ "$cn" -ne 256 ] || [ "$fn" -ne 34 ] || [ "$bad" -ne 0 ] || [ "$hbase" -ne 256 ] || [ "$hmissing" -ne 0 ]; then
+  echo "check_corpus.sh: structural error (home=$cn/256 foreign=$fn/34 baseline=$hbase/256 missing=$hmissing bad_parse=$bad)" >&2
   exit 3
 fi
 
-# real one-face firmware update (grow + revert) — two encodes, serial (negligible).
-oneface=$(FIXTURES="$FIX" scripts/oneface_metrics.sh ./ultrapatch)
-og=$(printf '%s\n' "$oneface" | sed -n 's/^oneface_grow=//p')
-orv=$(printf '%s\n' "$oneface" | sed -n 's/^oneface_revert=//p')
-
-printf 'matrix_ok=%d/256\nfull_total=%d\nforeign_ok=%d/34\nforeign_total=%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\noneface_grow=%d\noneface_revert=%d\n' \
-  "$cok" "$cfull" "$fok" "$ffull" "$mj" "$ma" "$mr" "$mi" "$og" "$orv"
+printf 'matrix_ok=%d/256\nfull_total=%d\nhome_size_better=%d\nhome_size_worse=%d\nhome_size_equal=%d\nforeign_ok=%d/34\nforeign_total=%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\n' \
+  "$cok" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$ffull" "$mj" "$ma" "$mr" "$mi"

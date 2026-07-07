@@ -49,17 +49,18 @@ IMAGES ?= test-bench/images
 FOREIGN ?= test-bench/foreign
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
 FOREIGN_MANIFEST ?= test-bench/foreign.sha256
+CORPUS_SIZE_BASELINE ?= test-bench/home-size-baseline.tsv
 
 BASE_FULL_TOTAL ?= 4151558
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
-BASE_FOREIGN_TOTAL ?= 1333476
+BASE_FOREIGN_TOTAL ?= 1333407
 BASE_ONEFACE_GROW ?= 574
 BASE_ONEFACE_REVERT ?= 287
 BASE_ARM_TEXT ?= 6093
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 11360
+BASE_ARM_BSS ?= 10852
 BASE_ARM_SOFT_DIV ?= 1
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
@@ -253,33 +254,40 @@ golden-update-internal: ultrapatch
 # so they run in ONE parallel pool across all cores via check_corpus.sh (each worker gets its own
 # mktemp dir — no shared blob path, contamination-safe). The foreign set's cross-major pair is the
 # single slowest job and is scheduled first so it overlaps everything (LPT), keeping the leg near
-# its home-only wall. matrix_ok/full_total gate the home set; foreign_ok(=34)/foreign_total gate
-# the foreign set (foreign_total ratchets vs BASE_FOREIGN_TOTAL); NVM write-safety maxima cover
-# BOTH. Override parallelism with JOBS=N (defaults to nproc).
+# its home-only wall. matrix_ok/full_total gate the home set; home_size_{better,worse,equal}
+# compares each home pair against CORPUS_SIZE_BASELINE and rejects any worse pair;
+# foreign_ok(=34)/foreign_total gate the foreign set (foreign_total ratchets vs
+# BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N
+# (defaults to nproc).
 check-corpus-internal: all-internal check-assets-internal
 	@set -e; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" FOREIGN="$(FOREIGN)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
+	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
 	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \
+	hbetter=$$(sed -n 's/^home_size_better=//p' "$$tmp/m.txt"); \
+	hworse=$$(sed -n 's/^home_size_worse=//p' "$$tmp/m.txt"); \
+	hequal=$$(sed -n 's/^home_size_equal=//p' "$$tmp/m.txt"); \
 	fok=$$(sed -n 's#^foreign_ok=\([0-9][0-9]*\)/34#\1#p' "$$tmp/m.txt"); \
 	fforeign=$$(sed -n 's/^foreign_total=//p' "$$tmp/m.txt"); \
 	max_amp=$$(sed -n 's/^max_amplified=//p' "$$tmp/m.txt"); \
 	max_row=$$(sed -n 's/^max_maxrowerase=//p' "$$tmp/m.txt"); \
 	max_inv=$$(sed -n 's/^max_inversions=//p' "$$tmp/m.txt"); \
-	one_g=$$(sed -n 's/^oneface_grow=//p' "$$tmp/m.txt"); \
-	one_r=$$(sed -n 's/^oneface_revert=//p' "$$tmp/m.txt"); \
+	test -n "$$hbetter"; \
+	test -n "$$hworse"; \
+	test -n "$$hequal"; \
+	hsum=$$((hbetter + hworse + hequal)); \
 	test "$$ok" -eq 256; \
+	test "$$hsum" -eq 256; \
+	test "$$hworse" -eq 0; \
 	test "$$fok" -eq 34; \
 	test "$$max_amp" -eq 0; \
 	test "$$max_row" -le 1; \
 	test "$$max_inv" -eq 0; \
 	test "$$full" -le "$(BASE_FULL_TOTAL)"; \
-	test "$$fforeign" -le "$(BASE_FOREIGN_TOTAL)"; \
-	test "$$one_g" -le "$(BASE_ONEFACE_GROW)"; \
-	test "$$one_r" -le "$(BASE_ONEFACE_REVERT)"
+	test "$$fforeign" -le "$(BASE_FOREIGN_TOTAL)"
 
 # THE gate — one target, everything, hard budget <= 60 s wall on the reference machine
 # (measured ~29 s at 32 jobs, incl. the folded-in foreign lineage). Builds up-front, then runs
@@ -288,9 +296,10 @@ check-corpus-internal: all-internal check-assets-internal
 # check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
 # check-models, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
 # matrix + 34 foreign
-# pair-directions (corpus full_total vs BASE_FULL_TOTAL, foreign_total vs BASE_FOREIGN_TOTAL,
-# foreign 34/34 round-trips, NVM write-safety, journal peak — check-corpus; the
-# 256-pair better/worse judging rule lives here). Wall time ~= the slowest leg
+# pair-directions (corpus full_total vs BASE_FULL_TOTAL, home per-pair better/worse/equal
+# split vs CORPUS_SIZE_BASELINE with zero worse pairs allowed, foreign_total vs
+# BASE_FOREIGN_TOTAL, foreign 34/34 round-trips, NVM write-safety, journal peak —
+# check-corpus). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
 # metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes

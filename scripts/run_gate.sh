@@ -41,7 +41,9 @@ awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_dir
 awk -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",$1,$2,$3,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|soft_div_calls|ARM   soft-divide calls  : '
 awk -F= '/^stack_bound_bytes=/{b=$2}/^stack_ceiling_o2=/{c=$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
-kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : ' 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM rows amplified       : ' 'm.txt|max_maxrowerase|NVM max erases-per-row   : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_journal|journal peak slots      : '
+kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : '
+awk -F= '/^home_size_better=/{b=$2}/^home_size_worse=/{w=$2}/^home_size_equal=/{e=$2}END{if(b!="")printf "home size split         : %s better / %s worse / %s equal\n",b,w,e}' "$tmp/m.txt"
+kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM rows amplified       : ' 'm.txt|max_maxrowerase|NVM max erases-per-row   : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_journal|journal peak slots      : '
 if [ "$rc" = 0 ]; then
   echo "robustness check         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"
   echo "RESULT                   : ALL GATES PASS"
