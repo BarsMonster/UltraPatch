@@ -108,33 +108,58 @@ void ug_seed_cont_e(void *g, int depth) {
     rc_seed_cont_u(ug->u, UG_CTX, depth);
 }
 
-static void re_unary(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
-    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &u[pos < clampmax ? pos : clampmax], 1, RC_S_BIT_RATE);
-    re_bit(r, &u[v < clampmax ? v : clampmax], 0, RC_S_BIT_RATE);
+static uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
+    uint32_t cost = 0;
+    for (uint32_t pos = 0; pos < v; pos++) {
+        uint16_t *p = &u[pos < clampmax ? pos : clampmax];
+        if (r) re_bit(r, p, 1, RC_S_BIT_RATE);
+        else cost += bit_price(*p, 1);
+    }
+    uint16_t *p = &u[v < clampmax ? v : clampmax];
+    if (r) re_bit(r, p, 0, RC_S_BIT_RATE);
+    else cost += bit_price(*p, 0);
+    return cost;
 }
 
-void ug_encode(void *vg, REnc *r, uint32_t v) {
+static uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit) {
+    if (r) {
+        re_bit(r, prob, bit, RC_S_BIT_RATE);
+        return 0;
+    }
+    return bit_price(*prob, bit);
+}
+
+static uint32_t ug_xfer(void *vg, REnc *r, uint32_t v) {
     const uint8_t code = *(const uint8_t *)vg;
-    uint32_t cl;
+    uint32_t cl, cost = 0;
     if (code == 'r') {
         UGRiceE *g = (UGRiceE *)vg;
         cl = v >> g->k;
-        re_unary(r, g->u, UG_CTX, cl);
-        for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);  /* rice: LSB-anchored ctx */
+        cost = unary_xfer(r, g->u, UG_CTX, cl);
+        for (int pos = 0; pos < g->k; pos++)
+            cost += ug_bit_xfer(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)],
+                                (int)((v >> (g->k - 1 - pos)) & 1u));  /* rice: LSB-anchored ctx */
     } else {
         UGGammaE *g = (UGGammaE *)vg;
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
         int row = UG_C((int)cl);
-        re_unary(r, g->u, UG_CTX, cl);
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[rc_ugg_mant_idx(row, (int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
+        cost = unary_xfer(r, g->u, UG_CTX, cl);
+        for (uint32_t pos = 0; pos < cl; pos++)
+            cost += ug_bit_xfer(r, &g->m[rc_ugg_mant_idx(row, (int)pos)],
+                                (int)((mm >> (cl - 1u - pos)) & 1u));
     }
+    return cost;
+}
+
+void ug_encode(void *vg, REnc *r, uint32_t v) {
+    (void)ug_xfer(vg, r, v);
 }
 
 /* MTF dict-index model: IDX_CTX / A1IdxUnary / a1_idx_init single-sourced in rc_models.h (decoder mirror).
  * The encoded index value v is ~54% zero; unary fits that concentration and drops the per-stream A1UGGamma. */
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v) {
-    re_unary(r, g->u, IDX_CTX - 1u, v);
+    (void)unary_xfer(r, g->u, IDX_CTX - 1u, v);
 }
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
@@ -157,41 +182,24 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     m->last_dist = 0;
 }
 
-static uint32_t unary_price(const uint16_t *u, uint32_t clampmax, uint32_t v) {
-    uint32_t cost = 0;
-    for (uint32_t pos = 0; pos < v; pos++) cost += bit_price(u[pos < clampmax ? pos : clampmax], 1);
-    return cost + bit_price(u[v < clampmax ? v : clampmax], 0);
+uint32_t ug_price(const void *vg, uint32_t v) {
+    return ug_xfer((void *)vg, NULL, v);
 }
 
-uint32_t ug_price(const void *vg, uint32_t v) {
-    const uint8_t code = *(const uint8_t *)vg;
-    uint32_t cl, cost = 0;
-    if (code == 'r') {
-        const UGRiceE *g = (const UGRiceE *)vg;
-        cl = v >> g->k;
-        cost = unary_price(g->u, UG_CTX, cl);
-        for (int pos = 0; pos < g->k; pos++)
-            cost += bit_price(g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
-    } else {
-        const UGGammaE *g = (const UGGammaE *)vg;
-        uint32_t mm = v + 1u;
-        cl = (uint32_t)bitlen32(mm) - 1u;
-        int row = UG_C((int)cl);
-        cost = unary_price(g->u, UG_CTX, cl);
-        for (uint32_t pos = 0; pos < cl; pos++)
-            cost += bit_price(g->m[rc_ugg_mant_idx(row, (int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
+static uint64_t bt_price_xfer(A1BitTree *t, uint8_t byte, int rate, int update) {
+    int m = 1; uint64_t cost = 0;
+    for (int i = 7; i >= 0; i--) {
+        int bit = (byte >> i) & 1;
+        uint16_t p = a1_bt_get(t, m - 1);
+        cost += bit_price(p, bit);
+        if (update) a1_bt_set(t, m - 1, rc_adapt(p, bit, rate));
+        m = (m << 1) | bit;
     }
     return cost;
 }
 
 uint32_t bt_price_static(const A1BitTree *t, uint8_t byte) {
-    int m = 1; uint32_t cost = 0;
-    for (int i = 7; i >= 0; i--) {
-        int bit = (byte >> i) & 1;
-        cost += bit_price(a1_bt_get(t, m - 1), bit);
-        m = (m << 1) | bit;
-    }
-    return cost;
+    return (uint32_t)bt_price_xfer((A1BitTree *)t, byte, 0, 0);
 }
 
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
@@ -201,13 +209,5 @@ uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
 }
 
 uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate) {
-    int m = 1; uint64_t cost = 0;
-    for (int i = 7; i >= 0; i--) {
-        int bit = (byte >> i) & 1;
-        uint16_t p = a1_bt_get(t, m - 1);
-        cost += bit_price(p, bit);
-        a1_bt_set(t, m - 1, rc_adapt(p, bit, rate));
-        m = (m << 1) | bit;
-    }
-    return cost;
+    return bt_price_xfer(t, byte, rate, 1);
 }
