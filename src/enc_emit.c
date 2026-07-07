@@ -577,34 +577,29 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
             }
         }
         free(nocand0);
-        /* anneal-k probe: fit_k_tokens minimizes the rice codelen of the raw distances, but the
-         * shipped cost is the ADAPTIVE ug_encode of M_gd seeded at k; the two optima can differ by
-         * one. Walk kd outward in each direction under the EXACT full-body byte gate and stop as soon
-         * as a step fails to help (the codelen-vs-k curve is unimodal). Encoder-only; wire unchanged. */
-        for (int dir = -1; dir <= 1; dir += 2) {
-            for (int nk = kd + dir; nk >= 0 && nk <= 15; nk += dir) {
-                size_t bb = emit_body_size(&meas, &seq, nk, ko, inj, NULL, NULL, 0);
-                if (bb < cur_bytes) { cur_bytes = bb; kd = nk; }
-                else break;
-            }
-        }
-        /* anneal-ko probe: same unimodal walk for the out-match position rice parameter. */
-        for (int dir = -1; dir <= 1; dir += 2) {
-            for (int nko = ko + dir; nko >= 0 && nko <= 15; nko += dir) {
-                size_t bb = emit_body_size(&meas, &seq, kd, nko, inj, NULL, NULL, 0);
-                if (bb < cur_bytes) { cur_bytes = bb; ko = nko; }
-                else break;
+        /* anneal rice parameters: fit_k_* minimizes raw codelen, but the shipped cost is the
+         * ADAPTIVE ug_encode seed. Walk each parameter outward under the exact full-body gate. */
+        for (int which = 0; which < 2; which++) {
+            int *kp = which ? &ko : &kd;
+            for (int dir = -1; dir <= 1; dir += 2) {
+                for (int nk = *kp + dir; nk >= 0 && nk <= 15; nk += dir) {
+                    size_t bb = emit_body_size(&meas, &seq, which ? kd : nk, which ? nk : ko,
+                                               inj, NULL, NULL, 0);
+                    if (bb < cur_bytes) { cur_bytes = bb; *kp = nk; }
+                    else break;
+                }
             }
         }
         /* map variants: same fixed parse, residual-space inj + shipped map. Each ships only if its
          * exact emitted body beats the current best (no-map, then whichever map already won). */
-        if (map_n > 0) {
-            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, map_b, map_v, map_n);
-            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 1; }
-        }
-        if (map_n2 > 0) {
-            size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, map_b2, map_v2, map_n2);
-            if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = 2; }
+        for (int mi = 1; mi <= 2; mi++) {
+            int mn = mi == 1 ? map_n : map_n2;
+            if (mn > 0) {
+                const uint32_t *mb = mi == 1 ? map_b : map_b2;
+                const int32_t *mv = mi == 1 ? map_v : map_v2;
+                size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, mb, mv, mn);
+                if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = mi; }
+            }
         }
     }
     free(cands); free(ncand);
