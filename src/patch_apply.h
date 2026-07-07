@@ -1005,8 +1005,8 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
       g_FWD=!desc; }
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped for both directions right after
      * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
-    { uint32_t z2; if(!env_uleb(pa,&z2) || z2==0xffffffffu) return 0;
-      g_fp_start=(z2&1u)? -(int32_t)((z2>>1)+1u) : (int32_t)(z2>>1); }
+    { uint32_t z2; if(!env_uleb(pa,&z2)) return 0;
+      g_fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
     if(!env_uleb(pa,&bl) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     g_from_size=fs; g_to_size=ts; g_want_to=want_to;
     g_body_left=bl;

@@ -35,7 +35,7 @@ header set.
   Move duplicated BL, LDR-literal, and shift-map prediction semantics into shared
   helpers, including the decoder/encoder LDR scan-bound drift fix.
 
-- [ ] 5. Make decoder helper sharing reduce ARM text.
+- [x] 5. Make decoder helper sharing reduce ARM text.
   Remove stale gamma init flexibility, route duplicated header zigzag decoding
   through shared helpers, and experiment with non-forced-inlined literal cursor
   helpers.

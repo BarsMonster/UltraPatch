@@ -16,6 +16,12 @@
 #include <string.h>
 #include "patch_config.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
+#else
+#define RC_ALWAYS_INLINE static inline
+#endif
+
 #define RC_KTOP (1u<<24)
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
@@ -163,7 +169,7 @@ static inline int rc_bl_pattern(uint16_t up, uint16_t lo){
     return ((up&0xf800u)==0xf000u) && ((lo&0xd000u)==0xd000u);
 }
 /* unpack the 24-bit BL immediate (halfword units), RAW (unsigned, not yet sign-extended). */
-static inline uint32_t rc_bl_imm24(uint16_t up, uint16_t lo){
+RC_ALWAYS_INLINE uint32_t rc_bl_imm24(uint16_t up, uint16_t lo){
     uint32_t s=(up>>10)&1u, i1=1u-(((lo>>13)&1u)^s), i2=1u-(((lo>>11)&1u)^s);
     return ((up&0x3ffu)<<11)|(lo&0x7ffu)|(s<<23)|(i1<<22)|(i2<<21);
 }
@@ -299,5 +305,7 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
 /* Header raw k-field width: the distance rice parameter kd and (when out-matches are enabled) the
  * out-position rice parameter ko each ship as a fixed RC_KFIELD_BITS-bit raw field. */
 #define RC_KFIELD_BITS 4
+
+#undef RC_ALWAYS_INLINE
 
 #endif
