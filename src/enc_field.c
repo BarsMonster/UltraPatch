@@ -39,35 +39,19 @@ static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out)
     return 1;
 }
 
-IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size) {
-    IVec s = {0};
-    int32_t lo = fp0, hi = fp0 + dl;
-    int32_t a = (lo & 1) ? lo + 1 : lo;
-    while (a + 2 <= hi && a + 2 <= (int32_t)from_size) {
+static int op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size, uint32_t fpk) {
+    if (fpk & 3u) return 0;
+    int32_t hi = fp0 + dl;
+    if ((int64_t)fpk + 4 > hi || fpk + 4u > from_size) return 0;
+    int32_t lo = (int32_t)fpk - 1024;
+    if (lo < fp0) lo = fp0;
+    if (lo < 0) lo = 0;
+    if (lo & 1) lo++;
+    for (int32_t a = lo; a + 2 <= (int32_t)fpk && a + 2 <= hi && a + 2 <= (int32_t)from_size; a += 2) {
         uint16_t up = u16le_at(frm + a);
-        if ((up & 0xf800u) == 0x4800u) {
-            int32_t t = rc_ldr_target(a, (int32_t)(up & 0xffu));
-            if (lo <= t && t + 4 <= hi && t + 4 <= (int32_t)from_size) ivec_push(&s, t);
-        }
-        a += 2;
+        if ((up & 0xf800u) == 0x4800u && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
     }
-    if (s.n) {
-        a1_sort(s.v, s.n, sizeof(s.v[0]), cmp_i32);
-        size_t w = 0;
-        for (size_t i = 0; i < s.n; i++) if (!w || s.v[w - 1] != s.v[i]) s.v[w++] = s.v[i];
-        s.n = w;
-    }
-    return s;
-}
-
-static int ivec_has(const IVec *v, int32_t x) {
-    size_t lo = 0, hi = v->n;
-    while (lo < hi) {
-        size_t m = (lo + hi) >> 1;
-        if (v->v[m] < x) lo = m + 1;
-        else hi = m;
-    }
-    return lo < v->n && v->v[lo] == x;
+    return 0;
 }
 
 typedef struct {
@@ -165,7 +149,7 @@ static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int
 /* o==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
  * EV_SBL) — coerce_reloc_literals uses that to detect fields before their literals are zeroed. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
-                            const IVec *ldr, const Op *o, int32_t fp0, int32_t k) {
+                            const Op *o, int32_t fp0, int32_t dl, int32_t k) {
     uint32_t fpk;
     if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
     int pure = !o || (o->diff[k] == 0 && o->diff[k + 1] == 0 && o->diff[k + 2] == 0 && o->diff[k + 3] == 0);
@@ -174,7 +158,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
         const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
         return (Event){ EV_BL, r ? r->delta : 0 };
     }
-    if (pure && ivec_has(ldr, (int32_t)fpk)) {
+    if (pure && op_ldr_targets(frm, fp0, dl, from_size, fpk)) {
         const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
         return (Event){ EV_EX, r ? r->delta : 0 };
     }
@@ -187,15 +171,15 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
  * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
  * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-                    const FieldDeltaVec *fd, const IVec *ldr, const Op *o, int32_t fp0, int32_t dl) {
+                    const FieldDeltaVec *fd, const Op *o, int32_t fp0, int32_t dl) {
     w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
-    w->frm = frm; w->from_size = from_size; w->fd = fd; w->ldr = ldr; w->o = o; w->fp0 = fp0;
+    w->frm = frm; w->from_size = from_size; w->fd = fd; w->o = o; w->fp0 = fp0;
 }
 int fw_next(FieldWalk *w) {
     if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
     int32_t a0 = w->fwd ? w->k : w->k - 3;
     if (a0 >= 0 && a0 + 4 <= w->dl) {
-        Event ev = classify_field(w->frm, w->from_size, w->fd, w->ldr, w->o, w->fp0, a0);
+        Event ev = classify_field(w->frm, w->from_size, w->fd, w->o, w->fp0, w->dl, a0);
         if (ev.type != EV_NONE) {
             w->is_field = 1; w->pos = a0; w->ev = ev; w->k += w->fwd ? 4 : -4;
             return 1;
@@ -228,7 +212,6 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
     OpWalkEnt *walk = opwalk_build(ops, 0);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &walk[oi];
-        IVec ldr = op_ldr_set(frm, we->fp, we->o->diff_len, from_size);
         for (int32_t k = 0; k + 4 <= we->o->diff_len; k += 2) {
             uint32_t fpk;
             if (!field_addr(we->fp, k, from_size, &fpk)) continue;
@@ -241,12 +224,11 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                     fd_put(&add, fpk, STREAM_BL,
                            (int32_t)((uint32_t)unpack_bl_local(fu, fl2) - (uint32_t)unpack_bl_local(tu, tl)));
                 }
-            } else if (ivec_has(&ldr, (int32_t)fpk)) {
+            } else if (op_ldr_targets(frm, we->fp, we->o->diff_len, from_size, fpk)) {
                 fd_put(&add, fpk, STREAM_LDR,
                        (int32_t)(u32le_at(frm + fpk) - u32le_at(tob + (size_t)tpk)));
             }
         }
-        free(ldr.v);
     }
     free(walk);
     fd_finalize(&add);
@@ -377,10 +359,9 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, ui
     int32_t fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
-        IVec ldr = op_ldr_set(frm, fp0, o->diff_len, from_size);
         /* o==NULL => assume-pure: a still-dirty field classifies as EV_BL/EV_EX so its
          * literals get zeroed here before they would suppress the field on the wire. */
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, NULL, fp0, o->diff_len);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, NULL, fp0, o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field) continue;
             int32_t k = w.pos;
@@ -389,7 +370,6 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, ui
             const FieldDelta *real = fd_find_kind(fd, fpk, w.ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
             if (real && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) memset(o->diff + k, 0, 4);
         }
-        free(ldr.v);
         fp0 += o->diff_len + o->adj;
     }
 }
@@ -587,8 +567,7 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     for (size_t idx = 0; idx < ops->n; idx++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, idx)];
         const Op *o = we->o;
-        IVec ldr = op_ldr_set(frm, we->fp, o->diff_len, from_size);
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, &ldr, o, we->fp, o->diff_len);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, we->fp, o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
             uint8_t packed[4];
@@ -603,7 +582,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
             }
             for (int b = 0; b < 4; b++) { ohas[we->tp + k + b] = 1; oval[we->tp + k + b] = packed[b]; }
         }
-        free(ldr.v);
     }
     uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
     memcpy(buf, frm, from_size);

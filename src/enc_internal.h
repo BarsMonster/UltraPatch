@@ -89,7 +89,7 @@ typedef struct { int type; int32_t delta; } Event;
 typedef struct {
     int fwd; int32_t dl, k;
     const uint8_t *frm; uint32_t from_size;
-    const FieldDeltaVec *fd; const IVec *ldr; const Op *o; int32_t fp0;
+    const FieldDeltaVec *fd; const Op *o; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
 typedef struct { int kind; uint32_t fpk; int32_t delta; } FieldRef;
@@ -189,9 +189,8 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
-IVec op_ldr_set(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size);
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-             const FieldDeltaVec *fd, const IVec *ldr, const Op *o, int32_t fp0, int32_t dl);
+             const FieldDeltaVec *fd, const Op *o, int32_t fp0, int32_t dl);
 int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);

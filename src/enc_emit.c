@@ -84,7 +84,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
  * cc is a READ-AHEAD cursor: like the decoder A1LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
 static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
-                            int32_t fp0, int32_t tp0, const FieldDeltaVec *fd, const IVec *ldr,
+                            int32_t fp0, int32_t tp0, const FieldDeltaVec *fd,
                             Buf *content, Buf *tags, InjVec *out) {
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
@@ -99,7 +99,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
         (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len),
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
-    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, o, fp0, o->diff_len);
+    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
             inj_push(out, lc.cc, w.ev.type, (uint32_t)(fp0 + w.pos),
@@ -481,15 +481,12 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
     InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
     OpWalkEnt *walk = opwalk_build(ops, fp_start);
-    IVec *ldrs = (IVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*ldrs));
-    for (size_t oi = 0; oi < ops->n; oi++)
-        ldrs[oi] = op_ldr_set(frm, walk[oi].fp, walk[oi].o->diff_len, from_size);
     /* Fused build: one decoder-order walk per op emits content/tags AND records the field-injection
      * cursors (Inj) in the same pass -- byte layout and cursors can never disagree by construction. */
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = opwalk_apply_index(ops->n, FWD, step);
         const OpWalkEnt *we = &walk[oi];
-        op_emit_content(we->o, FWD, frm, from_size, we->fp, we->tp, fd, &ldrs[oi], &content, &tags, &inj[step]);
+        op_emit_content(we->o, FWD, frm, from_size, we->fp, we->tp, fd, &content, &tags, &inj[step]);
         ends[step] = content.n;
     }
     uint8_t L0[256], L1[256];
@@ -612,7 +609,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                          inj, sel_b, sel_v, sel_n, overflow_out);
     injvec_array_free(inj, ops->n);
     free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
-    for (size_t oi = 0; oi < ops->n; oi++) free(ldrs[oi].v);
-    free(ldrs); free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
+    free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
