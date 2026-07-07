@@ -330,10 +330,10 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
     pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ug_price(&M.go, rc_zz32(256));
-    pt->go = M.go; pt->glo = M.glo;
+    pt->glo = M.glo;
     for (int c = 0; c < LIT0_CTX; c++)
-        for (int b = 0; b < 256; b++) pt->lit0[c][b] = bt_price_static(&M.lit0[c], (uint8_t)b);
-    for (int b = 0; b < 256; b++) pt->lit1[b] = bt_price_static(&M.lit1, (uint8_t)b);
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)bt_price_static(&M.lit0[c], (uint8_t)b);
+    for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)bt_price_static(&M.lit1, (uint8_t)b);
     pt->gs = M.gs; pt->gl = M.gl; pt->gd = M.gd;
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 0;
@@ -649,8 +649,8 @@ int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
 static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t L1[256]) {
     memset(pt, 0, sizeof(*pt));
     for (int c = 0; c < LIT0_CTX; c++)
-        for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint32_t)L0[b] * PR_SCALE;
-    for (int b = 0; b < 256; b++) pt->lit1[b] = (uint32_t)L1[b] * PR_SCALE;
+        for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)((uint32_t)L0[b] * PR_SCALE);
+    for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
     pt->bootstrap_simple = 1;
 }
 

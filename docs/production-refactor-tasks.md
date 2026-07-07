@@ -40,7 +40,7 @@ header set.
   through shared helpers, and experiment with non-forced-inlined literal cursor
   helpers.
 
-- [ ] 6. Shrink encoder `PriceTab`.
+- [x] 6. Shrink encoder `PriceTab`.
   Remove the unused `go` member and narrow literal price tables if guarded by
   range checks/static assertions.
 

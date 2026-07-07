@@ -84,6 +84,8 @@ typedef struct { int32_t dist, len; } Cand;
 typedef struct { int32_t pos, len; } OCand;
 #define OC_MAX 4
 enum { PR_SCALE = 64 };
+enum { PRICE_LIT_MAX = 255 * PR_SCALE };
+_Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit uint16_t");
 
 enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
 typedef struct { int type; int32_t delta; } Event;
@@ -104,10 +106,10 @@ typedef struct {
     uint32_t opos_avg;
     uint32_t oexp0;
     int fwd;
-    uint32_t lit0[LIT0_CTX][256];
-    uint32_t lit1[256];
+    uint16_t lit0[LIT0_CTX][256];
+    uint16_t lit1[256];
     UGE gs, gl, gd;
-    UGE go, glo;
+    UGE glo;
     int fixed_dist_bits;
     int bootstrap_simple;
 } PriceTab;
