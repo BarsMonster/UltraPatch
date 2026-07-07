@@ -191,8 +191,6 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
     if (to->n) memcpy(to_mut->d, to->d, to->n);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_DATA], &pa->to_st[M4_DATA], NULL);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_CODE], &pa->to_st[M4_CODE], NULL);
     create_patch_block(from_mut, to_mut, &pa->from_st[M4_BL], &pa->to_st[M4_BL], &blocks[STREAM_BL]);
     create_patch_block(from_mut, to_mut, &pa->from_st[M4_LDR], &pa->to_st[M4_LDR], &blocks[STREAM_LDR]);
     if (mask_bl) {

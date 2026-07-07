@@ -80,8 +80,12 @@ Acceptance rule for every code task:
   outcomes, single-source one-face metrics, and align gate comments/reporting
   with where per-pair better/worse/equal checks actually run.
 
-- [ ] 12. Decide whether DATA/CODE block-mask passes are product-dead.
+- [x] 12. Decide whether DATA/CODE block-mask passes are product-dead.
   The DATA/CODE masking passes were measured neutral on current home/foreign
   corpora and save a small amount of host text when removed, but those streams
   are real for pointer-heavy firmware. Remove them only if product scope says
   this path is genuinely dead beyond the current corpus.
+  Completed by removing only the DATA/CODE mask-only passes; A/B versus
+  `/tmp/ultrapatch.baseline-db1faa3` was bit-identical on the 256-pair corpus
+  (`better/worse/equal = 0/0/256`, `4151558 -> 4151558`) and unchanged for the
+  real one-face grow/revert patches (`574/287 -> 574/287`).
