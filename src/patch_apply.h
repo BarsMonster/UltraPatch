@@ -858,7 +858,7 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
 typedef struct { int32_t nextpos, litb, li, step, lim; } A1LitCur;
-A1_ALWAYS_INLINE void litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
+static void A1_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
     if(lc->li<nl){
         uint32_t g=sa_read_uleb(pa,s);
         /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
