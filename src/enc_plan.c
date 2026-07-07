@@ -202,19 +202,12 @@ static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *p
     return feasible;
 }
 
-static void encstats_from_ctx(const EncCtx *ctx, EncStats *st) {
-    st->deg_engaged = ctx->deg_engaged;
-    st->deg_pres_needed = ctx->deg_pres_needed;
-    st->deg_converted = ctx->deg_converted;
-    st->opc_splits = ctx->opc_splits;
-}
-
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
-Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,
-                       PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out) {
+PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa, PlanCfg cfg) {
+    PlanResult r = {0};
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
@@ -225,7 +218,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd);
     int32_t fp_end_s = opvec_fp_end(&ops, fp_start_s);
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
-    encstats_from_ctx(ctx, st_out);
+    r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
     int feasible = plan_caps_feasible(ctx, &ops, pc, fp_start_s);
@@ -245,7 +238,8 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     opvec_free_deep(&ops);
     blockvec_array_free(blocks);
     buf_free(&from_df); buf_free(&to_df);
-    *fp_end_out = fp_end_s;
-    *fp_start_out = fp_start_s;
-    return body;
+    r.body = body;
+    r.fp_end = fp_end_s;
+    r.fp_start = fp_start_s;
+    return r;
 }

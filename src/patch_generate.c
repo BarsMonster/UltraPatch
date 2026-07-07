@@ -68,7 +68,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
     EncCtx ctx = {0};
-    Buf body = {0}; int32_t fp_end_s = 0; int32_t fp_start_s = 0; EncStats st = {0}; int bestv = -1; int best_desc = 0;
+    PlanResult best = {0}; int bestv = -1; int best_desc = 0;
     size_t best_tot = 0;
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
@@ -82,16 +82,16 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
-        if (pass && bestv >= 0 && !st.deg_engaged) break;
+        if (pass && bestv >= 0 && !best.st.deg_engaged) break;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
-            int32_t fpe = 0, fps = 0; EncStats stv = {0};
-            Buf b = plan_encode(&ctx, &from, &to, &pa, PLANS[v], &fpe, &fps, &stv);
-            if (stv.opc_splits > sweep_opc_splits) sweep_opc_splits = stv.opc_splits;
-            if (b.n == 0) { buf_free(&b); continue; }        /* config infeasible on the wire */
-            size_t tot = emit_wire_blob(NULL, 0, 0, from_size, to_size, dir, fpe, fps, &b);
-            if (bestv < 0 || tot < best_tot) { buf_free(&body); body = b; fp_end_s = fpe; fp_start_s = fps; st = stv; bestv = v; best_desc = dir; best_tot = tot; }
-            else buf_free(&b);
+            PlanResult pr = plan_encode(&ctx, &from, &to, &pa, PLANS[v]);
+            if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
+            if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
+            size_t tot = emit_wire_blob(NULL, 0, 0, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
+            if (bestv < 0 || tot < best_tot) {
+                buf_free(&best.body); best = pr; bestv = v; best_desc = dir; best_tot = tot;
+            } else buf_free(&pr.body);
         }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
@@ -102,11 +102,11 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                 "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
                 best_desc ? "bwd" : "fwd",
                 rc_dir_is_natural(from_size, to_size, best_desc),
-                st.deg_engaged, st.deg_pres_needed, st.deg_converted, st.opc_splits, sweep_opc_splits,
+                best.st.deg_engaged, best.st.deg_pres_needed, best.st.deg_converted, best.st.opc_splits, sweep_opc_splits,
                 (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
     Buf blob = {0};
     size_t wire_n = emit_wire_blob(&blob, crc32_buf(from.d, from.n), crc32_buf(to.d, to.n),
-                                   from_size, to_size, best_desc, fp_end_s, fp_start_s, &body);
+                                   from_size, to_size, best_desc, best.fp_end, best.fp_start, &best.body);
     if (wire_n == SIZE_MAX || blob.n != best_tot) die("candidate size accounting drifted from emitted blob");
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
@@ -116,7 +116,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
       if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(patch_out, blob.d, blob.n);
-    buf_free(&body); buf_free(&blob); buf_free(&from); buf_free(&to);
+    buf_free(&best.body); buf_free(&blob); buf_free(&from); buf_free(&to);
     pair_analysis_free(&pa);
     free(felf); free(telf);
 }

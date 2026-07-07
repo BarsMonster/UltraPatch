@@ -66,6 +66,7 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
+typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
 typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
@@ -257,8 +258,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
-Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa,
-                PlanCfg cfg, int32_t *fp_end_out, int32_t *fp_start_out, EncStats *st_out);
+PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa, PlanCfg cfg);
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
 int decode_a1(const char *image_path, const char *patch_path);
