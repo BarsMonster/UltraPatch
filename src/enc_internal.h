@@ -69,7 +69,9 @@ typedef struct { int variant, fuzz; } PlanCfg;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
-typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGE;
+typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGRiceE;
+typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_GAMMA_MANT]; } UGGammaE;
+typedef UGRiceE UGE;  /* compatibility name for model-contract probes: rice keeps the full table */
 typedef struct { int32_t *dic; uint16_t cap, K; uint16_t rep[4], hit; uint8_t rh; } DRE;
 
 typedef struct { int type; int32_t start, len, dist; } Token;
@@ -107,8 +109,9 @@ typedef struct {
     int fwd;
     uint16_t lit0[LIT0_CTX][256];
     uint16_t lit1[256];
-    UGE gs, gl, gd;
-    UGE glo;
+    UGGammaE gs, gl;
+    UGRiceE gd;
+    UGGammaE glo;
     int fixed_dist_bits;
     int bootstrap_simple;
 } PriceTab;
@@ -117,7 +120,8 @@ typedef struct {
     A1BitTree lit0[LIT0_CTX], lit1;
     A1Flag1 flag;
     A1BitTree dval;
-    UGE gd, gl, gs, go, glo, pg, pgn, pg2, gdl, gel, gadj;
+    UGRiceE gd, go;
+    UGGammaE gl, gs, glo, pg, pgn, pg2, gdl, gel, gadj;
     uint16_t outb;
     A1IdxUnary dibl, diex;
     DRE dr_bl, dr_ex;
@@ -218,13 +222,14 @@ Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
 void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
-void ug_init_e(UGE *g, char code, int k);
-void ug_seed_cont_e(UGE *g, int depth);
-void ug_encode(UGE *g, REnc *r, uint32_t v);
+void ug_init_e_impl(void *g, char code, int k, size_t sz);
+#define ug_init_e(g, code, k) ug_init_e_impl((g), (code), (k), sizeof(*(g)))
+void ug_seed_cont_e(void *g, int depth);
+void ug_encode(void *g, REnc *r, uint32_t v);
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
-uint32_t ug_price(const UGE *g, uint32_t v);
+uint32_t ug_price(const void *g, uint32_t v);
 uint32_t bt_price_static(const A1BitTree *t, uint8_t byte);
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
 uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate);

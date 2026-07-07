@@ -82,37 +82,59 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t) {
     rc_lit_tree_from_hist(t, hist, w);   /* mirror of decoder lit_tree_from_hist */
 }
 
-void ug_init_e(UGE *g, char code, int k) {
-    g->code = (uint8_t)code; g->k = (uint8_t)k;
-    for (int i = 0; i <= UG_CTX; i++) { g->u[i] = RC_PHALF; for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF; }
+void ug_init_e_impl(void *vg, char code, int k, size_t sz) {
+    if (code == 'r') {
+        UGRiceE *g = (UGRiceE *)vg;
+        if (sz < sizeof(*g)) die("rice model storage too small");
+        g->code = (uint8_t)code; g->k = (uint8_t)k;
+        for (int i = 0; i <= UG_CTX; i++) {
+            g->u[i] = RC_PHALF;
+            for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF;
+        }
+    } else if (code == 'g') {
+        UGGammaE *g = (UGGammaE *)vg;
+        if (sz < sizeof(*g)) die("gamma model storage too small");
+        g->code = (uint8_t)code; g->k = (uint8_t)k;
+        for (int i = 0; i <= UG_CTX; i++) g->u[i] = RC_PHALF;
+        for (int i = 0; i < UG_GAMMA_MANT; i++) g->m[i] = RC_PHALF;
+    } else {
+        die("unknown ug model");
+    }
 }
 
 /* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
-void ug_seed_cont_e(UGE *g, int depth) {
-    rc_seed_cont_u(g->u, UG_CTX, depth);
+void ug_seed_cont_e(void *g, int depth) {
+    UGRiceE *ug = (UGRiceE *)g;
+    rc_seed_cont_u(ug->u, UG_CTX, depth);
 }
 
-void ug_encode(UGE *g, REnc *r, uint32_t v) {
+static void re_unary(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
+    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &u[pos < clampmax ? pos : clampmax], 1, RC_S_BIT_RATE);
+    re_bit(r, &u[v < clampmax ? v : clampmax], 0, RC_S_BIT_RATE);
+}
+
+void ug_encode(void *vg, REnc *r, uint32_t v) {
+    const uint8_t code = *(const uint8_t *)vg;
     uint32_t cl;
-    if (g->code == 'r') {
+    if (code == 'r') {
+        UGRiceE *g = (UGRiceE *)vg;
         cl = v >> g->k;
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[UG_C((int)pos)], 1, RC_S_BIT_RATE);
-        re_bit(r, &g->u[UG_C((int)cl)], 0, RC_S_BIT_RATE);
+        re_unary(r, g->u, UG_CTX, cl);
         for (int pos = 0; pos < g->k; pos++) re_bit(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u), RC_S_BIT_RATE);  /* rice: LSB-anchored ctx */
     } else {
+        UGGammaE *g = (UGGammaE *)vg;
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->u[UG_C((int)pos)], 1, RC_S_BIT_RATE);
-        re_bit(r, &g->u[UG_C((int)cl)], 0, RC_S_BIT_RATE);
-        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[UG_C((int)cl)][UG_C((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
+        int row = UG_C((int)cl);
+        re_unary(r, g->u, UG_CTX, cl);
+        for (uint32_t pos = 0; pos < cl; pos++) re_bit(r, &g->m[rc_ugg_mant_idx(row, (int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u), RC_S_BIT_RATE);
     }
 }
 
 /* MTF dict-index model: IDX_CTX / A1IdxUnary / a1_idx_init single-sourced in rc_models.h (decoder mirror).
  * The encoded index value v is ~54% zero; unary fits that concentration and drops the per-stream A1UGGamma. */
 void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v) {
-    for (uint32_t pos = 0; pos < v; pos++) re_bit(r, &g->u[rc_idx_ctx(pos)], 1, RC_S_BIT_RATE);
-    re_bit(r, &g->u[rc_idx_ctx(v)], 0, RC_S_BIT_RATE);
+    re_unary(r, g->u, IDX_CTX - 1u, v);
 }
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
@@ -135,21 +157,29 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     m->last_dist = 0;
 }
 
-uint32_t ug_price(const UGE *g, uint32_t v) {
+static uint32_t unary_price(const uint16_t *u, uint32_t clampmax, uint32_t v) {
+    uint32_t cost = 0;
+    for (uint32_t pos = 0; pos < v; pos++) cost += bit_price(u[pos < clampmax ? pos : clampmax], 1);
+    return cost + bit_price(u[v < clampmax ? v : clampmax], 0);
+}
+
+uint32_t ug_price(const void *vg, uint32_t v) {
+    const uint8_t code = *(const uint8_t *)vg;
     uint32_t cl, cost = 0;
-    if (g->code == 'r') {
+    if (code == 'r') {
+        const UGRiceE *g = (const UGRiceE *)vg;
         cl = v >> g->k;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[UG_C((int)pos)], 1);
-        cost += bit_price(g->u[UG_C((int)cl)], 0);
+        cost = unary_price(g->u, UG_CTX, cl);
         for (int pos = 0; pos < g->k; pos++)
             cost += bit_price(g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)], (int)((v >> (g->k - 1 - pos)) & 1u));
     } else {
+        const UGGammaE *g = (const UGGammaE *)vg;
         uint32_t mm = v + 1u;
         cl = (uint32_t)bitlen32(mm) - 1u;
-        for (uint32_t pos = 0; pos < cl; pos++) cost += bit_price(g->u[UG_C((int)pos)], 1);
-        cost += bit_price(g->u[UG_C((int)cl)], 0);
+        int row = UG_C((int)cl);
+        cost = unary_price(g->u, UG_CTX, cl);
         for (uint32_t pos = 0; pos < cl; pos++)
-            cost += bit_price(g->m[UG_C((int)cl)][UG_C((int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
+            cost += bit_price(g->m[rc_ugg_mant_idx(row, (int)pos)], (int)((mm >> (cl - 1u - pos)) & 1u));
     }
     return cost;
 }
