@@ -109,6 +109,14 @@ static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
     return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
 }
 
+static inline uint16_t rc_u16le(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
+static inline uint32_t rc_u32le(const uint8_t *p){
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+static inline void rc_u32le_put(uint8_t *p, uint32_t v){
+    p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
+}
+
 /* Zigzag values used by the envelope and by adaptive gamma fields. The decoder rejects the
  * single unrepresentable int32 value (0xffffffff -> -2147483648) instead of relying on
  * implementation-defined casts or signed overflow at call sites. */
@@ -167,12 +175,30 @@ static inline void rc_bl_pack(uint32_t imm24, uint8_t out[4]){
     uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
     out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
 }
+static inline int32_t rc_bl_imm24s(uint16_t up, uint16_t lo){ return (int32_t)(rc_bl_imm24(up,lo)<<8)>>8; }
+static inline uint32_t rc_bl_target(uint32_t pc, uint16_t up, uint16_t lo){
+    return pc + 4u + (uint32_t)(2 * rc_bl_imm24s(up,lo));
+}
+static inline void rc_bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
+    rc_bl_pack((rc_bl_imm24(up,lo) - delta) & 0x00ffffffu, out);
+}
 
 /* Thumb LDR-literal target byte address from the instruction address (halfword-scanned, rounded
  * back to 4-alignment) + imm8 word field: (addr & ~3) + 4*imm8 + 4. Signed to match the op-local
  * field cursors. */
+static inline int rc_thumb_ldr_lit(uint16_t up){ return (up&0xf800u)==0x4800u; }
 static inline int32_t rc_ldr_target(int32_t addr, int32_t imm8){
     return (addr & ~3) + 4*imm8 + 4;
+}
+static inline int rc_ldr_target_in_op(int32_t fp0, int32_t dl, uint32_t fpk){
+    return !(fpk&3u) && (int32_t)fpk + 4 <= fp0 + dl;
+}
+static inline int32_t rc_ldr_scan_first(int32_t fp0, uint32_t fpk){
+    int32_t lo=(int32_t)fpk-1024;
+    if(lo<fp0) lo=fp0;
+    if(lo<0) lo=0;
+    if(lo&1) lo++;
+    return lo;
 }
 
 /* piecewise shift-map lookup: value of the last boundary <= x, else 0 (also 0 for an empty map). */
@@ -180,6 +206,12 @@ static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint3
     int lo=0, hi=n-1, r=-1;
     while(lo<=hi){ int mid=(lo+hi)>>1; if(b[mid]<=x){ r=mid; lo=mid+1; } else hi=mid-1; }
     return r<0 ? 0 : v[r];
+}
+static inline int32_t rc_smap_pred_bl(const uint32_t*b, const int32_t*v, int n, uint32_t pc, uint32_t target){
+    return (int32_t)((uint32_t)rc_smap_at(b,v,n,pc) - (uint32_t)rc_smap_at(b,v,n,target)) / 2;
+}
+static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, uint32_t word){
+    return (int32_t)(0u - (uint32_t)rc_smap_at(b,v,n,word));
 }
 
 /* MTF dict-index UNARY model: IDX_CTX per-position priors (min(pos,IDX_CTX-1) clamp). The encoded

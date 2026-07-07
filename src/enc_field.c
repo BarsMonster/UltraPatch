@@ -10,26 +10,10 @@
 /* ------------------------------------------------------------------------------------- */
 /* A1 field and apply planning.                                                            */
 /* ------------------------------------------------------------------------------------- */
-static uint16_t u16le_at(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t u32le_at(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
-static void u32le_put(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
-
-/* rc_bl_imm24 / rc_bl_pack / rc_bl_pattern (rc_models.h) single-source the decoder-mirrored BL
- * unpack/pack/predicate. unpack_bl_local sign-extends the raw 24-bit immediate (same idiom the
- * decoder uses); pack_bl_local writes the low 24 bits back through rc_bl_pack. */
-static int32_t unpack_bl_local(uint16_t up, uint16_t lo) {
-    uint32_t imm24 = rc_bl_imm24(up, lo);
-    return (int32_t)(imm24 << 8) >> 8;
-}
-
-static void pack_bl_local(int32_t imm32, uint8_t out[4]) {
-    rc_bl_pack((uint32_t)imm32 & 0x00ffffffu, out);
-}
-
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
     if (fpk & 1u) return 0;
     if (fpk > from_size || from_size - fpk < 4u) return 0;
-    return rc_bl_pattern(u16le_at(frm + fpk), u16le_at(frm + fpk + 2));
+    return rc_bl_pattern(rc_u16le(frm + fpk), rc_u16le(frm + fpk + 2));
 }
 
 static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out) {
@@ -40,16 +24,10 @@ static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out)
 }
 
 static int op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size, uint32_t fpk) {
-    if (fpk & 3u) return 0;
-    int32_t hi = fp0 + dl;
-    if ((int64_t)fpk + 4 > hi || fpk + 4u > from_size) return 0;
-    int32_t lo = (int32_t)fpk - 1024;
-    if (lo < fp0) lo = fp0;
-    if (lo < 0) lo = 0;
-    if (lo & 1) lo++;
-    for (int32_t a = lo; a + 2 <= (int32_t)fpk && a + 2 <= hi && a + 2 <= (int32_t)from_size; a += 2) {
-        uint16_t up = u16le_at(frm + a);
-        if ((up & 0xf800u) == 0x4800u && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
+    if (fpk + 4u > from_size || !rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
+    for (int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2) {
+        uint16_t up = rc_u16le(frm + a);
+        if (rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
     }
     return 0;
 }
@@ -195,7 +173,7 @@ int fw_next(FieldWalk *w) {
  * preserve_corrections_pc absorbs any mask-induced diff mismatch by construction. */
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
     for (size_t a = 0; a + 4 <= n;) {
-        uint16_t up = u16le_at(real + a), lo = u16le_at(real + a + 2);
+        uint16_t up = rc_u16le(real + a), lo = rc_u16le(real + a + 2);
         if (rc_bl_pattern(up, lo)) {
             mut[a] = 0x00; mut[a + 1] = 0xf0; mut[a + 2] = 0x00; mut[a + 3] = 0xd0;
             a += 4;
@@ -218,15 +196,15 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
             int64_t tpk = (int64_t)we->tp + k;
             if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
             if (is_local_bl(frm, from_size, fpk)) {
-                uint16_t tu = u16le_at(tob + (size_t)tpk), tl = u16le_at(tob + (size_t)tpk + 2);
+                uint16_t tu = rc_u16le(tob + (size_t)tpk), tl = rc_u16le(tob + (size_t)tpk + 2);
                 if (rc_bl_pattern(tu, tl)) {
-                    uint16_t fu = u16le_at(frm + fpk), fl2 = u16le_at(frm + fpk + 2);
+                    uint16_t fu = rc_u16le(frm + fpk), fl2 = rc_u16le(frm + fpk + 2);
                     fd_put(&add, fpk, STREAM_BL,
-                           (int32_t)((uint32_t)unpack_bl_local(fu, fl2) - (uint32_t)unpack_bl_local(tu, tl)));
+                           (int32_t)((uint32_t)rc_bl_imm24s(fu, fl2) - (uint32_t)rc_bl_imm24s(tu, tl)));
                 }
             } else if (op_ldr_targets(frm, we->fp, we->o->diff_len, from_size, fpk)) {
                 fd_put(&add, fpk, STREAM_LDR,
-                       (int32_t)(u32le_at(frm + fpk) - u32le_at(tob + (size_t)tpk)));
+                       (int32_t)(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
             }
         }
     }
@@ -252,14 +230,10 @@ int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta
                               const uint32_t *mb, const int32_t *mv, int mn) {
     int32_t pred;
     if (kind == EV_BL) {
-        uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
-        uint32_t T = fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
-        /* mod-2^32 subtract then /2, bit-identical to the decoder's smap_at recombination
-         * (patch_apply.h): a corrupt/degenerate map can make a shift INT32_MIN, so the signed
-         * form would be UB — the unsigned wrap is both defined and the exact wire semantics. */
-        pred = (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fpk) - (uint32_t)rc_smap_at(mb, mv, mn, T)) / 2;
+        uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
+        pred = rc_smap_pred_bl(mb, mv, mn, fpk, rc_bl_target(fpk, up, lo));
     } else {
-        pred = (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, u32le_at(frm + fpk)));
+        pred = rc_smap_pred_ex(mb, mv, mn, rc_u32le(frm + fpk));
     }
     return (int32_t)((uint32_t)delta - (uint32_t)pred);
 }
@@ -285,9 +259,9 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         fk[i].k1 = fr[i].fpk;
         fk[i].need = (int32_t)(uint32_t)fr[i].delta;
         if (fr[i].kind == EV_BL) {
-            uint16_t up = u16le_at(frm + fr[i].fpk), lo = u16le_at(frm + fr[i].fpk + 2);
-            fk[i].k2 = fr[i].fpk + 4u + (uint32_t)(2 * unpack_bl_local(up, lo));
-        } else { fk[i].k2 = u32le_at(frm + fr[i].fpk); nex++; }
+            uint16_t up = rc_u16le(frm + fr[i].fpk), lo = rc_u16le(frm + fr[i].fpk + 2);
+            fk[i].k2 = rc_bl_target(fr[i].fpk, up, lo);
+        } else { fk[i].k2 = rc_u32le(frm + fr[i].fpk); nex++; }
     }
     /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
@@ -574,11 +548,11 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
             int32_t k = w.pos;
             uint32_t fpk = (uint32_t)(we->fp + k);
             if (w.ev.type == EV_BL) {
-                uint16_t up = u16le_at(frm + fpk), lo = u16le_at(frm + fpk + 2);
-                pack_bl_local(unpack_bl_local(up, lo) - w.ev.delta, packed);
+                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
+                rc_bl_dereloc(up, lo, (uint32_t)w.ev.delta, packed);
             } else {
-                uint32_t val = u32le_at(frm + fpk);
-                u32le_put(packed, val - (uint32_t)w.ev.delta);
+                uint32_t val = rc_u32le(frm + fpk);
+                rc_u32le_put(packed, val - (uint32_t)w.ev.delta);
             }
             for (int b = 0; b < 4; b++) { ohas[we->tp + k + b] = 1; oval[we->tp + k + b] = packed[b]; }
         }

@@ -77,16 +77,6 @@ static int uset_has(const uset_t *s, uint32_t k) {
 }
 static void uset_free(uset_t *s){ free(s->key); free(s->used); s->key=NULL; s->used=NULL; s->cap=s->n=0; }
 
-/* ---------- little-endian helpers ---------- */
-static uint16_t rd16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1]<<8)); }
-static uint32_t rd32(const uint8_t *p){ return (uint32_t)(p[0]|(p[1]<<8)|(p[2]<<16)|((uint32_t)p[3]<<24)); }
-
-/* ---------- bl unpacker (inverse of py unpack_bl) ---------- */
-static int32_t unpack_bl(uint16_t up, uint16_t lo) {
-    uint32_t imm24 = rc_bl_imm24(up, lo);
-    return (int32_t)(imm24 << 8) >> 8;   /* sign-extend the 24-bit immediate */
-}
-
 /* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
 typedef struct {
     map_t bl, ldr, data_ptr, code_ptr;
@@ -98,7 +88,7 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
     if ((address % 4) == 2) address -= 2;
     address += imm;
     if ((size_t)address + 4 > fsize) return;
-    int32_t v = (int32_t)rd32(f + address);
+    int32_t v = (int32_t)rc_u32le(f + address);
     if (map_push(ldr, address, v) == 0) uset_add(lit, address);
 }
 
@@ -115,7 +105,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
     while (addr < fsize) {
         if (data_off_begin <= addr && addr < data_off_end) {
             if ((size_t)addr + 4 > fsize) break;
-            uint32_t value = rd32(f + addr);
+            uint32_t value = rc_u32le(f + addr);
             if (data_begin <= value && value < data_end) map_push(&d->data_ptr, addr, value);
             else if (code_begin <= value && value < code_end) map_push(&d->code_ptr, addr, value);
             addr += 4;
@@ -123,14 +113,14 @@ static void disassemble(const uint8_t *f, size_t fsize,
             addr += 4;
         } else {
             if ((size_t)addr + 2 > fsize) break;
-            uint16_t up = rd16(f + addr);
+            uint16_t up = rc_u16le(f + addr);
             uint32_t ins = addr;
             addr += 2;
             if ((up & 0xf800) == 0xf000) {            /* bl / b.w */
                 if ((size_t)addr + 2 > fsize) continue;
-                uint16_t lo = rd16(f + addr);
-                if ((lo & 0xd000) == 0xd000) { addr += 2; map_push(&d->bl, ins, unpack_bl(up, lo)); }
-            } else if ((up & 0xf800) == 0x4800) {     /* ldr (literal) */
+                uint16_t lo = rc_u16le(f + addr);
+                if ((lo & 0xd000) == 0xd000) { addr += 2; map_push(&d->bl, ins, rc_bl_imm24s(up, lo)); }
+            } else if (rc_thumb_ldr_lit(up)) {        /* ldr (literal) */
                 ldr_common(f, fsize, ins, 4 * (up & 0xff) + 4, &d->ldr, &d->lit);
             }
         }

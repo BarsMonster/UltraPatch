@@ -31,7 +31,7 @@ header set.
   Store shift-map entries in journal-reserved memory and make the host encoder
   account for the effective journal budget before emitting a valid blob.
 
-- [ ] 4. Single-source relocation and shift-map wire helpers.
+- [x] 4. Single-source relocation and shift-map wire helpers.
   Move duplicated BL, LDR-literal, and shift-map prediction semantics into shared
   helpers, including the decoder/encoder LDR scan-bound drift fix.
 

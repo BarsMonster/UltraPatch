@@ -495,19 +495,11 @@ static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 /* relocation unpack/pack (Thumb bl + s32) — de-relocation override only (no flash write).      */
 /* The journal-aware pristine reads + the bl/ldr predicates live with the apply state below.    */
 /* ===================================================================================== */
-/* de-relocate a Thumb BL halfword pair (imm24 = imm - delta), repacked into 4 bytes (no flash write).
- * The subtract is mod 2^24 (masked & repacked immediately) so no sign-extension is needed.
- * rc_bl_imm24 / rc_bl_pack are the encoder-mirrored unpack/pack primitives. */
-static void bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8_t out[4]){
-    rc_bl_pack((rc_bl_imm24(up,lo) - delta) & 0x00ffffffu, out);
-}
-
 /* ---- piecewise shift map (D1): predicts BL/EX de-reloc deltas from addresses/values the
  * decoder already has in hand; only the RESIDUAL (delta - pred) rides the MTF dict streams.
- * smap_at(x) = value of the last segment with boundary <= x, else 0 (also 0 when no map).
+ * rc_smap_at(x) = value of the last segment with boundary <= x, else 0 (also 0 when no map).
  * Values are BYTE shifts; BL predictions divide by 2 (imm24 is in halfwords) with C
  * truncation-toward-zero on both sides (bit-exact vs patch_generate). ---- */
-static int32_t smap_at(PatchApply *pa, uint32_t x){ return rc_smap_at(g_smap_b, g_smap_v, (int)g_smap_n, x); }
 
 /* ===================================================================================== */
 /* HYBRID: monotonic output ROW write-back cache (real flash = row-erase 256 B).            */
@@ -597,8 +589,6 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
 /* ===================================================================================== */
 /* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
  * and no ranges side table. */
-/* pack s32 (ldr/data/code de-reloc) into 4 little-endian bytes (no flash write) */
-static void pack_s32_buf(uint32_t v, uint8_t out[4]){ out[0]=(uint8_t)v; out[1]=(uint8_t)(v>>8); out[2]=(uint8_t)(v>>16); out[3]=(uint8_t)(v>>24); }
 
 static void dr_init(A1DRStream*d, int32_t*dic, uint16_t hitseed){
     d->K=1; dic[0]=0;
@@ -677,14 +667,12 @@ static inline int ldr_targets(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32
     /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
      * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
      * skips any pristine read/record for an impossible target). */
-    if(fpk&3u) return 0;
-    int32_t hi=fp0+dl; if((int32_t)fpk+4>hi) return 0;
-    int32_t lo=(int32_t)fpk-1024; if(lo<fp0) lo=fp0; if(lo&1) lo++;
-    for(int32_t a=lo; a+2<=(int32_t)fpk; a+=2){
+    if(!rc_ldr_target_in_op(fp0,dl,fpk)) return 0;
+    for(int32_t a=rc_ldr_scan_first(fp0,fpk); a+2<=(int32_t)fpk; a+=2){
         int32_t imm;
         if(s){
             uint16_t up=(uint16_t)(hy_src(pa,a) | (hy_src(pa,a+1)<<8));
-            if((up&0xf800)!=0x4800) continue;
+            if(!rc_thumb_ldr_lit(up)) continue;
             imm=(int32_t)(up&0xff);
         } else {
             uint32_t i=((uint32_t)a>>1)&PSRC_HW_MASK;
@@ -769,7 +757,7 @@ static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
     uint32_t i=(a>>1)&PSRC_HW_MASK;
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
     g_psrc_imm[i]=lo;
-    if((up&0xf800)==0x4800) g_psrc_ldr[i>>3]|=(uint8_t)(1u<<(i&7u));
+    if(rc_thumb_ldr_lit(up)) g_psrc_ldr[i>>3]|=(uint8_t)(1u<<(i&7u));
     else g_psrc_ldr[i>>3]&=(uint8_t)~(1u<<(i&7u));
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
@@ -831,14 +819,11 @@ static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uin
     if(rc_bl_pattern(up,lo)){
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t res=pull_delta(pa,&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
-        uint32_t imm24=rc_bl_imm24(up,lo);
-        int32_t off=(int32_t)(imm24<<8)>>8;                 /* sign-extend the 24-bit imm */
-        uint32_t T=fpk+4u+(uint32_t)(2*off);                /* BL target byte address (mod 2^32) */
         /* byte shift -> imm24 halfword units. The subtract is done mod 2^32 (a corrupt map can
          * ship values near +-2^31; wrapped garbage is CRC-rejected, signed overflow would be UB);
          * valid map values are tiny, so the wrapped diff equals the true diff bit-exactly. */
-        int32_t pred=(int32_t)((uint32_t)smap_at(pa,fpk)-(uint32_t)smap_at(pa,T))/2;
-        bl_dereloc(up, lo, (uint32_t)pred+(uint32_t)res, packed);
+        int32_t pred=rc_smap_pred_bl(g_smap_b,g_smap_v,(int)g_smap_n,fpk,rc_bl_target(fpk,up,lo));
+        rc_bl_dereloc(up, lo, (uint32_t)pred+(uint32_t)res, packed);
         hy_word4_rec(pa,fpk,w);                             /* record the 4 BL bytes into the ring */
         return 1;
     }
@@ -847,9 +832,9 @@ static int field_at(PatchApply *pa, A1ApplyState*s, int32_t fp0, int32_t ks, uin
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
     if(pure && ldr_targets(pa,g_FWD?NULL:s, fp0, dl, fpk)){
         int32_t res=pull_delta(pa,&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
-        int32_t pred=-smap_at(pa,w);                        /* pointer words move by the value's shift */
+        int32_t pred=rc_smap_pred_ex(g_smap_b,g_smap_v,(int)g_smap_n,w); /* pointer words move by the value's shift */
         hy_word4_rec(pa,fpk,w);                             /* record the 4 EX bytes into the ring */
-        pack_s32_buf((w-((uint32_t)pred+(uint32_t)res))&0xffffffffu, packed);
+        rc_u32le_put(packed, (w-((uint32_t)pred+(uint32_t)res))&0xffffffffu);
         return 1;
     }
     return 0;

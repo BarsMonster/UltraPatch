@@ -351,9 +351,8 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < nfr; i++) {
-        int32_t pred = fk[i].kind == EV_BL
-            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2)) / 2
-            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, fk[i].k2));
+        int32_t pred = fk[i].kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, fk[i].k1, fk[i].k2)
+                                            : rc_smap_pred_ex(mb, mv, mn, fk[i].k2);
         int32_t resid = (int32_t)((uint32_t)fk[i].need - (uint32_t)pred);
         c += px_delta(fk[i].kind == EV_BL ? &bl : &ex, fk[i].kind == EV_BL ? &di_bl : &di_ex,
                       &dval, resid, &overflow);
@@ -371,9 +370,8 @@ static uint64_t smap_hit_cost(const uint32_t *mb, const int32_t *mv, int mn, voi
     SMapHitScore *s = (SMapHitScore *)ctx;
     size_t hits = 0;
     for (size_t i = 0; i < s->nfr; i++) {
-        int32_t pred = s->fk[i].kind == EV_BL
-            ? (int32_t)((uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k1) - (uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k2)) / 2
-            : (int32_t)(0u - (uint32_t)rc_smap_at(mb, mv, mn, s->fk[i].k2));
+        int32_t pred = s->fk[i].kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, s->fk[i].k1, s->fk[i].k2)
+                                               : rc_smap_pred_ex(mb, mv, mn, s->fk[i].k2);
         if (pred == s->fk[i].need) hits++;
     }
     return (uint64_t)(s->nfr - hits);
