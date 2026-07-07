@@ -23,7 +23,7 @@ header set.
 
 ## Tasks
 
-- [ ] 1. Compact `A1UGGamma` storage.
+- [x] 1. Compact `A1UGGamma` storage.
   Store only reachable gamma mantissa probabilities and share the accessor with
   encoder/pricing so wire behavior stays bit-exact.
 

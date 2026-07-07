@@ -45,10 +45,16 @@ static inline void a1_bt_set(A1BitTree*t,int idx,uint16_t prob){
 static inline void a1_bt_init(A1BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) a1_bt_set(t,i,RC_PHALF); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
- * UG_CTX = context clamp. A1 uses 6: the model array is sized at (UG_CTX+1)^2 u16.
+ * UG_CTX = context clamp. Rice keeps a full (UG_CTX+1)^2 mantissa table because any quotient
+ * row can use k columns. Gamma only reaches triangular rows 1..UG_CTX-1 plus the full clamped
+ * row UG_CTX; row 0 has no mantissa bits.
  * ENCODING-AFFECTING: patch_apply and patch_generate must use the same value. */
 #define UG_CTX 6
 #define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
+#define UG_GAMMA_MANT (((UG_CTX) * ((UG_CTX) - 1)) / 2 + ((UG_CTX) + 1))
+static inline int rc_ugg_mant_idx(int row,int pos){
+    return row<UG_CTX ? (row*(row-1))/2 + pos : ((UG_CTX*(UG_CTX-1))/2 + UG_C(pos));
+}
 
 /* ---- piecewise shift map (BL/EX delta prediction) ----
  * Shipped per patch: ascending u32 boundaries + int32 byte-shift values; keys below the first

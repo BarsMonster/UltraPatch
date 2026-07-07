@@ -91,7 +91,7 @@ typedef struct { uint32_t range, code; } A1RangeDec;
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGRice;
-typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGGamma;
+typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } A1UGGamma;
 
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
  * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. Each delta on the wire: rep-bit (==last?)
@@ -387,15 +387,12 @@ static void ugr_init(A1UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
-/* init a gamma model, seeding EVERY unary-prefix prior to `useed` (the mantissa priors are always
- * RC_PHALF). useed==RC_PHALF is the neutral init; useed==RC_PBIT-RC_PBIT/4 biases toward STOP (bit 0)
- * so the smallest gamma values are cheap from the first symbol — used by the MTF dict-index gammas
- * (dibl/diex), where the just-promoted index 1 (encoded value 0) dominates (RC_PBIT-RC_PBIT/4 is the
- * corpus optimum). Folding the u[] seed into the init avoids a second pass over u[]. */
-static void ugg_init_u(A1UGGamma*g,uint16_t useed){
-    for(int i=0;i<=UG_CTX;i++){ g->u[i]=useed; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
+/* init a neutral gamma model. Mantissa storage is compact: rows 1..UG_CTX-1 keep only
+ * their reachable columns, and the clamped row keeps all UG_CTX+1 columns. */
+static void ugg_init(A1UGGamma*g){
+    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
+    for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
 }
-static void ugg_init(A1UGGamma*g){ ugg_init_u(g,RC_PHALF); }
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
  * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
  * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
@@ -413,12 +410,16 @@ static uint32_t s_unary(PatchApply *pa, uint16_t*u,uint32_t clampmax,uint32_t ca
     uint32_t cl=0; while(s_bit(pa,&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
     return cl;
 }
-/* shared mantissa: read `cnt` adaptive bits MSB-first (significance-descending) from priors row[],
- * the m[UG_C(cl)] row already selected by caller. lsb!=0 (rice) anchors the ctx on significance from
- * the LSB (UG_C(sig)) so the LSB gets ctx 0 and the wide MSBs share the clamp; lsb==0 (gamma) keeps
- * MSB-anchored UG_C(cnt-1-sig)==UG_C(pos). Bit order on the wire stays MSB-first either way. */
+/* shared Rice mantissa: read `cnt` adaptive bits MSB-first (significance-descending) from priors row[].
+ * lsb anchors the ctx on significance from the LSB (UG_C(sig)) so the LSB gets ctx 0 and the wide
+ * MSBs share the clamp. Bit order on the wire stays MSB-first. */
 static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt,int lsb){
     uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(lsb?sig:cnt-1-sig)])<<sig;
+    return v;
+}
+static uint32_t s_ug_mant_gamma(PatchApply *pa, A1UGGamma*g,int cnt){
+    uint32_t v=0; int row=UG_C(cnt);
+    for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&g->m[rc_ugg_mant_idx(row,cnt-1-sig)])<<sig;
     return v;
 }
 static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
@@ -427,7 +428,7 @@ static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
 }
 static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
     int cl=(int)s_unary(pa,g->u,UG_CTX,RC_UNARY_MAX);
-    return ((1u<<cl) | s_ug_mant(pa,g->m[UG_C(cl)],cl,0)) - 1u;
+    return ((1u<<cl) | s_ug_mant_gamma(pa,g,cl)) - 1u;
 }
 /* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / A1IdxUnary / a1_idx_init are single-sourced
  * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
