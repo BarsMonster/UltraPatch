@@ -90,6 +90,10 @@ for n in 0 1 2 3 4 5 6 7 8 11 12 16 32 64; do
   expect_reject_unchanged "trunc_$n" "$tmp/trunc_$n.blob" "$base_bin"
 done
 
+cp "$tmp/grow.blob" "$tmp/trailing_junk.blob"
+printf '\000' >> "$tmp/trailing_junk.blob"
+expect_reject_unchanged trailing_junk "$tmp/trailing_junk.blob" "$base_bin"
+
 # CRC32(to) now lives in the HEADER (bytes 4..7), not a trailer. Corrupt it: the decoder still
 # reconstructs the correct image, then the header CRC32(to) gate fails AFTER apply -> reject
 # (never a silent wrong-accept). The host demo does not persist a rejected apply, so the disk

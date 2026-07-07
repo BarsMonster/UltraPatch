@@ -56,6 +56,7 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
                          const uint8_t *to, size_t to_n)
 {
+    if (blob_n < 8) return "selfcheck blob too short";
     uint32_t span = from_n > to_n ? (uint32_t)from_n : (uint32_t)to_n;
     uint32_t pad_seed = 0;
     for (int k = 0; k < 8; k++) pad_seed = pad_seed * 1664525u + 1013904223u + blob[k];
@@ -95,6 +96,10 @@ int decode_a1(const char *image_path, const char *patch_path){
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", rj,
                 rj==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         fclose(mf); free(sc_flash); free(blob); return 1; }
+    if(ha.consumed!=(size_t)bsz){
+        fprintf(stderr,"decode error - trailing bytes after counted patch body\n");
+        fclose(mf); free(sc_flash); free(blob); return 1;
+    }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
     if(!nvm_safety_ok()){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
