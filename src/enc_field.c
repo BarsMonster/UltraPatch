@@ -61,13 +61,13 @@ static void preserve_budget_byte(void *user, const OpWalkEnt *we, int32_t off, i
     pw->wi++;
 }
 
-static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, int32_t fp_start, uint32_t from_size) {
+static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
+                                 size_t nwalk, uint32_t from_size) {
     int FWD = ctx->fwd;
     int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
     for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
-    OpWalkEnt *m = opwalk_build(ops, fp_start);
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        const OpWalkEnt *we = &m[oi];
+    for (size_t oi = 0; oi < nwalk; oi++) {
+        const OpWalkEnt *we = &walk[oi];
         for (int32_t k = 0; k < we->o->diff_len; k++) {
             int32_t a = we->fp + k;
             if (0 <= a && (uint32_t)a < from_size) {
@@ -80,7 +80,6 @@ static int32_t *preserve_readarr(const EncCtx *ctx, const OpVec *ops, int32_t fp
             }
         }
     }
-    free(m);
     return readarr;
 }
 
@@ -234,7 +233,7 @@ int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta
     return (int32_t)((uint32_t)delta - (uint32_t)pred);
 }
 
-typedef struct { uint32_t b; int32_t v; } SegCand;
+typedef struct { uint32_t b; int32_t v; uint32_t w; } SegCand;
 static int cmp_seg(const void *a, const void *b) {
     const SegCand *x = (const SegCand *)a, *y = (const SegCand *)b;
     return (x->b > y->b) - (x->b < y->b);
@@ -250,17 +249,16 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
     /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
     SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
-    uint32_t *pw = (uint32_t *)xmalloc(pcap * sizeof(*pw));
     { OpWalkEnt *walk = opwalk_build(ops, fp_start);
       for (size_t i = 0; i < ops->n; i++) {
           if (walk[i].o->diff_len > 0 && walk[i].fp >= 0) {
               pool[pn].b = (uint32_t)walk[i].fp; pool[pn].v = walk[i].tp - walk[i].fp;
-              pw[pn] = (uint32_t)walk[i].o->diff_len; pn++;
+              pool[pn].w = (uint32_t)walk[i].o->diff_len; pn++;
           }
       }
       free(walk);
       pool[pn].b = from_size > to_size ? from_size : to_size; pool[pn].v = 0;
-      pw[pn] = 0x7fffffffu; pn++; }                      /* terminator: never pre-trimmed */
+      pool[pn].w = 0x7fffffffu; pn++; }                  /* terminator: never pre-trimmed */
     if (nex) {
         SegCand *ex = (SegCand *)xmalloc(nex * sizeof(*ex));
         size_t en = 0;
@@ -270,7 +268,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         for (size_t i = 0; i < en;) {
             size_t j = i;
             while (j < en && ex[j].v == ex[i].v) j++;
-            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pw[pn] = (uint32_t)(j - i); pn++;
+            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pool[pn].w = (uint32_t)(j - i); pn++;
             i = j;
         }
         free(ex);
@@ -278,9 +276,8 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
     /* pre-trim an oversized pool by weight so elimination stays fast */
     while (pn > SMAP_POOL_MAX) {
         size_t worst = 0;
-        for (size_t i = 1; i < pn; i++) if (pw[i] < pw[worst]) worst = i;
+        for (size_t i = 1; i < pn; i++) if (pool[i].w < pool[worst].w) worst = i;
         memmove(pool + worst, pool + worst + 1, (pn - worst - 1) * sizeof(*pool));
-        memmove(pw + worst, pw + worst + 1, (pn - worst - 1) * sizeof(*pw));
         pn--;
     }
     /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
@@ -290,7 +287,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
         tb[mn] = pool[i].b; tv[mn] = pool[i].v; mn++;
     }
-    free(pool); free(pw);
+    free(pool);
     return mn;
 }
 
@@ -369,6 +366,11 @@ static uint64_t extra_proxy_bits(const Buf *to, int32_t abs_begin, int32_t len,
 }
 
 typedef struct { int32_t begin, end; } Run;
+typedef struct {
+    uint64_t w, gp, x, e;
+    uint32_t cnt;
+    int32_t ft;
+} SplitScratch;
 
 
 
@@ -418,31 +420,26 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
          *   uleb(CNT[e]-CNT[p]) [+ boundary-gap uleb + (W[e]-W[p]) + (GP[e-1]-GP[p]) if e>p]
          * where the boundary gap is the only direction-dependent term: FWD prices the gap
          * from seg_p to the first run, grow prices the gap from `end` back to the last. */
-        uint64_t *W = (uint64_t *)xmalloc((nr + 1) * sizeof(uint64_t));
-        uint64_t *GP = (uint64_t *)xmalloc(nr * sizeof(uint64_t));
-        uint32_t *CNT = (uint32_t *)xmalloc((nr + 1) * sizeof(uint32_t));
-        uint64_t *X = (uint64_t *)xmalloc(nr * sizeof(uint64_t));
+        SplitScratch *sc = (SplitScratch *)xmalloc((nr + 1) * sizeof(*sc));
         const uint64_t uleb1 = uleb_proxy_bits(1u, L0);
-        W[0] = 0; CNT[0] = 0; GP[0] = 0;
+        sc[0].w = 0; sc[0].cnt = 0; sc[0].gp = 0;
         for (size_t j = 0; j < nr; j++) {
             uint64_t w = 0;
             for (int32_t k = runs[j].begin; k < runs[j].end; k++) w += L0[o->diff[k]];
             w += (uint64_t)(runs[j].end - runs[j].begin - 1) * uleb1;
-            W[j + 1] = W[j] + w;
-            CNT[j + 1] = CNT[j] + (uint32_t)(runs[j].end - runs[j].begin);
-            if (j) GP[j] = GP[j - 1] + uleb_proxy_bits((uint32_t)(runs[j].begin - runs[j - 1].end + 1), L0);
-            X[j] = extra_proxy_bits(to, tp + runs[j].begin,
-                                    runs[j].end - runs[j].begin, L0, L1);
+            sc[j + 1].w = sc[j].w + w;
+            sc[j + 1].cnt = sc[j].cnt + (uint32_t)(runs[j].end - runs[j].begin);
+            if (j) sc[j].gp = sc[j - 1].gp + uleb_proxy_bits((uint32_t)(runs[j].begin - runs[j - 1].end + 1), L0);
+            sc[j].x = extra_proxy_bits(to, tp + runs[j].begin,
+                                       runs[j].end - runs[j].begin, L0, L1);
         }
         const uint64_t XF = extra_proxy_bits(to, tp + o->diff_len, o->extra_len, L0, L1);
         const int FWD = ctx->fwd;
 #define DIFFBITS(P, E, ENDPOS, SEG) \
-        (uleb_proxy_bits(CNT[E] - CNT[P], L0) + \
+        (uleb_proxy_bits(sc[E].cnt - sc[P].cnt, L0) + \
          ((E) > (P) ? (FWD ? uleb_proxy_bits((uint32_t)(runs[P].begin - (SEG)), L0) \
                            : uleb_proxy_bits((uint32_t)((ENDPOS) - runs[(E) - 1].end + 1), L0)) \
-                      + (W[E] - W[P]) + (GP[(E) - 1] - GP[P]) : 0u))
-        uint64_t *E = (uint64_t *)xmalloc((nr + 1) * sizeof(uint64_t));
-        int32_t *ft = (int32_t *)xmalloc((nr + 1) * sizeof(int32_t));
+                      + (sc[E].w - sc[P].w) + (sc[(E) - 1].gp - sc[P].gp) : 0u))
         for (size_t p = nr + 1; p-- > 0;) {
             int32_t seg = p ? runs[p - 1].end : 0;
             /* terminal (no further split): the historical DP(nr, p) row */
@@ -459,18 +456,18 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
                 uint64_t c = dz_bits_u32((uint32_t)(runs[s].begin - seg)) +
                              dz_bits_u32((uint32_t)len) +
                              dz_bits_u32(rc_zz32(len)) + 2 +
-                             DIFFBITS(p, s, runs[s].begin, seg) + X[s] +
-                             E[s + 1];
+                             DIFFBITS(p, s, runs[s].begin, seg) + sc[s].x +
+                             sc[s + 1].e;
                 if (c + SPLIT_GAIN_MARGIN_BITS < v) { v = c; take = (int32_t)s; }
             }
-            E[p] = v; ft[p] = take;
+            sc[p].e = v; sc[p].ft = take;
         }
 #undef DIFFBITS
         int32_t seg = 0;
         int split_any = 0;
         { size_t p = 0;
-          while (ft[p] >= 0) {
-              size_t s = (size_t)ft[p];
+          while (sc[p].ft >= 0) {
+              size_t s = (size_t)sc[p].ft;
               int32_t len = runs[s].end - runs[s].begin;
               int32_t pre = runs[s].begin - seg;
               opvec_push(&out, op_copy(pre, o->diff + seg, len,
@@ -487,7 +484,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
         } else {
             opvec_push(&out, *o);
         }
-        free(W); free(GP); free(CNT); free(X); free(E); free(ft);
+        free(sc);
         free(runs);
         tp += o->diff_len + o->extra_len;
     }
@@ -498,8 +495,8 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
 size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
                               uint32_t to_size, size_t budget, int32_t *cutoff) {
     int FWD = ctx->fwd;
-    int32_t *readarr = preserve_readarr(ctx, ops, 0, from_size);
     OpWalkEnt *m = opwalk_build(ops, 0);
+    int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
     PreserveBudgetWalk bw = { ctx, readarr, from_size, to_size, budget, 0, 0, 0, 0 };
     const OpWalkEnt *we;
     OP_EVENT_FOR(we, m, ops->n, FWD, step) {
@@ -517,8 +514,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
-    int32_t *readarr = preserve_readarr(ctx, ops, fp_start, from_size);
     OpWalkEnt *m = opwalk_build(ops, fp_start);
+    int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
     const OpWalkEnt *we;
     OP_EVENT_FOR(we, m, ops->n, FWD, idx) {
         const Op *o = we->o;
