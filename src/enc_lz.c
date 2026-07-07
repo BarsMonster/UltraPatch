@@ -390,49 +390,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
     uint32_t maxrun = 1024, win = 1u << PATHE_W;
-    if (pt->bootstrap_simple) {
-        uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-        Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
-        uint64_t *lsum = span_lit_prefix(n, content, tags, pt);
-        size_t *ntok = next_token_starts(n, ncand, NULL);
-        const uint64_t INF = UINT64_MAX / 4;
-        cost[n] = 0;
-        for (size_t ri = n; ri-- > 0;) {
-            uint64_t best = INF;
-            Token bt = {0};
-            size_t lim = n < ri + maxrun ? n : ri + maxrun;
-            size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
-            for (size_t j = ri + 1; j <= dense_end; j++) {
-                uint64_t c = PR_SCALE + gammalen_u32((uint32_t)(j - ri)) * PR_SCALE + (lsum[j] - lsum[ri]) + cost[j];
-                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-            }
-            for (size_t j = ntok[dense_end + 1]; j <= lim; j = ntok[j + 1]) {
-                uint64_t c = PR_SCALE + gammalen_u32((uint32_t)(j - ri)) * PR_SCALE + (lsum[j] - lsum[ri]) + cost[j];
-                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-                if (j >= n) break;
-            }
-            for (int ci = 0; ci < ncand[ri]; ci++) {
-                int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
-                uint32_t dv = (uint32_t)bd - 1u;
-                uint64_t db = pt->fixed_dist_bits >= 0 ? (uint64_t)pt->fixed_dist_bits * PR_SCALE
-                                                       : (uint64_t)((dv >> pt->gd.k) + 1u + pt->gd.k) * PR_SCALE;
-                for (int32_t l = 3; l <= bl; l++) {
-                    uint64_t c = PR_SCALE + db + gammalen_u32((uint32_t)l) * PR_SCALE + cost[ri + (size_t)l];
-                    if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
-                }
-            }
-            cost[ri] = best;
-            nxt[ri] = bt;
-        }
-        TokenVec tv = {0};
-        for (size_t i = 0; i < n;) {
-            Token t = nxt[i];
-            tok_push(&tv, t);
-            i += (size_t)t.len;
-        }
-        free(cost); free(nxt); free(lsum); free(ntok);
-        return tv;
-    }
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. */
     size_t maxlen = n + 1;
@@ -446,7 +403,48 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
         olen[L] = L >= RC_OUTMATCH_MIN ? ug_price(&pt->glo, (uint32_t)L - RC_OUTMATCH_MIN) : 0;
     }
-    for (uint32_t D = 1; D <= win; D++) dpr[D] = ug_price(&pt->gd, D - 1u);
+    for (uint32_t D = 1; D <= win; D++)
+        dpr[D] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
+                                          : ug_price(&pt->gd, D - 1u);
+    const uint64_t INF = UINT64_MAX / 4;
+    size_t *next_tok = next_token_starts(n, ncand, nocand);
+    if (pt->bootstrap_simple) {
+        uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
+        Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
+        cost[n] = 0;
+        for (size_t ri = n; ri-- > 0;) {
+            uint64_t best = INF;
+            Token bt = {0};
+            size_t lim = n < ri + maxrun ? n : ri + maxrun;
+            size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
+            for (size_t j = ri + 1; j <= dense_end; j++) {
+                uint64_t c = PR_SCALE + (uint64_t)slen[j - ri] + (span_lit[j] - span_lit[ri]) + cost[j];
+                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+            }
+            for (size_t j = next_tok[dense_end + 1]; j <= lim; j = next_tok[j + 1]) {
+                uint64_t c = PR_SCALE + (uint64_t)slen[j - ri] + (span_lit[j] - span_lit[ri]) + cost[j];
+                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
+                if (j >= n) break;
+            }
+            for (int ci = 0; ci < ncand[ri]; ci++) {
+                int32_t bd = cands[ri][ci].dist, bl = cands[ri][ci].len;
+                for (int32_t l = 3; l <= bl; l++) {
+                    uint64_t c = PR_SCALE + dpr[bd] + (uint64_t)mlen[l] + cost[ri + (size_t)l];
+                    if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
+                }
+            }
+            cost[ri] = best;
+            nxt[ri] = bt;
+        }
+        TokenVec tv = {0};
+        for (size_t i = 0; i < n;) {
+            Token t = nxt[i];
+            tok_push(&tv, t);
+            i += (size_t)t.len;
+        }
+        free(cost); free(nxt); free(slen); free(mlen); free(olen); free(dpr); free(span_lit); free(next_tok);
+        return tv;
+    }
     /* Every literal's tag0 context is now the deterministic previous content byte content[p-1]
      * (order-1 wire: matches/backrefs/out-matches update prevlit too), so this prefix table gives
      * the EXACT literal cost of any span [i,j) as span_lit[j] - span_lit[i], first literal included
@@ -461,14 +459,12 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         reuse_extra[h] = mflag + pt->rep0_yes;
         out_extra[h]   = mflag + pt->rep0_no + pt->outb_yes;
     }
-    const uint64_t INF = UINT64_MAX / 4;
     /* One state per (position, flag-history h): h = (prev2<<1)|prev1, span=0/match=1, keeping only
      * the cheapest arrival. State index s = i*4 + h; ns = (n+1)*4. Encoder-only; the chosen parse
      * is re-checked by the exact byte gate. */
     /* span ends only matter where a token can START (or at the content end): spans ending in a
      * literal desert fold into a longer span (merge_adjacent_spans keeps the wire identical, the
      * DP merely prices long spans as several). next_tok[j] = first j' >= j with candidates. */
-    size_t *next_tok = next_token_starts(n, ncand, nocand);
     size_t ns = (n + 1) * 4;   /* one state per (position, flag-history h): cheapest arrival */
     uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
     int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
@@ -544,7 +540,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
               } }
             /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
              * The rep distance is carried through unchanged (out-matches do not set last_dist). */
-            for (int cix = 0; cix < nocand[i]; cix++) {
+            for (int cix = 0, no = nocand ? nocand[i] : 0; cix < no; cix++) {
                 int32_t opos = ocands[i][cix].pos, olm = ocands[i][cix].len;
                 uint64_t obase = ci + out_extra[h] + pt->opos_avg;
                 (void)opos;
@@ -654,6 +650,12 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)((uint32_t)L0[b] * PR_SCALE);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
+    for (int h = 0; h < 4; h++) pt->fspan_c[h] = PR_SCALE;
+    ug_init_e(&pt->gs, 'g', 0);
+    ug_init_e(&pt->gl, 'g', 0);
+    ug_init_e(&pt->gd, 'r', PATHE_W);
+    ug_init_e(&pt->glo, 'g', 0);
+    pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
 }
 
