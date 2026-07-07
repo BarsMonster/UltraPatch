@@ -296,66 +296,8 @@ check-corpus-internal: all-internal check-assets-internal
 # metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes
 # never race on a compile; legs run undisturbed even if sources change mid-gate.
 gate-internal: all-internal
-	@set -e; \
-	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; rc=0; \
-	echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-corpus..."; \
-	$(MAKE) --no-print-directory check-assets-internal >"$$tmp/assets.txt"    2>&1 & p_assets=$$!; \
-	$(MAKE) --no-print-directory check-internal >"$$tmp/c.txt"         2>&1 & p_c=$$!; \
-	$(MAKE) --no-print-directory check-malformed-internal >"$$tmp/malformed.txt" 2>&1 & p_mal=$$!; \
-	$(MAKE) --no-print-directory check-edge-internal >"$$tmp/e.txt"         2>&1 & p_e=$$!; \
-	$(MAKE) --no-print-directory check-degrade-internal >"$$tmp/dg.txt"        2>&1 & p_dg=$$!; \
-	$(MAKE) --no-print-directory check-golden-internal >"$$tmp/g.txt"         2>&1 & p_g=$$!; \
-	$(MAKE) --no-print-directory check-decoder-contract-internal >"$$tmp/dec_contract.txt" 2>&1 & p_dec_contract=$$!; \
-	$(MAKE) --no-print-directory check-models-internal >"$$tmp/models.txt" 2>&1 & p_models=$$!; \
-	$(MAKE) --no-print-directory check-arm-internal >"$$tmp/a.txt"         2>&1 & p_a=$$!; \
-	$(MAKE) --no-print-directory check-stack-internal >"$$tmp/st.txt"        2>&1 & p_st=$$!; \
-	$(MAKE) --no-print-directory check-corpus-internal >"$$tmp/m.txt"         2>&1 & p_m=$$!; \
-	for p in $$p_assets $$p_c $$p_mal $$p_e $$p_dg $$p_g $$p_dec_contract $$p_models $$p_a $$p_st $$p_m; do \
-		wait $$p || rc=1; \
-	done; \
-	echo "==================== A1 GATE ========================="; \
-	sed -n 's/^corpus_assets=/corpus assets          : /p' "$$tmp/assets.txt"; \
-	sed -n 's/^foreign_assets=/foreign assets         : /p' "$$tmp/assets.txt"; \
-	sed -n 's/^malformed_rejects=/malformed rejects      : /p' "$$tmp/malformed.txt"; \
-	awk -F= '/^edge_cases=/{c=$$2}/^edge_roundtrips=/{r=$$2}/^edge_refusals=/{f=$$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$$tmp/e.txt"; \
-	sed -n 's/^golden_wire=/golden wire             : /p' "$$tmp/g.txt"; \
-	sed -n 's/^decoder_contract=/decoder contract        : /p' "$$tmp/dec_contract.txt"; \
-	sed -n 's/^model_contract=/model contract          : /p' "$$tmp/models.txt"; \
-	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_bigspan=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
-	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",$$1,$$2,$$3,"$(BASE_ARM_TEXT)","$(BASE_ARM_DATA)","$(BASE_ARM_BSS)"}' "$$tmp/a.txt"; \
-	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
-	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \
-	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
-	sed -n 's/^full_total=/corpus full_total       : /p' "$$tmp/m.txt"; \
-	sed -n 's/^foreign_ok=/foreign round-trips     : /p' "$$tmp/m.txt"; \
-	sed -n 's/^foreign_total=/foreign full_total      : /p' "$$tmp/m.txt"; \
-	sed -n 's/^oneface_grow=/one-face grow            : /p' "$$tmp/c.txt"; \
-	sed -n 's/^oneface_revert=/one-face revert          : /p' "$$tmp/c.txt"; \
-	sed -n 's/^max_amplified=/NVM rows amplified       : /p' "$$tmp/m.txt"; \
-	sed -n 's/^max_maxrowerase=/NVM max erases-per-row   : /p' "$$tmp/m.txt"; \
-	sed -n 's/^max_inversions=/NVM frontier inversions  : /p' "$$tmp/m.txt"; \
-	sed -n 's/^max_journal=/journal peak slots      : /p' "$$tmp/m.txt"; \
-	if [ $$rc = 0 ]; then \
-		echo "robustness check         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"; \
-		echo "RESULT                   : ALL GATES PASS"; \
-	else \
-		echo "RESULT                   : *** GATE FAILED (rc=$$rc) ***"; \
-		echo "------------------ check-assets ------------------"; cat "$$tmp/assets.txt"; \
-		echo "------------------ check ------------------";        cat "$$tmp/c.txt"; \
-		echo "------------------ check-malformed ------------------"; cat "$$tmp/malformed.txt"; \
-		echo "------------------ check-edge ------------------";   cat "$$tmp/e.txt"; \
-		echo "------------------ check-degrade ------------------"; cat "$$tmp/dg.txt"; \
-		echo "------------------ check-golden ------------------"; cat "$$tmp/g.txt"; \
-		echo "------------------ check-decoder-contract ------------------"; cat "$$tmp/dec_contract.txt"; \
-		echo "------------------ check-models ------------------"; cat "$$tmp/models.txt"; \
-		echo "------------------ check-arm ------------------";    cat "$$tmp/a.txt"; \
-		echo "------------------ check-stack ------------------";  cat "$$tmp/st.txt"; \
-		if [ -s "$$tmp/m.txt" ]; then \
-			echo "------------------ check-corpus ------------------"; cat "$$tmp/m.txt"; \
-		fi; \
-	fi; \
-	echo "====================================================="; \
-	exit $$rc
+	@MAKE="$(MAKE)" BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
+	BASE_ARM_BSS="$(BASE_ARM_BSS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-

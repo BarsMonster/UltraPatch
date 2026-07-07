@@ -39,18 +39,22 @@ analyze() { # analyze <src> <extra-defines>
     "$CC" $2 $COMMON "$1" 2>>"$log" || rc=1
 }
 
-analyze src/patch_generate.c   "-DULTRAPATCH_MAIN"         # unified host CLI main
-analyze src/enc_util.c         ""                          # host encoder utilities
-analyze src/enc_elf.c          ""                          # host ELF scanner
-analyze src/enc_bsdiff.c       ""                          # host diff planner
-analyze src/enc_field.c        ""                          # host field/apply planner
-analyze src/enc_rc.c           ""                          # host range encoder models
-analyze src/enc_lz.c           ""                          # host LZ planner/pricer
-analyze src/enc_emit.c         ""                          # host body emitter
-analyze src/enc_plan.c         ""                          # host plan/degrade sweep
-analyze src/arm_cortex_m4.c    ""                          # ARM reloc scanner/packers
-analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L" # shared host decoder backend
-analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN" # standalone decoder main
+while IFS='|' read -r src defs; do
+    analyze "$src" "$defs"
+done <<'EOF'
+src/patch_generate.c|-DULTRAPATCH_MAIN
+src/enc_util.c|
+src/enc_elf.c|
+src/enc_bsdiff.c|
+src/enc_field.c|
+src/enc_rc.c|
+src/enc_lz.c|
+src/enc_emit.c|
+src/enc_plan.c|
+src/arm_cortex_m4.c|
+src/patch_host_backend.c|-D_POSIX_C_SOURCE=200809L
+src/patch_host_backend.c|-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN
+EOF
 
 w="$(grep -c 'warning:' "$log" 2>/dev/null || true)"
 if [ "$rc" -ne 0 ] || [ "$w" -ne 0 ]; then
