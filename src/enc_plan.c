@@ -181,13 +181,23 @@ static int32_t opvec_fp_end(const OpVec *ops, int32_t fp_start) {
     return fp_end;
 }
 
-static int plan_caps_feasible(const OpVec *ops, const OpPC *pc) {
+static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *pc, int32_t fp_start) {
     int feasible = 1;
     size_t tpres = 0;
-    for (size_t i = 0; i < ops->n; i++) {
-        if (pc[i].corr.n > A1_OPC_CAP) feasible = 0;
-        tpres += pc[i].pres.n;
+    OpWalkEnt *walk = opwalk_build(ops, fp_start);
+    for (size_t step = 0; step < ops->n; step++) {
+        const OpPC *p = &pc[step];
+        const OpWalkEnt *we = &walk[opwalk_apply_index(ops->n, ctx->fwd, step)];
+        if (p->corr.n > A1_OPC_CAP) feasible = 0;
+        for (size_t i = 0; i < p->corr.n; i++)
+            if (p->corr.v[i].off < 0 || (uint32_t)p->corr.v[i].off >= RC_PACKED_POS_LIMIT) feasible = 0;
+        for (size_t i = 0; i < p->pres.n; i++) {
+            int64_t pos = (int64_t)we->tp + p->pres.v[i];
+            if (pos < 0 || pos >= (int64_t)RC_PACKED_POS_LIMIT) feasible = 0;
+        }
+        tpres += p->pres.n;
     }
+    free(walk);
     if (tpres > A1_JSLOTS) feasible = 0;
     return feasible;
 }
@@ -218,7 +228,7 @@ Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis 
     encstats_from_ctx(ctx, st_out);
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
-    int feasible = plan_caps_feasible(&ops, pc);
+    int feasible = plan_caps_feasible(ctx, &ops, pc, fp_start_s);
     Buf body = {0};
     if (feasible) {
         int emit_overflow = 0;

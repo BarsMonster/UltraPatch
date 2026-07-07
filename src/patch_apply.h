@@ -448,7 +448,8 @@ static uint32_t crc32_flash(uint32_t n){
 
 /* ===================================================================================== */
 /* never-evict journal — FLAT SORTED uint32 slots, each packed (pos<<8)|byte (the op_corr      */
-/* packing). Sorted by pos, so lookup is one binary search on slot>>8. 24-bit pos spans 16 MiB */
+/* packing). Sorted by pos, so lookup is one binary search on slot>>8. RC_PACKED_POS_BITS      */
+/* positions span 16 MiB.                                                                       */
 /* — any realistic image. NEVER-EVICT: the first write to a pos wins; over-depth (would exceed */
 /* JSLOTS) is REFUSED before any write. Lives in the apply phase ONLY (overlaid in ARENA       */
 /* front).                                                                                     */
@@ -474,7 +475,7 @@ static int jr_find(PatchApply *pa, uint32_t pos, int*at){
     return 0;
 }
 static int jr_put(PatchApply *pa, uint32_t pos, uint8_t b){
-    if(pos>=(1u<<24)) return -1;                     /* slot packs pos in 24 bits (16 MiB span) */
+    if(pos>=RC_PACKED_POS_LIMIT) return -1;          /* slot packs pos in RC_PACKED_POS_BITS */
     int at;
     if(jr_find(pa,pos,&at)) return 0;                /* never-evict: keep the first write */
     if(g_jcount>=JSLOTS) return -1;                  /* over-depth: refuse BEFORE any write */
@@ -640,7 +641,7 @@ static int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t 
     uint32_t gap=s_ug_gamma(pa,idx?&M_pg2:&M_pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ g_rcerr=1; return 0; }
     *off+=gap;
-    if(*off>=nwu){ g_rcerr=1; return 0; }
+    if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ g_rcerr=1; return 0; }
     return 1;
 }
 

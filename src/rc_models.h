@@ -19,6 +19,8 @@
 #define RC_KTOP (1u<<24)
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
+#define RC_PACKED_POS_BITS 24u
+#define RC_PACKED_POS_LIMIT (1u<<RC_PACKED_POS_BITS)
 
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
