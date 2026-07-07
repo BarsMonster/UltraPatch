@@ -489,8 +489,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
             int32_t tail = o->diff_len - seg;
             if (tail || o->extra_len || o->adj)
                 opvec_push(&out, op_copy(tail, o->diff + seg, o->extra_len, o->extra, o->adj));
-            free(o->diff);
-            free(o->extra);
+            op_free_payload(o);
         } else {
             opvec_push(&out, *o);
         }

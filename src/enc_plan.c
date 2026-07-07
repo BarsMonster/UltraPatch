@@ -68,7 +68,7 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
         if (split_any) {
             if ((dl - seg) || o->extra_len || o->adj)
                 opvec_push(&out, op_copy(dl - seg, o->diff + seg, o->extra_len, o->extra, o->adj));
-            free(o->diff); free(o->extra);
+            op_free_payload(o);
         } else {
             opvec_push(&out, *o);
         }
@@ -107,8 +107,7 @@ static int32_t fold_zero_ops(OpVec *ops) {
         if (o.diff_len == 0 && o.extra_len == 0) {
             if (out.n) out.v[out.n - 1].adj += o.adj;
             else fp_start += o.adj;
-            free(o.diff);
-            free(o.extra);
+            op_free_payload(&o);
         } else {
             opvec_push(&out, o);
         }
@@ -146,7 +145,7 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
             opvec_push(&out2, op_copy(cut[oi], o->diff, 0, NULL, 0));
             opvec_push(&out2, op_copy(o->diff_len - cut[oi], o->diff + cut[oi],
                                       o->extra_len, o->extra, o->adj));
-            free(o->diff); free(o->extra);
+            op_free_payload(o);
         }
         free(ops->v);
         *ops = out2;
