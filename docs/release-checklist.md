@@ -31,6 +31,7 @@ Record the complete output in the release notes. The gate must report:
 - `edge inputs`: all synthetic edge cases round-tripped or cleanly refused
 - `golden wire`: OK against the committed `test-bench/golden.sha256` (the wire
   freeze — an unexplained mismatch blocks release)
+- `model contract`: OK for shared model/default-cap invariants
 - ARM `.text/.data/.bss`
 - ARM soft-divide count
 - `matrix round-trips`: `256/256`

@@ -15,6 +15,9 @@ Acceptance rule for every code task:
   size without a justified production benefit.
 - For compression-affecting changes, report the per-pair better/worse/equal
   split, corpus totals, and the real one-face grow/revert sizes.
+- Use `scripts/ab_matrix.sh <baseline-encoder> <candidate-encoder>
+  <candidate-decoder> [jobs]` for explicit A/B compression experiments before
+  trusting a size win.
 
 Issue 3 is intentionally not tracked below as a code split. The current product
 decision is that `ultrapatch` remains a unified host CLI with encode and decode
@@ -64,7 +67,7 @@ header set.
   Compute the best code/data ranges without materializing temporary range
   vectors, preserving the current heuristic exactly.
 
-- [ ] 12. Refactor verification around model/wire changes.
-  Add the missing model-check coverage, wire the A/B matrix into the documented
-  refactor workflow, harden edge fixture generation, and reduce duplicated gate
-  shell plumbing where it materially improves maintainability.
+- [x] 12. Add the model/wire contract gate.
+  Add `make check-models` and run it from `make gate` so shared model constants,
+  compact gamma indexing, literal selector bounds, and relocation helper
+  assumptions are compiled and checked against the real encoder/decoder headers.
