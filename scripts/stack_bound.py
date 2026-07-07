@@ -37,8 +37,8 @@
 #                set or the toolchain-runtime allowlist),
 #              - a dynamic/VLA stack frame (.su qualifier != "static").
 #
-# BOUND = longest root-to-leaf weighted path from the entry (rcv3_run == patch_apply_run;
-#         the RC_V3_ARM wrapper tail-calls patch_apply_run, which the compiler folds in),
+# BOUND = longest root-to-leaf weighted path from the harness entry (rcv3_run wraps
+#         patch_apply_run with caller-owned PatchApply storage and is folded by the compiler),
 #         summing internal frames only. Externs are EXCLUDED and reported separately:
 #           - integrator externs  : flash_read, flash_write, and the byte callback. Their
 #                                   stack is the integrator's own cost, by contract.
@@ -168,7 +168,7 @@ def frame_for(name, sizes):
 
 def main():
     ap = argparse.ArgumentParser(description="static worst-case caller-stack bound")
-    ap.add_argument("obj", help="the RC_V3_ARM object built with -fstack-usage")
+    ap.add_argument("obj", help="the decoder harness object built with -fstack-usage")
     ap.add_argument("--su", help="the .su file (default: <obj> with .su extension)")
     ap.add_argument("--objdump", default=os.environ.get(
         "OBJDUMP", "arm-none-eabi-objdump"))

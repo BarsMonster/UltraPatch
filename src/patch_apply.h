@@ -1152,15 +1152,6 @@ static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return g_im
 static inline int patch_apply_forward(const PatchApply *pa){ return g_FWD; }
 static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_jcount; }
 
-/* ===================================================================================== */
-/* Optional exported entry point for external measurement wrappers. Normal integrations call */
-/* patch_apply_run(&state, next, ctx) directly with caller-owned PatchApply storage.          */
-/* On the device flash_read/flash_write are the real flash primitives (extern).              */
-/* ===================================================================================== */
-#ifdef RC_V3_ARM
-int  rcv3_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(pa, next, ctx); }
-#endif
-
 #undef g_image_span
 #undef g_from_size
 #undef g_to_size

@@ -144,7 +144,7 @@ check-arm-internal:
 
 # Worst-case caller-stack bound for patch_apply_run(). Since the fiber was deleted (44eee88)
 # the whole decode runs on the CALLER's stack; docs/device-integration.md pins the budget an
-# integrator must reserve. Builds the RC_V3_ARM decoder standalone with -fstack-usage (gcc -O2,
+# integrator must reserve. Builds the decoder harness with -fstack-usage (gcc -O2,
 # the pessimistic level — deeper than -Os here) and runs scripts/stack_bound.py, which sums the
 # per-function .su frames (each already includes its own pushed LR/regs) along the deepest path
 # of the static call graph extracted from the disassembly. It fails loudly on recursion, an
