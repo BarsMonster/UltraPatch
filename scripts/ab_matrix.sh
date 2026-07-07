@@ -17,7 +17,8 @@
 # Decoder commands must accept: --decode <image> <patch>.
 # Env:   IMAGES, FIXTURES (as for check_corpus.sh),
 #        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face gates; default: the Makefile pins).
-# Exit:  0 on a structurally sound run (the accept decision is the caller's),
+# Exit:  0 on a structurally sound run that passes the no-regression accept gate,
+#        1 on a structurally sound run that should be rejected for compression,
 #        3 on structural error or any candidate round-trip failure.
 set -u
 ENC_A="${1:?baseline encoder}"; ENC_B="${2:?candidate encoder}"; DEC_B="${3:?candidate decoder}"
@@ -65,12 +66,16 @@ if [ "$n" -ne 256 ] || [ "$rt" -ne 256 ]; then
   exit 3
 fi
 
-printf '%s\n' "$lines" | awk '
+summary=$(printf '%s\n' "$lines" | awk '
   { ta+=$1; tb+=$2
     if ($2<$1) b++; else if ($2>$1) { w++; printf "worse: %s -> %s  %d -> %d (+%d)\n", $4,$5,$1,$2,$2-$1 > "/dev/stderr" }
     else e++ }
   END { printf "split_better=%d\nsplit_worse=%d\nsplit_equal=%d\n", b+0, w+0, e+0
-        printf "full_total_base=%d\nfull_total_cand=%d\nfull_total_delta=%d\n", ta, tb, tb-ta }'
+        printf "full_total_base=%d\nfull_total_cand=%d\nfull_total_delta=%d\n", ta, tb, tb-ta }')
+printf '%s\n' "$summary"
+split_worse=$(printf '%s\n' "$summary" | sed -n 's/^split_worse=//p')
+full_base=$(printf '%s\n' "$summary" | sed -n 's/^full_total_base=//p')
+full_cand=$(printf '%s\n' "$summary" | sed -n 's/^full_total_cand=//p')
 
 # one-face product patch, both encoders (serial; candidate blobs round-tripped)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
@@ -93,3 +98,15 @@ verdict=OK
 [ "$gb" -gt "$GATE_G" ] && verdict="ONEFACE_GROW_REGRESSION"
 [ "$rb" -gt "$GATE_R" ] && verdict="ONEFACE_REVERT_REGRESSION"
 printf 'oneface_gate=%s (caps %d/%d)\n' "$verdict" "$GATE_G" "$GATE_R"
+
+reject=""
+[ "$split_worse" -ne 0 ] && reject="${reject:+$reject,}worse_pairs"
+[ "$full_cand" -gt "$full_base" ] && reject="${reject:+$reject,}full_total"
+[ "$gb" -gt "$ga" ] && reject="${reject:+$reject,}oneface_grow"
+[ "$rb" -gt "$ra" ] && reject="${reject:+$reject,}oneface_revert"
+[ "$verdict" != OK ] && reject="${reject:+$reject,}oneface_gate"
+if [ -n "$reject" ]; then
+  printf 'accept_gate=REJECT (%s)\n' "$reject"
+  exit 1
+fi
+printf 'accept_gate=OK\n'
