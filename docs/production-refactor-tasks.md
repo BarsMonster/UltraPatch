@@ -21,7 +21,7 @@ Acceptance rule for every code task:
 
 ## Tasks
 
-- [ ] 1. Harden decoder error flow and unify checked readers.
+- [x] 1. Harden decoder error flow and unify checked readers.
   Replace EOF zero-fill and post-error write-through behavior with checked
   byte, ULEB, Rice, and content readers that stop side effects immediately.
 
