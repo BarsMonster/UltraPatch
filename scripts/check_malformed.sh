@@ -116,3 +116,4 @@ expect_reject_unchanged trunc_tail4 "$tmp/trunc_tail4.blob" "$base_bin"
 expect_reject_unchanged wrong_current_image "$tmp/grow.blob" "$one_bin"
 
 printf 'malformed_rejects=%u\n' "$rejects"
+test "$rejects" -eq 25

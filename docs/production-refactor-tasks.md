@@ -66,7 +66,7 @@ Acceptance rule for every code task:
   Share file loading and NVM statistics helpers, and reject oversized or invalid
   image/envelope inputs before narrowing sizes or starting analysis.
 
-- [ ] 12. Make verification metrics single-source and stricter.
+- [x] 12. Make verification metrics single-source and stricter.
   Centralize real one-face metric collection, reject A/B baseline encode
   failures, assert expected case counts, and keep published stack/size contracts
   generated from the gate.

@@ -107,4 +107,5 @@ run_case big_shift
 
 printf 'edge_cases=%u\nedge_roundtrips=%u\nedge_refusals=%u\nedge_failures=%u\n' \
   "$cases" "$roundtrips" "$refusals" "$failures"
+test "$cases" -eq 12
 test "$failures" -eq 0

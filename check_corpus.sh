@@ -98,11 +98,9 @@ if [ "$cn" -ne 256 ] || [ "$fn" -ne 34 ] || [ "$bad" -ne 0 ]; then
 fi
 
 # real one-face firmware update (grow + revert) — two encodes, serial (negligible).
-d=$(mktemp -d)
-./ultrapatch "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$d/grow.blob" >/dev/null 2>&1
-./ultrapatch "$FIX/v1_one_face/watch.bin" "$FIX/v0_base/watch.bin" "$d/revert.blob" >/dev/null 2>&1
-og=$(wc -c < "$d/grow.blob"); orv=$(wc -c < "$d/revert.blob")
-rm -rf "$d"
+oneface=$(FIXTURES="$FIX" scripts/oneface_metrics.sh ./ultrapatch)
+og=$(printf '%s\n' "$oneface" | sed -n 's/^oneface_grow=//p')
+orv=$(printf '%s\n' "$oneface" | sed -n 's/^oneface_revert=//p')
 
 printf 'matrix_ok=%d/256\nfull_total=%d\nforeign_ok=%d/34\nforeign_total=%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\noneface_grow=%d\noneface_revert=%d\n' \
   "$cok" "$cfull" "$fok" "$ffull" "$mj" "$ma" "$mr" "$mi" "$og" "$orv"

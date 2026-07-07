@@ -26,7 +26,8 @@ JOBS="${4:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 # One-face gate defaults track the authoritative Makefile pins (env still overrides).
-MK="$(dirname "$0")/../Makefile"
+SDIR="$(dirname "$0")"
+MK="$SDIR/../Makefile"
 gate() {  # <make-var> <env-value> -> its ?= default from the Makefile unless overridden
   [ -n "$2" ] && { echo "$2"; return; }
   v=$(sed -n "s/^$1[[:space:]]*?=[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$MK" | head -1)
@@ -39,15 +40,19 @@ GATE_R=$(gate BASE_ONEFACE_REVERT "${BASE_ONEFACE_REVERT:-}") || exit 2
 ab_work() {
   from=$1; to=$2
   d=$(mktemp -d)
-  "$AB_ENC_A" "$from/watch.bin" "$to/watch.bin" "$d/a.blob" >/dev/null 2>&1
-  "$AB_ENC_B" "$from/watch.bin" "$to/watch.bin" "$d/b.blob" >/dev/null 2>&1
-  sa=$(wc -c < "$d/a.blob" 2>/dev/null || echo 0)
-  sb=$(wc -c < "$d/b.blob" 2>/dev/null || echo 0)
-  cp "$from/watch.bin" "$d/mem.bin"
+  aok=0; bok=0
+  "$AB_ENC_A" "$from/watch.bin" "$to/watch.bin" "$d/a.blob" >/dev/null 2>&1 && aok=1
+  "$AB_ENC_B" "$from/watch.bin" "$to/watch.bin" "$d/b.blob" >/dev/null 2>&1 && bok=1
+  sa=0; sb=0
+  [ "$aok" -eq 1 ] && sa=$(wc -c < "$d/a.blob")
+  [ "$bok" -eq 1 ] && sb=$(wc -c < "$d/b.blob")
   ok=0
-  "$AB_DEC_B" --decode "$d/mem.bin" "$d/b.blob" >/dev/null 2>&1 \
-    && cmp -s "$d/mem.bin" "$to/watch.bin" && ok=1
-  printf '%s %s %s %s %s\n' "$sa" "$sb" "$ok" "$(basename "$from")" "$(basename "$to")"
+  if [ "$bok" -eq 1 ]; then
+    cp "$from/watch.bin" "$d/mem.bin"
+    "$AB_DEC_B" --decode "$d/mem.bin" "$d/b.blob" >/dev/null 2>&1 \
+      && cmp -s "$d/mem.bin" "$to/watch.bin" && ok=1
+  fi
+  printf '%s %s %s %s %s %s %s\n' "$sa" "$sb" "$ok" "$(basename "$from")" "$(basename "$to")" "$aok" "$bok"
   rm -rf "$d"
 }
 export -f ab_work
@@ -60,9 +65,13 @@ lines=$(
 
 n=$(printf '%s\n' "$lines" | wc -l)
 rt=$(printf '%s\n' "$lines" | awk '{ ok+=$3 } END { print ok+0 }')
-if [ "$n" -ne 256 ] || [ "$rt" -ne 256 ]; then
-  echo "ab_matrix.sh: structural error or round-trip failure (pairs=$n roundtrips=$rt/256)" >&2
-  printf '%s\n' "$lines" | awk '$3==0 { printf "  RT-FAIL %s -> %s\n", $4, $5 }' >&2
+aenc=$(printf '%s\n' "$lines" | awk '{ ok+=$6 } END { print ok+0 }')
+benc=$(printf '%s\n' "$lines" | awk '{ ok+=$7 } END { print ok+0 }')
+if [ "$n" -ne 256 ] || [ "$aenc" -ne 256 ] || [ "$benc" -ne 256 ] || [ "$rt" -ne 256 ]; then
+  echo "ab_matrix.sh: structural error (pairs=$n baseline_encodes=$aenc/256 candidate_encodes=$benc/256 roundtrips=$rt/256)" >&2
+  printf '%s\n' "$lines" | awk '$6==0 { printf "  BASE-ENC-FAIL %s -> %s\n", $4, $5 }
+                                  $7==0 { printf "  CAND-ENC-FAIL %s -> %s\n", $4, $5 }
+                                  $7==1 && $3==0 { printf "  RT-FAIL %s -> %s\n", $4, $5 }' >&2
   exit 3
 fi
 
@@ -79,19 +88,14 @@ full_cand=$(printf '%s\n' "$summary" | sed -n 's/^full_total_cand=//p')
 
 # one-face product patch, both encoders (serial; candidate blobs round-tripped)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
-"$ENC_A" "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$d/ga.blob" >/dev/null 2>&1
-"$ENC_A" "$FIX/v1_one_face/watch.bin" "$FIX/v0_base/watch.bin" "$d/ra.blob" >/dev/null 2>&1
-"$ENC_B" "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$d/gb.blob" >/dev/null 2>&1
-"$ENC_B" "$FIX/v1_one_face/watch.bin" "$FIX/v0_base/watch.bin" "$d/rb.blob" >/dev/null 2>&1
-for p in g r; do
-  from="$FIX/v0_base"; to="$FIX/v1_one_face"
-  [ "$p" = r ] && { from="$FIX/v1_one_face"; to="$FIX/v0_base"; }
-  cp "$from/watch.bin" "$d/mem.bin"
-  "$DEC_B" --decode "$d/mem.bin" "$d/${p}b.blob" >/dev/null 2>&1 && cmp -s "$d/mem.bin" "$to/watch.bin" \
-    || { echo "ab_matrix.sh: one-face candidate round-trip failed ($p)" >&2; exit 3; }
-done
-ga=$(wc -c < "$d/ga.blob"); ra=$(wc -c < "$d/ra.blob")
-gb=$(wc -c < "$d/gb.blob"); rb=$(wc -c < "$d/rb.blob")
+FIXTURES="$FIX" "$SDIR/oneface_metrics.sh" "$ENC_A" > "$d/base_oneface.txt" \
+  || { echo "ab_matrix.sh: one-face baseline encode failed" >&2; exit 3; }
+FIXTURES="$FIX" ONEFACE_ROUNDTRIP=1 "$SDIR/oneface_metrics.sh" "$ENC_B" "$DEC_B" > "$d/cand_oneface.txt" \
+  || { echo "ab_matrix.sh: one-face candidate encode/round-trip failed" >&2; exit 3; }
+ga=$(sed -n 's/^oneface_grow=//p' "$d/base_oneface.txt")
+ra=$(sed -n 's/^oneface_revert=//p' "$d/base_oneface.txt")
+gb=$(sed -n 's/^oneface_grow=//p' "$d/cand_oneface.txt")
+rb=$(sed -n 's/^oneface_revert=//p' "$d/cand_oneface.txt")
 printf 'oneface_grow_base=%d\noneface_grow_cand=%d\noneface_revert_base=%d\noneface_revert_cand=%d\n' \
   "$ga" "$gb" "$ra" "$rb"
 verdict=OK

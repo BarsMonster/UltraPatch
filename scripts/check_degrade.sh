@@ -231,4 +231,5 @@ fi
 cases=5
 printf 'degrade_journal_peak=%s\ndegrade_opc_splits=%s\ndegrade_direction=%s\ndegrade_rowwindow=%s\ndegrade_bigspan=%s\ndegrade_cases=%s\ndegrade_fail=%s\n' \
   "$j_peak" "$opc_n" "$dir_flip" "$rw" "$bigspan" "$cases" "$fail"
+test "$cases" -eq 5
 test "$fail" -eq 0

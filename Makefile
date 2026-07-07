@@ -106,19 +106,10 @@ check-internal: all-internal
 		echo "ultrapatch with no arguments unexpectedly succeeded" >&2; exit 1; \
 	fi; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/noargs.err"; \
-	cp "$(FIXTURES)/v0_base/watch.bin" "$$tmp/mem.bin"; \
-	./ultrapatch "$(FIXTURES)/v0_base/watch.bin" "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/grow.blob"; \
-	./ultrapatch --decode "$$tmp/mem.bin" "$$tmp/grow.blob" >/dev/null; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v1_one_face/watch.bin"; \
-	cp "$(FIXTURES)/v1_one_face/watch.bin" "$$tmp/mem.bin"; \
-	./ultrapatch "$(FIXTURES)/v1_one_face/watch.bin" "$(FIXTURES)/v0_base/watch.bin" "$$tmp/revert.blob"; \
-	./ultrapatch --decode "$$tmp/mem.bin" "$$tmp/revert.blob" >/dev/null; \
-	cmp "$$tmp/mem.bin" "$(FIXTURES)/v0_base/watch.bin"; \
-	grow_sz=$$(wc -c < "$$tmp/grow.blob"); \
-	revert_sz=$$(wc -c < "$$tmp/revert.blob"); \
-	wc -c "$$tmp/grow.blob" "$$tmp/revert.blob"; \
-	echo "oneface_grow=$$grow_sz"; \
-	echo "oneface_revert=$$revert_sz"; \
+	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 scripts/oneface_metrics.sh ./ultrapatch ./ultrapatch >"$$tmp/oneface.txt"; \
+	cat "$$tmp/oneface.txt"; \
+	grow_sz=$$(sed -n 's/^oneface_grow=//p' "$$tmp/oneface.txt"); \
+	revert_sz=$$(sed -n 's/^oneface_revert=//p' "$$tmp/oneface.txt"); \
 	test "$$grow_sz" -le "$(BASE_ONEFACE_GROW)"; \
 	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"
 
@@ -331,7 +322,7 @@ gate-internal: all-internal
 	sed -n 's/^decoder_contract=/decoder contract        : /p' "$$tmp/dec_contract.txt"; \
 	sed -n 's/^model_contract=/model contract          : /p' "$$tmp/models.txt"; \
 	awk -F= '/^degrade_journal_peak=/{j=$$2}/^degrade_opc_splits=/{o=$$2}/^degrade_direction=/{d=$$2}/^degrade_rowwindow=/{w=$$2}/^degrade_bigspan=/{f=$$2}/^degrade_cases=/{c=$$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s (%s cases)\n",j,o,d,w,f,c}' "$$tmp/dg.txt"; \
-	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (.bss cap 12288)\n",$$1,$$2,$$3}' "$$tmp/a.txt"; \
+	awk 'NR==2{printf "ARM   text / data / bss  : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",$$1,$$2,$$3,"$(BASE_ARM_TEXT)","$(BASE_ARM_DATA)","$(BASE_ARM_BSS)"}' "$$tmp/a.txt"; \
 	sed -n 's/^soft_div_calls=/ARM   soft-divide calls  : /p' "$$tmp/a.txt"; \
 	awk -F= '/^stack_bound_bytes=/{b=$$2}/^stack_ceiling_o2=/{c=$$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$$tmp/st.txt"; \
 	sed -n 's/^matrix_ok=/matrix round-trips      : /p' "$$tmp/m.txt"; \
