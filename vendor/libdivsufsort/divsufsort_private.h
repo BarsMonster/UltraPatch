@@ -68,13 +68,6 @@ extern "C" {
 #  define PRIdSAIDX_T PRIdSAIDX64_T
 # endif /* PRIdSAIDX_T */
 # define divsufsort divsufsort64
-# define divbwt divbwt64
-# define divsufsort_version divsufsort64_version
-# define bw_transform bw_transform64
-# define inverse_bw_transform inverse_bw_transform64
-# define sufcheck sufcheck64
-# define sa_search sa_search64
-# define sa_simplesearch sa_simplesearch64
 # define sssort sssort64
 # define trsort trsort64
 #else
