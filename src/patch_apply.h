@@ -298,21 +298,20 @@ static int env_u32le(PatchApply *pa, uint32_t*out){
     for(int i=0;i<4;i++){ if(!env_byte(pa,&b)) return 0; v|=(uint32_t)b<<(8*i); }
     *out=v; return 1;
 }
+#define A1_ULEB32_OVERFLOW(sh,b) ((sh)==28 && (uint8_t)(b)>15u)
 /* uLEB with a NON-CANONICAL-encoding flag: a canonical multi-byte uLEB never ends in a 0x00
  * byte (emission stops once the remaining value is zero; a lone 0x00 is the value 0), so one
  * redundant trailing continuation byte is a legal, value-neutral 1-bit side channel. The
- * envelope reads it on the size-delta field as the UNNATURAL-apply-direction marker. This is
- * the ONE uLEB reader; env_uleb below is the plain wrapper (discards the flag into a dummy). */
-static int env_uleb_ov(PatchApply *pa, uint32_t*out, uint8_t*ov){
+ * envelope permits it ONLY on the size-delta field as the UNNATURAL-apply-direction marker. */
+static int env_uleb(PatchApply *pa, uint32_t*out, uint8_t*ov){
     uint32_t v=0; int sh=0, n=0; uint8_t b;
-    do{ if(sh>28||!env_byte(pa,&b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
-    *ov=(uint8_t)rc_uleb_overlong(n,b);
+    do{ if(!env_byte(pa,&b) || A1_ULEB32_OVERFLOW(sh,b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
+    { uint8_t o=(uint8_t)rc_uleb_overlong(n,b); if(o && !ov) return 0; if(ov) *ov=o; }
     *out=v; return 1;
 }
-static int env_uleb(PatchApply *pa, uint32_t*out){ uint8_t ov; return env_uleb_ov(pa,out, &ov); }
 /* zigzag-uLEB absolute around `base` (to_size and fp_end are delta-coded vs from_size). */
 static int env_zz_abs(PatchApply *pa, uint32_t base, uint32_t*out){
-    uint32_t z; if(!env_uleb(pa,&z)) return 0;
+    uint32_t z; if(!env_uleb(pa,&z,0)) return 0;
     return rc_zz_abs(base,z,A1_MAX_IMAGE,out);
 }
 
@@ -373,8 +372,8 @@ static int32_t bb_unzz(PatchApply *pa, uint32_t u){
 static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
-        if(sh>28){ g_rcerr=1; return 0; }            /* cap shift (uLEB <=32-bit) */
         b=s_bt(pa,t,rate);
+        if(A1_ULEB32_OVERFLOW(sh,b)){ g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
     }while(b&0x80);
     return bb_unzz(pa,acc);
@@ -745,7 +744,7 @@ static uint32_t sa_read_uleb(PatchApply *pa, A1ApplyState*s){
     for(;;){ if(g_rcerr) return 0;
         uint8_t b=sa_next_content(pa,s,0);
         if(g_rcerr) return 0;
-        if(sh>28){ g_rcerr=1; return 0; }            /* cap shift (uLEB <=32-bit) */
+        if(A1_ULEB32_OVERFLOW(sh,b)){ g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
 }
@@ -1000,7 +999,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
 static int A1_NOINLINE decode_header(PatchApply *pa){
     uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
-    if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs) || fs>A1_MAX_IMAGE || !env_uleb_ov(pa,&z,&ov)) return 0;
+    if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs,0) || fs>A1_MAX_IMAGE || !env_uleb(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
     else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
     /* Apply direction is an ENCODER CHOICE. The NATURAL direction (descending iff the image
@@ -1015,9 +1014,9 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
       g_FWD=!desc; }
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped for both directions right after
      * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
-    { uint32_t z2; if(!env_uleb(pa,&z2)) return 0;
+    { uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
       g_fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
-    if(!env_uleb(pa,&bl) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
+    if(!env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     g_from_size=fs; g_to_size=ts; g_want_to=want_to;
     g_body_left=bl;
     g_image_span = fs>ts ? fs : ts;
@@ -1216,6 +1215,7 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef SA_ARENA
 #undef ARENA_BYTES
 #undef RC_UNARY_MAX
+#undef A1_ULEB32_OVERFLOW
 #undef OROW_NONE
 #undef OROW_SLOT
 #undef PSRC_HW_MASK

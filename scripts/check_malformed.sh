@@ -32,6 +32,34 @@ put_uleb() {
   done
 }
 
+byte_at() {
+  od -An -tu1 -j "$2" -N1 "$1" | tr -d ' '
+}
+
+uleb_end_excl() {
+  blob=$1
+  off=$2
+  while :; do
+    b=$(byte_at "$blob" "$off")
+    off=$((off + 1))
+    [ $((b & 128)) -eq 0 ] && break
+  done
+  printf '%u\n' "$off"
+}
+
+make_overlong_uleb_at() {
+  in=$1
+  start=$2
+  out=$3
+  end=$(uleb_end_excl "$in" "$start")
+  last_off=$((end - 1))
+  last=$(byte_at "$in" "$last_off")
+  head -c "$last_off" "$in" > "$out"
+  emit_byte "$((last | 128))" "$out"
+  emit_byte 0 "$out"
+  tail -c "+$((end + 1))" "$in" >> "$out"
+}
+
 zeros() {
   dd if=/dev/zero bs=1 count="$1" 2>/dev/null
 }
@@ -76,6 +104,30 @@ printf '\200\200\200\200\200\200' >> "$tmp/unterminated_from_size.blob"
 zeros 8 >> "$tmp/unterminated_from_size.blob"
 expect_reject_unchanged unterminated_from_size "$tmp/unterminated_from_size.blob" "$base_bin"
 
+: > "$tmp/overflow5_from_size.blob"
+head -c 8 "$tmp/grow.blob" >> "$tmp/overflow5_from_size.blob"   # CRC32(from)[4] | CRC32(to)[4]
+printf '\200\200\200\200\020' >> "$tmp/overflow5_from_size.blob"
+zeros 8 >> "$tmp/overflow5_from_size.blob"
+expect_reject_unchanged overflow5_from_size "$tmp/overflow5_from_size.blob" "$base_bin"
+
+from_start=8
+from_end=$(uleb_end_excl "$tmp/grow.blob" "$from_start")
+delta_end=$(uleb_end_excl "$tmp/grow.blob" "$from_end")
+fp_end_end=$(uleb_end_excl "$tmp/grow.blob" "$delta_end")
+fp_start_end=$(uleb_end_excl "$tmp/grow.blob" "$fp_end_end")
+
+make_overlong_uleb_at "$tmp/grow.blob" "$from_start" "$tmp/overlong_from_size.blob"
+expect_reject_unchanged overlong_from_size "$tmp/overlong_from_size.blob" "$base_bin"
+
+make_overlong_uleb_at "$tmp/grow.blob" "$delta_end" "$tmp/overlong_fp_end.blob"
+expect_reject_unchanged overlong_fp_end "$tmp/overlong_fp_end.blob" "$base_bin"
+
+make_overlong_uleb_at "$tmp/grow.blob" "$fp_end_end" "$tmp/overlong_fp_start.blob"
+expect_reject_unchanged overlong_fp_start "$tmp/overlong_fp_start.blob" "$base_bin"
+
+make_overlong_uleb_at "$tmp/grow.blob" "$fp_start_end" "$tmp/overlong_body_len.blob"
+expect_reject_unchanged overlong_body_len "$tmp/overlong_body_len.blob" "$base_bin"
+
 mk_header_blob "$tmp/from_size_mismatch.blob" 1 0
 expect_reject_unchanged from_size_mismatch "$tmp/from_size_mismatch.blob" "$base_bin"
 
@@ -116,4 +168,4 @@ expect_reject_unchanged trunc_tail4 "$tmp/trunc_tail4.blob" "$base_bin"
 expect_reject_unchanged wrong_current_image "$tmp/grow.blob" "$one_bin"
 
 printf 'malformed_rejects=%u\n' "$rejects"
-test "$rejects" -eq 25
+test "$rejects" -eq 30
