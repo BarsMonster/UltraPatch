@@ -52,7 +52,7 @@ header set.
   Avoid copying `Inj` data into a second `FieldRef` vector and build shared
   shift-map preparation data once for both scorers.
 
-- [ ] 9. Simplify ARM relocation scanner containers.
+- [x] 9. Simplify ARM relocation scanner containers.
   Transfer finalized scanner maps directly to `m4_stream_t` and replace the
   literal-pool hash set with smaller host-only storage.
 
