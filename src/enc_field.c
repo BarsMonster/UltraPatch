@@ -244,25 +244,13 @@ static int cmp_seg(const void *a, const void *b) {
     return (x->b > y->b) - (x->b < y->b);
 }
 
-/* Build the per-field key table (BL: k1,k2,need; EX: k2=word value, need) and the FULL deduped
- * candidate map (bsdiff op-walk boundaries + span terminator + exact EX value runs, an oversized
- * pool weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping the later
- * EX-derived value). Shared front half of both fits: the hit-count fit_shift_map (below) and the
- * bits-based fit_shift_map_bits (enc_emit.c). tb/tv are caller buffers of >= SMAP_POOL_MAX
- * entries, fk of >= nfr; returns the full-map entry count. */
+/* Build the FULL deduped candidate map from prebuilt field keys (BL: k1,k2,need; EX: k2=word
+ * value, need): bsdiff op-walk boundaries + span terminator + exact EX value runs, oversized pool
+ * weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping later EX entries. */
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                           const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                           uint32_t *tb, int32_t *tv, FieldKey *fk) {
+                    const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv) {
     size_t nex = 0;
-    for (size_t i = 0; i < nfr; i++) {
-        fk[i].kind = fr[i].kind;
-        fk[i].k1 = fr[i].fpk;
-        fk[i].need = (int32_t)(uint32_t)fr[i].delta;
-        if (fr[i].kind == EV_BL) {
-            uint16_t up = rc_u16le(frm + fr[i].fpk), lo = rc_u16le(frm + fr[i].fpk + 2);
-            fk[i].k2 = rc_bl_target(fr[i].fpk, up, lo);
-        } else { fk[i].k2 = rc_u32le(frm + fr[i].fpk); nex++; }
-    }
+    for (size_t i = 0; i < nfr; i++) nex += fk[i].kind == EV_EX;
     /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
     SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));

@@ -48,7 +48,7 @@ header set.
   Replace per-op literal vectors/temp buffers with a counted directional cursor
   and fixed uLEB scratch while preserving injection cursor timing.
 
-- [ ] 8. Collapse injection and shift-map preparation copies.
+- [x] 8. Collapse injection and shift-map preparation copies.
   Avoid copying `Inj` data into a second `FieldRef` vector and build shared
   shift-map preparation data once for both scorers.
 

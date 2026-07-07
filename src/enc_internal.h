@@ -95,7 +95,6 @@ typedef struct {
     const FieldDeltaVec *fd; const Op *o; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
-typedef struct { int kind; uint32_t fpk; int32_t delta; } FieldRef;
 typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
 enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
 
@@ -200,8 +199,7 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
 int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
                        const uint32_t *mb, const int32_t *mv, int mn);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                    const uint8_t *frm, const FieldRef *fr, size_t nfr,
-                    uint32_t *tb, int32_t *tv, FieldKey *fk);
+                    const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv);
 FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                            const FieldDeltaVec *fd);

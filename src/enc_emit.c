@@ -24,21 +24,33 @@ static void injvec_array_free(InjVec *v, size_t n) {
     free(v);
 }
 
-static FieldRef *field_refs_from_inj(const InjVec *inj, size_t nops, int FWD, size_t *nout) {
-    FieldRef *out = NULL;
-    size_t n = 0, cap = 0;
+static size_t inj_field_count(const InjVec *inj, size_t nops) {
+    size_t n = 0;
+    for (size_t i = 0; i < nops; i++) n += inj[i].n;
+    return n;
+}
+
+static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD,
+                                const uint8_t *frm, FieldKey *fk) {
+    size_t n = 0;
     for (size_t oi = 0; oi < nops; oi++) {
         size_t step = FWD ? oi : nops - 1u - oi;
         const InjVec *iv = &inj[step];
         for (size_t q = 0; q < iv->n; q++) {
             size_t ii = FWD ? q : iv->n - 1u - q;
             const Inj *ij = &iv->v[ii];
-            out = (FieldRef *)vec_reserve(out, &cap, n + 1, sizeof(*out), 256);
-            out[n++] = (FieldRef){ ij->kind, ij->fpk, ij->delta };
+            fk[n].kind = ij->kind;
+            fk[n].k1 = ij->fpk;
+            fk[n].need = (int32_t)(uint32_t)ij->delta;
+            if (ij->kind == EV_BL) {
+                uint16_t up = rc_u16le(frm + ij->fpk), lo = rc_u16le(frm + ij->fpk + 2);
+                fk[n].k2 = rc_bl_target(ij->fpk, up, lo);
+            } else {
+                fk[n].k2 = rc_u32le(frm + ij->fpk);
+            }
+            n++;
         }
     }
-    *nout = n;
-    return out;
 }
 
 typedef struct {
@@ -399,18 +411,16 @@ static int smap_finish(uint32_t *tb, int32_t *tv, int mn, uint32_t *mb, int32_t 
     return mn;
 }
 
-static int fit_shift_map_scored(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                                const uint8_t *frm, const FieldRef *fr, size_t nfr,
+static int fit_shift_map_scored(const uint32_t *fb, const int32_t *fv, int fn,
                                 SMapScoreFn score, void *score_ctx,
                                 uint64_t slack, int strict_improve, int sentinel_mark,
                                 uint32_t *mb, int32_t *mv) {
-    FieldKey *fk = (FieldKey *)xmalloc((nfr ? nfr : 1) * sizeof(*fk));
     uint32_t tb[SMAP_POOL_MAX]; int32_t tv[SMAP_POOL_MAX];
     uint32_t b2[SMAP_POOL_MAX]; int32_t v2[SMAP_POOL_MAX];
     int mark[SMAP_POOL_MAX] = {0};
-    int mn = smap_build_full(ops, fp_start, from_size, to_size, frm, fr, nfr, tb, tv, fk);
-    if (score == smap_hit_cost) ((SMapHitScore *)score_ctx)->fk = fk;
-    else ((SMapBitScore *)score_ctx)->fk = fk;
+    memcpy(tb, fb, (size_t)fn * sizeof(*tb));
+    memcpy(tv, fv, (size_t)fn * sizeof(*tv));
+    int mn = fn;
     uint64_t cur = score(tb, tv, mn, score_ctx);
     for (int round = 0; round < 8 && mn > 1; round++) {
         int removed = 0;
@@ -442,30 +452,27 @@ static int fit_shift_map_scored(const OpVec *ops, int32_t fp_start, uint32_t fro
     }
     (void)cur;
     mn = smap_finish(tb, tv, mn, mb, mv);
-    free(fk);
     return mn;
 }
 
-static int fit_shift_map_hit(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                             const uint8_t *frm, const FieldRef *fr, size_t nfr,
+static int fit_shift_map_hit(const uint32_t *fb, const int32_t *fv, int fn,
+                             const FieldKey *fk, size_t nfr,
                              uint32_t *mb, int32_t *mv) {
-    SMapHitScore sc = { NULL, nfr };
-    return fit_shift_map_scored(ops, fp_start, from_size, to_size, frm, fr, nfr,
-                                smap_hit_cost, &sc, SMAP_MAX_LOSS, 0, 1, mb, mv);
+    SMapHitScore sc = { fk, nfr };
+    return fit_shift_map_scored(fb, fv, fn, smap_hit_cost, &sc, SMAP_MAX_LOSS, 0, 1, mb, mv);
 }
 
 /* Bits-based shift-map fit: same prune/cap/finish engine as the hit-count fit, but the score is
  * estimated shipped bits for the map header plus BL/EX residual streams. A segment is batch-removed
  * only when its removal strictly reduces the estimate. The final exact byte gate still chooses among
  * no map, hit-count map, and this map, so proxy over-removal cannot regress a pair. */
-static int fit_shift_map_bits(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                              const uint8_t *frm, const FieldRef *fr, size_t nfr,
+static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
+                              const FieldKey *fk, size_t nfr,
                               uint32_t *mb, int32_t *mv) {
     int32_t *dic_bl = (int32_t *)xmalloc(DR_KCAP_BL * sizeof(int32_t));
     int32_t *dic_ex = (int32_t *)xmalloc(DR_KCAP_EX * sizeof(int32_t));
-    SMapBitScore sc = { NULL, nfr, dic_bl, dic_ex };
-    int mn = fit_shift_map_scored(ops, fp_start, from_size, to_size, frm, fr, nfr,
-                                  smap_bit_cost, &sc, 0, 1, 0, mb, mv);
+    SMapBitScore sc = { fk, nfr, dic_bl, dic_ex };
+    int mn = fit_shift_map_scored(fb, fv, fn, smap_bit_cost, &sc, 0, 1, 0, mb, mv);
     free(dic_bl); free(dic_ex);
     return mn;
 }
@@ -501,13 +508,16 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;      /* hit-count fit */
     uint32_t map_b2[SMAP_CAP]; int32_t map_v2[SMAP_CAP]; int map_n2 = 0;   /* bits fit */
     int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
-    { size_t nfr = 0;
-      FieldRef *frs = field_refs_from_inj(inj, ops->n, FWD, &nfr);
+    { size_t nfr = inj_field_count(inj, ops->n);
       if (nfr) {
-          map_n = fit_shift_map_hit(ops, fp_start, from_size, to_size, frm, frs, nfr, map_b, map_v);
-          map_n2 = fit_shift_map_bits(ops, fp_start, from_size, to_size, frm, frs, nfr, map_b2, map_v2);
-      }
-      free(frs); }
+          FieldKey *fk = (FieldKey *)xmalloc(nfr * sizeof(*fk));
+          field_keys_from_inj(inj, ops->n, FWD, frm, fk);
+          uint32_t fb[SMAP_POOL_MAX]; int32_t fv[SMAP_POOL_MAX];
+          int fn = smap_build_full(ops, fp_start, from_size, to_size, fk, nfr, fb, fv);
+          map_n = fit_shift_map_hit(fb, fv, fn, fk, nfr, map_b, map_v);
+          map_n2 = fit_shift_map_bits(fb, fv, fn, fk, nfr, map_b2, map_v2);
+          free(fk);
+      } }
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
      * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
     uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
