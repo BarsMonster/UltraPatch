@@ -19,55 +19,54 @@ Acceptance rule for every code task:
   <candidate-decoder> [jobs]` for explicit A/B compression experiments before
   trusting a size win.
 
-Issue 3 is intentionally not tracked below as a code split. The current product
-decision is that `ultrapatch` remains a unified host CLI with encode and decode
-modes; the device decoder artifact remains the header-only `patch_apply.h`
-header set.
-
 ## Tasks
 
-- [x] 1. Compact `A1UGGamma` storage.
-  Store only reachable gamma mantissa probabilities and share the accessor with
-  encoder/pricing so wire behavior stays bit-exact.
+- [ ] 1. Harden decoder error flow and unify checked readers.
+  Replace EOF zero-fill and post-error write-through behavior with checked
+  byte, ULEB, Rice, and content readers that stop side effects immediately.
 
-- [ ] 2. Overlay shift-map storage with the journal arena.
-  Store shift-map entries in journal-reserved memory and make the host encoder
-  account for the effective journal budget before emitting a valid blob.
+- [ ] 2. Stream op corrections instead of storing `op_corr[OPC_CAP]`.
+  Change the wire so corrections are emitted and decoded in apply order, keeping
+  only the next correction offset/value in decoder state.
 
-- [x] 4. Single-source relocation and shift-map wire helpers.
-  Move duplicated BL, LDR-literal, and shift-map prediction semantics into shared
-  helpers, including the decoder/encoder LDR scan-bound drift fix.
+- [ ] 3. Rework shift-map storage against the journal/apply arena.
+  Store shift-map entries in journal-reserved memory where possible and make the
+  host encoder account for the effective journal budget before emitting a blob.
 
-- [x] 5. Make decoder helper sharing reduce ARM text.
-  Remove stale gamma init flexibility, route duplicated header zigzag decoding
-  through shared helpers, and experiment with non-forced-inlined literal cursor
-  helpers.
+- [ ] 4. Collapse the duplicated LZ parser paths.
+  Remove the bootstrap/simple parser split by configuring the full priced parser
+  with bootstrap prices, and route LZ field widths through shared constants.
 
-- [x] 6. Shrink encoder `PriceTab`.
-  Remove the unused `go` member and narrow literal price tables if guarded by
-  range checks/static assertions.
+- [ ] 5. Fix and simplify LZ candidate handling.
+  Correct out-match candidate retention, remove duplicated new/old source
+  scanning, and make candidate eligibility use shared wire constants.
 
-- [ ] 7. Stream per-op content emission without heap vectors.
-  Replace per-op literal vectors/temp buffers with a counted directional cursor
-  and fixed uLEB scratch while preserving injection cursor timing.
+- [ ] 6. Make the wire grammar shared, not mirrored by convention.
+  Single-source the body prologue, delta MTF transitions, content token state,
+  and add a small wire/profile discriminator before the next intentional wire
+  change.
 
-- [x] 8. Collapse injection and shift-map preparation copies.
-  Avoid copying `Inj` data into a second `FieldRef` vector and build shared
-  shift-map preparation data once for both scorers.
+- [ ] 7. Remove per-op literal/temp emission plumbing.
+  Stream each op's literals/extras directly into the full content stream instead
+  of building per-op literal vectors and temporary buffers.
 
-- [x] 9. Simplify ARM relocation scanner containers.
-  Transfer finalized scanner maps directly to `m4_stream_t` and replace the
-  literal-pool hash set with smaller host-only storage.
+- [ ] 8. Deduplicate field discovery/classification walks.
+  Use one encoder field-walk helper for BL/LDR discovery, preservation, and
+  degradation decisions while preserving current suppression behavior.
 
-- [x] 10. Flatten SequenceMatcher and block ownership.
-  Replace nested `B2J` vectors with a flat stable sorted index and make block
-  value ownership explicit without duplicate heap copies.
+- [ ] 9. Fold ARM/ELF scanner code into the encoder utilities.
+  Replace scanner-local containers, allocation handling, sorting, and fake error
+  returns with existing encoder vector, sort, and error helpers.
 
-- [x] 11. Stream ELF range reduction.
-  Compute the best code/data ranges without materializing temporary range
-  vectors, preserving the current heuristic exactly.
+- [ ] 10. Replace ELF data byte-search with validated range objects.
+  Carry VM and file offsets in one file-backed loadable range object and remove
+  raw byte-search/reconstruction logic.
 
-- [x] 12. Add the model/wire contract gate.
-  Add `make check-models` and run it from `make gate` so shared model constants,
-  compact gamma indexing, literal selector bounds, and relocation helper
-  assumptions are compiled and checked against the real encoder/decoder headers.
+- [ ] 11. Consolidate host file/NVM helpers and envelope preflight.
+  Share file loading and NVM statistics helpers, and reject oversized or invalid
+  image/envelope inputs before narrowing sizes or starting analysis.
+
+- [ ] 12. Make verification metrics single-source and stricter.
+  Centralize real one-face metric collection, reject A/B baseline encode
+  failures, assert expected case counts, and keep published stack/size contracts
+  generated from the gate.
