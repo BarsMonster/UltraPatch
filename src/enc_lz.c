@@ -397,11 +397,9 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
     uint64_t *span_lit = span_lit_prefix(n, content, tags, pt);
-    uint32_t *olen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
     for (size_t L = 1; L <= maxlen; L++) {
         slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
         mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
-        olen[L] = L >= RC_OUTMATCH_MIN ? ug_price(&pt->glo, (uint32_t)L - RC_OUTMATCH_MIN) : 0;
     }
     for (uint32_t D = 1; D <= win; D++)
         dpr[D] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
@@ -442,7 +440,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             tok_push(&tv, t);
             i += (size_t)t.len;
         }
-        free(cost); free(nxt); free(slen); free(mlen); free(olen); free(dpr); free(span_lit); free(next_tok);
+        free(cost); free(nxt); free(slen); free(mlen); free(dpr); free(span_lit); free(next_tok);
         return tv;
     }
     /* Every literal's tag0 context is now the deterministic previous content byte content[p-1]
@@ -546,7 +544,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                 (void)opos;
                 for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= olm; l++) {
                     size_t j = i + (size_t)l;
-                    uint64_t c = obase + olen[l];
+                    uint64_t c = obase + ug_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
                     size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, via, vh, jb, c, ri,
                            (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
@@ -592,7 +590,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(via); free(vh); free(slen); free(mlen); free(olen); free(dpr); free(span_lit); free(next_tok);
+    free(cost); free(rep); free(via); free(vh); free(slen); free(mlen); free(dpr); free(span_lit); free(next_tok);
     return tv;
 }
 
