@@ -16,14 +16,25 @@
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
 # Usage: check_edge.sh   (needs ./ultrapatch already built)
-set -u
+set -euo pipefail
+
+EXPECTED_CASES=12
+EXPECTED_ROUNDTRIPS=11
+EXPECTED_REFUSALS=1
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ ! -x ./ultrapatch ]; then
+  echo "edge infrastructure failure: ./ultrapatch is missing or not executable" >&2
+  exit 2
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # gen <path> <size> <mode> [args...]: deterministic image generator (shared scripts/synth_gen.py).
 #   modes: rand <seed> | const <byte> | text | mutate <src> <seed> <permille> | insert <src> <size> <seed>
-gen() { python3 "$(dirname "$0")/synth_gen.py" img "$@"; }
+gen() { python3 "$script_dir/synth_gen.py" img "$@"; }
 
 mkpair() { # mkpair <name> -> creates $tmp/<name>_from/ and $tmp/<name>_to/ dirs
   mkdir -p "$tmp/$1_from" "$tmp/$1_to"
@@ -36,6 +47,10 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
   cases=$((cases + 1))
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
+  if [ ! -f "$from" ] || [ ! -f "$to" ]; then
+    echo "edge infrastructure failure: $name fixture is incomplete" >&2
+    exit 2
+  fi
   if ./ultrapatch "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
     cp "$from" "$tmp/$name.mem"
     if ./ultrapatch --decode "$tmp/$name.mem" "$blob" >/dev/null 2>&1 && cmp -s "$tmp/$name.mem" "$to"; then
@@ -49,7 +64,8 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
       echo "edge FAILURE: $name refused but left a blob file" >&2
       failures=$((failures + 1))
     else
-      echo "edge refusal: $name ($(tail -1 "$tmp/$name.encerr" 2>/dev/null))" >&2
+      encerr_tail="$(tail -n 1 "$tmp/$name.encerr" 2>/dev/null || true)"
+      echo "edge refusal: $name ($encerr_tail)" >&2
       refusals=$((refusals + 1))
     fi
   fi
@@ -105,7 +121,20 @@ mkpair big_shift; gen "$tmp/big_shift_from/watch.bin" 409600 rand 88
 gen "$tmp/big_shift_to/watch.bin" 0 insert "$tmp/big_shift_from/watch.bin" 4096 89
 run_case big_shift
 
+if [ "$cases" -ne "$EXPECTED_CASES" ]; then
+  echo "edge FAILURE: expected $EXPECTED_CASES cases, got $cases" >&2
+  failures=$((failures + 1))
+fi
+if [ "$roundtrips" -ne "$EXPECTED_ROUNDTRIPS" ]; then
+  echo "edge FAILURE: expected $EXPECTED_ROUNDTRIPS accepted round-trips, got $roundtrips" >&2
+  failures=$((failures + 1))
+fi
+if [ "$refusals" -ne "$EXPECTED_REFUSALS" ]; then
+  echo "edge FAILURE: expected $EXPECTED_REFUSALS refusals, got $refusals" >&2
+  failures=$((failures + 1))
+fi
+
 printf 'edge_cases=%u\nedge_roundtrips=%u\nedge_refusals=%u\nedge_failures=%u\n' \
   "$cases" "$roundtrips" "$refusals" "$failures"
-test "$cases" -eq 12
+
 test "$failures" -eq 0

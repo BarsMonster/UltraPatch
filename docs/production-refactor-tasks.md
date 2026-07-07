@@ -83,6 +83,8 @@ Acceptance rule for every code task:
   Make edge fixture setup failures fatal, pin expected edge accepted/refused
   outcomes, single-source one-face metrics, and align gate comments/reporting
   with where per-pair better/worse/equal checks actually run.
+  Edge-gate subset completed: fixture/tooling failures are fatal and expected
+  accepted/refused counts are explicit. One-face/gate summary ownership remains.
 
 - [x] 12. Decide whether DATA/CODE block-mask passes are product-dead.
   The DATA/CODE masking passes were measured neutral on current home/foreign
