@@ -24,11 +24,15 @@ Acceptance rule for every code task:
 
 ## Tasks
 
-- [ ] 1. Unify and harden all uLEB readers.
+- [x] 1. Unify and harden all uLEB readers.
   Replace the duplicated envelope, dval, and content uLEB readers with one
   checked uLEB32 core that rejects fifth-byte overflow and exposes explicit
   policies for canonical envelope fields, the size-delta direction marker,
   content gaps, and dval escapes.
+  Completed by adding the shared overflow guard and rejecting illegal envelope
+  overlong markers. Valid golden blobs remain unchanged; malformed rejects
+  increased from 25 to 30. ARM `text/data/bss = 6093/0/10852`, stack bound
+  remains `408 B`.
 
 - [ ] 2. Stream op corrections instead of storing `op_corr[OPC_CAP]`.
   Change the wire so corrections are emitted and decoded in apply order,
