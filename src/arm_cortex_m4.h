@@ -16,7 +16,7 @@ typedef struct { uint32_t addr; int32_t val; } m4_field_t;
 typedef struct { m4_field_t *a; size_t n; } m4_stream_t;
 /* streams order: [0]=data-ptr [1]=code-ptr [2]=bl [3]=ldr  */
 enum { M4_DATA, M4_CODE, M4_BL, M4_LDR, M4_NSTREAMS };
-int  a1_m4_disassemble(const uint8_t *from, size_t from_size,
+void a1_m4_disassemble(const uint8_t *from, size_t from_size,
                        uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
                        uint32_t code_begin, uint32_t code_end,
                        m4_stream_t streams[M4_NSTREAMS]);

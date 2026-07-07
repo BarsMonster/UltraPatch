@@ -173,13 +173,10 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
                         const Ranges *fr, const Ranges *tr) {
     memset(pa, 0, sizeof(*pa));
-    if (a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                          fr->code_begin, fr->code_end, pa->from_st)) die("from disassemble failed");
-    if (a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                          tr->code_begin, tr->code_end, pa->to_st)) {
-        a1_m4_free_streams(pa->from_st);
-        die("to disassemble failed");
-    }
+    a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
+                      fr->code_begin, fr->code_end, pa->from_st);
+    a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
+                      tr->code_begin, tr->code_end, pa->to_st);
 }
 
 void pair_analysis_free(PairAnalysis *pa) {

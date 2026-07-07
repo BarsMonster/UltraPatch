@@ -8,24 +8,14 @@
  */
 
 /* ARM Cortex-M relocation field scanner and packers for the final A1 encoder. */
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include "arm_cortex_m4.h"
-#include "rc_models.h"   /* rc_bl_imm24 / rc_bl_pack: single-sourced BL unpack/pack (decoder mirror) */
+#include "enc_internal.h"
 
 /* ---------- address->value maps ---------- */
 typedef struct { m4_field_t *a; size_t n, cap; } map_t;
 
-static int map_push(map_t *m, uint32_t addr, int32_t val) {
-    if (m->n == m->cap) {
-        size_t nc = m->cap ? m->cap * 2 : 256;
-        m4_field_t *na = realloc(m->a, nc * sizeof(*m->a));
-        if (!na) return -1;
-        m->a = na; m->cap = nc;
-    }
+static void map_push(map_t *m, uint32_t addr, int32_t val) {
+    m->a = (m4_field_t *)vec_reserve(m->a, &m->cap, m->n + 1, sizeof(m->a[0]), 256);
     m->a[m->n].addr = addr; m->a[m->n].val = val; m->n++;
-    return 0;
 }
 static int kv_cmp(const void *x, const void *y) {
     uint32_t a = ((const m4_field_t*)x)->addr, b = ((const m4_field_t*)y)->addr;
@@ -36,7 +26,7 @@ static void map_finalize(map_t *m) {
     if (m->n == 0) return;
     /* Duplicate addresses here carry equal values, so sort + unique-by-address
        preserves the scanner result. */
-    qsort(m->a, m->n, sizeof(*m->a), kv_cmp);
+    a1_sort(m->a, m->n, sizeof(*m->a), kv_cmp);
     size_t w = 0;
     for (size_t i = 0; i < m->n; i++) {
         if (w > 0 && m->a[w-1].addr == m->a[i].addr) m->a[w-1] = m->a[i];
@@ -50,7 +40,7 @@ static void map_free(map_t *m){ free(m->a); m->a=NULL; m->n=m->cap=0; }
 typedef struct { uint8_t *bits; size_t nbits; } litset_t;
 static void litset_init(litset_t *s, size_t fsize) {
     s->nbits = (fsize + 3u) >> 2;
-    s->bits = (uint8_t *)calloc((s->nbits + 7u) >> 3, 1);
+    s->bits = (uint8_t *)xcalloc((s->nbits + 7u) >> 3, 1);
 }
 static void litset_add(litset_t *s, uint32_t k) {
     size_t i = (size_t)(k >> 2);
@@ -74,7 +64,8 @@ static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_
     address += imm;
     if ((size_t)address + 4 > fsize) return;
     int32_t v = (int32_t)rc_u32le(f + address);
-    if (map_push(ldr, address, v) == 0) litset_add(lit, address);
+    map_push(ldr, address, v);
+    litset_add(lit, address);
 }
 
 /* The scanner records literal-pool target addresses as it finds them, then skips
@@ -116,10 +107,10 @@ static void disassemble(const uint8_t *f, size_t fsize,
     map_finalize(&d->data_ptr); map_finalize(&d->code_ptr);
 }
 
-int a1_m4_disassemble(const uint8_t *from, size_t from_size,
-                      uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
-                      uint32_t code_begin, uint32_t code_end,
-                      m4_stream_t streams[M4_NSTREAMS]) {
+void a1_m4_disassemble(const uint8_t *from, size_t from_size,
+                       uint32_t data_offset, uint32_t data_begin, uint32_t data_end,
+                       uint32_t code_begin, uint32_t code_end,
+                       m4_stream_t streams[M4_NSTREAMS]) {
     dis_t d;
     uint32_t data_off_end = data_offset + (data_end - data_begin);
     disassemble(from, from_size, data_offset, data_off_end, data_begin, data_end,
@@ -133,7 +124,6 @@ int a1_m4_disassemble(const uint8_t *from, size_t from_size,
     }
     map_free(&d.bl); map_free(&d.ldr);
     map_free(&d.data_ptr); map_free(&d.code_ptr);
-    return 0;
 }
 void a1_m4_free_streams(m4_stream_t streams[M4_NSTREAMS]) {
     for (int s = 0; s < M4_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }
