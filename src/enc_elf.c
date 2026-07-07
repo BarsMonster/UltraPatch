@@ -14,7 +14,6 @@ typedef struct { uint32_t type, off, addr, size, entsize; } Shdr;
 typedef struct { uint32_t value, size; uint8_t type; uint16_t sec; } Sym;
 typedef struct { uint32_t begin, end, sec; } ARange;
 typedef struct { Sym *v; size_t n, cap; } SymVec;
-typedef struct { ARange *v; size_t n, cap; } RangeVec;
 
 static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
@@ -29,12 +28,6 @@ static void sym_push(SymVec *v, Sym s) {
     v->v[v->n++] = s;
 }
 
-static void range_push(RangeVec *v, uint32_t begin, uint32_t end, uint32_t sec) {
-    if (end <= begin) return;
-    v->v = (ARange *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 128);
-    v->v[v->n++] = (ARange){ begin, end, sec };
-}
-
 static int section_for_addr(const Shdr *sh, size_t n, uint32_t addr) {
     for (size_t i = 0; i < n; i++)
         if (sh[i].addr <= addr && addr < sh[i].addr + sh[i].size)
@@ -42,38 +35,63 @@ static int section_for_addr(const Shdr *sh, size_t n, uint32_t addr) {
     return -1;
 }
 
-static ARange largest_code_range(const RangeVec *funcs) {
-    ARange best = {0, 0, 0};
-    size_t i = 0;
-    while (i < funcs->n) {
-        uint32_t sec = funcs->v[i].sec;
-        ARange r = { funcs->v[i].begin, funcs->v[i].end, sec };
-        while (i + 1 < funcs->n && funcs->v[i + 1].sec == sec) {
-            i++;
-            r.end = funcs->v[i].end;
-        }
-        if (r.end - r.begin > best.end - best.begin) best = r;
+static void best_range(ARange *best, ARange r) {
+    if (r.end > r.begin && r.end - r.begin > best->end - best->begin) *best = r;
+}
+
+static size_t next_sym_range(const SymVec *syms, size_t i, ARange *r, uint8_t *type) {
+    uint16_t sec = syms->v[i].sec;
+    *type = syms->v[i].type;
+    r->begin = syms->v[i].value;
+    r->end = syms->v[i].value + syms->v[i].size;
+    r->sec = sec;
+    i++;
+    while (i < syms->n && syms->v[i].sec == sec && syms->v[i].type == *type) {
+        r->end = syms->v[i].value + syms->v[i].size;
         i++;
     }
+    return i;
+}
+
+static ARange largest_code_range(const SymVec *syms) {
+    ARange best = {0, 0, 0}, secspan = {0, 0, 0};
+    int have = 0;
+    for (size_t i = 0; i < syms->n;) {
+        ARange r; uint8_t type;
+        i = next_sym_range(syms, i, &r, &type);
+        if (type != 2) continue;
+        if (!have || secspan.sec != r.sec) {
+            if (have) best_range(&best, secspan);
+            secspan = r; have = 1;
+        } else {
+            secspan.end = r.end;
+        }
+    }
+    if (have) best_range(&best, secspan);
     return best;
 }
 
-static ARange largest_data_range(const RangeVec *objs, ARange code) {
-    ARange best = {0, 0, 0};
-    for (size_t i = 0; i < objs->n; i++) {
-        ARange r = objs->v[i];
-        if (r.begin < code.begin && code.begin < r.end) {
-            ARange left = { r.begin, code.begin, r.sec };
-            if (r.begin < code.end && code.end < r.end) {
-                ARange right = { code.end, r.end, r.sec };
-                r = ((left.end - left.begin) > (right.end - right.begin)) ? left : right;
-            } else {
-                r = left;
-            }
-        } else if (r.begin < code.end && code.end < r.end) {
-            r.begin = code.end;
+static ARange trim_data_range(ARange r, ARange code) {
+    if (r.begin < code.begin && code.begin < r.end) {
+        ARange left = { r.begin, code.begin, r.sec };
+        if (r.begin < code.end && code.end < r.end) {
+            ARange right = { code.end, r.end, r.sec };
+            r = ((left.end - left.begin) > (right.end - right.begin)) ? left : right;
+        } else {
+            r = left;
         }
-        if (r.end > r.begin && r.end - r.begin > best.end - best.begin) best = r;
+    } else if (r.begin < code.end && code.end < r.end) {
+        r.begin = code.end;
+    }
+    return r;
+}
+
+static ARange largest_data_range(const SymVec *syms, ARange code) {
+    ARange best = {0, 0, 0};
+    for (size_t i = 0; i < syms->n;) {
+        ARange r; uint8_t type;
+        i = next_sym_range(syms, i, &r, &type);
+        if (type != 2) best_range(&best, trim_data_range(r, code));
     }
     return best;
 }
@@ -139,31 +157,10 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
         }
     }
     a1_sort(syms.v, syms.n, sizeof(syms.v[0]), cmp_sym_val);
-    RangeVec funcs = {0}, objs = {0};
-    size_t i = 0;
-    while (i < syms.n) {
-        uint16_t sec = syms.v[i].sec;
-        size_t j = i;
-        while (j < syms.n && syms.v[j].sec == sec) j++;
-        uint8_t bt = syms.v[i].type;
-        uint32_t bb = syms.v[i].value, be = syms.v[i].size;
-        for (size_t k = i; k < j; k++) {
-            if (syms.v[k].type != bt) {
-                if (bt == 2) range_push(&funcs, bb, be, sec);
-                else range_push(&objs, bb, be, sec);
-                bt = syms.v[k].type;
-                bb = syms.v[k].value;
-            }
-            be = syms.v[k].value + syms.v[k].size;
-        }
-        if (bt == 2) range_push(&funcs, bb, be, sec);
-        else range_push(&objs, bb, be, sec);
-        i = j;
-    }
-    ARange code = largest_code_range(&funcs);
-    ARange data = largest_data_range(&objs, code);
+    ARange code = largest_code_range(&syms);
+    ARange data = largest_data_range(&syms, code);
     uint32_t doff = find_data_offset_in_bin(&e, sh, bin, data, which);
     Ranges r = { doff, data.begin, data.end, code.begin, code.end };
-    free(sh); free(syms.v); free(funcs.v); free(objs.v); buf_free(&e);
+    free(sh); free(syms.v); buf_free(&e);
     return r;
 }

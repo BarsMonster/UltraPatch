@@ -60,7 +60,7 @@ header set.
   Replace nested `B2J` vectors with a flat stable sorted index and make block
   value ownership explicit without duplicate heap copies.
 
-- [ ] 11. Stream ELF range reduction.
+- [x] 11. Stream ELF range reduction.
   Compute the best code/data ranges without materializing temporary range
   vectors, preserving the current heuristic exactly.
 
