@@ -314,7 +314,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     ContentStats st = {0};
     ContentCursor cc;
     content_cursor_init(&cc, seq, content, tags, seq->n ? (size_t)seq->v[seq->n - 1u].start + (size_t)seq->v[seq->n - 1u].len : 0,
-                        &M, &r, pt->fwd, 1, pt->oexp0);
+                        &M, &r, pt->fwd, pt->out_en, pt->oexp0);
     content_cursor_to(&cc, cc.content_n, &st);
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
@@ -455,7 +455,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     uint64_t fresh_extra[4], reuse_extra[4], out_extra[4];
     for (int h = 0; h < 4; h++) {
         uint64_t mflag = (h & 1) ? (uint64_t)pt->fmatch_c[h] : 0;
-        fresh_extra[h] = mflag + pt->rep0_no + pt->outb_no;   /* fresh ring dist also pays outb=0 */
+        fresh_extra[h] = mflag + pt->rep0_no + (pt->out_en ? pt->outb_no : 0);
         reuse_extra[h] = mflag + pt->rep0_yes;
         out_extra[h]   = mflag + pt->rep0_no + pt->outb_yes;
     }
@@ -540,7 +540,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
               } }
             /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
              * The rep distance is carried through unchanged (out-matches do not set last_dist). */
-            for (int cix = 0, no = nocand ? nocand[i] : 0; cix < no; cix++) {
+            for (int cix = 0, no = (pt->out_en && nocand) ? nocand[i] : 0; cix < no; cix++) {
                 int32_t opos = ocands[i][cix].pos, olm = ocands[i][cix].len;
                 uint64_t obase = ci + out_extra[h] + pt->opos_avg;
                 (void)opos;
@@ -657,6 +657,7 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     ug_init_e(&pt->glo, 'g', 0);
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
+    pt->out_en = 0;
 }
 
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)

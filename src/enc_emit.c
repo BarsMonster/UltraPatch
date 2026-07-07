@@ -543,16 +543,16 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
         size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, inj, NULL, NULL, 0);
-        /* Phase 1: ring-only price feedback to its fixpoint (the pre-out-match trajectory).
-         * Phase 2: re-parse WITH out-candidates; each candidate must beat the phase-1 fixpoint
-         * under the exact byte gate, so out-matches (and their per-fresh-match out-bit tax +
-         * ko header) ship only when they win outright — no pair can end worse than ring-only. */
+        /* Keep the legacy mixed-mode trajectory as the incumbent (phases 0/1), then try the
+         * corrected ring-only pricing state (phase 2) before re-opening out-candidates (phase 3).
+         * Every candidate still has to beat the exact emitted body. */
         uint8_t *nocand0 = (uint8_t *)xcalloc(content.n ? content.n : 1, 1);
-        for (int phase = 0; phase < 2; phase++) {
-            const uint8_t *noc = phase ? nocand : nocand0;
+        for (int phase = 0; phase < 4; phase++) {
+            int price_out_en = (phase == 0 || phase == 1 || phase == 3);
+            const uint8_t *noc = (phase == 1 || phase == 3) ? nocand : nocand0;
             for (int pass = 0; pass < 16; pass++) {
                 PriceTab pt;
-                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD;
+                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = price_out_en;
                 measure_prices(&seq, content.d, tags.d, frm, from_size, kd, ko, &pt);
                 TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, ocands, noc, &pt);
                 int nk = fit_k_tokens(&cand_seq);

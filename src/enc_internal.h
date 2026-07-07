@@ -114,6 +114,7 @@ typedef struct {
     UGGammaE glo;
     int fixed_dist_bits;
     int bootstrap_simple;
+    int out_en;
 } PriceTab;
 
 typedef struct {
