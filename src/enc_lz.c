@@ -78,10 +78,18 @@ static uint32_t hash3_key_rev(const uint8_t *p) {
  * FWD window is [0, olim[i]) — everything below the op's tp0 is written; grow window is
  * [olim[i], to_size) — everything above the op's output end is written. ---- */
 static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
-    int w = -1;                                    /* keep the OC_MAX longest */
+    int w = -1;                                   /* legacy first-shorter replacement, not strict top-K */
     for (int q = 0; q < *nc; q++) if (row[q].len < len) { w = q; break; }
     if (*nc < OC_MAX) { row[*nc].pos = pos; row[*nc].len = len; (*nc)++; }
     else if (w >= 0) { row[w].pos = pos; row[w].len = len; }
+}
+
+static void oc_match(OCand *row, uint8_t *nc, const uint8_t *src, int FWD,
+                     int32_t pj, const uint8_t *content, size_t i, size_t maxl) {
+    size_t l = 0, p = (size_t)pj;
+    if (FWD) while (l < maxl && src[p + l] == content[i + l]) l++;
+    else     while (l < maxl && src[p - l] == content[i + l]) l++;
+    if (l >= RC_OUTMATCH_MIN) oc_keep(row, nc, pj, (int32_t)l);
 }
 
 /* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for grow —
@@ -132,10 +140,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                     maxl = (size_t)((uint32_t)pj - lim + 1u);
                 }
                 if (maxl > n - i) maxl = n - i;
-                size_t l = 0;
-                if (FWD) while (l < maxl && to[(size_t)pj + l] == content[i + l]) l++;
-                else     while (l < maxl && to[(size_t)pj - l] == content[i + l]) l++;
-                if (l >= RC_OUTMATCH_MIN) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
+                oc_match(oc[i], &noc[i], to, FWD, pj, content, i, maxl);
             }
             uint32_t lim2 = olim2[i], cap = ocap[i];
             if (cap < RC_OUTMATCH_MIN) continue;
@@ -151,10 +156,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
                 }
                 if (maxl > n - i) maxl = n - i;
                 if (maxl > cap) maxl = cap;                    /* OLD tokens end inside their op */
-                size_t l = 0;
-                if (FWD) while (l < maxl && frm[(size_t)pj + l] == content[i + l]) l++;
-                else     while (l < maxl && frm[(size_t)pj - l] == content[i + l]) l++;
-                if (l >= RC_OUTMATCH_MIN) oc_keep(oc[i], &noc[i], pj, (int32_t)l);
+                oc_match(oc[i], &noc[i], frm, FWD, pj, content, i, maxl);
             }
         }
         free(head); free(prev); free(fhead); free(fprev);
