@@ -6,8 +6,7 @@
 set -eu
 
 out="${1:-artifacts/a1-corpus.tar.gz}"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 scripts/verify_corpus.sh test-bench/corpus.sha256 >/dev/null
 scripts/verify_corpus.sh test-bench/foreign.sha256 foreign_assets >/dev/null

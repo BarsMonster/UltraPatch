@@ -11,8 +11,7 @@ set -eu
 CC="${CC:-gcc}"
 CFLAGS="${CFLAGS:--DCORTEX_M0 -g -Wall -Wextra -Wdouble-promotion -Wfloat-equal -Wformat=2 -Wshadow -Werror -std=c99 -O2 -ffunction-sections -fdata-sections -I. -Isrc -Ivendor/libdivsufsort}"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 cat > "$tmp/model_probe.c" <<'EOF'
 #include "enc_internal.h"

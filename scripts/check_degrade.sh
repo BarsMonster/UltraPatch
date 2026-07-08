@@ -39,8 +39,7 @@ set -u
 
 CC_HOST="${CC:-cc}"
 IMG="${IMAGES:-test-bench/images}"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.

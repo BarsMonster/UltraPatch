@@ -11,8 +11,7 @@ ENC="${1:-./ultrapatch}"
 DEC="${2:-$ENC}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 "$ENC" "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$tmp/grow.blob" >/dev/null 2>&1
 "$ENC" "$FIX/v1_one_face/watch.bin" "$FIX/v0_base/watch.bin" "$tmp/revert.blob" >/dev/null 2>&1

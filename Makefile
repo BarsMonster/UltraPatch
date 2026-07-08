@@ -105,8 +105,7 @@ ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
 
 check-internal: all-internal
 	@set -e; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	. ./scripts/tempdir.sh; \
 	./ultrapatch --help >"$$tmp/help.txt"; \
 	./ultrapatch -h >"$$tmp/help-short.txt"; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/help.txt"; \
@@ -125,8 +124,7 @@ check-internal: all-internal
 
 check-arm-internal:
 	@set -e; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
@@ -156,8 +154,7 @@ check-arm-internal:
 # headroom absorbs those + interrupt-frame slack. Same cross-gcc as check-arm.
 check-stack-internal:
 	@set -e; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack.txt"; \
@@ -181,8 +178,7 @@ check-decoder-contract-internal:
 	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' src/patch_apply.h src/rc_models.h src/patch_config.h; then :; else \
 		echo "decoder header set must not declare file-scope static variables" >&2; exit 1; \
 	fi; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	. ./scripts/tempdir.sh; \
 	single="$$tmp/patch_apply_single.h"; \
 	python3 scripts/gen_single_header.py "$$single"; \
 	if grep -nE '^[[:space:]]*#include[[:space:]]*"' "$$single" | grep -E '"(patch_config|rc_models|patch_apply)\.h"'; then \
@@ -284,8 +280,7 @@ golden-update-internal: ultrapatch
 # (defaults to nproc).
 check-corpus-internal: all-internal check-assets-internal
 	@set -e; \
-	tmp=$$(mktemp -d); \
-	trap 'rm -rf "$$tmp"' EXIT; \
+	. ./scripts/tempdir.sh; \
 	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
 	cat "$$tmp/m.txt"; \
 	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \

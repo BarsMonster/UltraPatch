@@ -18,8 +18,7 @@ FIX="${FIXTURES:-test-bench/fixtures}"
 IMG="${IMAGES:-test-bench/images}"
 MANIFEST="test-bench/golden.sha256"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 # Two SYNTHETIC wire-surface pins the six in-repo blobs never exercise: a journal-BUDGET-degraded
 # blob (over-budget read-after-overwrite shipped as plain extras) and an UNNATURAL-DIRECTION blob

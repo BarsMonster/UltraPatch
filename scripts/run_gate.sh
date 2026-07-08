@@ -5,8 +5,7 @@
 set -u
 
 MAKE_CMD="${MAKE:-make}"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 rc=0
 
 echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-corpus..."

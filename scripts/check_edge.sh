@@ -29,8 +29,7 @@ if [ ! -x ./ultrapatch ]; then
   exit 2
 fi
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$script_dir/tempdir.sh"
 
 # gen <path> <size> <mode> [args...]: deterministic image generator (shared scripts/synth_gen.py).
 #   modes: rand <seed> | const <byte> | text | mutate <src> <seed> <permille> | insert <src> <size> <seed>

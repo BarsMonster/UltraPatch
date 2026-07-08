@@ -9,8 +9,7 @@ FIX="${FIXTURES:-test-bench/fixtures}"
 base="$FIX/v0_base"
 one="$FIX/v1_one_face"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+. "$(dirname "$0")/tempdir.sh"
 
 ./ultrapatch "$base/watch.bin" "$one/watch.bin" "$tmp/grow.blob" >/dev/null 2>&1
 
