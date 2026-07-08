@@ -15,6 +15,34 @@
 #include "arm_cortex_m4.h"
 #include "rc_models.h"
 
+/* Encoder mirror knobs. Host-only: they derive from the RC_*_DEFAULT constants (rc_models.h ->
+ * patch_config.h) so they stay pinned to the decoder knobs; check_models.sh statically asserts
+ * each equals its decoder twin. Kept out of the shipped decoder headers. */
+#ifndef PATHE_W
+#define PATHE_W RC_WINDOW_LOG_DEFAULT
+#endif
+#ifndef A1_JSLOTS
+#define A1_JSLOTS RC_JSLOTS_DEFAULT
+#endif
+#ifndef A1_OPC_CAP
+#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
+#endif
+#ifndef A1_OUTROW
+#define A1_OUTROW RC_OUTROW_DEFAULT
+#endif
+#ifndef A1_ROW_DEPTH
+#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
+#endif
+
+/* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32 or the MTF index
+ * context, so these host-only readers stay out of the shipped decoder headers (rc_u32le_put IS
+ * decoder-used and remains in rc_models.h). */
+static inline uint16_t rc_u16le(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
+static inline uint32_t rc_u32le(const uint8_t *p){
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+static inline int rc_idx_ctx(uint32_t pos){ return pos<IDX_CTX ? (int)pos : IDX_CTX-1; }
+
 #if defined(__GNUC__) || defined(__clang__)
 #define ENC_NORETURN __attribute__((noreturn))
 #else

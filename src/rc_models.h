@@ -117,10 +117,6 @@ static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
     return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
 }
 
-static inline uint16_t rc_u16le(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
-static inline uint32_t rc_u32le(const uint8_t *p){
-    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
-}
 static inline void rc_u32le_put(uint8_t *p, uint32_t v){
     p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
 }
@@ -249,7 +245,6 @@ static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, 
 #define IDX_CTX 5
 typedef struct { uint16_t u[IDX_CTX]; } A1IdxUnary;
 static inline void a1_idx_init(A1IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
-static inline int rc_idx_ctx(uint32_t pos){ return pos<IDX_CTX ? (int)pos : IDX_CTX-1; }
 
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
     if(j){ int32_t t=dic[j]; memmove(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }

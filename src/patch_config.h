@@ -37,22 +37,8 @@
 #define RC_OUTROW_DEFAULT      256u
 #define RC_ROW_DEPTH_DEFAULT   2u
 
-/* Encoder mirror knobs. */
-#ifndef PATHE_W
-#define PATHE_W RC_WINDOW_LOG_DEFAULT
-#endif
-#ifndef A1_JSLOTS
-#define A1_JSLOTS RC_JSLOTS_DEFAULT
-#endif
-#ifndef A1_OPC_CAP
-#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
-#endif
-#ifndef A1_OUTROW
-#define A1_OUTROW RC_OUTROW_DEFAULT
-#endif
-#ifndef A1_ROW_DEPTH
-#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
-#endif
+/* Encoder mirror knobs live in src/enc_internal.h (host-only), derived from the RC_*_DEFAULT
+ * constants above so they stay pinned to the decoder knobs below. */
 
 /* Decoder knobs. */
 #ifndef SA_W
