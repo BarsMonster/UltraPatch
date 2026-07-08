@@ -326,7 +326,7 @@ gate-internal: all-internal
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
-	@scripts/check_analyze.sh
+	@ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
 
 clean-internal:
 	rm -f ultrapatch $(DECODER_SINGLE_HDR)

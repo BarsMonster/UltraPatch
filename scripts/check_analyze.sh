@@ -39,22 +39,20 @@ analyze() { # analyze <src> <extra-defines>
     "$CC" $2 $COMMON "$1" 2>>"$log" || rc=1
 }
 
-while IFS='|' read -r src defs; do
-    analyze "$src" "$defs"
-done <<'EOF'
-src/patch_generate.c|-DULTRAPATCH_MAIN
-src/enc_util.c|
-src/enc_elf.c|
-src/enc_bsdiff.c|
-src/enc_field.c|
-src/enc_rc.c|
-src/enc_lz.c|
-src/enc_emit.c|
-src/enc_plan.c|
-src/arm_cortex_m4.c|
-src/patch_host_backend.c|-D_POSIX_C_SOURCE=200809L
-src/patch_host_backend.c|-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN
-EOF
+# Special-cased first-party TUs: entrypoint main + arm + host-backend variants.
+# These carry bespoke defines and are kept verbatim; the plain encoder modules
+# come from $ENC_MODULES (single-sourced from the Makefile's ENC_MODULE_SRCS)
+# so a newly added src/enc_*.c is analyzed automatically. When run directly
+# without the env (ENC_MODULES unset), fall back to globbing src/enc_*.c.
+: "${ENC_MODULES:=$(echo src/enc_*.c)}"
+
+analyze src/patch_generate.c "-DULTRAPATCH_MAIN"
+for m in $ENC_MODULES; do
+    analyze "$m" ""
+done
+analyze src/arm_cortex_m4.c ""
+analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L"
+analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN"
 
 w="$(grep -c 'warning:' "$log" 2>/dev/null || true)"
 if [ "$rc" -ne 0 ] || [ "$w" -ne 0 ]; then
