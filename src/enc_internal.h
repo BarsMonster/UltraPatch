@@ -246,8 +246,6 @@ void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
 int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
-int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
-                       const uint32_t *mb, const int32_t *mv, int mn);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,

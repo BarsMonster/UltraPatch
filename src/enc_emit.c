@@ -9,13 +9,15 @@
 #include "enc_internal.h"
 /* One field injection (delta escaped into the LZ content stream): cc = byte cursor within its op's
  * content slice, kind = EV_BL/EV_EX, fpk = from-image field address, delta = plain (no-map) wire
- * residual. The map variant derives from delta+fpk (field_residual) without re-walking. */
-typedef struct { uint32_t cc; int kind; uint32_t fpk; int32_t delta; } Inj;
+ * residual, k2 = shift-map lookup key (BL branch target / EX word value) derived ONCE here from the
+ * pristine from-image bytes. The mapped residual derives from delta+k2 via smap_resid() without
+ * re-walking those bytes. */
+typedef struct { uint32_t cc; int kind; uint32_t fpk; int32_t delta; uint32_t k2; } Inj;
 typedef struct { Inj *v; size_t n, cap; } InjVec;
 
-static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int32_t delta) {
+static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int32_t delta, uint32_t k2) {
     v->v = (Inj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
-    v->v[v->n++] = (Inj){cc, kind, fpk, delta};
+    v->v[v->n++] = (Inj){cc, kind, fpk, delta, k2};
 }
 
 static void injvec_array_free(InjVec *v, size_t n) {
@@ -30,8 +32,7 @@ static size_t inj_field_count(const InjVec *inj, size_t nops) {
     return n;
 }
 
-static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD,
-                                const uint8_t *frm, FieldKey *fk) {
+static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD, FieldKey *fk) {
     size_t n = 0;
     for (size_t oi = 0; oi < nops; oi++) {
         size_t step = FWD ? oi : nops - 1u - oi;
@@ -42,12 +43,7 @@ static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD,
             fk[n].kind = ij->kind;
             fk[n].k1 = ij->fpk;
             fk[n].need = (int32_t)(uint32_t)ij->delta;
-            if (ij->kind == EV_BL) {
-                uint16_t up = rc_u16le(frm + ij->fpk), lo = rc_u16le(frm + ij->fpk + 2);
-                fk[n].k2 = rc_bl_target(ij->fpk, up, lo);
-            } else {
-                fk[n].k2 = rc_u32le(frm + ij->fpk);
-            }
+            fk[n].k2 = ij->k2;
             n++;
         }
     }
@@ -114,7 +110,14 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
-            inj_push(out, lc.cc, w.ev.type, (uint32_t)(fp0 + w.pos), w.ev.delta);
+            uint32_t fpk = (uint32_t)(fp0 + w.pos), k2;
+            if (w.ev.type == EV_BL) {
+                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
+                k2 = rc_bl_target(fpk, up, lo);
+            } else {
+                k2 = rc_u32le(frm + fpk);
+            }
+            inj_push(out, lc.cc, w.ev.type, fpk, w.ev.delta, k2);
         } else if (w.is_field) {   /* EV_SBL still-dirty window: its bytes ship as ordinary literals */
             if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
             else     for (int b = 3; b >= 0; b--) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
@@ -208,6 +211,17 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     }
 }
 
+/* residual = need - pred under a candidate shift map, wrapped mod 2^32 exactly like the decoder
+ * recombines them. BL pred is (shift(k1=pc) - shift(k2=target)) / 2; EX pred is -shift(k2=word).
+ * mn==0 degenerates to residual == need (no-map wire); safe with mb/mv NULL (rc_smap_at never
+ * dereferences at n==0). Single source for all four shift-map prediction/residual sites. */
+static int32_t smap_resid(const uint32_t *mb, const int32_t *mv, int mn,
+                          int kind, uint32_t k1, uint32_t k2, int32_t need) {
+    int32_t pred = kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, k1, k2)
+                                 : rc_smap_pred_ex(mb, mv, mn, k2);
+    return (int32_t)((uint32_t)need - (uint32_t)pred);
+}
+
 /* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
@@ -261,7 +275,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
         for (size_t ii = 0; ii < inj[step].n; ii++) {
             const Inj *ij = &inj[step].v[ii];
-            int32_t delta = mn ? field_residual(ij->kind, frm, ij->fpk, ij->delta, mb, mv, mn) : ij->delta;
+            int32_t delta = mn ? smap_resid(mb, mv, mn, ij->kind, ij->fpk, ij->k2, ij->delta) : ij->delta;
             content_cursor_to(&ec, base + ij->cc, NULL);
             emit_delta(&M, &rc, ij->kind, delta, overflow);
         }
@@ -331,9 +345,7 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < nfr; i++) {
-        int32_t pred = fk[i].kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, fk[i].k1, fk[i].k2)
-                                            : rc_smap_pred_ex(mb, mv, mn, fk[i].k2);
-        int32_t resid = (int32_t)((uint32_t)fk[i].need - (uint32_t)pred);
+        int32_t resid = smap_resid(mb, mv, mn, fk[i].kind, fk[i].k1, fk[i].k2, fk[i].need);
         c += px_delta(fk[i].kind == EV_BL ? &bl : &ex, fk[i].kind == EV_BL ? &di_bl : &di_ex,
                       &dval, resid, &overflow);
         if (overflow) return UINT64_MAX / 2;
@@ -349,11 +361,8 @@ typedef struct { const FieldKey *fk; size_t nfr; int32_t *dic_bl, *dic_ex; } SMa
 static uint64_t smap_hit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
     SMapHitScore *s = (SMapHitScore *)ctx;
     size_t hits = 0;
-    for (size_t i = 0; i < s->nfr; i++) {
-        int32_t pred = s->fk[i].kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, s->fk[i].k1, s->fk[i].k2)
-                                               : rc_smap_pred_ex(mb, mv, mn, s->fk[i].k2);
-        if (pred == s->fk[i].need) hits++;
-    }
+    for (size_t i = 0; i < s->nfr; i++)
+        hits += smap_resid(mb, mv, mn, s->fk[i].kind, s->fk[i].k1, s->fk[i].k2, s->fk[i].need) == 0;
     return (uint64_t)(s->nfr - hits);
 }
 
@@ -478,7 +487,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     { size_t nfr = inj_field_count(inj, ops->n);
       if (nfr) {
           FieldKey *fk = (FieldKey *)xmalloc(nfr * sizeof(*fk));
-          field_keys_from_inj(inj, ops->n, FWD, frm, fk);
+          field_keys_from_inj(inj, ops->n, FWD, fk);
           uint32_t fb[SMAP_POOL_MAX]; int32_t fv[SMAP_POOL_MAX];
           int fn = smap_build_full(ops, fp_start, from_size, to_size, fk, nfr, fb, fv);
           map_n[0] = fit_shift_map_hit(fb, fv, fn, fk, nfr, map_b[0], map_v[0]);

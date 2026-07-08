@@ -241,21 +241,6 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
 /* ---- piecewise shift map (D1): lookups go through rc_smap_at (rc_models.h), the single-sourced
  * mirror of patch_apply smap_at. ---- */
 
-/* residual = delta - pred, wrapped mod 2^32 exactly like the decoder recombines them.
- * BL pred is (shift(pc) - shift(target)) / 2 in imm24 halfword units (C truncation both sides);
- * EX pred is -shift(word value). mn==0 degenerates to residual == delta (no-map wire). */
-int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta,
-                              const uint32_t *mb, const int32_t *mv, int mn) {
-    int32_t pred;
-    if (kind == EV_BL) {
-        uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
-        pred = rc_smap_pred_bl(mb, mv, mn, fpk, rc_bl_target(fpk, up, lo));
-    } else {
-        pred = rc_smap_pred_ex(mb, mv, mn, rc_u32le(frm + fpk));
-    }
-    return (int32_t)((uint32_t)delta - (uint32_t)pred);
-}
-
 typedef struct { uint32_t b; int32_t v; uint32_t w; } SegCand;
 static int cmp_seg(const void *a, const void *b) {
     const SegCand *x = (const SegCand *)a, *y = (const SegCand *)b;
