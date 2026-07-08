@@ -129,7 +129,8 @@ typedef struct PatchApply {
 
     A1RangeDec RC;
     uint8_t g_rcerr;
-    uint8_t g_reject;
+    uint8_t g_reject;   /* only REJ_RESOURCE cap sites set this during decode; REJ_CORRUPT is
+                         * assigned once at the patch_apply_run boundary for every other failure */
     uint8_t g_flash_touched;
 
     A1Arena ARENA;
@@ -860,7 +861,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     /* Feature 7B termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
      * writes >=1 byte. REJECT nw==0 here (do NOT trust the encoder): it is what guarantees the
      * frontier-terminated op loop advances every iteration and cannot spin on a corrupt stream. */
-    if(nw==0){ g_rcerr=1; g_reject=REJ_CORRUPT; return; }
+    if(nw==0){ g_rcerr=1; return; }
     int32_t tp0,fp0;
     if(g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
@@ -989,7 +990,7 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
     return 1;
 }
 static int decode_body(PatchApply *pa){
-    if(!decode_header(pa)){ g_reject=REJ_CORRUPT; return 0; }
+    if(!decode_header(pa)) return 0;
     if(!rc_init(pa)) return 0;
     orow_reset(pa);
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
@@ -1066,10 +1067,7 @@ static void A1_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint3
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
     g_pull_fn=next; g_pull_ctx=ctx;
-    if(!decode_body(pa)){
-        if(!g_reject) g_reject=REJ_CORRUPT;
-        return PATCH_APPLY_ERROR; }
-    if(crc32_flash(g_to_size)!=g_want_to){
+    if(!decode_body(pa) || crc32_flash(g_to_size)!=g_want_to){
         if(!g_reject) g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
