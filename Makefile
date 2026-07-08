@@ -97,7 +97,7 @@ all-internal: ultrapatch
 	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN -c $(DEC_SRCS) -o /dev/null
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
-	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)"
+	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
 	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
@@ -166,40 +166,36 @@ check-stack-internal:
 
 check-decoder-contract-internal:
 	@set -e; \
-	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/patch_apply.h | grep -v '"rc_models.h"'; then \
-		echo "patch_apply.h may include only its shipped support header rc_models.h" >&2; exit 1; \
+	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \
+		echo "decoder headers may include only their previous shipped support header" >&2; exit 1; \
 	fi; \
-	if grep -nE '^[[:space:]]*#include[[:space:]]*"' src/rc_models.h | grep -v '"patch_config.h"'; then \
-		echo "rc_models.h may include only its shipped support header patch_config.h" >&2; exit 1; \
-	fi; \
-	if grep -nE '\b(malloc|calloc|realloc|free)[[:space:]]*\(' src/patch_apply.h src/rc_models.h src/patch_config.h; then \
+	if grep -nE '\b(malloc|calloc|realloc|free)[[:space:]]*\(' $(DECODER_PUBLIC_HDRS); then \
 		echo "decoder header set must not use dynamic memory" >&2; exit 1; \
 	fi; \
-	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' src/patch_apply.h src/rc_models.h src/patch_config.h; then :; else \
+	if awk '/^static[[:space:]]/ && $$0 !~ /\(/ { print FILENAME ":" FNR ":" $$0; bad=1 } END{ exit bad ? 1 : 0 }' $(DECODER_PUBLIC_HDRS); then :; else \
 		echo "decoder header set must not declare file-scope static variables" >&2; exit 1; \
 	fi; \
 	. ./scripts/tempdir.sh; \
 	single="$$tmp/patch_apply_single.h"; \
-	python3 scripts/gen_single_header.py "$$single"; \
+	python3 scripts/gen_single_header.py "$$single" $(DECODER_PUBLIC_HDRS); \
 	if grep -nE '^[[:space:]]*#include[[:space:]]*"' "$$single" | grep -E '"(patch_config|rc_models|patch_apply)\.h"'; then \
 		echo "generated single decoder header must not include local decoder support headers" >&2; exit 1; \
 	fi; \
-	{ printf '%s\n' '#include <stdint.h>'; \
-	  printf '%s\n' '#include "patch_apply.h"'; \
-	  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
-	  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
-	  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
-	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
-	} > "$$tmp/smoke.c"; \
-	$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$tmp/smoke.c" -o "$$tmp/smoke.o"; \
-	{ printf '%s\n' '#include <stdint.h>'; \
-	  printf '%s\n' '#include "patch_apply_single.h"'; \
-	  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
-	  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
-	  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
-	  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
-	} > "$$tmp/single_smoke.c"; \
-	$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$tmp" -c "$$tmp/single_smoke.c" -o "$$tmp/single_smoke.o"; \
+	for inc in patch_apply.h patch_apply_single.h; do \
+		csrc="$$tmp/$${inc%.h}_smoke.c"; obj="$$tmp/$${inc%.h}_smoke.o"; \
+		{ printf '%s\n' '#include <stdint.h>'; \
+		  printf '%s\n' "#include \"$$inc\""; \
+		  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
+		  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
+		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
+		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
+		} > "$$csrc"; \
+		if [ "$$inc" = patch_apply_single.h ]; then \
+			$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$tmp" -c "$$csrc" -o "$$obj"; \
+		else \
+			$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
+		fi; \
+	done; \
 	{ printf '%s\n' '#include <stdint.h>'; \
 	  printf '%s\n' '#include "patch_apply_push_adapter.h"'; \
 	  printf '%s\n' 'typedef struct { PatchRing *r; int calls; } WaitCtx;'; \
