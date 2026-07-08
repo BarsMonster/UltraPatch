@@ -157,26 +157,26 @@ static uint64_t bv_xfer(A1BitTree *t, REnc *r, int32_t x) {
 
 static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
     d->dic = dic; d->cap = (uint16_t)cap;
-    rc_dr_init(&d->K, d->rep, &d->hit, &d->rh, d->dic, hitseed);
+    rc_dr_init(&d->s, d->dic, hitseed);
 }
 
 enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC, DR_TR_OVER };
 typedef struct { uint8_t kind, ri; uint32_t idx; } DRTrans;
 
 static DRTrans dr_transition(DRE *D, int32_t delta) {
-    DRTrans tr = { DR_TR_REP, rc_dr_rep_ctx(D->rh, D->dic[0]), 0 };
-    if (delta == D->dic[0]) { D->rh = 1; return tr; }
-    D->rh = 0;
+    DRTrans tr = { DR_TR_REP, rc_dr_rep_ctx(D->s.rh, D->dic[0]), 0 };
+    if (delta == D->dic[0]) { D->s.rh = 1; return tr; }
+    D->s.rh = 0;
     int j = -1;
-    for (int i = 0; i < D->K; i++) if (D->dic[i] == delta) { j = i; break; }
+    for (int i = 0; i < D->s.K; i++) if (D->dic[i] == delta) { j = i; break; }
     if (j > 0) {
         rc_mtf_promote_i32(D->dic, (uint32_t)j);
         tr.kind = DR_TR_HIT;
         tr.idx = (uint32_t)(j - 1);
     } else {
         if (j == 0) die("unexpected delta dict index 0");
-        if (D->K >= D->cap) { tr.kind = DR_TR_OVER; return tr; }
-        rc_mtf_insert_i32(D->dic, &D->K, delta);
+        if (D->s.K >= D->cap) { tr.kind = DR_TR_OVER; return tr; }
+        rc_mtf_insert_i32(D->dic, &D->s.K, delta);
         tr.kind = DR_TR_ESC;
     }
     return tr;
@@ -186,15 +186,15 @@ static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
                            REnc *r, int32_t delta, int *overflow) {
     DRTrans tr = dr_transition(D, delta);
     if (tr.kind == DR_TR_REP) {
-        return bit_xfer(r, &D->rep[tr.ri], 1);
+        return bit_xfer(r, &D->s.rep[tr.ri], 1);
     }
-    uint64_t c = bit_xfer(r, &D->rep[tr.ri], 0);
+    uint64_t c = bit_xfer(r, &D->s.rep[tr.ri], 0);
     if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
-        c += bit_xfer(r, &D->hit, 1);
+        c += bit_xfer(r, &D->s.hit, 1);
         c += idx_xfer(gix, r, tr.idx);
     } else {
-        c += bit_xfer(r, &D->hit, 0);
+        c += bit_xfer(r, &D->s.hit, 0);
         c += bv_xfer(dval, r, delta);
     }
     return c;
@@ -208,16 +208,16 @@ static void emit_delta(Models *M, REnc *r, int kind, int32_t delta, int *overflo
 }
 
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
-    ug_encode(&M->gdl, r, (uint32_t)o->diff_len);
-    ug_encode(&M->gel, r, (uint32_t)o->extra_len);
-    ug_encode(&M->gadj, r, rc_zz32(o->adj));
-    ug_encode(&M->pgn, r, (uint32_t)pc->pres.n);
+    ugg_encode(&M->gdl, r, (uint32_t)o->diff_len);
+    ugg_encode(&M->gel, r, (uint32_t)o->extra_len);
+    ugg_encode(&M->gadj, r, rc_zz32(o->adj));
+    ugg_encode(&M->pgn, r, (uint32_t)pc->pres.n);
     int32_t prev = 0;
-    for (size_t i = 0; i < pc->pres.n; i++) { ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
-    ug_encode(&M->pgn, r, (uint32_t)pc->corr.n);
+    for (size_t i = 0; i < pc->pres.n; i++) { ugg_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
+    ugg_encode(&M->pgn, r, (uint32_t)pc->corr.n);
     prev = 0;
     for (size_t i = 0; i < pc->corr.n; i++) {
-        ug_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
+        ugg_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
         prev = pc->corr.v[i].off;
         bt_encode(&M->dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
     }
@@ -237,15 +237,15 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     memset(&M, 0, sizeof(M));
     models_init_content(&M, frm, from_size, kd, ko);
     a1_bt_init(&M.dval);
-    ug_init_e(&M.pg, 'g', 0);
-    ug_init_e(&M.pgn, 'g', 0);
-    ug_init_e(&M.pg2, 'g', 0);
-    ug_seed_cont_e(&M.pg2, RC_SEED_DEPTH_PG2);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct
+    ugg_init_e(&M.pg);
+    ugg_init_e(&M.pgn);
+    ugg_init_e(&M.pg2);
+    ugg_seed_cont_e(&M.pg2, RC_SEED_DEPTH_PG2);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct
                                   * offsets) => M_pg2 first unary bit always continue; depth in rc_models.h. */
-    ug_init_e(&M.gdl, 'g', 0);   /* neutral at top: BORROWED to code the map header below, then re-init'd
+    ugg_init_e(&M.gdl);   /* neutral at top: BORROWED to code the map header below, then re-init'd
                                   * with the seed_cont apply-phase priors after the map, before the token loop. */
-    ug_init_e(&M.gel, 'g', 0);
-    ug_init_e(&M.gadj, 'g', 0);
+    ugg_init_e(&M.gel);
+    ugg_init_e(&M.gadj);
     a1_idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
     a1_idx_init(&M.diex, RC_IDX_SEED);
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
@@ -259,19 +259,19 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     re_init(&rc);
     /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
      * coded through the BORROWED M.gdl (count+gaps) / M.gadj (zz values) gamma models — mirror of the
-     * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ug_encode 'g'). */
-    ug_encode(&M.gdl, &rc, (uint32_t)mn);
+     * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ugg_encode). */
+    ugg_encode(&M.gdl, &rc, (uint32_t)mn);
     { uint32_t prev = 0;
       for (int i = 0; i < mn; i++) {
           uint32_t gap = mb[i] - prev;
-          ug_encode(&M.gdl, &rc, i ? gap - 1u : gap);
+          ugg_encode(&M.gdl, &rc, i ? gap - 1u : gap);
           prev = mb[i];
-          ug_encode(&M.gadj, &rc, rc_zz32(mv[i]));
+          ugg_encode(&M.gadj, &rc, rc_zz32(mv[i]));
       } }
     /* re-init the borrowed models to their apply-phase state (clear map pollution + apply seed_cont),
      * mirroring the ugg_init/ugg_seed_cont(&M_gdl,&M_gadj) in decode_body before its token loop. */
-    ug_init_e(&M.gdl, 'g', 0);  ug_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
-    ug_init_e(&M.gadj, 'g', 0); ug_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
+    ugg_init_e(&M.gdl);  ugg_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
+    ugg_init_e(&M.gadj); ugg_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
      * op loop bounds it (Feature 7, part A). */

@@ -65,10 +65,10 @@ typedef struct { int ok; int32_t fp_end; size_t pres_total; } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
-typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_CTX + 1][UG_CTX + 1]; } UGRiceE;
-typedef struct { uint8_t code, k; uint16_t u[UG_CTX + 1], m[UG_GAMMA_MANT]; } UGGammaE;
-typedef UGRiceE UGE;  /* compatibility name for model-contract probes: rice keeps the full table */
-typedef struct { int32_t *dic; uint16_t cap, K; uint16_t rep[4], hit; uint8_t rh; } DRE;
+/* A1UGRice/A1UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
+ * them directly (no runtime 'code' tag). DRE wraps the shared A1DRStream with the host-only MTF dict
+ * pointer + cap; the shared fields (K/rep/hit/rh) live in .s so rc_dr_init can init both sides. */
+typedef struct { int32_t *dic; uint16_t cap; A1DRStream s; } DRE;
 
 typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
@@ -105,9 +105,9 @@ typedef struct {
     int fwd;
     uint16_t lit0[LIT0_CTX][256];
     uint16_t lit1[256];
-    UGGammaE gs, gl;
-    UGRiceE gd;
-    UGGammaE glo;
+    A1UGGamma gs, gl;
+    A1UGRice gd;
+    A1UGGamma glo;
     int fixed_dist_bits;
     int bootstrap_simple;
     int out_en;
@@ -117,8 +117,8 @@ typedef struct {
     A1BitTree lit0[LIT0_CTX], lit1;
     A1Flag1 flag;
     A1BitTree dval;
-    UGRiceE gd, go;
-    UGGammaE gl, gs, glo, pg, pgn, pg2, gdl, gel, gadj;
+    A1UGRice gd, go;
+    A1UGGamma gl, gs, glo, pg, pgn, pg2, gdl, gel, gadj;
     uint16_t outb;
     A1IdxUnary dibl, diex;
     DRE dr_bl, dr_ex;
@@ -220,13 +220,15 @@ Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
 void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
-void ug_init_e_impl(void *g, char code, int k, size_t sz);
-#define ug_init_e(g, code, k) ug_init_e_impl((g), (code), (k), sizeof(*(g)))
-void ug_seed_cont_e(void *g, int depth);
-void ug_encode(void *g, REnc *r, uint32_t v);
+void ugr_init_e(A1UGRice *g, int k);
+void ugg_init_e(A1UGGamma *g);
+void ugg_seed_cont_e(A1UGGamma *g, int depth);
+void ugr_encode(A1UGRice *g, REnc *r, uint32_t v);
+void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
-uint32_t ug_price(const void *g, uint32_t v);
+uint32_t ugr_price(const A1UGRice *g, uint32_t v);
+uint32_t ugg_price(const A1UGGamma *g, uint32_t v);
 uint32_t bt_price_static(const A1BitTree *t, uint8_t byte);
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
 uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate);

@@ -162,17 +162,20 @@ static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
 RC_ALWAYS_INLINE void rc_init_probs(uint16_t*p,int n,uint16_t seed){
     for(int i=0;i<n;i++) p[i]=seed;
 }
-#define RC_UG_RICE_INIT(kfield,u,m,kval) do { \
-    *(kfield)=(uint8_t)(kval); \
-    for(int rc_ug_i=0;rc_ug_i<=UG_CTX;rc_ug_i++){ \
-        (u)[rc_ug_i]=RC_PHALF; \
-        for(int rc_ug_j=0;rc_ug_j<=UG_CTX;rc_ug_j++) (m)[rc_ug_i][rc_ug_j]=RC_PHALF; \
-    } \
-} while(0)
-#define RC_UG_GAMMA_INIT(u,m) do { \
-    for(int rc_ug_i=0;rc_ug_i<=UG_CTX;rc_ug_i++) (u)[rc_ug_i]=RC_PHALF; \
-    for(int rc_ug_i=0;rc_ug_i<UG_GAMMA_MANT;rc_ug_i++) (m)[rc_ug_i]=RC_PHALF; \
-} while(0)
+/* ---- UGolomb (Rice/Gamma) model structs, single-sourced so the COMPILER enforces the
+ * decoder<->encoder mirror. Rice keeps a full (UG_CTX+1)^2 mantissa table (any quotient row can use
+ * k columns); Gamma keeps the compact triangular table (UG_GAMMA_MANT). Both sides use these types
+ * and the shared neutral-init helpers directly (no per-side wrappers). */
+typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGRice;
+typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } A1UGGamma;
+static inline void rc_ugr_init(A1UGRice*g,int k){
+    g->k=(uint8_t)k;
+    for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
+}
+static inline void rc_ugg_init(A1UGGamma*g){
+    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
+    for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
+}
 
 static inline void rc_lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
@@ -254,11 +257,17 @@ static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,int32_t v){
 RC_ALWAYS_INLINE uint8_t rc_dr_rep_ctx(uint8_t rh,int32_t last){
     return (uint8_t)(rh | (last==0 ? 2 : 0));
 }
-RC_ALWAYS_INLINE void rc_dr_init(uint16_t*K,uint16_t rep[4],uint16_t*hit,uint8_t*rh,
-                                 int32_t*dic,uint16_t hitseed){
-    *K=1; dic[0]=0;
-    rc_init_probs(rep,4,RC_PHALF);
-    *rh=0; *hit=hitseed;
+/* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
+ * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. The dict array lives OUTSIDE the struct
+ * so bl/ex get separate caps; single-sourced here so decoder + encoder share the neutral init. */
+typedef struct {
+    uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
+    uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
+} A1DRStream;
+RC_ALWAYS_INLINE void rc_dr_init(A1DRStream*d,int32_t*dic,uint16_t hitseed){
+    d->K=1; dic[0]=0;
+    rc_init_probs(d->rep,4,RC_PHALF);
+    d->rh=0; d->hit=hitseed;
 }
 
 /* =====================================================================================
@@ -303,7 +312,7 @@ RC_ALWAYS_INLINE void rc_dr_init(uint16_t*K,uint16_t rep[4],uint16_t*hit,uint8_t
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"
  * (bit 1). Structural priors (format invariants), NOT corpus caps — they make the very first op as
- * cheap as the warmed-up state. Mirrored by decoder ugg_seed_cont / encoder ug_seed_cont_e.
+ * cheap as the warmed-up state. Mirrored by decoder ugg_seed_cont / encoder ugg_seed_cont_e.
  *   GDL  = per-op diff_len gamma; op magnitudes are essentially never tiny.
  *   GADJ = per-op adj gamma.
  *   PG2  = rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1.

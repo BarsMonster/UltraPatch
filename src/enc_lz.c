@@ -212,7 +212,7 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
     if (cc->cur.type == 'S') {
         if (cc->last_span) die("adjacent span tokens on wire");
         fl_encode(&M->flag, rc, 0);
-        ug_encode(&M->gs, rc, (uint32_t)cc->cur.len - 1u);
+        ugg_encode(&M->gs, rc, (uint32_t)cc->cur.len - 1u);
         cc->tok_mode = 'S';
         cc->tok_left = cc->cur.len;
         cc->span_pos = 0;
@@ -226,10 +226,10 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
         if (stats) { stats->oy_cost += bit_price(M->outb, 1); stats->oy_n++; }
         re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
         { uint32_t zv = rc_outmatch_delta((uint32_t)cc->cur.dist, cc->oexp);
-          if (stats) { stats->op_cost += ug_price(&M->go, zv); stats->op_n++; }
-          ug_encode(&M->go, rc, zv);
+          if (stats) { stats->op_cost += ugr_price(&M->go, zv); stats->op_n++; }
+          ugr_encode(&M->go, rc, zv);
           cc->oexp = rc_outmatch_next_expect(cc->fwd, (uint32_t)cc->cur.dist, (uint32_t)cc->cur.len); }
-        ug_encode(&M->glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
+        ugg_encode(&M->glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
     } else {
@@ -247,10 +247,10 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
                 if (stats) { stats->on_cost += bit_price(M->outb, 0); stats->on_n++; }
                 re_bit(rc, &M->outb, 0, RC_S_BIT_RATE);
             }
-            ug_encode(&M->gd, rc, (uint32_t)cc->cur.dist - 1u);
+            ugr_encode(&M->gd, rc, (uint32_t)cc->cur.dist - 1u);
             M->last_dist = cc->cur.dist;
         }
-        ug_encode(&M->gl, rc, (uint32_t)cc->cur.len - 1u);
+        ugg_encode(&M->gl, rc, (uint32_t)cc->cur.len - 1u);
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
     }
@@ -332,7 +332,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     pt->outb_no  = st.on_n ? (uint32_t)(st.on_cost / st.on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
-    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ug_price(&M.go, rc_zz32(256));
+    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.go, rc_zz32(256));
     pt->glo = M.glo;
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)bt_price_static(&M.lit0[c], (uint8_t)b);
@@ -398,12 +398,12 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
     uint64_t *span_lit = span_lit_prefix(n, content, tags, pt);
     for (size_t L = 1; L <= maxlen; L++) {
-        slen[L] = ug_price(&pt->gs, (uint32_t)L - 1u);
-        mlen[L] = ug_price(&pt->gl, (uint32_t)L - 1u);
+        slen[L] = ugg_price(&pt->gs, (uint32_t)L - 1u);
+        mlen[L] = ugg_price(&pt->gl, (uint32_t)L - 1u);
     }
     for (uint32_t D = 1; D <= win; D++)
         dpr[D] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
-                                          : ug_price(&pt->gd, D - 1u);
+                                          : ugr_price(&pt->gd, D - 1u);
     const uint64_t INF = UINT64_MAX / 4;
     size_t *next_tok = next_token_starts(n, ncand, nocand);
     if (pt->bootstrap_simple) {
@@ -544,7 +544,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                 (void)opos;
                 for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= olm; l++) {
                     size_t j = i + (size_t)l;
-                    uint64_t c = obase + ug_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
+                    uint64_t c = obase + ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
                     size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, via, vh, jb, c, ri,
                            (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
@@ -649,10 +649,10 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)((uint32_t)L0[b] * PR_SCALE);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
     for (int h = 0; h < 4; h++) pt->fspan_c[h] = PR_SCALE;
-    ug_init_e(&pt->gs, 'g', 0);
-    ug_init_e(&pt->gl, 'g', 0);
-    ug_init_e(&pt->gd, 'r', PATHE_W);
-    ug_init_e(&pt->glo, 'g', 0);
+    ugg_init_e(&pt->gs);
+    ugg_init_e(&pt->gl);
+    ugr_init_e(&pt->gd, PATHE_W);
+    ugg_init_e(&pt->glo);
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
     pt->out_en = 0;

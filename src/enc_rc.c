@@ -95,26 +95,14 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t) {
     rc_lit_tree_from_hist(t, hist, w);   /* mirror of decoder lit_tree_from_hist */
 }
 
-void ug_init_e_impl(void *vg, char code, int k, size_t sz) {
-    if (code == 'r') {
-        UGRiceE *g = (UGRiceE *)vg;
-        if (sz < sizeof(*g)) die("rice model storage too small");
-        g->code = (uint8_t)code;
-        RC_UG_RICE_INIT(&g->k, g->u, g->m, k);
-    } else if (code == 'g') {
-        UGGammaE *g = (UGGammaE *)vg;
-        if (sz < sizeof(*g)) die("gamma model storage too small");
-        g->code = (uint8_t)code; g->k = (uint8_t)k;
-        RC_UG_GAMMA_INIT(g->u, g->m);
-    } else {
-        die("unknown ug model");
-    }
-}
+/* Neutral-init entry points: thin out-of-line wrappers over the shared rc_ugr_init/rc_ugg_init
+ * (rc_models.h) so the host keeps ONE copy of each init loop instead of inlining it at every model. */
+void ugr_init_e(A1UGRice *g, int k) { rc_ugr_init(g, k); }
+void ugg_init_e(A1UGGamma *g) { rc_ugg_init(g); }
 
 /* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
-void ug_seed_cont_e(void *g, int depth) {
-    UGRiceE *ug = (UGRiceE *)g;
-    rc_seed_cont_u(ug->u, UG_CTX, depth);
+void ugg_seed_cont_e(A1UGGamma *g, int depth) {
+    rc_seed_cont_u(g->u, UG_CTX, depth);
 }
 
 static uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
@@ -138,32 +126,28 @@ static uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit) {
     return bit_price(*prob, bit);
 }
 
-static uint32_t ug_xfer(void *vg, REnc *r, uint32_t v) {
-    const uint8_t code = *(const uint8_t *)vg;
-    uint32_t cl, cost = 0;
-    if (code == 'r') {
-        UGRiceE *g = (UGRiceE *)vg;
-        cl = v >> g->k;
-        cost = unary_xfer(r, g->u, UG_CTX, cl);
-        for (int pos = 0; pos < g->k; pos++)
-            cost += ug_bit_xfer(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)],
-                                (int)((v >> (g->k - 1 - pos)) & 1u));  /* rice: LSB-anchored ctx */
-    } else {
-        UGGammaE *g = (UGGammaE *)vg;
-        uint32_t mm = v + 1u;
-        cl = (uint32_t)bitlen32(mm) - 1u;
-        int row = UG_C((int)cl);
-        cost = unary_xfer(r, g->u, UG_CTX, cl);
-        for (uint32_t pos = 0; pos < cl; pos++)
-            cost += ug_bit_xfer(r, &g->m[rc_ugg_mant_idx(row, (int)pos)],
-                                (int)((mm >> (cl - 1u - pos)) & 1u));
-    }
+/* Rice/Gamma transfer cores: statically typed, sharing the unary-prefix + bit transfer helpers. */
+static uint32_t ugr_xfer(A1UGRice *g, REnc *r, uint32_t v) {
+    uint32_t cl = v >> g->k;
+    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl);
+    for (int pos = 0; pos < g->k; pos++)
+        cost += ug_bit_xfer(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)],
+                            (int)((v >> (g->k - 1 - pos)) & 1u));  /* rice: LSB-anchored ctx */
+    return cost;
+}
+static uint32_t ugg_xfer(A1UGGamma *g, REnc *r, uint32_t v) {
+    uint32_t mm = v + 1u;
+    uint32_t cl = (uint32_t)bitlen32(mm) - 1u;
+    int row = UG_C((int)cl);
+    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl);
+    for (uint32_t pos = 0; pos < cl; pos++)
+        cost += ug_bit_xfer(r, &g->m[rc_ugg_mant_idx(row, (int)pos)],
+                            (int)((mm >> (cl - 1u - pos)) & 1u));
     return cost;
 }
 
-void ug_encode(void *vg, REnc *r, uint32_t v) {
-    (void)ug_xfer(vg, r, v);
-}
+void ugr_encode(A1UGRice *g, REnc *r, uint32_t v) { (void)ugr_xfer(g, r, v); }
+void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
 void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
@@ -172,12 +156,12 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &m->lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &m->lit1);
     a1_fl_init(&m->flag);
-    ug_init_e(&m->gd, 'r', kd);
-    ug_init_e(&m->gl, 'g', 0);
-    ug_seed_cont_e(&m->gl, RC_SEED_DEPTH_GL);
-    ug_init_e(&m->gs, 'g', 0);
-    ug_init_e(&m->go, 'r', ko);
-    ug_init_e(&m->glo, 'g', 0);
+    ugr_init_e(&m->gd, kd);
+    ugg_init_e(&m->gl);
+    ugg_seed_cont_e(&m->gl, RC_SEED_DEPTH_GL);
+    ugg_init_e(&m->gs);
+    ugr_init_e(&m->go, ko);
+    ugg_init_e(&m->glo);
     m->outb = RC_PHALF;
     m->rep0[0] = RC_REP0_INIT;
     m->rep0[1] = RC_REP0_INIT;
@@ -185,9 +169,8 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     m->last_dist = 0;
 }
 
-uint32_t ug_price(const void *vg, uint32_t v) {
-    return ug_xfer((void *)vg, NULL, v);
-}
+uint32_t ugr_price(const A1UGRice *g, uint32_t v) { return ugr_xfer((A1UGRice *)g, NULL, v); }
+uint32_t ugg_price(const A1UGGamma *g, uint32_t v) { return ugg_xfer((A1UGGamma *)g, NULL, v); }
 
 uint32_t bt_price_static(const A1BitTree *t, uint8_t byte) {
     return (uint32_t)bt_xfer((A1BitTree *)t, NULL, byte, 0, BT_XFER_PRICE);

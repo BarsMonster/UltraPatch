@@ -25,10 +25,6 @@ _Static_assert(A1_JSLOTS == JSLOTS, "encoder/decoder journal caps must match");
 _Static_assert(A1_OPC_CAP == OPC_CAP, "encoder/decoder per-op correction caps must match");
 _Static_assert(A1_OUTROW == OUTROW, "encoder/decoder row sizes must match");
 _Static_assert(A1_ROW_DEPTH == OUTROW_DEPTH, "encoder/decoder row depths must match");
-_Static_assert(sizeof(((UGE *)0)->m) == sizeof(((A1UGRice *)0)->m),
-               "encoder/decoder rice mantissa tables must match");
-_Static_assert(COUNT_OF(((A1UGGamma *)0)->m) == UG_GAMMA_MANT,
-               "compact gamma mantissa table size must match its indexer");
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
 void flash_write(uint32_t addr, uint8_t val){ (void)addr; (void)val; }
@@ -67,12 +63,7 @@ static int check_shared_models(void){
     A1BitTree bt;
     A1Flag1 fl;
     A1IdxUnary idx;
-    A1UGRice drice;
-    UGRiceE erice;
-    A1UGGamma dgamma;
-    UGGammaE egamma;
-    uint16_t K, rep[4], hit;
-    uint8_t rh;
+    A1DRStream ds;
     int32_t dic[4] = { 123, 456, 789, 111 };
     CHECK(RC_PROB_BITS == 12u);
     CHECK(RC_PBIT == (1u << RC_PROB_BITS));
@@ -85,25 +76,12 @@ static int check_shared_models(void){
     for(int i = 0; i < 4; i++) CHECK(fl.m[i] == RC_PHALF);
     a1_idx_init(&idx, 1234u);
     for(int i = 0; i < IDX_CTX; i++) CHECK(idx.u[i] == 1234u);
-    RC_UG_RICE_INIT(&drice.k, drice.u, drice.m, 3);
-    erice.code = 'r';
-    RC_UG_RICE_INIT(&erice.k, erice.u, erice.m, 3);
-    CHECK(drice.k == erice.k);
-    for(int i = 0; i <= UG_CTX; i++){
-        CHECK(drice.u[i] == erice.u[i]);
-        for(int j = 0; j <= UG_CTX; j++) CHECK(drice.m[i][j] == erice.m[i][j]);
-    }
-    RC_UG_GAMMA_INIT(dgamma.u, dgamma.m);
-    egamma.code = 'g'; egamma.k = 0;
-    RC_UG_GAMMA_INIT(egamma.u, egamma.m);
-    for(int i = 0; i <= UG_CTX; i++) CHECK(dgamma.u[i] == egamma.u[i]);
-    for(int i = 0; i < UG_GAMMA_MANT; i++) CHECK(dgamma.m[i] == egamma.m[i]);
-    rc_dr_init(&K, rep, &hit, &rh, dic, DR_HIT_INIT);
-    CHECK(K == 1 && dic[0] == 0 && hit == DR_HIT_INIT && rh == 0);
+    rc_dr_init(&ds, dic, DR_HIT_INIT);
+    CHECK(ds.K == 1 && dic[0] == 0 && ds.hit == DR_HIT_INIT && ds.rh == 0);
     CHECK(rc_dr_rep_ctx(0, 0) == 2);
     CHECK(rc_dr_rep_ctx(1, 0) == 3);
     CHECK(rc_dr_rep_ctx(1, 5) == 1);
-    for(int i = 0; i < 4; i++) CHECK(rep[i] == RC_PHALF);
+    for(int i = 0; i < 4; i++) CHECK(ds.rep[i] == RC_PHALF);
     return 0;
 }
 

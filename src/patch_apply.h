@@ -90,18 +90,12 @@ typedef struct { uint32_t range, code; } A1RangeDec;
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 #define RC_RICE_UNARY_MAX (1u<<20)
-typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGRice;
-typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } A1UGGamma;
 
-/* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
- * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. Each delta on the wire: rep-bit (==last?)
- * | else hit-bit (in dict? -> MTF index via the index UGolomb | else escape value as zigzag uLEB
- * via M_dval, MTF-inserted at front). The dict array is outside the struct so bl/ex get separate caps
- * (distinct-value peaks: bl 180, ex 106). */
-typedef struct {
-    uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
-    uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
-} A1DRStream;
+/* STREAMED-DELTA per-stream state A1DRStream (bl, ex) is single-sourced in rc_models.h: a
+ * MOVE-TO-FRONT dict of distinct delta values + an adaptive "repeat-last" bit + an adaptive
+ * "dict-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (in dict? -> MTF index
+ * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
+ * dict array is outside the struct so bl/ex get separate caps (distinct-value peaks: bl 180, ex 106). */
 
 /* JSLOTS is configured above. The ENCODER mirrors this budget
  * (A1_JSLOTS in patch_generate) and DEGRADES over-budget plans host-side
@@ -386,15 +380,9 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
  * of (value+1), so <=31 for any uint32 (RC_UNARY_MAX). For RICE ('r') the prefix is the QUOTIENT
  * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, W=11 =>
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
- * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
-static void ugr_init(A1UGRice*g,int k){
-    RC_UG_RICE_INIT(&g->k,g->u,g->m,k);
-}
-/* init a neutral gamma model. Mantissa storage is compact: rows 1..UG_CTX-1 keep only
- * their reachable columns, and the clamped row keeps all UG_CTX+1 columns. */
-static void ugg_init(A1UGGamma*g){
-    RC_UG_GAMMA_INIT(g->u,g->m);
-}
+ * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
+ * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
+ * mantissa: rows 1..UG_CTX-1 keep only reachable columns, the clamped row keeps all UG_CTX+1). */
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
  * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
  * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
@@ -592,9 +580,6 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
 /* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
  * and no ranges side table. */
 
-static void dr_init(A1DRStream*d, int32_t*dic, uint16_t hitseed){
-    rc_dr_init(&d->K,d->rep,&d->hit,&d->rh,dic,hitseed);
-}
 /* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
@@ -1039,10 +1024,10 @@ static int decode_body(PatchApply *pa){
      * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
     /* BORROW two apply-phase gamma statics (not yet live: the map is read before apply-model setup,
-     * and both are re-init'd fresh at ugg_init(&M_gdl)/ugg_init(&M_gadj) below before the token loop).
+     * and both are re-init'd fresh at rc_ugg_init(&M_gdl)/rc_ugg_init(&M_gadj) below before the token loop).
      * Coding the skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits
      * at ZERO extra SRAM. M_gdl carries the count + boundary gaps; M_gadj carries the zz shift values. */
-    ugg_init(&M_gdl); ugg_init(&M_gadj);
+    rc_ugg_init(&M_gdl); rc_ugg_init(&M_gadj);
     { uint32_t mn=s_ug_gamma(pa,&M_gdl);
       if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
@@ -1060,23 +1045,23 @@ static int decode_body(PatchApply *pa){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    a1_bt_init(&M_dval); dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
+    a1_bt_init(&M_dval); rc_dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); rc_dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
     a1_idx_init(&M_dibl, RC_IDX_SEED); a1_idx_init(&M_diex, RC_IDX_SEED);   /* dict-hit/index seeds mirrored with encoder */
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    ugg_init(&M_pg); ugg_init(&M_pgn);
-    ugg_init(&M_pg2);
+    rc_ugg_init(&M_pg); rc_ugg_init(&M_pgn);
+    rc_ugg_init(&M_pg2);
     ugg_seed_cont(&M_pg2,RC_SEED_DEPTH_PG2);  /* rest preserve/corr gaps are strictly-increasing distinct offsets
                                * => gap>=1 => M_pg2's first unary-prefix bit is ALWAYS continue (a format
                                * invariant, like M_gl): seed it cheap from symbol 1. */
-    ugg_init(&M_gdl); ugg_init(&M_gel); ugg_init(&M_gadj);
+    rc_ugg_init(&M_gdl); rc_ugg_init(&M_gel); rc_ugg_init(&M_gadj);
     ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
     { A1ApplyState*s=&SAst;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
-      ugr_init(&M_gd,kd); ugg_init(&M_gl); ugg_init(&M_gs);
-      ugr_init(&M_go,ko); ugg_init(&M_glo); M_outb=RC_PHALF;
+      rc_ugr_init(&M_gd,kd); rc_ugg_init(&M_gl); rc_ugg_init(&M_gs);
+      rc_ugr_init(&M_go,ko); rc_ugg_init(&M_glo); M_outb=RC_PHALF;
       g_oexp=g_FWD?0u:g_to_size;
       ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first
                                  * unary prefix bit is ALWAYS continue, so seed it cheap. */
