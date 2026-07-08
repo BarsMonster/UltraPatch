@@ -70,9 +70,15 @@ awk 'NR==FNR { a[$1 SUBSEP $2]=$3; next }
   "$d/a.tsv" "$d/b.tsv"
 
 # --- one-face product patch, both encoders (candidate blobs round-tripped through DEC_B) -----
-FIXTURES="$FIX" "$SDIR/oneface_metrics.sh" "$ENC_A" > "$d/base_oneface.txt" \
+# Both calls run oneface_metrics.sh in BARE-MEASUREMENT mode (pins cleared): the accept/reject
+# verdict below owns cap enforcement (candidate-vs-baseline binary, not the fixed gate pins), so a
+# cap regression here must stay REJECT (exit 1), never oneface_metrics.sh's exit-nonzero -> our
+# structural exit 3.
+BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" \
+  "$SDIR/oneface_metrics.sh" "$ENC_A" > "$d/base_oneface.txt" \
   || { echo "ab_matrix.sh: one-face baseline encode failed" >&2; exit 3; }
-FIXTURES="$FIX" ONEFACE_ROUNDTRIP=1 "$SDIR/oneface_metrics.sh" "$ENC_B" "$DEC_B" > "$d/cand_oneface.txt" \
+BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" ONEFACE_ROUNDTRIP=1 \
+  "$SDIR/oneface_metrics.sh" "$ENC_B" "$DEC_B" > "$d/cand_oneface.txt" \
   || { echo "ab_matrix.sh: one-face candidate encode/round-trip failed" >&2; exit 3; }
 ga=$(sed -n 's/^oneface_grow=//p' "$d/base_oneface.txt")
 ra=$(sed -n 's/^oneface_revert=//p' "$d/base_oneface.txt")

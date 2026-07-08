@@ -5,6 +5,10 @@
 # Real one-face product patch metric, shared by gate and A/B compression checks.
 # Usage: scripts/oneface_metrics.sh [encoder] [decoder]
 # Env: FIXTURES, ONEFACE_ROUNDTRIP=1
+#      BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT  one-face acceptance caps (AGENTS.md calls this
+#        rule authoritative): enforced only when set (exit nonzero on a breach), skipped for a
+#        bare measurement run when unset — the single enforcement site, mirroring the corpus-leg
+#        ratchets in check_corpus.sh.
 set -eu
 
 ENC="${1:-./ultrapatch}"
@@ -26,5 +30,19 @@ if [ "${ONEFACE_ROUNDTRIP:-0}" != 0 ]; then
   cmp -s "$tmp/revert.mem" "$FIX/v0_base/watch.bin"
 fi
 
-printf 'oneface_grow=%d\noneface_revert=%d\n' \
-  "$(wc -c < "$tmp/grow.blob")" "$(wc -c < "$tmp/revert.blob")"
+grow_sz=$(wc -c < "$tmp/grow.blob")
+revert_sz=$(wc -c < "$tmp/revert.blob")
+printf 'oneface_grow=%d\noneface_revert=%d\n' "$grow_sz" "$revert_sz"
+
+# Acceptance ratchets (single source): enforce the authoritative one-face caps only when the
+# env pins are set; a bare measurement run (pins unset/empty) just prints the sizes above.
+rc=0
+if [ -n "${BASE_ONEFACE_GROW:-}" ] && [ "$grow_sz" -gt "$BASE_ONEFACE_GROW" ]; then
+  echo "oneface_metrics.sh: grow ratchet (oneface_grow=$grow_sz > BASE_ONEFACE_GROW=$BASE_ONEFACE_GROW)" >&2
+  rc=1
+fi
+if [ -n "${BASE_ONEFACE_REVERT:-}" ] && [ "$revert_sz" -gt "$BASE_ONEFACE_REVERT" ]; then
+  echo "oneface_metrics.sh: revert ratchet (oneface_revert=$revert_sz > BASE_ONEFACE_REVERT=$BASE_ONEFACE_REVERT)" >&2
+  rc=1
+fi
+exit "$rc"

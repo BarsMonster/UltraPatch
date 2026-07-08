@@ -116,12 +116,9 @@ check-internal: ultrapatch
 		echo "ultrapatch with no arguments unexpectedly succeeded" >&2; exit 1; \
 	fi; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/noargs.err"; \
-	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 scripts/oneface_metrics.sh ./ultrapatch ./ultrapatch >"$$tmp/oneface.txt"; \
-	cat "$$tmp/oneface.txt"; \
-	grow_sz=$$(sed -n 's/^oneface_grow=//p' "$$tmp/oneface.txt"); \
-	revert_sz=$$(sed -n 's/^oneface_revert=//p' "$$tmp/oneface.txt"); \
-	test "$$grow_sz" -le "$(BASE_ONEFACE_GROW)"; \
-	test "$$revert_sz" -le "$(BASE_ONEFACE_REVERT)"
+	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
+	  BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
+	  scripts/oneface_metrics.sh ./ultrapatch ./ultrapatch
 
 check-arm-internal:
 	@set -e; \
