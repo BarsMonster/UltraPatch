@@ -148,7 +148,8 @@ void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
 void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
 
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko) {
-    for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &m->lit0[c]);
+    lit_tree_seed_e(frm, from_size, 0, &m->lit0[0]);            /* one parity-0 image scan... */
+    for (int c = 1; c < LIT0_CTX; c++) m->lit0[c] = m->lit0[0]; /* ...shared by every LIT0 context */
     lit_tree_seed_e(frm, from_size, 1, &m->lit1);
     rc_init_tok(&m->tok, kd, ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 (rc_models.h) */
     m->rep0h = 0;
