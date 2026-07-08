@@ -276,33 +276,9 @@ golden-update-internal: ultrapatch
 # BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N
 # (defaults to nproc).
 check-corpus-internal: ultrapatch
-	@set -e; \
-	. ./scripts/tempdir.sh; \
-	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
-	cat "$$tmp/m.txt"; \
-	ok=$$(sed -n 's#^matrix_ok=\([0-9][0-9]*\)/256#\1#p' "$$tmp/m.txt"); \
-	full=$$(sed -n 's/^full_total=//p' "$$tmp/m.txt"); \
-	hbetter=$$(sed -n 's/^home_size_better=//p' "$$tmp/m.txt"); \
-	hworse=$$(sed -n 's/^home_size_worse=//p' "$$tmp/m.txt"); \
-	hequal=$$(sed -n 's/^home_size_equal=//p' "$$tmp/m.txt"); \
-	fok=$$(sed -n 's#^foreign_ok=\([0-9][0-9]*\)/34#\1#p' "$$tmp/m.txt"); \
-	fforeign=$$(sed -n 's/^foreign_total=//p' "$$tmp/m.txt"); \
-	max_amp=$$(sed -n 's/^max_amplified=//p' "$$tmp/m.txt"); \
-	max_row=$$(sed -n 's/^max_maxrowerase=//p' "$$tmp/m.txt"); \
-	max_inv=$$(sed -n 's/^max_inversions=//p' "$$tmp/m.txt"); \
-	test -n "$$hbetter"; \
-	test -n "$$hworse"; \
-	test -n "$$hequal"; \
-	hsum=$$((hbetter + hworse + hequal)); \
-	test "$$ok" -eq 256; \
-	test "$$hsum" -eq 256; \
-	test "$$hworse" -eq 0; \
-	test "$$fok" -eq 34; \
-	test "$$max_amp" -eq 0; \
-	test "$$max_row" -le 1; \
-	test "$$max_inv" -eq 0; \
-	test "$$full" -le "$(BASE_FULL_TOTAL)"; \
-	test "$$fforeign" -le "$(BASE_FOREIGN_TOTAL)"
+	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" \
+	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
+	./check_corpus.sh $(JOBS)
 
 # THE gate — one target, everything, hard budget <= 60 s wall on the reference machine
 # (measured ~29 s at 32 jobs, incl. the folded-in foreign lineage). Builds up-front, then runs

@@ -23,6 +23,9 @@
 #
 # Usage: check_corpus.sh [jobs]      (jobs defaults to nproc)
 # Exit 3 on a structural error (wrong pair count, or a decode produced no parseable NVM metrics).
+# Exit 4 on a gate-assertion failure: matrix/foreign round-trip and NVM write-safety always, plus —
+# only when the BASE_FULL_TOTAL / BASE_FOREIGN_TOTAL pins are set — the home per-pair and total-size
+# ratchets. Those pins stay unset for a bare measurement run on a deliberately regressing candidate.
 set -u
 JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
@@ -135,3 +138,21 @@ fi
 
 printf 'matrix_ok=%d/256\nfull_total=%d\nhome_size_better=%d\nhome_size_worse=%d\nhome_size_equal=%d\nforeign_ok=%d/34\nforeign_total=%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\n' \
   "$cok" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$ffull" "$mj" "$ma" "$mr" "$mi"
+
+# ---- gate assertions (single source; the Makefile corpus leg just runs this script) ----
+# Correctness / write-safety (unconditional; only a broken candidate, never a regression, trips it):
+hsum=$((hbetter + hworse + hequal))
+if [ "$cok" -ne 256 ] || [ "$hsum" -ne 256 ] || [ "$fok" -ne 34 ] \
+   || [ "$ma" -ne 0 ] || [ "$mr" -gt 1 ] || [ "$mi" -ne 0 ]; then
+  echo "check_corpus.sh: correctness/write-safety gate (matrix=$cok/256 split_sum=$hsum foreign=$fok/34 amplified=$ma maxrowerase=$mr inversions=$mi)" >&2
+  exit 4
+fi
+# Ratchets (skipped unless the pin is set): home per-pair (zero worse) + total, and foreign total.
+if [ -n "${BASE_FULL_TOTAL:-}" ] && { [ "$hworse" -ne 0 ] || [ "$cfull" -gt "$BASE_FULL_TOTAL" ]; }; then
+  echo "check_corpus.sh: home ratchet (worse=$hworse full_total=$cfull > BASE_FULL_TOTAL=$BASE_FULL_TOTAL)" >&2
+  exit 4
+fi
+if [ -n "${BASE_FOREIGN_TOTAL:-}" ] && [ "$ffull" -gt "$BASE_FOREIGN_TOTAL" ]; then
+  echo "check_corpus.sh: foreign ratchet (foreign_total=$ffull > BASE_FOREIGN_TOTAL=$BASE_FOREIGN_TOTAL)" >&2
+  exit 4
+fi

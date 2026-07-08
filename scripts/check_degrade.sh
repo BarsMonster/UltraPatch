@@ -77,11 +77,11 @@ enc() {
   return $rc
 }
 
-# dec <decoder> <name> <mode> -> round-trip a fresh copy of `from`; echoes "OK|WRONG|REJECT <journal>"
+# dec <decoder> <name> -> round-trip a fresh copy of `from`; echoes "OK|WRONG|REJECT <journal>"
 dec() {
-  d=$1; name=$2; bmode=$3
+  d=$1; name=$2
   cp "$tmp/${name}_from/watch.bin" "$tmp/$name.mem"
-  "$d" --decode $bmode "$tmp/$name.mem" "$tmp/$name.blob" >/dev/null 2>"$tmp/$name.declog"; drc=$?
+  "$d" --decode "$tmp/$name.mem" "$tmp/$name.blob" >/dev/null 2>"$tmp/$name.declog"; drc=$?
   jp=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$tmp/$name.declog")
   if [ $drc -ne 0 ]; then echo "REJECT ${jp:-NA}"; return; fi
   if cmp -s "$tmp/$name.mem" "$tmp/${name}_to/watch.bin"; then echo "OK ${jp:-NA}"; else echo "WRONG ${jp:-NA}"; fi
@@ -119,7 +119,7 @@ dpin jdeg synth_journal_degrade            # == golden pin (swap 2048 88); fixtu
 if enc jdeg; then
   dj=$(sed -n 's/.*deg_journal=\([0-9]\).*/\1/p' "$tmp/jdeg.deg")
   pn=$(sed -n 's/.*pres_needed=\([0-9]*\).*/\1/p' "$tmp/jdeg.deg")
-  r0=$(dec ./ultrapatch jdeg "")
+  r0=$(dec ./ultrapatch jdeg)
   j_peak=${r0#* }
   [ "$dj" = 1 ] || bad "journal degradation did not engage (deg_journal=$dj, pres_needed=$pn)"
   [ "${r0%% *}" = OK ] || bad "journal-degraded blob did not round-trip ($r0)"
@@ -180,7 +180,7 @@ print("OVERLONG" if (n > 1 and last == 0) else "canonical")
 EOF
 )
   natflag=$(sed -n 's/.*natural=\([0-9]\).*/\1/p' "$tmp/dir.deg")
-  r=$(dec ./ultrapatch dir "")
+  r=$(dec ./ultrapatch dir)
   dir_flip=$ov
   [ "$ov" = OVERLONG ] || bad "direction pair did not emit the overlong size-delta uLEB ($ov)"
   [ "$natflag" = 0 ] || bad "encoder reports natural=$natflag for the flipped pair (expected 0)"
@@ -199,8 +199,8 @@ fi
 # =========================================================================================
 dpair rowwin rshift 8192 555 128 6000 32
 if enc rowwin; then
-  r2=$(dec ./ultrapatch rowwin "")
-  r1=$(dec "$D1" rowwin "")
+  r2=$(dec ./ultrapatch rowwin)
+  r1=$(dec "$D1" rowwin)
   rw="D2:${r2%% *}_D1:${r1%% *}"
   [ "${r2%% *}" = OK ] || bad "row-window blob did not round-trip on the production D=2 decoder ($r2)"
   [ "${r2#* }" = 0 ] || bad "row-window blob used the journal (peak ${r2#* }); expected pure window reliance (0)"
@@ -219,7 +219,7 @@ fi
 # =========================================================================================
 dpair bigspan highswap 393216 4096 88
 if enc bigspan; then
-  r=$(dec ./ultrapatch bigspan "")
+  r=$(dec ./ultrapatch bigspan)
   bigspan="${r%% *}_j${r#* }"
   [ "${r%% *}" = OK ] || bad "big-span blob did not round-trip ($r)"
   note "(e) big span: roundtrip=${r%% *} journal_peak=${r#* }/$JBUDGET blob=$(wc -c <"$tmp/bigspan.blob")B"
