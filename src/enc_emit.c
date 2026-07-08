@@ -125,21 +125,6 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     free(lits.v); buf_free(&tmp);
 }
 
-static uint64_t bit_xfer(REnc *r, uint16_t *prob, int bit) {
-    if (r) {
-        re_bit(r, prob, bit, RC_S_BIT_RATE);
-        return 0;
-    }
-    return bit_price_update(prob, bit, RC_S_BIT_RATE);
-}
-
-static uint64_t idx_xfer(A1IdxUnary *g, REnc *r, uint32_t v) {
-    uint64_t c = 0;
-    for (uint32_t pos = 0; pos < v; pos++)
-        c += bit_xfer(r, &g->u[rc_idx_ctx(pos)], 1);
-    return c + bit_xfer(r, &g->u[rc_idx_ctx(v)], 0);
-}
-
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
 static uint64_t bv_xfer(A1BitTree *t, REnc *r, int32_t x) {
     uint32_t v = rc_zz32(x);
@@ -186,15 +171,15 @@ static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
                            REnc *r, int32_t delta, int *overflow) {
     DRTrans tr = dr_transition(D, delta);
     if (tr.kind == DR_TR_REP) {
-        return bit_xfer(r, &D->s.rep[tr.ri], 1);
+        return ug_bit_xfer(r, &D->s.rep[tr.ri], 1, 1);
     }
-    uint64_t c = bit_xfer(r, &D->s.rep[tr.ri], 0);
+    uint64_t c = ug_bit_xfer(r, &D->s.rep[tr.ri], 0, 1);
     if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
-        c += bit_xfer(r, &D->s.hit, 1);
-        c += idx_xfer(gix, r, tr.idx);
+        c += ug_bit_xfer(r, &D->s.hit, 1, 1);
+        c += unary_xfer(r, gix->u, IDX_CTX - 1, tr.idx, 1);
     } else {
-        c += bit_xfer(r, &D->s.hit, 0);
+        c += ug_bit_xfer(r, &D->s.hit, 0, 1);
         c += bv_xfer(dval, r, delta);
     }
     return c;

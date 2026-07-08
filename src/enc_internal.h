@@ -34,14 +34,13 @@
 #define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
 #endif
 
-/* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32 or the MTF index
- * context, so these host-only readers stay out of the shipped decoder headers (rc_u32le_put IS
- * decoder-used and remains in rc_models.h). */
+/* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32, so these host-only
+ * readers stay out of the shipped decoder headers (rc_u32le_put IS decoder-used and remains in
+ * rc_models.h). */
 static inline uint16_t rc_u16le(const uint8_t *p){ return (uint16_t)(p[0] | ((uint16_t)p[1]<<8)); }
 static inline uint32_t rc_u32le(const uint8_t *p){
     return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
 }
-static inline int rc_idx_ctx(uint32_t pos){ return pos<IDX_CTX ? (int)pos : IDX_CTX-1; }
 
 #if defined(__GNUC__) || defined(__clang__)
 #define ENC_NORETURN __attribute__((noreturn))
@@ -248,6 +247,8 @@ void ugr_init_e(A1UGRice *g, int k);
 void ugg_init_e(A1UGGamma *g);
 void ugr_encode(A1UGRice *g, REnc *r, uint32_t v);
 void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v);
+uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit, int adapt);
+uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int adapt);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
 uint32_t ugr_price(const A1UGRice *g, uint32_t v);

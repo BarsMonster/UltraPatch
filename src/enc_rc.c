@@ -100,44 +100,42 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t) {
 void ugr_init_e(A1UGRice *g, int k) { rc_ugr_init(g, k); }
 void ugg_init_e(A1UGGamma *g) { rc_ugg_init(g); }
 
-static uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
-    uint32_t cost = 0;
-    for (uint32_t pos = 0; pos < v; pos++) {
-        uint16_t *p = &u[pos < clampmax ? pos : clampmax];
-        if (r) re_bit(r, p, 1, RC_S_BIT_RATE);
-        else cost += bit_price(*p, 1);
-    }
-    uint16_t *p = &u[v < clampmax ? v : clampmax];
-    if (r) re_bit(r, p, 0, RC_S_BIT_RATE);
-    else cost += bit_price(*p, 0);
-    return cost;
-}
-
-static uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit) {
+/* Shared single-bit transfer: encode (r!=NULL) or price. adapt=0 leaves the prob untouched (the frozen
+ * ugr_price/ugg_price snapshots); adapt=1 advances it via bit_price_update (the adaptive delta streams). */
+uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit, int adapt) {
     if (r) {
         re_bit(r, prob, bit, RC_S_BIT_RATE);
         return 0;
     }
-    return bit_price(*prob, bit);
+    return adapt ? bit_price_update(prob, bit, RC_S_BIT_RATE) : bit_price(*prob, bit);
 }
 
-/* Rice/Gamma transfer cores: statically typed, sharing the unary-prefix + bit transfer helpers. */
+/* Adaptive unary prefix: min(pos,clampmax)-clamped u[] priors (mirror of the decoder s_unary). */
+uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int adapt) {
+    uint32_t cost = 0;
+    for (uint32_t pos = 0; pos < v; pos++)
+        cost += ug_bit_xfer(r, &u[pos < clampmax ? pos : clampmax], 1, adapt);
+    return cost + ug_bit_xfer(r, &u[v < clampmax ? v : clampmax], 0, adapt);
+}
+
+/* Rice/Gamma transfer cores: statically typed, sharing the unary-prefix + bit transfer helpers.
+ * These snapshots are frozen (adapt=0): the prob state never advances during pricing. */
 static uint32_t ugr_xfer(A1UGRice *g, REnc *r, uint32_t v) {
     uint32_t cl = v >> g->k;
-    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl);
+    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
     for (int pos = 0; pos < g->k; pos++)
         cost += ug_bit_xfer(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)],
-                            (int)((v >> (g->k - 1 - pos)) & 1u));  /* rice: LSB-anchored ctx */
+                            (int)((v >> (g->k - 1 - pos)) & 1u), 0);  /* rice: LSB-anchored ctx */
     return cost;
 }
 static uint32_t ugg_xfer(A1UGGamma *g, REnc *r, uint32_t v) {
     uint32_t mm = v + 1u;
     uint32_t cl = (uint32_t)bitlen32(mm) - 1u;
     int row = UG_C((int)cl);
-    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl);
+    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
     for (uint32_t pos = 0; pos < cl; pos++)
         cost += ug_bit_xfer(r, &g->m[rc_ugg_mant_idx(row, (int)pos)],
-                            (int)((mm >> (cl - 1u - pos)) & 1u));
+                            (int)((mm >> (cl - 1u - pos)) & 1u), 0);
     return cost;
 }
 
