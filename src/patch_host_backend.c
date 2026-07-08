@@ -6,35 +6,11 @@
  * The device artifact remains src/patch_apply.h; this file exists only so the
  * host tool links one reference-decoder copy instead of one per harness.
  */
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "enc_internal.h"
 #include "nvm_emu.inc"
-
-typedef struct { uint8_t *d; size_t n; } HostFile;
-
-static void host_file_free(HostFile *b){
-    free(b->d); b->d = NULL; b->n = 0;
-}
-
-static int host_read_file(const char *path, HostFile *out){
-    FILE *f = fopen(path, "rb");
-    if(!f){ perror(path); return 2; }
-    if(fseek(f,0,SEEK_END)){ perror(path); if(fclose(f)) perror(path); return 2; }
-    long sz = ftell(f);
-    if(sz < 0){ perror(path); if(fclose(f)) perror(path); return 2; }
-    if(fseek(f,0,SEEK_SET)){ perror(path); if(fclose(f)) perror(path); return 2; }
-    out->d = (uint8_t*)malloc(sz ? (size_t)sz : 1u);
-    if(!out->d){ if(fclose(f)) perror(path); return 2; }
-    out->n = (size_t)sz;
-    if(out->n && fread(out->d,1,out->n,f)!=out->n){ perror(path); if(fclose(f)) perror(path); host_file_free(out); return 2; }
-    if(fclose(f)){ perror(path); host_file_free(out); return 2; }
-    return 0;
-}
 
 static int host_close_file(FILE **fp, const char *path){
     if(!*fp) return 0;
@@ -170,12 +146,12 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
 }
 
 int decode_a1(const char *image_path, const char *patch_path){
-    HostFile blob = {0}, image = {0};
+    Buf blob = {0}, image = {0};
     FILE *mf = NULL;
     int rc = 2;
-    rc = host_read_file(patch_path, &blob); if(rc) goto out;
+    rc = read_file_buf(patch_path, &blob, 0); if(rc) goto out;
     if(blob.n<12){ fprintf(stderr,"blob too short\n"); rc = 1; goto out; }
-    rc = host_read_file(image_path, &image); if(rc) goto out;
+    rc = read_file_buf(image_path, &image, 0); if(rc) goto out;
     if(image.n > UINT32_MAX){ fprintf(stderr,"image too large for host decoder: %zu\n", image.n); rc = 2; goto out; }
     HostApply ha;
     { uint32_t image_n = (uint32_t)image.n;
@@ -222,7 +198,7 @@ out:
     if(mf && !rc) rc = host_close_file(&mf, image_path);
     else if(mf) (void)host_close_file(&mf, image_path);
     nvm_free();
-    host_file_free(&image); host_file_free(&blob);
+    buf_free(&image); buf_free(&blob);
     return rc;
 }
 

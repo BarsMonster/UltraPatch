@@ -163,23 +163,44 @@ void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user)
     }
 }
 
-Buf slurp(const char *path) {
+int read_file_buf(const char *path, Buf *out, uint64_t max_size) {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); exit(2); }
-    if (fseek(f, 0, SEEK_END)) die("seek failed");
+    Buf b = {0};
+    if (!f) { perror(path); return 2; }
+    if (fseek(f, 0, SEEK_END)) { perror(path); goto fail; }
     long sz = ftell(f);
-    if (sz < 0) die("tell failed");
+    if (sz < 0) { perror(path); goto fail; }
+    if ((uint64_t)sz > SIZE_MAX || (max_size && (uint64_t)sz > max_size)) {
+        fprintf(stderr, "%s: file too large\n", path);
+        goto fail;
+    }
+    if (fseek(f, 0, SEEK_SET)) { perror(path); goto fail; }
+    size_t alloc = sz ? (size_t)sz : 1u;     /* never leave b.d NULL: an empty image is a valid
+                                              * input, and from->d/to->d flow straight into memcpy/
+                                              * memcmp whose args are declared nonnull (0-len UB) */
+    b.d = (uint8_t *)malloc(alloc);
+    if (!b.d) { fprintf(stderr, "out of memory\n"); goto fail; }
+    b.n = (size_t)sz;
+    b.cap = alloc;
+    if (b.n && fread(b.d, 1, b.n, f) != b.n) {
+        if (ferror(f)) perror(path);
+        else fprintf(stderr, "%s: short read\n", path);
+        goto fail;
+    }
+    if (fclose(f)) { perror(path); buf_free(&b); return 2; }
+    *out = b;
+    return 0;
+fail:
+    if (fclose(f)) perror(path);
+    buf_free(&b);
+    return 2;
+}
+
+Buf slurp(const char *path) {
+    Buf b = {0};
     /* 1 GiB ceiling: bsdiff_ops casts image sizes to int32_t for the suffix array and every
      * signed cursor, and the wire size fields are u32 — a >=2 GiB image would go negative. */
-    if ((uint64_t)sz > (1u << 30)) die("image too large");
-    if (fseek(f, 0, SEEK_SET)) die("seek failed");
-    Buf b = {0};
-    buf_reserve(&b, sz ? (size_t)sz : 1);   /* never leave b.d NULL: an empty image is a valid
-                                             * input, and from->d/to->d flow straight into memcpy/
-                                             * memcmp whose args are declared nonnull (0-len UB) */
-    b.n = (size_t)sz;
-    if (b.n && fread(b.d, 1, b.n, f) != b.n) die("read failed");
-    fclose(f);
+    if (read_file_buf(path, &b, 1u << 30)) exit(2);
     return b;
 }
 
