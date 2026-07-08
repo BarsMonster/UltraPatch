@@ -71,9 +71,10 @@ ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
-# derives the exact static bound from -fstack-usage frames + the call graph. Measured 400 B
-# after de-duplicating the op write helpers into shared call bodies; pinned ceiling gives
-# ample headroom. check-stack fails above this.
+# derives the exact static bound from -fstack-usage frames + the call graph. The current
+# measured bound is printed by `make check-stack` and pinned in docs/device-integration.md
+# (single source of truth for the number); the ceiling below gives ample headroom and
+# check-stack fails above it.
 BASE_STACK_CEIL_O2 ?= 480
 
 # ---- hard 60 s execution cap on EVERY public target ---------------------------------

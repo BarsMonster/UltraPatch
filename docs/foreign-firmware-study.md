@@ -1,5 +1,16 @@
 # Foreign-Firmware Validation Study (2026-07-02)
 
+> **Superseded in part (2026-07-08):** the encoder/decoder have moved on since the
+> study period, so the in-body figures are historical measurements, not current
+> values. The journal budget is now `RC_JSLOTS_DEFAULT = 768` (see
+> `src/patch_config.h`); the JSLOTS `904`/`1024` steps, the ARM `.text`/`.bss`
+> table, and the foreign-total figures below (incl. `1,373,186`) are the numbers
+> as measured on their dated lines. The current pinned foreign ratchet is
+> `BASE_FOREIGN_TOTAL` in the Makefile — that pin is the single source of truth,
+> re-pinned on every intentional wire change. The study's conclusions (graceful
+> degradation, which cap binds, direction/row-window wins, permanent-gate
+> decision) all still hold; only the raw numbers have drifted.
+
 Every prior A1 validation ran on one firmware lineage (Sensor Watch, SAML22,
 Cortex-M0+). This study exercises the encoder + decoder on a second, unrelated
 Cortex-M0+ lineage to convert the "degrades gracefully on foreign firmware"
@@ -180,7 +191,8 @@ frontier inversions) cover the foreign pairs too — all clean, journal peak 768
 (the degradation budget), which is the gate's overall journal-peak driver.
 
 Current measurement with the landed encoder: 34/34 round-trip byte-exact,
-`foreign full_total = 1,373,186` B (this is the pinned `BASE_FOREIGN_TOTAL`; it
-differs from the historical 1,234,665 above because the encoder has moved on
-since 2026-07-03). Re-pin on any intentional wire change, same as the home
-baseline.
+`foreign full_total = 1,373,186` B (a study-period measurement; the live pinned
+ratchet is `BASE_FOREIGN_TOTAL` in the Makefile — the single source of truth —
+which differs both from this and from the historical 1,234,665 above because the
+encoder has moved on since 2026-07-03). Re-pin on any intentional wire change,
+same as the home baseline.

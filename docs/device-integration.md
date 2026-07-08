@@ -87,8 +87,8 @@ CRC32(from)[4]
 CRC32(to)[4]
 from_size uLEB
 zigzag(to_size - from_size) uLEB  # overlong encoding = unnatural apply direction
-zigzag(fp_end - from_size) uLEB   # present only when the apply is DESCENDING
-zigzag(fp_start) uLEB
+zigzag(fp_end - from_size) uLEB   # DESCENDING only — the sole source-seed field when descending
+zigzag(fp_start) uLEB             # ASCENDING only  — the sole source-seed field when ascending
 compressed_body_len uLEB
 range-coded body bytes            # exactly compressed_body_len bytes
 ```
@@ -97,8 +97,11 @@ The apply direction is an encoder choice. The NATURAL direction (descending iff
 the image grows — the historical derived rule) ships the size-delta as a
 canonical uLEB; the unnatural direction is signaled by an overlong encoding
 (one redundant trailing continuation byte, value-neutral) and is chosen only
-when it wins by more than that byte. `fp_end` is present exactly when the
-apply is descending.
+when it wins by more than that byte. Exactly ONE source-seed field rides the
+header, selected by that direction: `zigzag(fp_end - from_size)` when the apply
+is descending (it seeds the descending source walk), `zigzag(fp_start)` when it
+is ascending (the ascending walk's initial source seek). Neither field is ever
+present in the other direction.
 
 Both CRCs ride the header. The decoder verifies `CRC32(from)` against the
 current flash content BEFORE its first flash write (wrong or dirty current
@@ -186,7 +189,7 @@ storage if the bootloader stack is tight. The worst-case caller-stack cost of
 
 | Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
 | --------------------------------- | ----------------------- |
-| **gcc -O2 (gated ceiling: 480 B)** | **408 B** |
+| **gcc -O2 (gated ceiling: 480 B)** | **400 B** |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
@@ -242,12 +245,16 @@ has chosen a recovery path.
 ## Build-Time Contract
 
 **Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
-build and the decoder TU — `patch_apply.h` fails the build with a clear `#error`
-without it, so an encoder/decoder pair can never silently disagree about the
-target family. `CORTEX_M0` selects the implemented Thumb-1/ARMv6-M wire and
-compiles out the Thumb-2 wide-field (B.W / LDR.W) encoder support. `CORTEX_M4`
-is reserved for a future Thumb-2 wire revision; it may change the wire format
-and is currently rejected at compile time.
+build and the decoder TU — the build fails with a clear `#error` without it (the
+guard is in `patch_config.h`, reached transitively from `patch_apply.h` via
+`rc_models.h`), so an encoder/decoder pair can never silently disagree about the
+target family. The define is a build-time wire-contract ASSERTION only: nothing
+is conditionally compiled on it. There is no Thumb-2 code path to select — the
+encoder's ARM field scanner recognizes only the Thumb-1/ARMv6-M BL long-branch
+and LDR-literal encodings, unconditionally, and the decoder derives exactly those
+fields. `CORTEX_M4` is reserved for a future Thumb-2 wire revision that would
+change the wire format; it is currently rejected at compile time by a second
+`#error` in `patch_config.h`.
 
 The decoder defaults and wire-model helpers are shared through
 `src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only source

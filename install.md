@@ -6,10 +6,17 @@ Debian/Ubuntu system:
 ```sh
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  gcc \
   gcc-arm-none-eabi \
   binutils-arm-none-eabi \
-  make
+  make \
+  python3
 ```
+
+The host `gcc` builds the `ultrapatch` encoder CLI and the host decoder wrapper
+(the Makefile uses `$(CROSS_COMPILE)gcc`, i.e. plain `gcc`, when `CROSS_COMPILE`
+is empty); `python3` drives the single-header generator and the stack-bound
+analysis that several `make gate` legs run.
 
 Optional but useful for local inspection:
 
