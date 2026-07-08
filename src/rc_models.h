@@ -23,8 +23,10 @@
 #endif
 
 #define RC_KTOP (1u<<24)
+#define RC_PROB_BITS 12u
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
+#define RC_PROB_BOUND(range, prob) (((range) >> RC_PROB_BITS) * (prob))
 #define RC_PACKED_POS_BITS 24u
 #define RC_PACKED_POS_LIMIT (1u<<RC_PACKED_POS_BITS)
 
@@ -157,6 +159,20 @@ static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc
 static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
     for(int i=0;i<depth && i<=maxidx;i++) u[i]=(uint16_t)(RC_PBIT/16);
 }
+RC_ALWAYS_INLINE void rc_init_probs(uint16_t*p,int n,uint16_t seed){
+    for(int i=0;i<n;i++) p[i]=seed;
+}
+#define RC_UG_RICE_INIT(kfield,u,m,kval) do { \
+    *(kfield)=(uint8_t)(kval); \
+    for(int rc_ug_i=0;rc_ug_i<=UG_CTX;rc_ug_i++){ \
+        (u)[rc_ug_i]=RC_PHALF; \
+        for(int rc_ug_j=0;rc_ug_j<=UG_CTX;rc_ug_j++) (m)[rc_ug_i][rc_ug_j]=RC_PHALF; \
+    } \
+} while(0)
+#define RC_UG_GAMMA_INIT(u,m) do { \
+    for(int rc_ug_i=0;rc_ug_i<=UG_CTX;rc_ug_i++) (u)[rc_ug_i]=RC_PHALF; \
+    for(int rc_ug_i=0;rc_ug_i<UG_GAMMA_MANT;rc_ug_i++) (m)[rc_ug_i]=RC_PHALF; \
+} while(0)
 
 static inline void rc_lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
@@ -234,6 +250,15 @@ static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
 static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,int32_t v){
     memmove(&dic[1],&dic[0],(size_t)(*K)*sizeof(dic[0]));
     dic[0]=v; (*K)++;
+}
+RC_ALWAYS_INLINE uint8_t rc_dr_rep_ctx(uint8_t rh,int32_t last){
+    return (uint8_t)(rh | (last==0 ? 2 : 0));
+}
+RC_ALWAYS_INLINE void rc_dr_init(uint16_t*K,uint16_t rep[4],uint16_t*hit,uint8_t*rh,
+                                 int32_t*dic,uint16_t hitseed){
+    *K=1; dic[0]=0;
+    rc_init_probs(rep,4,RC_PHALF);
+    *rh=0; *hit=hitseed;
 }
 
 /* =====================================================================================

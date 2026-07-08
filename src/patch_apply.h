@@ -339,7 +339,7 @@ static int rc_decode(PatchApply *pa, uint32_t bound){
 }
 static int s_bit_r(PatchApply *pa, uint16_t*prob,int rate){
     uint32_t p=*prob;
-    int b=rc_decode(pa,(RC.range>>12)*p);
+    int b=rc_decode(pa,RC_PROB_BOUND(RC.range,p));
     *prob=rc_adapt(p,b,rate);
     return b;
 }
@@ -388,14 +388,12 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
  * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
 static void ugr_init(A1UGRice*g,int k){
-    g->k=(uint8_t)k;
-    for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
+    RC_UG_RICE_INIT(&g->k,g->u,g->m,k);
 }
 /* init a neutral gamma model. Mantissa storage is compact: rows 1..UG_CTX-1 keep only
  * their reachable columns, and the clamped row keeps all UG_CTX+1 columns. */
 static void ugg_init(A1UGGamma*g){
-    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
-    for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
+    RC_UG_GAMMA_INIT(g->u,g->m);
 }
 /* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
  * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
@@ -596,9 +594,7 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
  * and no ranges side table. */
 
 static void dr_init(A1DRStream*d, int32_t*dic, uint16_t hitseed){
-    d->K=1; dic[0]=0;
-    for(int i=0;i<4;i++) d->rep[i]=RC_PHALF;
-    d->rh=0; d->hit=hitseed;
+    rc_dr_init(&d->K,d->rep,&d->hit,&d->rh,dic,hitseed);
 }
 /* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
@@ -606,7 +602,7 @@ static void dr_init(A1DRStream*d, int32_t*dic, uint16_t hitseed){
  *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
  *   then last=v. */
 static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*dic, uint32_t cap){
-    { int ri=d->rh | (dic[0]==0 ? 2 : 0);
+    { int ri=rc_dr_rep_ctx(d->rh,dic[0]);
       int rb=s_bit(pa,&d->rep[ri]); d->rh=(uint8_t)rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
     if(s_bit(pa,&d->hit)==1){

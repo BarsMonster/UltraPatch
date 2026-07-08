@@ -157,15 +157,15 @@ static uint64_t bv_xfer(A1BitTree *t, REnc *r, int32_t x) {
 }
 
 static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
-    d->dic = dic; d->cap = (uint16_t)cap; d->K = 1; d->dic[0] = 0; d->rh = 0; d->hit = hitseed;
-    for (int i = 0; i < 4; i++) d->rep[i] = RC_PHALF;
+    d->dic = dic; d->cap = (uint16_t)cap;
+    rc_dr_init(&d->K, d->rep, &d->hit, &d->rh, d->dic, hitseed);
 }
 
 enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC, DR_TR_OVER };
 typedef struct { uint8_t kind, ri; uint32_t idx; } DRTrans;
 
 static DRTrans dr_transition(DRE *D, int32_t delta) {
-    DRTrans tr = { DR_TR_REP, (uint8_t)(D->rh | (D->dic[0] == 0 ? 2 : 0)), 0 };
+    DRTrans tr = { DR_TR_REP, rc_dr_rep_ctx(D->rh, D->dic[0]), 0 };
     if (delta == D->dic[0]) { D->rh = 1; return tr; }
     D->rh = 0;
     int j = -1;

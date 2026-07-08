@@ -33,7 +33,7 @@ void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz
  * are single-sourced in rc_models.h, shared verbatim with the decoder. */
 
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate) {
-    uint32_t p = *prob, bound = (r->range >> 12) * p;
+    uint32_t p = *prob, bound = RC_PROB_BOUND(r->range, p);
     if (bit == 0) r->range = bound;
     else { r->low += bound; r->range -= bound; }
     *prob = rc_adapt(p, bit, rate);   /* shared update rule (rc_models.h), mirror of decoder s_bit_r */
@@ -99,17 +99,13 @@ void ug_init_e_impl(void *vg, char code, int k, size_t sz) {
     if (code == 'r') {
         UGRiceE *g = (UGRiceE *)vg;
         if (sz < sizeof(*g)) die("rice model storage too small");
-        g->code = (uint8_t)code; g->k = (uint8_t)k;
-        for (int i = 0; i <= UG_CTX; i++) {
-            g->u[i] = RC_PHALF;
-            for (int j = 0; j <= UG_CTX; j++) g->m[i][j] = RC_PHALF;
-        }
+        g->code = (uint8_t)code;
+        RC_UG_RICE_INIT(&g->k, g->u, g->m, k);
     } else if (code == 'g') {
         UGGammaE *g = (UGGammaE *)vg;
         if (sz < sizeof(*g)) die("gamma model storage too small");
         g->code = (uint8_t)code; g->k = (uint8_t)k;
-        for (int i = 0; i <= UG_CTX; i++) g->u[i] = RC_PHALF;
-        for (int i = 0; i < UG_GAMMA_MANT; i++) g->m[i] = RC_PHALF;
+        RC_UG_GAMMA_INIT(g->u, g->m);
     } else {
         die("unknown ug model");
     }
