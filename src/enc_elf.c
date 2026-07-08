@@ -10,8 +10,8 @@
 /* ------------------------------------------------------------------------------------- */
 /* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
-typedef struct { uint32_t type, off, addr, size, entsize; } Shdr;
 typedef struct { uint32_t begin, end; } Range;
+typedef struct { uint32_t type, off, addr, size, entsize; Range code, data; } Sec;
 
 static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
@@ -72,8 +72,8 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
      * (checkers stay active for the rest of the function): the analyzer cannot see through slurp's
      * allocator wrappers, so it models `e.d` as possibly-NULL at the memcmp (it is not: slurp always
      * allocates >=1 byte and the `e.n < 52` guard short-circuits before the memcmp); and it cannot
-     * relate `sh = xcalloc(shnum, sizeof *sh)` to the `i < shnum` loop, so it reports the in-bounds
-     * `sh[i]` field stores as heap overflow. Verified by construction + the ASan encoder-fuzz
+     * relate `sec = xcalloc(shnum, sizeof *sec)` to the `i < shnum` loop, so it reports the in-bounds
+     * `sec[i]` field stores as heap overflow. Verified by construction + the ASan encoder-fuzz
      * campaign (hostile/truncated/oversized ELFs: clean die() or round-trip, zero ASan reports). */
 #if defined(__GNUC__) && !defined(__clang__)   /* -Wanalyzer-* is gcc-only; clang -Werror rejects it */
 #pragma GCC diagnostic push
@@ -86,40 +86,38 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     uint16_t shentsize = rd16le(e.d + 46), shnum = rd16le(e.d + 48);
     if (!phoff || !phnum || phentsize < 32 || (uint64_t)phoff + (uint64_t)phentsize * phnum > e.n) die("bad ELF program headers");
     if (!shoff || !shnum || shentsize < 40 || (uint64_t)shoff + (uint64_t)shentsize * shnum > e.n) die("bad ELF sections");
-    Shdr *sh = (Shdr *)xcalloc(shnum, sizeof(*sh));
+    Sec *sec = (Sec *)xcalloc(shnum, sizeof(*sec));
     for (uint16_t i = 0; i < shnum; i++) {
         const uint8_t *p = e.d + shoff + (uint32_t)i * shentsize;
-        sh[i].type = rd32le(p + 4);
-        sh[i].addr = rd32le(p + 12);
-        sh[i].off = rd32le(p + 16);
-        sh[i].size = rd32le(p + 20);
-        sh[i].entsize = rd32le(p + 36);
+        sec[i].type = rd32le(p + 4);
+        sec[i].addr = rd32le(p + 12);
+        sec[i].off = rd32le(p + 16);
+        sec[i].size = rd32le(p + 20);
+        sec[i].entsize = rd32le(p + 36);
+        sec[i].code.begin = sec[i].data.begin = UINT32_MAX;
     }
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-    Range *code_by_sec = (Range *)xcalloc(shnum, sizeof(*code_by_sec));
-    Range *data_by_sec = (Range *)xcalloc(shnum, sizeof(*data_by_sec));
-    for (uint16_t si = 0; si < shnum; si++) code_by_sec[si].begin = data_by_sec[si].begin = UINT32_MAX;
     for (uint16_t si = 0; si < shnum; si++) {
-        if (sh[si].type != 2 || sh[si].entsize < 16 ||
-            (uint64_t)sh[si].off + sh[si].size > e.n) continue;
-        size_t n = sh[si].size / sh[si].entsize;
+        if (sec[si].type != 2 || sec[si].entsize < 16 ||
+            (uint64_t)sec[si].off + sec[si].size > e.n) continue;
+        size_t n = sec[si].size / sec[si].entsize;
         for (size_t k = 0; k < n; k++) {
-            const uint8_t *p = e.d + sh[si].off + k * sh[si].entsize;
+            const uint8_t *p = e.d + sec[si].off + k * sec[si].entsize;
             uint32_t value = rd32le(p + 4), size = rd32le(p + 8);
             uint8_t type = p[12] & 0x0f;
             if ((type != 1 && type != 2) || size == 0) continue;
-            uint16_t sec = rd16le(p + 14);
-            if (sec >= shnum || value < sh[sec].addr || (uint64_t)value >= (uint64_t)sh[sec].addr + sh[sec].size) continue;
-            range_add(type == 2 ? &code_by_sec[sec] : &data_by_sec[sec], value, size);
+            uint16_t dst = rd16le(p + 14);
+            if (dst >= shnum || value < sec[dst].addr || (uint64_t)value >= (uint64_t)sec[dst].addr + sec[dst].size) continue;
+            range_add(type == 2 ? &sec[dst].code : &sec[dst].data, value, size);
         }
     }
     Range code = {0, 0}, data = {0, 0};
-    for (uint16_t si = 0; si < shnum; si++) best_range(&code, code_by_sec[si]);
-    for (uint16_t si = 0; si < shnum; si++) best_range(&data, trim_data_range(data_by_sec[si], code));
+    for (uint16_t si = 0; si < shnum; si++) best_range(&code, sec[si].code);
+    for (uint16_t si = 0; si < shnum; si++) best_range(&data, trim_data_range(sec[si].data, code));
     uint32_t doff = data_offset_in_bin(&e, bin, phoff, phentsize, phnum, data, which);
     Ranges r = { doff, data.begin, data.end };
-    free(sh); free(code_by_sec); free(data_by_sec); buf_free(&e);
+    free(sec); buf_free(&e);
     return r;
 }
