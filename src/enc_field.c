@@ -83,14 +83,46 @@ static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
     return readarr;
 }
 
+typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } PreserveFieldCursor;
+
 typedef struct {
     const EncCtx *ctx;
     const int32_t *readarr;
-    const uint8_t *frm, *true_to, *ohas, *oval;
+    const uint8_t *frm, *true_to;
+    PreserveFieldCursor *fc;
     uint8_t *buf, *jhas, *jval;
     uint32_t from_size;
     OpPC *pc;
 } PreserveCorrWalk;
+
+static void preserve_field_cursor_next(PreserveFieldCursor *fc) {
+    while (fw_next(&fc->w)) {
+        if (!fc->w.is_field || (fc->w.ev.type != EV_BL && fc->w.ev.type != EV_EX)) continue;
+        fc->pos = fc->w.pos;
+        uint32_t fpk = (uint32_t)(fc->w.fp0 + fc->w.pos);
+        if (fc->w.ev.type == EV_BL) {
+            uint16_t up = rc_u16le(fc->w.frm + fpk), lo = rc_u16le(fc->w.frm + fpk + 2);
+            rc_bl_dereloc(up, lo, (uint32_t)fc->w.ev.delta, fc->packed);
+        } else {
+            uint32_t val = rc_u32le(fc->w.frm + fpk);
+            rc_u32le_put(fc->packed, val - (uint32_t)fc->w.ev.delta);
+        }
+        fc->have = 1;
+        return;
+    }
+    fc->have = 0;
+}
+
+static const PreserveFieldCursor *preserve_corr_event(PreserveCorrWalk *pw, int32_t off) {
+    if (!pw->fc->have) preserve_field_cursor_next(pw->fc);
+    while (pw->fc->have) {
+        int32_t d = off - pw->fc->pos;
+        if ((uint32_t)d < 4u) return pw->fc;
+        if (pw->ctx->fwd ? d > 3 : d < 0) { preserve_field_cursor_next(pw->fc); continue; }
+        return NULL;
+    }
+    return NULL;
+}
 
 static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
     PreserveCorrWalk *pw = (PreserveCorrWalk *)user;
@@ -103,8 +135,10 @@ static void preserve_corr_byte(void *user, const OpWalkEnt *we, int32_t off, int
         pw->jval[tp] = pw->buf[tp];
     }
     uint8_t produced;
-    if (pw->ohas[tp]) produced = pw->oval[tp];
-    else {
+    const PreserveFieldCursor *ev = is_diff ? preserve_corr_event(pw, off) : NULL;
+    if (ev) {
+        produced = ev->packed[off - ev->pos];
+    } else {
         uint8_t src = 0;
         if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
             int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
@@ -513,35 +547,20 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
-    uint8_t *ohas = (uint8_t *)xcalloc(span ? span : 1, 1), *oval = (uint8_t *)xcalloc(span ? span : 1, 1);
     OpWalkEnt *m = opwalk_build(ops, fp_start);
     int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
-    const OpWalkEnt *we;
-    OP_EVENT_FOR(we, m, ops->n, FWD, idx) {
-        const Op *o = we->o;
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, we->fp, o->diff_len);
-        while (fw_next(&w)) {
-            if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
-            uint8_t packed[4];
-            int32_t k = w.pos;
-            uint32_t fpk = (uint32_t)(we->fp + k);
-            if (w.ev.type == EV_BL) {
-                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
-                rc_bl_dereloc(up, lo, (uint32_t)w.ev.delta, packed);
-            } else {
-                uint32_t val = rc_u32le(frm + fpk);
-                rc_u32le_put(packed, val - (uint32_t)w.ev.delta);
-            }
-            for (int b = 0; b < 4; b++) { ohas[we->tp + k + b] = 1; oval[we->tp + k + b] = packed[b]; }
-        }
-    }
     uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, ohas, oval, buf, jhas, jval, from_size, NULL };
+    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, NULL, buf, jhas, jval, from_size, NULL };
+    const OpWalkEnt *we;
     OP_EVENT_FOR(we, m, ops->n, FWD, step) {
+        PreserveFieldCursor fc;
+        fw_init(&fc.w, FWD, frm, from_size, fd, we->o, we->fp, we->o->diff_len);
+        fc.have = 0;
         OpPC *pc = &out[step];
+        cw.fc = &fc;
         cw.pc = pc;
         opwalk_each_byte(FWD, we, preserve_corr_byte, &cw);
         if (!FWD) {
@@ -549,6 +568,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(buf); free(jhas); free(jval); free(ohas); free(oval); free(m); free(readarr);
+    free(buf); free(jhas); free(jval); free(m); free(readarr);
     return out;
 }
