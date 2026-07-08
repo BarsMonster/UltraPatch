@@ -467,7 +467,6 @@ static uint32_t crc32_flash(uint32_t n){
 /* DR_KCAP_* and OPC_CAP are configured above. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
-static void jr_reset(PatchApply *pa){ g_jcount=0; }
 /* Binary search on slot>>8 over [0, g_jcount). On a hit *at is the matching slot and the return
  * is 1; on a miss *at is the sorted insertion index and the return is 0. */
 static int jr_find(PatchApply *pa, uint32_t pos, int*at){
@@ -1028,13 +1027,11 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
-      lit_tree_from_hist(&M_lit1,hist1,w);
-      g_litprev=0; }
+      lit_tree_from_hist(&M_lit1,hist1,w); }
     { A1ApplyState*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?g_fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
-    g_rcerr=0; g_reject=REJ_NONE;
     if(!decode_header(pa)){ g_reject=REJ_CORRUPT; return 0; }
     if(!rc_init(pa)) return 0;
     orow_reset(pa);
@@ -1046,7 +1043,6 @@ static int decode_body(PatchApply *pa){
      * Coding the skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits
      * at ZERO extra SRAM. M_gdl carries the count + boundary gaps; M_gadj carries the zz shift values. */
     ugg_init(&M_gdl); ugg_init(&M_gadj);
-    g_smap_n=0;
     { uint32_t mn=s_ug_gamma(pa,&M_gdl);
       if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
@@ -1069,7 +1065,6 @@ static int decode_body(PatchApply *pa){
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    jr_reset(pa);
     ugg_init(&M_pg); ugg_init(&M_pgn);
     ugg_init(&M_pg2);
     ugg_seed_cont(&M_pg2,RC_SEED_DEPTH_PG2);  /* rest preserve/corr gaps are strictly-increasing distinct offsets
@@ -1086,9 +1081,8 @@ static int decode_body(PatchApply *pa){
       ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first
                                  * unary prefix bit is ALWAYS continue, so seed it cheap. */
       a1_fl_init(&M_flag);
-      M_rep0[0]=M_rep0[1]=RC_REP0_INIT; g_rep0h=0; g_lastdist=0;
+      M_rep0[0]=M_rep0[1]=RC_REP0_INIT;
       if(g_rcerr) return 0;
-      s->tok_mode=0;
       /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
        * until tp reaches 0. This is SAFE because sa_apply_op REJECTS any zero-output op (nw==0), so
        * every accepted op advances the frontier by >=1 and the overshoot/underrun guards cap it: the
@@ -1124,7 +1118,7 @@ static void A1_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint3
  * the reason). */
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
-    g_pull_fn=next; g_pull_ctx=ctx; g_body_left=0; g_pull_eof=0; g_flash_touched=0;
+    g_pull_fn=next; g_pull_ctx=ctx;
     if(!decode_body(pa)){
         if(!g_reject) g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }
