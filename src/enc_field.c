@@ -94,7 +94,7 @@ typedef struct {
     const EncCtx *ctx;
     const int32_t *readarr;
     const uint8_t *frm, *true_to;
-    uint8_t *buf, *jhas, *jval;
+    uint8_t *buf, *jhas;
     uint32_t from_size;
     PlanCaps *caps;
 } PreserveCorrWalk;
@@ -139,10 +139,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         pw->caps->pres_total++;
         if ((uint32_t)tp >= RC_PACKED_POS_LIMIT || pw->caps->pres_total > A1_JSLOTS)
             pw->caps->ok = 0;
-    }
-    if (preserve && 0 <= tp && (uint32_t)tp < pw->from_size && !pw->jhas[tp]) {
         pw->jhas[tp] = 1;
-        pw->jval[tp] = pw->buf[tp];
     }
     uint8_t produced;
     const PreserveFieldCursor *ev = is_diff ? preserve_corr_event(pw->ctx, fc, off) : NULL;
@@ -152,8 +149,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         uint8_t src = 0;
         if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
             int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
-            src = pw->jhas[fp] ? pw->jval[fp]
-                : ((behind && a1_row_covered(pw->ctx, fp, tp)) ? pw->frm[fp] : pw->buf[fp]);
+            src = (pw->jhas[fp] || (behind && a1_row_covered(pw->ctx, fp, tp))) ? pw->frm[fp] : pw->buf[fp];
         }
         produced = (uint8_t)(byte + src);
     }
@@ -570,9 +566,9 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
     uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
     memcpy(buf, frm, from_size);
-    uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1), *jval = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
+    uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, buf, jhas, jval, from_size, caps };
+    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, buf, jhas, from_size, caps };
     const OpWalkEnt *we;
     OP_EVENT_FOR(we, m, ops->n, FWD, step) {
         PreserveFieldCursor fc;
@@ -585,6 +581,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
             if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(buf); free(jhas); free(jval); free(m); free(readarr);
+    free(buf); free(jhas); free(m); free(readarr);
     return out;
 }
