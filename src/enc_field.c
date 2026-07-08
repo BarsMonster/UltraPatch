@@ -238,7 +238,10 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
  * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                                   uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
-    FieldDeltaVec add = {0};
+    /* Append op-derived entries after the already-finalized block-matched entries, then a single
+     * fd_finalize: its stable sort keeps the appended op-derived entry after the same-key block
+     * entry, and its last-wins dedup makes op-derived override block-matched (and, among op-derived
+     * duplicates, the last fd_put win) -- bit-identical to the former add/out rebuild. */
     OpWalkEnt *walk = opwalk_build(ops, 0);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &walk[oi];
@@ -251,25 +254,17 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                 uint16_t tu = rc_u16le(tob + (size_t)tpk), tl = rc_u16le(tob + (size_t)tpk + 2);
                 if (rc_bl_pattern(tu, tl)) {
                     uint16_t fu = rc_u16le(frm + fpk), fl2 = rc_u16le(frm + fpk + 2);
-                    fd_put(&add, fpk, STREAM_BL,
+                    fd_put(fd, fpk, STREAM_BL,
                            (int32_t)((uint32_t)rc_bl_imm24s(fu, fl2) - (uint32_t)rc_bl_imm24s(tu, tl)));
                 }
             } else if (op_ldr_targets(frm, we->fp, we->o->diff_len, from_size, fpk)) {
-                fd_put(&add, fpk, STREAM_LDR,
+                fd_put(fd, fpk, STREAM_LDR,
                        (int32_t)(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
             }
         }
     }
     free(walk);
-    fd_finalize(&add);
-    /* rebuild fd: old entries not overridden + all op-derived entries */
-    FieldDeltaVec out = {0};
-    for (size_t i = 0; i < fd->n; i++)
-        if (!fd_find_kind(&add, fd->v[i].addr, fd->v[i].kind)) fd_put(&out, fd->v[i].addr, fd->v[i].kind, fd->v[i].delta);
-    for (size_t i = 0; i < add.n; i++) fd_put(&out, add.v[i].addr, add.v[i].kind, add.v[i].delta);
-    fd_finalize(&out);
-    free(add.v); free(fd->v);
-    *fd = out;
+    fd_finalize(fd);
 }
 
 /* ---- piecewise shift map (D1): lookups go through rc_smap_at (rc_models.h), the single-sourced
