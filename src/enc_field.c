@@ -407,7 +407,17 @@ typedef struct {
     int32_t ft;
 } SplitScratch;
 
-
+static uint64_t split_diff_bits(const SplitScratch *sc, const Run *runs,
+                                size_t p, size_t e, int32_t endpos, int32_t seg,
+                                int fwd, const uint8_t L0[256]) {
+    uint64_t bits = uleb_proxy_bits(sc[e].cnt - sc[p].cnt, L0);
+    if (e > p) {
+        bits += fwd ? uleb_proxy_bits((uint32_t)(runs[p].begin - seg), L0)
+                    : uleb_proxy_bits((uint32_t)(endpos - runs[e - 1].end + 1), L0);
+        bits += (sc[e].w - sc[p].w) + (sc[e - 1].gp - sc[p].gp);
+    }
+    return bits;
+}
 
 /* Dense diff runs can be represented either as literal diff bytes or as an
  * extra span plus an equal source skip. Choose the subset analytically per op:
@@ -436,7 +446,6 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
         if (!nr) {
             opvec_push(&out, *o);
             tp += o->diff_len + o->extra_len;
-            free(runs);
             continue;
         }
         /* The historical DP re-priced every (segment start, split run) pair with a fresh
@@ -470,18 +479,13 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
         }
         const uint64_t XF = extra_proxy_bits(to, tp + o->diff_len, o->extra_len, L0, L1);
         const int FWD = ctx->fwd;
-#define DIFFBITS(P, E, ENDPOS, SEG) \
-        (uleb_proxy_bits(sc[E].cnt - sc[P].cnt, L0) + \
-         ((E) > (P) ? (FWD ? uleb_proxy_bits((uint32_t)(runs[P].begin - (SEG)), L0) \
-                           : uleb_proxy_bits((uint32_t)((ENDPOS) - runs[(E) - 1].end + 1), L0)) \
-                      + (sc[E].w - sc[P].w) + (sc[(E) - 1].gp - sc[P].gp) : 0u))
         for (size_t p = nr + 1; p-- > 0;) {
             int32_t seg = p ? runs[p - 1].end : 0;
             /* terminal (no further split): the historical DP(nr, p) row */
             uint64_t v = dz_bits_u32((uint32_t)(o->diff_len - seg)) +
                          dz_bits_u32((uint32_t)o->extra_len) +
                          dz_bits_u32(rc_zz32(o->adj)) + 2 +
-                         DIFFBITS(p, nr, o->diff_len, seg) + XF;
+                         split_diff_bits(sc, runs, p, nr, o->diff_len, seg, FWD, L0) + XF;
             int32_t take = -1;
             /* downward scan mirrors the historical backward recurrence: at each s the
              * running v IS DP(s+1, p), and the margin fires under the same condition,
@@ -491,15 +495,13 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
                 uint64_t c = dz_bits_u32((uint32_t)(runs[s].begin - seg)) +
                              dz_bits_u32((uint32_t)len) +
                              dz_bits_u32(rc_zz32(len)) + 2 +
-                             DIFFBITS(p, s, runs[s].begin, seg) + sc[s].x +
+                             split_diff_bits(sc, runs, p, s, runs[s].begin, seg, FWD, L0) + sc[s].x +
                              sc[s + 1].e;
                 if (c + SPLIT_GAIN_MARGIN_BITS < v) { v = c; take = (int32_t)s; }
             }
             sc[p].e = v; sc[p].ft = take;
         }
-#undef DIFFBITS
         int32_t seg = 0;
-        int split_any = 0;
         { size_t p = 0;
           while (sc[p].ft >= 0) {
               size_t s = (size_t)sc[p].ft;
@@ -509,9 +511,8 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
                                        to->d + (size_t)tp + (size_t)runs[s].begin, len));
               seg = runs[s].end;
               p = s + 1;
-              split_any = 1;
           } }
-        if (split_any) {
+        if (seg) {
             int32_t tail = o->diff_len - seg;
             if (tail || o->extra_len || o->adj)
                 opvec_push(&out, op_copy(tail, o->diff + seg, o->extra_len, o->extra, o->adj));
