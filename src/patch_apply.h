@@ -1040,9 +1040,9 @@ static int decode_body(PatchApply *pa){
        * stream decodes zero-fill garbage that trips a geometry/frontier guard or lands a wrong image
        * that CRC32(to) rejects. */
       while(!g_rcerr && (g_FWD ? s->tp!=(int32_t)g_to_size : s->tp!=0)) sa_apply_op(pa,s);
-      /* tp must land exactly (the loop guarantees it on the clean path). fp is unchecked in both
-       * directions (no fp_start/fp_end landing check) — CRC32(to) validates the final image. */
-      if(!g_rcerr && s->tp!=(g_FWD?(int32_t)g_to_size:0)) g_rcerr=1;
+      /* tp must land exactly; the loop guarantees it on the clean path (it exits only on g_rcerr or
+       * tp==target, and sa_apply_op's frontier guards make overshoot impossible), so no post-loop tp
+       * landing check is needed. fp is unchecked in both directions — CRC32(to) validates the image. */
       if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
       if(g_rcerr) return 0;
       orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
