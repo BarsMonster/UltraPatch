@@ -1164,4 +1164,40 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef OROW_SLOT
 #undef PSRC_TGT_MASK
 
+/* Seal the non-knob model/wire macros that rc_models.h + patch_config.h define and that this
+ * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
+ * Only the documented -D override knobs (JSLOTS, SA_W, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
+ * DR_KCAP_EX, A1_MAX_IMAGE and the RC_*_DEFAULT constants they derive from) stay defined. The
+ * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
+ * #undefs never reach the encoder side of the mirror. */
+#undef RC_KTOP
+#undef RC_PROB_BITS
+#undef RC_PBIT
+#undef RC_PHALF
+#undef RC_PROB_BOUND
+#undef RC_PACKED_POS_BITS
+#undef RC_PACKED_POS_LIMIT
+#undef BT_PROBS
+#undef BT_BYTES
+#undef UG_CTX
+#undef UG_C
+#undef UG_GAMMA_MANT
+#undef SMAP_CAP
+#undef LIT0_CTX
+#undef LIT0_SEL
+#undef IDX_CTX
+#undef RC_S_BIT_RATE
+#undef RC_LIT0_RATE
+#undef RC_LIT1_RATE
+#undef RC_DVAL_RATE
+#undef RC_REP0_INIT
+#undef DR_HIT_INIT
+#undef RC_IDX_SEED
+#undef RC_SEED_DEPTH_GDL
+#undef RC_SEED_DEPTH_GADJ
+#undef RC_SEED_DEPTH_PG2
+#undef RC_SEED_DEPTH_GL
+#undef RC_OUTMATCH_MIN
+#undef RC_KFIELD_BITS
+
 #endif /* PATCH_APPLY_H */
