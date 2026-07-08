@@ -79,6 +79,7 @@ typedef struct { int32_t dist, len; } Cand;
 #if LZ_CAND_MAX < 1
 #error "LZ_CAND_MAX must be at least 1"
 #endif
+enum { LZ_MAX_RUN = 1024, LZ_MAX_MATCH = 2048 };
 typedef struct { int32_t pos, len; } OCand;
 #define OC_MAX 4
 enum { PR_SCALE = 64 };

@@ -389,18 +389,19 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
-    uint32_t maxrun = 1024, win = 1u << PATHE_W;
+    uint32_t maxrun = LZ_MAX_RUN, win = 1u << PATHE_W;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
-     * dpr[D]=fresh-distance value price. */
-    size_t maxlen = n + 1;
-    uint32_t *slen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
-    uint32_t *mlen = (uint32_t *)xmalloc((maxlen + 1) * sizeof(uint32_t));
+     * dpr[D]=fresh-distance value price. slen is only ever indexed by a span/rep run length
+     * (<= maxrun == LZ_MAX_RUN) and mlen by a match length (candidate lens clamp to LZ_MAX_MATCH
+     * in lz_candidates_c; rep-probe runs are <= maxrun), so both tables are fixed-size at the real
+     * token caps rather than n+1. Pricing is pure with the NULL encoder, so filling entries beyond
+     * n is harmless. static (single-threaded host, non-recursive, fully rewritten before any read
+     * each call) keeps the ~12 KB off the caller frame. */
+    static uint32_t slen[LZ_MAX_RUN + 2], mlen[LZ_MAX_MATCH + 2];
     uint32_t *dpr  = (uint32_t *)xmalloc(((size_t)win + 1) * sizeof(uint32_t));
     uint64_t *span_lit = span_lit_prefix(n, content, tags, pt);
-    for (size_t L = 1; L <= maxlen; L++) {
-        slen[L] = ugg_price(&pt->gs, (uint32_t)L - 1u);
-        mlen[L] = ugg_price(&pt->gl, (uint32_t)L - 1u);
-    }
+    for (size_t L = 1; L <= LZ_MAX_RUN + 1; L++) slen[L] = ugg_price(&pt->gs, (uint32_t)L - 1u);
+    for (size_t L = 1; L <= LZ_MAX_MATCH + 1; L++) mlen[L] = ugg_price(&pt->gl, (uint32_t)L - 1u);
     for (uint32_t D = 1; D <= win; D++)
         dpr[D] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
                                           : ugr_price(&pt->gd, D - 1u);
@@ -440,7 +441,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             tok_push(&tv, t);
             i += (size_t)t.len;
         }
-        free(cost); free(nxt); free(slen); free(mlen); free(dpr); free(span_lit); free(next_tok);
+        free(cost); free(nxt); free(dpr); free(span_lit); free(next_tok);
         return tv;
     }
     /* Every literal's tag0 context is now the deterministic previous content byte content[p-1]
@@ -590,7 +591,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(via); free(vh); free(slen); free(mlen); free(dpr); free(span_lit); free(next_tok);
+    free(cost); free(rep); free(via); free(vh); free(dpr); free(span_lit); free(next_tok);
     return tv;
 }
 
@@ -665,7 +666,7 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
                                 const uint8_t L0[256], const uint8_t L1[256],
                                 int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
-    int32_t win = 1 << PATHE_W, maxm = 2048;
+    int32_t win = 1 << PATHE_W, maxm = LZ_MAX_MATCH;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
     int32_t *head = hash3_heads_new();
