@@ -57,11 +57,7 @@
 #define DR_KCAP_EX RC_DR_KCAP_EX_DEFAULT
 #endif
 #ifndef OUTROW
-#ifdef NVM_ROW
-#define OUTROW NVM_ROW
-#else
 #define OUTROW RC_OUTROW_DEFAULT
-#endif
 #endif
 #ifndef OUTROW_DEPTH
 #define OUTROW_DEPTH RC_ROW_DEPTH_DEFAULT
