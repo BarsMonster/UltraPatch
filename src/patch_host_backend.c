@@ -156,7 +156,7 @@ int decode_a1(const char *image_path, const char *patch_path){
     HostApply ha;
     { uint32_t image_n = (uint32_t)image.n;
       uint32_t span = image_n>A1_MAX_IMAGE ? image_n : A1_MAX_IMAGE;
-      if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, image_n, &ha)) goto out; }
+      if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, image_n, &ha)){ rc = 2; goto out; } }
 
     NvmStats st;
     { int reject = REJ_NONE;
@@ -185,7 +185,7 @@ int decode_a1(const char *image_path, const char *patch_path){
         rc = 1; goto out;
     }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
-    mf=fopen(image_path,"r+b"); if(!mf){perror(image_path);goto out;}
+    mf=fopen(image_path,"r+b"); if(!mf){perror(image_path); rc = 2; goto out;}
     rc = host_commit_image(mf, image_path, sc_flash, to_size, image.n);
     if(rc) goto out;
     rc = host_close_file(&mf, image_path);
@@ -195,8 +195,7 @@ int decode_a1(const char *image_path, const char *patch_path){
             st.erases,st.rows,st.programs,st.amplified,st.max_row_erases,st.inversions,span,(span+255)/256);
     rc = 0;
 out:
-    if(mf && !rc) rc = host_close_file(&mf, image_path);
-    else if(mf) (void)host_close_file(&mf, image_path);
+    if(mf) (void)host_close_file(&mf, image_path);
     nvm_free();
     buf_free(&image); buf_free(&blob);
     return rc;
