@@ -114,8 +114,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
     FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
-            inj_push(out, lc.cc, w.ev.type, (uint32_t)(fp0 + w.pos),
-                     field_residual(w.ev.type, frm, (uint32_t)(fp0 + w.pos), w.ev.delta, NULL, NULL, 0));
+            inj_push(out, lc.cc, w.ev.type, (uint32_t)(fp0 + w.pos), w.ev.delta);
         } else if (w.is_field) {   /* EV_SBL still-dirty window: its bytes ship as ordinary literals */
             if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
             else     for (int b = 3; b >= 0; b--) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
@@ -499,17 +498,17 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
      * and emit_body derives mapped residuals from the plain-delta injections at the exact emit site.
      * Both maps then compete against the no-map body under the exact byte gate at the end
      * (ship-smallest => improve-or-tie per pair by construction). */
-    uint32_t map_b[SMAP_CAP]; int32_t map_v[SMAP_CAP]; int map_n = 0;      /* hit-count fit */
-    uint32_t map_b2[SMAP_CAP]; int32_t map_v2[SMAP_CAP]; int map_n2 = 0;   /* bits fit */
-    int use_map = 0;   /* 0 = no map, 1 = hit-count map, 2 = bits map */
+    uint32_t map_b[2][SMAP_CAP]; int32_t map_v[2][SMAP_CAP];
+    int map_n[2] = {0, 0};   /* 0 = hit-count fit, 1 = bits fit */
+    int use_map = -1;
     { size_t nfr = inj_field_count(inj, ops->n);
       if (nfr) {
           FieldKey *fk = (FieldKey *)xmalloc(nfr * sizeof(*fk));
           field_keys_from_inj(inj, ops->n, FWD, frm, fk);
           uint32_t fb[SMAP_POOL_MAX]; int32_t fv[SMAP_POOL_MAX];
           int fn = smap_build_full(ops, fp_start, from_size, to_size, fk, nfr, fb, fv);
-          map_n = fit_shift_map_hit(fb, fv, fn, fk, nfr, map_b, map_v);
-          map_n2 = fit_shift_map_bits(fb, fv, fn, fk, nfr, map_b2, map_v2);
+          map_n[0] = fit_shift_map_hit(fb, fv, fn, fk, nfr, map_b[0], map_v[0]);
+          map_n[1] = fit_shift_map_bits(fb, fv, fn, fk, nfr, map_b[1], map_v[1]);
           free(fk);
       } }
     /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
@@ -546,10 +545,9 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         /* Keep the legacy mixed-mode trajectory as the incumbent (phases 0/1), then try the
          * corrected ring-only pricing state (phase 2) before re-opening out-candidates (phase 3).
          * Every candidate still has to beat the exact emitted body. */
-        uint8_t *nocand0 = (uint8_t *)xcalloc(content.n ? content.n : 1, 1);
         for (int phase = 0; phase < 4; phase++) {
             int price_out_en = (phase == 0 || phase == 1 || phase == 3);
-            const uint8_t *noc = (phase == 1 || phase == 3) ? nocand : nocand0;
+            const uint8_t *noc = (phase == 1 || phase == 3) ? nocand : NULL;
             for (int pass = 0; pass < 16; pass++) {
                 PriceTab pt;
                 pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = price_out_en;
@@ -571,7 +569,6 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 }
             }
         }
-        free(nocand0);
         /* anneal rice parameters: fit_k_* minimizes raw codelen, but the shipped cost is the
          * ADAPTIVE ug_encode seed. Walk each parameter outward under the exact full-body gate. */
         for (int which = 0; which < 2; which++) {
@@ -587,20 +584,20 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         }
         /* map variants: same fixed parse, residual-space inj + shipped map. Each ships only if its
          * exact emitted body beats the current best (no-map, then whichever map already won). */
-        for (int mi = 1; mi <= 2; mi++) {
-            int mn = mi == 1 ? map_n : map_n2;
+        for (int mi = 0; mi < 2; mi++) {
+            int mn = map_n[mi];
             if (mn > 0) {
-                const uint32_t *mb = mi == 1 ? map_b : map_b2;
-                const int32_t *mv = mi == 1 ? map_v : map_v2;
+                const uint32_t *mb = map_b[mi];
+                const int32_t *mv = map_v[mi];
                 size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, mb, mv, mn);
                 if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = mi; }
             }
         }
     }
     free(cands); free(ncand);
-    const uint32_t *sel_b = use_map == 2 ? map_b2 : use_map == 1 ? map_b : NULL;
-    const int32_t *sel_v = use_map == 2 ? map_v2 : use_map == 1 ? map_v : NULL;
-    int sel_n = use_map == 2 ? map_n2 : use_map == 1 ? map_n : 0;
+    const uint32_t *sel_b = use_map >= 0 ? map_b[use_map] : NULL;
+    const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
+    int sel_n = use_map >= 0 ? map_n[use_map] : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          inj, sel_b, sel_v, sel_n, overflow_out);
     injvec_array_free(inj, ops->n);
