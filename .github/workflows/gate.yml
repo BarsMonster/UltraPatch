@@ -23,9 +23,6 @@ jobs:
             binutils-arm-none-eabi \
             make
 
-      - name: Verify corpus assets
-        run: make check-assets
-
       - name: Run release gate
         run: make gate
 

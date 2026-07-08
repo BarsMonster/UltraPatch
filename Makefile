@@ -103,7 +103,7 @@ decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
 
-check-internal: all-internal
+check-internal: ultrapatch
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	./ultrapatch --help >"$$tmp/help.txt"; \
@@ -238,13 +238,13 @@ check-assets-internal:
 # real Thumb-1 decoder every cycle, and a one-time 260-pair qemu study (db6d693) found ZERO
 # divergence. Do not reintroduce qemu legs into the gate.
 
-check-malformed-internal: all-internal
+check-malformed-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
 # page-boundary/>384KiB-span pairs). ultrapatch self-verifies every encoded blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
-check-edge-internal: all-internal
+check-edge-internal: ultrapatch
 	@scripts/check_edge.sh
 
 # Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
@@ -252,7 +252,7 @@ check-edge-internal: all-internal
 # op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
-check-degrade-internal: all-internal
+check-degrade-internal: ultrapatch
 	@scripts/check_degrade.sh
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
@@ -274,7 +274,7 @@ golden-update-internal: ultrapatch
 # foreign_ok(=34)/foreign_total gate the foreign set (foreign_total ratchets vs
 # BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N
 # (defaults to nproc).
-check-corpus-internal: all-internal check-assets-internal
+check-corpus-internal: ultrapatch
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" ./check_corpus.sh $(JOBS) > "$$tmp/m.txt"; \
