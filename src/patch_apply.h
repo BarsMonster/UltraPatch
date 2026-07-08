@@ -160,61 +160,6 @@ typedef struct PatchApply {
     uint32_t g_psrc_even;
 } PatchApply;
 
-#define g_image_span (pa->g_image_span)
-#define g_from_size (pa->g_from_size)
-#define g_to_size (pa->g_to_size)
-#define g_want_to (pa->g_want_to)
-#define g_FWD (pa->g_FWD)
-#define g_pull_fn (pa->g_pull_fn)
-#define g_pull_ctx (pa->g_pull_ctx)
-#define g_body_left (pa->g_body_left)
-#define g_pull_eof (pa->g_pull_eof)
-#define RC (pa->RC)
-#define g_rcerr (pa->g_rcerr)
-#define g_reject (pa->g_reject)
-#define g_flash_touched (pa->g_flash_touched)
-#define ARENA (pa->ARENA)
-#define Jbuf (ARENA.apply.jbuf)
-#define SAst (ARENA.apply.sa)
-#define g_jcount (pa->g_jcount)
-#define g_smap_b (pa->g_smap_b)
-#define g_smap_v (pa->g_smap_v)
-#define g_smap_n (pa->g_smap_n)
-#define g_orow_buf (pa->g_orow_buf)
-#define g_orow_base (pa->g_orow_base)
-#define g_orow_dirty (pa->g_orow_dirty)
-#define M_gd (pa->MDL_tok.gd)
-#define M_gl (pa->MDL_tok.gl)
-#define M_gs (pa->MDL_tok.gs)
-#define M_go (pa->MDL_tok.go)
-#define M_glo (pa->MDL_tok.glo)
-#define M_outb (pa->MDL_tok.outb)
-#define g_out_en (pa->g_out_en)
-#define g_oexp (pa->g_oexp)
-#define M_pg (pa->MDL_pre.pg)
-#define M_pgn (pa->MDL_pre.pgn)
-#define M_pg2 (pa->MDL_pre.pg2)
-#define M_gdl (pa->MDL_pre.gdl)
-#define M_gel (pa->MDL_pre.gel)
-#define M_gadj (pa->MDL_pre.gadj)
-#define M_dibl (pa->MDL_pre.dibl)
-#define M_diex (pa->MDL_pre.diex)
-#define M_lit0 (pa->M_lit0)
-#define M_lit1 (pa->M_lit1)
-#define g_litprev (pa->g_litprev)
-#define M_dval (pa->MDL_pre.dval)
-#define M_flag (pa->MDL_tok.flag)
-#define M_rep0 (pa->MDL_tok.rep0)
-#define g_rep0h (pa->g_rep0h)
-#define g_lastdist (pa->g_lastdist)
-#define DR_DIC_BL (pa->DR_DIC_BL)
-#define DR_DIC_EX (pa->DR_DIC_EX)
-#define DR_BL (pa->DR_BL)
-#define DR_EX (pa->DR_EX)
-#define g_psrc_ldr (pa->g_psrc_ldr)
-#define g_psrc_lo (pa->g_psrc_lo)
-#define g_psrc_even (pa->g_psrc_even)
-
 _Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
 _Static_assert(offsetof(A1Arena, apply.sa) == JREGION && (offsetof(A1Arena, apply.sa) & 3u)==0u,
                "A1ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
@@ -249,8 +194,8 @@ enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 /* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
  * (later reads keep returning 0 without re-invoking the callback). */
 static int pull_raw(PatchApply *pa, uint8_t*out){
-    if(g_pull_eof) return 0;
-    if(!g_pull_fn(g_pull_ctx,out)){ g_pull_eof=1; return 0; }
+    if(pa->g_pull_eof) return 0;
+    if(!pa->g_pull_fn(pa->g_pull_ctx,out)){ pa->g_pull_eof=1; return 0; }
     return 1;
 }
 /* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
@@ -261,9 +206,9 @@ enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
 
 static uint8_t next_byte(PatchApply *pa){
     uint8_t b;
-    if(g_body_left==0) return 0;
-    if(!pull_raw(pa,&b)){ g_body_left=0; g_rcerr=1; return 0; }
-    g_body_left--;
+    if(pa->g_body_left==0) return 0;
+    if(!pull_raw(pa,&b)){ pa->g_body_left=0; pa->g_rcerr=1; return 0; }
+    pa->g_body_left--;
     return b;
 }
 static int env_byte(PatchApply *pa, uint8_t*out){ return pull_raw(pa,out); }             /* envelope: strict */
@@ -292,33 +237,33 @@ static int env_zz_abs(PatchApply *pa, uint32_t base, uint32_t*out){
 
 /* divide-free range decoder reading through the (possibly blocking) byte source. */
 static int rc_init(PatchApply *pa){
-    RC.range = 0xFFFFFFFFu; RC.code = 0;
+    pa->RC.range = 0xFFFFFFFFu; pa->RC.code = 0;
     /* The encoder drops the always-zero LZMA leading cache byte from the wire, so the
      * 4 code bytes are read directly (no skip). */
-    for (int i=0;i<4;i++) RC.code = (RC.code<<8) | next_byte(pa);
-    return !g_rcerr;
+    for (int i=0;i<4;i++) pa->RC.code = (pa->RC.code<<8) | next_byte(pa);
+    return !pa->g_rcerr;
 }
 /* range-coder DECODE core shared by both the adaptive bit and the raw (equiprobable) bit: split at
  * `bound`, pick the sub-interval the code lands in, return the bit, then renorm (refill from the FIFO
  * until range climbs back above KTOP). The readers differ ONLY in `bound` + probability adaptation. */
 static int rc_decode(PatchApply *pa, uint32_t bound){
-    uint32_t code=RC.code, range=RC.range;
+    uint32_t code=pa->RC.code, range=pa->RC.range;
     int b;
     if (code<bound){ range=bound; b=0; } else { code-=bound; range-=bound; b=1; }
     while (range<RC_KTOP){ code=(code<<8)|next_byte(pa); range<<=8; }
-    RC.code=code; RC.range=range;
+    pa->RC.code=code; pa->RC.range=range;
     return b;
 }
 static int s_bit_r(PatchApply *pa, uint16_t*prob,int rate){
     uint32_t p=*prob;
-    int b=rc_decode(pa,RC_PROB_BOUND(RC.range,p));
+    int b=rc_decode(pa,RC_PROB_BOUND(pa->RC.range,p));
     *prob=rc_adapt(p,b,rate);
     return b;
 }
 /* RC_S_BIT_RATE: shared Golomb / order-2 flag / MTF rep+hit adaptation rate.
  * literal/dval bit-trees keep their own per-tree rate via s_bit_r. */
 static int s_bit(PatchApply *pa, uint16_t*prob){ return s_bit_r(pa,prob,RC_S_BIT_RATE); }
-static int s_raw(PatchApply *pa){ return rc_decode(pa,RC.range>>1); }
+static int s_raw(PatchApply *pa){ return rc_decode(pa,pa->RC.range>>1); }
 /* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
@@ -340,7 +285,7 @@ static int s_bt(PatchApply *pa, A1BitTree*t,int rate){
     return m-256;
 }
 static int32_t bb_unzz(PatchApply *pa, uint32_t u){
-    if(!rc_unzz32_valid(u)){ g_rcerr=1; return 0; }
+    if(!rc_unzz32_valid(u)){ pa->g_rcerr=1; return 0; }
     return rc_unzz32_value(u);
 }
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
@@ -348,7 +293,7 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
         b=s_bt(pa,t,rate);
-        if(A1_ULEB32_OVERFLOW(sh,b)){ g_rcerr=1; return 0; }
+        if(A1_ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
     }while(b&0x80);
     return bb_unzz(pa,acc);
@@ -371,7 +316,7 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
  * no-op and the apply cleanly rejects. clampmax==UG_CTX(=6) reproduces UG_C over the 7-entry Golomb
  * u[]; clampmax==IDX_CTX-1 (=4) reproduces the index code's min(pos,4) over the 5-entry u[]. */
 static uint32_t s_unary(PatchApply *pa, uint16_t*u,uint32_t clampmax,uint32_t cap){
-    uint32_t cl=0; while(s_bit(pa,&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ g_rcerr=1; return 0; } }
+    uint32_t cl=0; while(s_bit(pa,&u[cl<clampmax?cl:clampmax])==1){ if(++cl>cap){ pa->g_rcerr=1; return 0; } }
     return cl;
 }
 /* shared Rice mantissa: read `cnt` adaptive bits MSB-first (significance-descending) from priors row[].
@@ -388,7 +333,7 @@ static uint32_t s_ug_mant_gamma(PatchApply *pa, A1UGGamma*g,int cnt){
 }
 static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
     uint32_t cl=s_unary(pa,g->u,UG_CTX,RC_RICE_UNARY_MAX);
-    if(g_rcerr || (g->k && cl>(UINT32_MAX>>g->k))){ g_rcerr=1; return 0; }
+    if(pa->g_rcerr || (g->k && cl>(UINT32_MAX>>g->k))){ pa->g_rcerr=1; return 0; }
     return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k);
 }
 static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
@@ -432,9 +377,9 @@ static uint32_t crc32_flash(uint32_t n){
 /* Binary search on slot>>8 over [0, g_jcount). On a hit *at is the matching slot and the return
  * is 1; on a miss *at is the sorted insertion index and the return is 0. */
 static int jr_find(PatchApply *pa, uint32_t pos, int*at){
-    int lo=0, hi=(int)g_jcount-1;
+    int lo=0, hi=(int)pa->g_jcount-1;
     while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1);
-        uint32_t k=Jbuf[mid]>>8;
+        uint32_t k=pa->ARENA.apply.jbuf[mid]>>8;
         if(k==pos){ *at=mid; return 1; } if(k<pos) lo=mid+1; else hi=mid-1; }
     *at=lo;
     return 0;
@@ -443,15 +388,15 @@ static int jr_put(PatchApply *pa, uint32_t pos, uint8_t b){
     if(pos>=RC_PACKED_POS_LIMIT) return -1;          /* slot packs pos in RC_PACKED_POS_BITS */
     int at;
     if(jr_find(pa,pos,&at)) return 0;                /* never-evict: keep the first write */
-    if(g_jcount>=JSLOTS) return -1;                  /* over-depth: refuse BEFORE any write */
-    if(at<(int)g_jcount) memmove(Jbuf+at+1, Jbuf+at, (size_t)((int)g_jcount-at)*4u);
-    Jbuf[at]=(pos<<8)|b;
-    g_jcount++;
+    if(pa->g_jcount>=JSLOTS) return -1;                  /* over-depth: refuse BEFORE any write */
+    if(at<(int)pa->g_jcount) memmove(pa->ARENA.apply.jbuf+at+1, pa->ARENA.apply.jbuf+at, (size_t)((int)pa->g_jcount-at)*4u);
+    pa->ARENA.apply.jbuf[at]=(pos<<8)|b;
+    pa->g_jcount++;
     return 0;
 }
 static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
     int at;
-    if(jr_find(pa,pos,&at)){ *out=(uint8_t)Jbuf[at]; return 1; }
+    if(jr_find(pa,pos,&at)){ *out=(uint8_t)pa->ARENA.apply.jbuf[at]; return 1; }
     return 0;
 }
 
@@ -494,54 +439,54 @@ static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 _Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
 _Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
 static void orow_commit_slot(PatchApply *pa, uint32_t s){
-    if(g_orow_base[s]!=OROW_NONE && g_orow_dirty[s]){
-        uint32_t base=g_orow_base[s], end=base+OUTROW; if(end>g_image_span) end=g_image_span;
-        g_flash_touched=1;
+    if(pa->g_orow_base[s]!=OROW_NONE && pa->g_orow_dirty[s]){
+        uint32_t base=pa->g_orow_base[s], end=base+OUTROW; if(end>pa->g_image_span) end=pa->g_image_span;
+        pa->g_flash_touched=1;
         /* force the (at most one) row erase up front, then program from the RAM buffer so every
          * byte is a pure 1->0 program (no further erase). All bytes of the row were produced by the
          * monotonic output, so the buffer holds the exact final content. */
         for(uint32_t a=base;a<end;a++){ if(flash_read(a)!=0xFFu){ flash_write(a,0xFFu); break; } }
-        for(uint32_t a=base;a<end;a++) flash_write(a, g_orow_buf[s][a-base]);
+        for(uint32_t a=base;a<end;a++) flash_write(a, pa->g_orow_buf[s][a-base]);
     }
-    g_orow_dirty[s]=0; g_orow_base[s]=OROW_NONE;
+    pa->g_orow_dirty[s]=0; pa->g_orow_base[s]=OROW_NONE;
 }
 /* final flush: commit remaining slots in WRITE order (frontier monotonicity holds on NVM). */
 static void orow_commit_all(PatchApply *pa){
     for(uint32_t i=0;i<OUTROW_DEPTH;i++){
         uint32_t best=OROW_NONE, bs=0;
         for(uint32_t s=0;s<OUTROW_DEPTH;s++){
-            uint32_t b=g_orow_base[s];
+            uint32_t b=pa->g_orow_base[s];
             if(b==OROW_NONE) continue;
-            if(best==OROW_NONE || (g_FWD ? b<best : b>best)){ best=b; bs=s; }
+            if(best==OROW_NONE || (pa->g_FWD ? b<best : b>best)){ best=b; bs=s; }
         }
         if(best==OROW_NONE) break;
         orow_commit_slot(pa,bs);
     }
 }
-static void orow_reset(PatchApply *pa){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){ g_orow_base[s]=OROW_NONE; g_orow_dirty[s]=0; } }
+static void orow_reset(PatchApply *pa){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){ pa->g_orow_base[s]=OROW_NONE; pa->g_orow_dirty[s]=0; } }
 /* read one byte of ALREADY-PRODUCED output at absolute position a: an uncommitted row from
  * its RAM slot, anything else from flash. Valid streams only reference written positions; a
  * corrupt position yields stale flash bytes, which the CRC32(to) gate rejects. */
 static uint8_t out_read(PatchApply *pa, uint32_t a){
-    if(a>=g_image_span) return 0;
+    if(a>=pa->g_image_span) return 0;
     { uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
-      if(g_orow_base[s]==base) return g_orow_buf[s][a-base]; }
+      if(pa->g_orow_base[s]==base) return pa->g_orow_buf[s][a-base]; }
     return flash_read(a);
 }
 /* OUTPUT write: buffer in the row's slot, committing the slot's previous occupant (the row
  * exactly OUTROW_DEPTH rows behind) on a row change. */
 static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
-    if(a>=g_image_span) return;
+    if(a>=pa->g_image_span) return;
     uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
-    if(base!=g_orow_base[s]){
+    if(base!=pa->g_orow_base[s]){
         orow_commit_slot(pa,s);
         { uint32_t end=base+OUTROW;
-          if(end>g_image_span) end=g_image_span;
-          for(uint32_t x=base;x<end;x++) g_orow_buf[s][x-base]=flash_read(x); } /* preload (source not yet erased) */
-        g_orow_base[s]=base;   /* orow_commit_slot() above already cleared the dirty flag */
+          if(end>pa->g_image_span) end=pa->g_image_span;
+          for(uint32_t x=base;x<end;x++) pa->g_orow_buf[s][x-base]=flash_read(x); } /* preload (source not yet erased) */
+        pa->g_orow_base[s]=base;   /* orow_commit_slot() above already cleared the dirty flag */
     }
     { uint32_t off=a-base;
-      if(g_orow_buf[s][off]!=v){ g_orow_buf[s][off]=v; g_orow_dirty[s]=1; } }
+      if(pa->g_orow_buf[s][off]!=v){ pa->g_orow_buf[s][off]=v; pa->g_orow_dirty[s]=1; } }
 }
 /* ===================================================================================== */
 /* HYBRID STREAMED DELTAS (12 KiB build). Each field's                                              */
@@ -565,12 +510,12 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
     int32_t v;
     if(s_bit(pa,&d->hit)==1){
         uint32_t j=s_unary(pa,gix->u,IDX_CTX-1,cap)+1u;    /* cmp-1: dict idx 0 unreachable -> encode j-1 */
-        if(j>=(uint32_t)d->K){ g_rcerr=1; return 0; }
+        if(j>=(uint32_t)d->K){ pa->g_rcerr=1; return 0; }
         v=dic[j];
         rc_mtf_promote_i32(dic,j);
     } else {
-        v=s_bv(pa,&M_dval, RC_DVAL_RATE);
-        if((uint32_t)d->K>=cap){ g_rcerr=1; g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
+        v=s_bv(pa,&pa->MDL_pre.dval, RC_DVAL_RATE);
+        if((uint32_t)d->K>=cap){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
         rc_mtf_insert_i32(dic,&d->K,v);
     }
     return v;
@@ -585,13 +530,13 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
 /* The LZSS ring (size 2^SA_W) is the content history; backref distances <= 2^SA_W.             */
 /* ===================================================================================== */
-/* A1ApplyState type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
+/* A1ApplyState type + SA_RING/SA_MASK + the arena asserts live up with the ARENA
  * union (near JREGION), since the union embeds A1ApplyState directly in its apply phase. */
 A1_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
-    uint32_t gap=s_ug_gamma(pa,idx?&M_pg2:&M_pg);
-    if((idx && gap==0u) || gap>UINT32_MAX-*off){ g_rcerr=1; return 0; }
+    uint32_t gap=s_ug_gamma(pa,idx?&pa->MDL_pre.pg2:&pa->MDL_pre.pg);
+    if((idx && gap==0u) || gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
     *off+=gap;
-    if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ g_rcerr=1; return 0; }
+    if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; return 0; }
     return 1;
 }
 typedef struct { int32_t i, step; } A1CorrCur;
@@ -622,8 +567,8 @@ static uint8_t hy_src(PatchApply *pa, int32_t fp);   /* fwd decl: journal-aware 
 static inline int psrc_ldr_take(PatchApply *pa, uint32_t fpk){
     uint32_t i=(fpk>>2)&PSRC_TGT_MASK;
     uint32_t bit=1u<<(i&31u);
-    int hit=(g_psrc_ldr[i>>5]&bit)!=0;
-    g_psrc_ldr[i>>5]&=~bit;
+    int hit=(pa->g_psrc_ldr[i>>5]&bit)!=0;
+    pa->g_psrc_ldr[i>>5]&=~bit;
     return hit;
 }
 static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
@@ -644,17 +589,17 @@ static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t 
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
  * the next span selects M_lit0[LIT0_SEL(content[pos-1])] regardless of which token produced pos-1.
  * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
-static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; g_litprev=b; }
+static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; pa->g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
 static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
     for(;;){
-        if(g_rcerr) goto fail;
+        if(pa->g_rcerr) goto fail;
         if(s->tok_left>0){
             uint8_t b;
-            if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&M_lit1:&M_lit0[LIT0_SEL(g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
+            if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&pa->M_lit1:&pa->M_lit0[LIT0_SEL(pa->g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
             else if(s->tok_mode==2){ b=s->ring[s->tok_src & SA_MASK]; s->tok_src++; }
-            else { b=out_read(pa,s->tok_src); s->tok_src+=(uint32_t)(g_FWD?1:-1); }
-            if(g_rcerr) goto fail;
+            else { b=out_read(pa,s->tok_src); s->tok_src+=(uint32_t)(pa->g_FWD?1:-1); }
+            if(pa->g_rcerr) goto fail;
             sa_emit_ring(pa,s,b); s->tok_left--;
             if(s->tok_left==0) s->tok_mode=0;
             return b;
@@ -663,72 +608,72 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
          * span/match flag is IMPLICITLY "match": skip the coded bit but keep the order-2
          * flag history tracking the true token kinds (mirror emit_body last_span). */
         int is_match;
-        if(s->last_span){ M_flag.h=((M_flag.h<<1)|1)&3; is_match=1; }
-        else is_match=s_flag(pa,&M_flag);
+        if(s->last_span){ pa->MDL_tok.flag.h=((pa->MDL_tok.flag.h<<1)|1)&3; is_match=1; }
+        else is_match=s_flag(pa,&pa->MDL_tok.flag);
         if(!is_match){
-            uint32_t ln=s_ug_gamma(pa,&M_gs)+1u;
+            uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.gs)+1u;
             s->tok_mode=1; s->tok_left=ln; s->last_span=1;
         } else {
             uint32_t d;
-            int rb=s_bit(pa,&M_rep0[g_rep0h]); g_rep0h=rb;
-            if(rb){ d=g_lastdist; }                         /* rep0: reuse last distance */
-            else if(g_out_en && s_bit(pa,&M_outb)){         /* fresh + out-bit: long-range OUTPUT match */
-                int32_t dpos=bb_unzz(pa,s_ug_rice(pa,&M_go)); /* position as zigzag delta vs expected */
-                uint32_t p=rc_outmatch_pos(g_oexp,dpos);
-                uint32_t ln=s_ug_gamma(pa,&M_glo)+RC_OUTMATCH_MIN;
+            int rb=s_bit(pa,&pa->MDL_tok.rep0[pa->g_rep0h]); pa->g_rep0h=rb;
+            if(rb){ d=pa->g_lastdist; }                         /* rep0: reuse last distance */
+            else if(pa->g_out_en && s_bit(pa,&pa->MDL_tok.outb)){         /* fresh + out-bit: long-range OUTPUT match */
+                int32_t dpos=bb_unzz(pa,s_ug_rice(pa,&pa->MDL_tok.go)); /* position as zigzag delta vs expected */
+                uint32_t p=rc_outmatch_pos(pa->g_oexp,dpos);
+                uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.glo)+RC_OUTMATCH_MIN;
                 /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
                  * grow content (whose extras are byte-reversed) still matches produced output. */
-                if(g_rcerr || p>=g_image_span || (g_FWD ? ln>g_image_span-p : ln>p+1u)) goto fail;
-                g_oexp=rc_outmatch_next_expect(g_FWD,p,ln);  /* sequential runs keep deltas tiny */
+                if(pa->g_rcerr || p>=pa->g_image_span || (pa->g_FWD ? ln>pa->g_image_span-p : ln>p+1u)) goto fail;
+                pa->g_oexp=rc_outmatch_next_expect(pa->g_FWD,p,ln);  /* sequential runs keep deltas tiny */
                 s->tok_mode=3; s->tok_src=p; s->tok_left=ln; s->last_span=0;
                 continue;
             }
-            else { d=s_ug_rice(pa,&M_gd)+1u; g_lastdist=d; }
-            uint32_t ln=s_ug_gamma(pa,&M_gl)+1u;
+            else { d=s_ug_rice(pa,&pa->MDL_tok.gd)+1u; pa->g_lastdist=d; }
+            uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.gl)+1u;
             if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
             s->tok_mode=2; s->tok_src=s->ototal-d; s->tok_left=ln; s->last_span=0;
         }
     }
 fail:
-    g_rcerr=1;
+    pa->g_rcerr=1;
     return 0;
 }
 /* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
 static uint32_t sa_read_uleb(PatchApply *pa, A1ApplyState*s){
     uint32_t acc=0; int sh=0;
-    for(;;){ if(g_rcerr) return 0;
+    for(;;){ if(pa->g_rcerr) return 0;
         uint8_t b=sa_next_content(pa,s,0);
-        if(g_rcerr) return 0;
-        if(A1_ULEB32_OVERFLOW(sh,b)){ g_rcerr=1; return 0; }
+        if(pa->g_rcerr) return 0;
+        if(A1_ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
 }
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
 static void sa_journal(PatchApply *pa, int32_t tp){
-    if(tp>=0 && tp<(int32_t)g_from_size){ if(jr_put(pa,(uint32_t)tp, flash_read((uint32_t)tp))){ g_rcerr=1; g_reject=REJ_RESOURCE; }
+    if(tp>=0 && tp<(int32_t)pa->g_from_size){ if(jr_put(pa,(uint32_t)tp, flash_read((uint32_t)tp))){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; }
     }
 }
 static uint8_t hy_src_peek(PatchApply *pa, int32_t fp){
-    if(fp>=0 && (uint32_t)fp<g_from_size){ uint8_t jb; return jr_get(pa,(uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
+    if(fp>=0 && (uint32_t)fp<pa->g_from_size){ uint8_t jb; return jr_get(pa,(uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
     return 0;
 }
 static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
     if(rc_thumb_ldr_lit(up)){
         uint32_t i=((uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo)>>2)&PSRC_TGT_MASK;
-        g_psrc_ldr[i>>5]|=1u<<(i&31u);
+        pa->g_psrc_ldr[i>>5]|=1u<<(i&31u);
     }
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
 static void hy_src_rec(PatchApply *pa, int32_t fp, uint8_t v){
-    if(fp>=0 && (uint32_t)fp<g_from_size){
+    if(fp>=0 && (uint32_t)fp<pa->g_from_size){
         uint32_t a=(uint32_t)fp;
         if(a&1u){
-            if(g_psrc_even==a-1u) hy_half_rec(pa,a-1u,g_psrc_lo,v);
+            if(pa->g_psrc_even==a-1u) hy_half_rec(pa,a-1u,pa->g_psrc_lo,v);
         } else {
-            g_psrc_lo=v;
-            g_psrc_even=a;
+            pa->g_psrc_lo=v;
+            pa->g_psrc_even=a;
         }
     }
 }
@@ -770,22 +715,22 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
      * ks >= 0), and once fpk >= 0 the unsigned sum fp0+ks cannot wrap (0 <= fp0+ks < 2^32). */
     if(fp0 < -ks) return 0;                                /* fpk would be negative */
     uint32_t fpk=(uint32_t)fp0+(uint32_t)ks;
-    if(fpk>g_from_size || g_from_size-fpk<4u) return 0;    /* fpk+4 > from_size (no +4 overflow) */
+    if(fpk>pa->g_from_size || pa->g_from_size-fpk<4u) return 0;    /* fpk+4 > from_size (no +4 overflow) */
     if(fpk&1u) return 0;                                  /* BL is 2-aligned; LDR targets are 4-aligned */
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(pa,fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
-    int fwd_ldr_hit=(g_FWD && !(fpk&3u)) ? psrc_ldr_take(pa,fpk) : 0;
+    int fwd_ldr_hit=(pa->g_FWD && !(fpk&3u)) ? psrc_ldr_take(pa,fpk) : 0;
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
     if(rc_bl_pattern(up,lo)){
-        if(g_FWD && (fpk&2u)) (void)psrc_ldr_take(pa,fpk+2u);
+        if(pa->g_FWD && (fpk&2u)) (void)psrc_ldr_take(pa,fpk+2u);
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
-        int32_t res=pull_delta(pa,&DR_BL, &M_dibl, DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
-        if(g_rcerr) return 0;
+        int32_t res=pull_delta(pa,&pa->DR_BL, &pa->MDL_pre.dibl, pa->DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
+        if(pa->g_rcerr) return 0;
         /* byte shift -> imm24 halfword units. The subtract is done mod 2^32 (a corrupt map can
          * ship values near +-2^31; wrapped garbage is CRC-rejected, signed overflow would be UB);
          * valid map values are tiny, so the wrapped diff equals the true diff bit-exactly. */
-        int32_t pred=rc_smap_pred_bl(g_smap_b,g_smap_v,(int)g_smap_n,fpk,rc_bl_target(fpk,up,lo));
+        int32_t pred=rc_smap_pred_bl(pa->g_smap_b,pa->g_smap_v,(int)pa->g_smap_n,fpk,rc_bl_target(fpk,up,lo));
         rc_bl_dereloc(up, lo, (uint32_t)pred+(uint32_t)res, packed);
         hy_word4_rec(pa,fpk,w);                             /* record the 4 BL bytes into the ring */
         return 1;
@@ -793,10 +738,10 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
     /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
      * mirrors the encoder's pure(k) + op_ldr_set; positions are derived, not shipped. ldr_targets
      * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
-    if(pure && (g_FWD ? fwd_ldr_hit : ldr_targets(pa, fp0, dl, fpk))){
-        int32_t res=pull_delta(pa,&DR_EX, &M_diex, DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
-        if(g_rcerr) return 0;
-        int32_t pred=rc_smap_pred_ex(g_smap_b,g_smap_v,(int)g_smap_n,w); /* pointer words move by the value's shift */
+    if(pure && (pa->g_FWD ? fwd_ldr_hit : ldr_targets(pa, fp0, dl, fpk))){
+        int32_t res=pull_delta(pa,&pa->DR_EX, &pa->MDL_pre.diex, pa->DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
+        if(pa->g_rcerr) return 0;
+        int32_t pred=rc_smap_pred_ex(pa->g_smap_b,pa->g_smap_v,(int)pa->g_smap_n,w); /* pointer words move by the value's shift */
         hy_word4_rec(pa,fpk,w);                             /* record the 4 EX bytes into the ring */
         rc_u32le_put(packed, (w-((uint32_t)pred+(uint32_t)res))&0xffffffffu);
         return 1;
@@ -819,9 +764,9 @@ static void A1_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc,
          * bound the gap and the stepped position in pure uint32 (no wrap can slip through:
          * g<=lim and base<=lim keep base+g < 2^32; a backward underflow lands >lim). */
         uint32_t np=(lc->step>0)? (uint32_t)lc->nextpos+g : (uint32_t)lc->nextpos-g;
-        if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ g_rcerr=1; lc->nextpos=-1; return; }
+        if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ pa->g_rcerr=1; lc->nextpos=-1; return; }
         lc->nextpos=(int32_t)np; lc->litb=sa_next_content(pa,s,0);
-        if(g_rcerr){ lc->nextpos=-1; return; }
+        if(pa->g_rcerr){ lc->nextpos=-1; return; }
     }
     else lc->nextpos=-1;
 }
@@ -832,10 +777,10 @@ A1_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, i
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
 static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
-    for(int32_t i=0;i<el && !g_rcerr;i++){
+    for(int32_t i=0;i<el && !pa->g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=sa_next_content(pa,s,(int)((tp0+dl+e)&1));
-        if(g_rcerr) return;
+        if(pa->g_rcerr) return;
         out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_take(s,cc,dl+e)));
     }
 }
@@ -843,66 +788,66 @@ static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int
 static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_step(pa,s,lc,nl); }
-    if(g_rcerr) return;
+    if(pa->g_rcerr) return;
     out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_take(s,cc,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
 static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
-    uint32_t dl_u=s_ug_gamma(pa,&M_gdl), el_u=s_ug_gamma(pa,&M_gel), adj_u=s_ug_gamma(pa,&M_gadj);
+    uint32_t dl_u=s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=s_ug_gamma(pa,&pa->MDL_pre.gadj);
     int32_t adj=bb_unzz(pa,adj_u);
     /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= A1_MAX_IMAGE via
      * decode_header envelope checks + _Static_assert), so this pure 32-bit headroom test (check dl,
      * then el against the rest of span) also subsumes the dl_u/el_u < 2^31 bound: any value >= 2^31
      * exceeds the span and is rejected here. Cast to int32 only after the guard passes. */
-    if(g_rcerr || dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ g_rcerr=1; return; }
+    if(pa->g_rcerr || dl_u>(uint32_t)pa->g_image_span || el_u>(uint32_t)pa->g_image_span-dl_u){ pa->g_rcerr=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
     int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
     /* Feature 7B termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
      * writes >=1 byte. REJECT nw==0 here (do NOT trust the encoder): it is what guarantees the
      * frontier-terminated op loop advances every iteration and cannot spin on a corrupt stream. */
-    if(nw==0){ g_rcerr=1; return; }
+    if(nw==0){ pa->g_rcerr=1; return; }
     int32_t tp0,fp0;
-    if(g_FWD){
+    if(pa->g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
          * checked with A1_ADD_OVERFLOW (no 64-bit math). (For a valid stream fp is a small
          * in-range position, so this never trips.) */
         int32_t nfp;
-        if(nw>(int32_t)g_to_size || s->tp>(int32_t)g_to_size-nw ||
-           A1_ADD_OVERFLOW(s->fp,dl,&nfp) || A1_ADD_OVERFLOW(nfp,adj,&nfp)){ g_rcerr=1; return; }
+        if(nw>(int32_t)pa->g_to_size || s->tp>(int32_t)pa->g_to_size-nw ||
+           A1_ADD_OVERFLOW(s->fp,dl,&nfp) || A1_ADD_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
         tp0=s->tp; fp0=s->fp; s->tp=s->tp+nw; s->fp=nfp;
     } else {
         int32_t nfp;
         if(s->tp<nw ||
-           A1_SUB_OVERFLOW(s->fp,dl,&nfp) || A1_SUB_OVERFLOW(nfp,adj,&nfp)){ g_rcerr=1; return; }
+           A1_SUB_OVERFLOW(s->fp,dl,&nfp) || A1_SUB_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
         s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
     /* fp headroom: the copy loop and the ldr back-scan form fp0+K for K<=dl, so fp0+dl must be
      * representable in int32. The overflow builtins above only guard fp0+dl+adj / fp0 itself —
      * a corrupt adj walk can park fp0 near INT32_MAX and make the bare fp0+dl overflow (UB).
      * Valid streams keep fp inside the image plus small overshoot, so this never fires there. */
-    if(fp0>(int32_t)0x7fffffff-dl){ g_rcerr=1; return; }
+    if(fp0>(int32_t)0x7fffffff-dl){ pa->g_rcerr=1; return; }
     /* ---- [P]/[C] op-local offsets: journal preserves eagerly, then fill sorted corrections. ---- */
     uint32_t nwu=(uint32_t)nw;
     int corr=0;
-    uint32_t n=s_ug_gamma(pa,&M_pgn);
+    uint32_t n=s_ug_gamma(pa,&pa->MDL_pre.pgn);
     for(;;){
         uint32_t off=0;
-        if(corr && n>(uint32_t)OPC_CAP){ g_rcerr=1; g_reject=REJ_RESOURCE; return; }
-        if(n>nwu){ g_rcerr=1; return; }
+        if(corr && n>(uint32_t)OPC_CAP){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
+        if(n>nwu){ pa->g_rcerr=1; return; }
         if(corr) s->op_nc=(int32_t)n;
-        for(uint32_t i=0;i<n && !g_rcerr;i++){
+        for(uint32_t i=0;i<n && !pa->g_rcerr;i++){
             if(!op_next_offset(pa,&off,i,nwu)) return;
             if(corr){
-                int cbyte=s_bt(pa,&M_dval, RC_DVAL_RATE);
+                int cbyte=s_bt(pa,&pa->MDL_pre.dval, RC_DVAL_RATE);
                 s->op_corr[i]=(off<<8)|(uint32_t)cbyte;
             } else {
                 sa_journal(pa,tp0+(int32_t)off);
             }
         }
-        if(g_rcerr) return;
+        if(pa->g_rcerr) return;
         if(corr) break;
-        corr=1; n=s_ug_gamma(pa,&M_pgn);
+        corr=1; n=s_ug_gamma(pa,&pa->MDL_pre.pgn);
     }
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (ldr_targets). */
@@ -913,16 +858,16 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
      * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
      * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
     int32_t nl=(int32_t)sa_read_uleb(pa,s);
-    if(nl<0||nl>dl){ g_rcerr=1; return; }
+    if(nl<0||nl>dl){ pa->g_rcerr=1; return; }
     uint8_t packed[4];
-    int fwd=g_FWD; int32_t step=fwd?1:-1;
-    if(fwd){ memset(g_psrc_ldr,0,sizeof g_psrc_ldr); g_psrc_even=UINT32_MAX; }
+    int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
+    if(fwd){ memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX; }
     A1LitCur lc;
     A1CorrCur cc; corr_cur_init(&cc,s,fwd);
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
-    while(k>=0 && k<dl && !g_rcerr){
+    while(k>=0 && k<dl && !pa->g_rcerr){
         int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
         if(a0>=0 && a0+4<=dl){
             int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
@@ -942,8 +887,8 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
 
 /* ===================================================================================== */
 /* the decode entry: runs the whole single-stream decode start-to-finish on the CALLER's    */
-/* stack (plain calls, no coroutine/fiber). Shared state is passed via the file-scope globals*/
-/* that patch_apply_run primes before invoking decode_body.                                  */
+/* stack (plain calls, no coroutine/fiber). Shared state lives in the caller-owned PatchApply */
+/* object that patch_apply_run primes before invoking decode_body.                            */
 /* ===================================================================================== */
 /* ---- envelope header (strict reads): CRC32(from)[4] | CRC32(to)[4] | from_size uLEB |
  * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | [zz(fp_start) iff ascending] |
@@ -971,22 +916,22 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
     fpe=fs;
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !env_zz_abs(pa,fs,&fpe)) return 0;
-      g_FWD=!desc; }
+      pa->g_FWD=!desc; }
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
-    if(g_FWD){ uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
-      fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
+    if(pa->g_FWD){ uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
+      fp_start=bb_unzz(pa,z2); if(pa->g_rcerr) return 0; }
     if(!env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
-    g_from_size=fs; g_to_size=ts; g_want_to=want_to;
-    g_body_left=bl;
-    g_image_span = fs>ts ? fs : ts;
+    pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
+    pa->g_body_left=bl;
+    pa->g_image_span = fs>ts ? fs : ts;
     if(crc32_flash(fs)!=want_from) return 0;
-    { uint32_t *hist0=ARENA.seed.hist0, *hist1=ARENA.seed.hist1, *w=ARENA.seed.w;
+    { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
-      for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
-      lit_tree_from_hist(&M_lit1,hist1,w); }
-    { A1ApplyState*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?fp_start:(int32_t)fpe; }
+      for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&pa->M_lit0[c],hist0,w);
+      lit_tree_from_hist(&pa->M_lit1,hist1,w); }
+    { A1ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -1000,25 +945,25 @@ static int decode_body(PatchApply *pa){
      * and both are re-init'd fresh at rc_ugg_init(&M_gdl)/rc_ugg_init(&M_gadj) below before the token loop).
      * Coding the skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits
      * at ZERO extra SRAM. M_gdl carries the count + boundary gaps; M_gadj carries the zz shift values. */
-    rc_ugg_init(&M_gdl); rc_ugg_init(&M_gadj);
-    { uint32_t mn=s_ug_gamma(pa,&M_gdl);
-      if(mn>SMAP_CAP){ g_reject=REJ_RESOURCE; return 0; }
+    rc_ugg_init(&pa->MDL_pre.gdl); rc_ugg_init(&pa->MDL_pre.gadj);
+    { uint32_t mn=s_ug_gamma(pa,&pa->MDL_pre.gdl);
+      if(mn>SMAP_CAP){ pa->g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
-      for(uint32_t i=0;i<mn && !g_rcerr;i++){
-          uint32_t gap=s_ug_gamma(pa,&M_gdl); if(i) gap+=1u;
-          if(gap>UINT32_MAX-b){ g_rcerr=1; break; }
+      for(uint32_t i=0;i<mn && !pa->g_rcerr;i++){
+          uint32_t gap=s_ug_gamma(pa,&pa->MDL_pre.gdl); if(i) gap+=1u;
+          if(gap>UINT32_MAX-b){ pa->g_rcerr=1; break; }
           b+=gap;
-          g_smap_b[i]=b; g_smap_v[i]=bb_unzz(pa,s_ug_gamma(pa,&M_gadj));
+          pa->g_smap_b[i]=b; pa->g_smap_v[i]=bb_unzz(pa,s_ug_gamma(pa,&pa->MDL_pre.gadj));
       }
-      if(g_rcerr) return 0;
-      g_smap_n=(uint16_t)mn; }
+      if(pa->g_rcerr) return 0;
+      pa->g_smap_n=(uint16_t)mn; }
     /* out-match enable: 1 raw bit. 0 => no ko header field and no out-bit on any fresh match,
      * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
-    g_out_en=(uint8_t)s_raw(pa);
+    pa->g_out_en=(uint8_t)s_raw(pa);
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    rc_dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); rc_dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
+    rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL, DR_HIT_INIT); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX, DR_HIT_INIT);
     /* pre-kd apply-phase models: dval + dict-index seeds + preserve/corr/geometry gammas with their
      * structural seed_cont priors. This RE-INITs the gdl/gadj borrowed for the map header above; the
      * whole sequence is single-sourced as rc_init_prekd (rc_models.h, mirror of encoder emit_body). */
@@ -1026,24 +971,24 @@ static int decode_body(PatchApply *pa){
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    { A1ApplyState*s=&SAst;
+    { A1ApplyState*s=&pa->ARENA.apply.sa;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
-      int ko=g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
+      int ko=pa->g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
       rc_init_tok(&pa->MDL_tok,kd,ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 prior */
-      g_oexp=g_FWD?0u:g_to_size;
-      if(g_rcerr) return 0;
+      pa->g_oexp=pa->g_FWD?0u:pa->g_to_size;
+      if(pa->g_rcerr) return 0;
       /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
        * until tp reaches 0. This is SAFE because sa_apply_op REJECTS any zero-output op (nw==0), so
        * every accepted op advances the frontier by >=1 and the overshoot/underrun guards cap it: the
        * loop runs at most to_size times, then rejects (a corrupt stream cannot spin). A truncated
        * stream decodes zero-fill garbage that trips a geometry/frontier guard or lands a wrong image
        * that CRC32(to) rejects. */
-      while(!g_rcerr && (g_FWD ? s->tp!=(int32_t)g_to_size : s->tp!=0)) sa_apply_op(pa,s);
+      while(!pa->g_rcerr && (pa->g_FWD ? s->tp!=(int32_t)pa->g_to_size : s->tp!=0)) sa_apply_op(pa,s);
       /* tp must land exactly; the loop guarantees it on the clean path (it exits only on g_rcerr or
        * tp==target, and sa_apply_op's frontier guards make overshoot impossible), so no post-loop tp
        * landing check is needed. fp is unchecked in both directions — CRC32(to) validates the image. */
-      if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
-      if(g_rcerr) return 0;
+      if(!pa->g_rcerr && s->tok_mode!=0) pa->g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
+      if(pa->g_rcerr) return 0;
       orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
     }
     /* body complete: the caller verifies CRC32(to) (g_want_to) over the final image before
@@ -1066,9 +1011,9 @@ static void A1_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint3
  * the reason). */
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
-    g_pull_fn=next; g_pull_ctx=ctx;
-    if(!decode_body(pa) || crc32_flash(g_to_size)!=g_want_to){
-        if(!g_reject) g_reject=REJ_CORRUPT;
+    pa->g_pull_fn=next; pa->g_pull_ctx=ctx;
+    if(!decode_body(pa) || crc32_flash(pa->g_to_size)!=pa->g_want_to){
+        if(!pa->g_reject) pa->g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
 }
@@ -1077,75 +1022,21 @@ static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *c
  * firmware needs a larger build) vs REJ_CORRUPT (malformed/truncated/wrong-image). Prefer this
  * accessor over reading g_reject directly; it is unused-static-inline and compiles out when the
  * integrator does not call it (no ARM .text cost). */
-static inline int patch_apply_reject(const PatchApply *pa){ return g_reject; }
+static inline int patch_apply_reject(const PatchApply *pa){ return pa->g_reject; }
 
 /* After PATCH_APPLY_ERROR, whether any flash_write happened this run: 0 = old image intact
  * (still bootable, safe to retry after fixing the cause), 1 = image partially overwritten
  * (bootloader recovery required). Same unused-static-inline compile-out as patch_apply_reject. */
-static inline int patch_apply_flash_touched(const PatchApply *pa){ return g_flash_touched; }
+static inline int patch_apply_flash_touched(const PatchApply *pa){ return pa->g_flash_touched; }
 
 /* Parsed patch geometry/state after a completed run. These keep host harnesses and
  * integrations from depending on decoder global names while still compiling out when unused. */
-static inline uint32_t patch_apply_from_size(const PatchApply *pa){ return g_from_size; }
-static inline uint32_t patch_apply_to_size(const PatchApply *pa){ return g_to_size; }
-static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return g_image_span; }
-static inline int patch_apply_forward(const PatchApply *pa){ return g_FWD; }
-static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_jcount; }
+static inline uint32_t patch_apply_from_size(const PatchApply *pa){ return pa->g_from_size; }
+static inline uint32_t patch_apply_to_size(const PatchApply *pa){ return pa->g_to_size; }
+static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return pa->g_image_span; }
+static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
+static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa->g_jcount; }
 
-#undef g_image_span
-#undef g_from_size
-#undef g_to_size
-#undef g_want_to
-#undef g_FWD
-#undef g_pull_fn
-#undef g_pull_ctx
-#undef g_body_left
-#undef g_pull_eof
-#undef RC
-#undef g_rcerr
-#undef g_reject
-#undef g_flash_touched
-#undef ARENA
-#undef Jbuf
-#undef SAst
-#undef g_jcount
-#undef g_smap_b
-#undef g_smap_v
-#undef g_smap_n
-#undef g_orow_buf
-#undef g_orow_base
-#undef g_orow_dirty
-#undef M_gd
-#undef M_gl
-#undef M_gs
-#undef M_go
-#undef M_glo
-#undef M_outb
-#undef g_out_en
-#undef g_oexp
-#undef M_pg
-#undef M_pgn
-#undef M_pg2
-#undef M_gdl
-#undef M_gel
-#undef M_gadj
-#undef M_dibl
-#undef M_diex
-#undef M_lit0
-#undef M_lit1
-#undef g_litprev
-#undef M_dval
-#undef M_flag
-#undef M_rep0
-#undef g_rep0h
-#undef g_lastdist
-#undef DR_DIC_BL
-#undef DR_DIC_EX
-#undef DR_BL
-#undef DR_EX
-#undef g_psrc_ldr
-#undef g_psrc_lo
-#undef g_psrc_even
 #undef A1_NOINLINE
 #undef A1_ALWAYS_INLINE
 #undef A1_ADD_OVERFLOW
