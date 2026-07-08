@@ -36,6 +36,14 @@ accidental duplicate decoder text in final firmware, include the decoder from a
 single update `.c` file and route other application modules through that update
 module's local API.
 
+The repository ARM `.text/.data/.bss` release metric is the static-wrapper
+integration built by `make check-arm`: one file-scope `PatchApply` object and a
+small `rcv3_run(next, ctx)` wrapper that passes that object to
+`patch_apply_run()`. The generic caller-owned call shape shown below is the
+public API contract, but it is not the shape used for the pinned ARM size
+ratchet; product firmware using a different wrapper should size that wrapper in
+its own build.
+
 The target must provide exactly two flash primitives:
 
 ```c

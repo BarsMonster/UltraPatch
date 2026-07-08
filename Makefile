@@ -65,6 +65,9 @@ BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10540
 BASE_ARM_SOFT_DIV ?= 1
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
+# The production ARM size gate intentionally measures the static-state wrapper integration
+# used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;
+# product notes/gate output must not present this number as shape-independent.
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
 # Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
 # decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
@@ -128,6 +131,7 @@ check-arm-internal:
 	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
+	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
 	test "$$1" -le "$(BASE_ARM_TEXT)"; \
 	test "$$2" -le "$(BASE_ARM_DATA)"; \
