@@ -542,7 +542,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             for (int cix = 0, no = (pt->out_en && nocand) ? nocand[i] : 0; cix < no; cix++) {
                 int32_t opos = ocands[i][cix].pos, olm = ocands[i][cix].len;
                 uint64_t obase = ci + out_extra[h] + pt->opos_avg;
-                (void)opos;
                 for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= olm; l++) {
                     size_t j = i + (size_t)l;
                     uint64_t c = obase + ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
@@ -649,14 +648,11 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)((uint32_t)L0[b] * PR_SCALE);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
-    for (int h = 0; h < 4; h++) pt->fspan_c[h] = PR_SCALE;
     ugg_init_e(&pt->gs);
     ugg_init_e(&pt->gl);
     ugr_init_e(&pt->gd, PATHE_W);
-    ugg_init_e(&pt->glo);
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
-    pt->out_en = 0;
 }
 
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
