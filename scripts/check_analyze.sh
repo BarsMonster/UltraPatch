@@ -46,7 +46,7 @@ analyze() { # analyze <src> <extra-defines>
 # without the env (ENC_MODULES unset), fall back to globbing src/enc_*.c.
 : "${ENC_MODULES:=$(echo src/enc_*.c)}"
 
-analyze src/patch_generate.c "-DULTRAPATCH_MAIN"
+analyze src/patch_generate.c ""
 for m in $ENC_MODULES; do
     analyze "$m" ""
 done

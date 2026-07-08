@@ -145,7 +145,6 @@ static void usage(FILE *out, const char *prog) {
             prog, prog);
 }
 
-#ifdef ULTRAPATCH_MAIN
 int main(int argc, char **argv) {
     int decode = 0, mode_set = 0;
     const char *pos[3] = {0};
@@ -179,4 +178,3 @@ int main(int argc, char **argv) {
     encode_a1(pos[0], pos[1], pos[2]);
     return 0;
 }
-#endif

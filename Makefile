@@ -102,7 +102,7 @@ decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
-	$(CC) $(CFLAGS) -DULTRAPATCH_MAIN -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
 
 check-internal: ultrapatch
 	@set -e; \
