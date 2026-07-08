@@ -122,7 +122,6 @@ typedef union {
 typedef struct PatchApply {
     uint32_t g_image_span;
     uint32_t g_from_size, g_to_size, g_body_left;
-    int32_t  g_fp_start;
     uint32_t g_want_to;
     int      g_FWD;
 
@@ -165,7 +164,6 @@ typedef struct PatchApply {
 #define g_image_span (pa->g_image_span)
 #define g_from_size (pa->g_from_size)
 #define g_to_size (pa->g_to_size)
-#define g_fp_start (pa->g_fp_start)
 #define g_want_to (pa->g_want_to)
 #define g_FWD (pa->g_FWD)
 #define g_pull_fn (pa->g_pull_fn)
@@ -960,6 +958,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
 static int A1_NOINLINE decode_header(PatchApply *pa){
     uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
+    int32_t fp_start=0;
     if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs,0) || fs>A1_MAX_IMAGE || !env_uleb(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
     else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
@@ -976,7 +975,7 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
     if(g_FWD){ uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
-      g_fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
+      fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
     if(!env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     g_from_size=fs; g_to_size=ts; g_want_to=want_to;
     g_body_left=bl;
@@ -987,7 +986,7 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&M_lit0[c],hist0,w);
       lit_tree_from_hist(&M_lit1,hist1,w); }
-    { A1ApplyState*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?g_fp_start:(int32_t)fpe; }
+    { A1ApplyState*s=&SAst; memset(s,0,sizeof*s); s->tp=g_FWD?0:(int32_t)ts; s->fp=g_FWD?fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -1099,7 +1098,6 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef g_image_span
 #undef g_from_size
 #undef g_to_size
-#undef g_fp_start
 #undef g_want_to
 #undef g_FWD
 #undef g_pull_fn
