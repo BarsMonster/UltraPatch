@@ -32,38 +32,9 @@ static int op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t 
     return 0;
 }
 
-typedef struct {
-    const EncCtx *ctx;
-    const int32_t *readarr;
-    uint32_t from_size, to_size;
-    size_t budget, total;
-    int32_t cutoff, wi;
-    int found_cutoff;
-} PreserveBudgetWalk;
-
 static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
     if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
     return ctx->fwd ? (readarr[tpw] > tpw) : (readarr[tpw] >= 0 && readarr[tpw] < tpw);
-}
-
-static void preserve_budget_at(PreserveBudgetWalk *pw, int32_t tpw) {
-    if (preserve_needed_at(pw->ctx, pw->readarr, pw->from_size, tpw)) {
-        if (!pw->found_cutoff && pw->total == pw->budget) {
-            pw->cutoff = pw->ctx->fwd ? pw->wi : (int32_t)(pw->to_size - 1u - (uint32_t)pw->wi);
-            pw->found_cutoff = 1;
-        }
-        pw->total++;
-    }
-    pw->wi++;
-}
-
-static void preserve_budget_op(PreserveBudgetWalk *pw, const OpWalkEnt *we) {
-    int32_t n = we->o->diff_len + we->o->extra_len;
-    int FWD = pw->ctx->fwd;
-    for (int32_t i = 0; i < n; i++) {
-        int32_t off = FWD ? i : n - 1 - i;
-        preserve_budget_at(pw, we->tp + off);
-    }
 }
 
 static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
@@ -527,23 +498,6 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
     }
     free(ops->v);
     *ops = out;
-}
-
-size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from_size,
-                              uint32_t to_size, size_t budget, int32_t *cutoff) {
-    int FWD = ctx->fwd;
-    OpWalkEnt *m = opwalk_build(ops, 0);
-    int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
-    PreserveBudgetWalk bw = { ctx, readarr, from_size, to_size, budget, 0, 0, 0, 0 };
-    const OpWalkEnt *we;
-    OP_EVENT_FOR(we, m, ops->n, FWD, step) {
-        (void)step;
-        preserve_budget_op(&bw, we);
-    }
-    free(m);
-    free(readarr);
-    *cutoff = bw.cutoff;
-    return bw.total;
 }
 
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,

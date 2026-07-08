@@ -30,13 +30,49 @@ static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_
            !a1_row_covered(ctx, a, t);
 }
 
-static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to, uint32_t from_size,
-                                          uint32_t to_size, size_t budget) {
+/* Output position of the (budget+1)-th preserve in apply order, i.e. the cutoff C that
+ * degrade_hazard_at compares against. preserve_corrections_pc already accumulated the identical
+ * preserve set: caps.pres_total is the count and pc[step] holds each op's preserves. Within an op,
+ * FWD pushes ascending offsets (== apply order) while grow re-sorts pres ascending, so grow apply
+ * order is pc->pres reversed. Each op's output base tp tiles from 0 (opwalk_build), so the position
+ * of a preserve is tp + off. Only called when total > budget, so the (budget+1)-th preserve exists. */
+static int32_t degrade_pres_cutoff(const EncCtx *ctx, const OpVec *ops, const OpPC *pc, size_t budget) {
     int FWD = ctx->fwd;
-    int32_t C = 0;
-    size_t total = preserve_budget_cutoff(ctx, ops, from_size, to_size, budget, &C);
+    size_t n = ops->n;
+    int32_t *tp_of = (int32_t *)xmalloc((n ? n : 1) * sizeof(int32_t));
+    int32_t tp = 0;
+    for (size_t i = 0; i < n; i++) { tp_of[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len; }
+    int32_t cutoff = 0;
+    size_t seen = 0;
+    for (size_t step = 0; step < n; step++) {
+        const IVec *pres = &pc[step].pres;
+        for (size_t j = 0; j < pres->n; j++) {
+            if (seen == budget) {
+                int32_t off = FWD ? pres->v[j] : pres->v[pres->n - 1u - j];
+                cutoff = tp_of[opwalk_apply_index(n, FWD, step)] + off;
+                free(tp_of);
+                return cutoff;
+            }
+            seen++;
+        }
+    }
+    free(tp_of);
+    return cutoff;
+}
+
+static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
+                                          const uint8_t *frm, const FieldDeltaVec *fd,
+                                          uint32_t from_size, uint32_t to_size, size_t budget) {
+    int FWD = ctx->fwd;
+    /* Derive the preserve total and cutoff from a single preserve_corrections_pc pass over the same
+     * opwalk+readarr machinery (fp_start=0: degrade runs before fold_zero_ops). */
+    PlanCaps caps;
+    OpPC *pc = preserve_corrections_pc(ctx, ops, 0, frm, to->d, fd, from_size, to_size, &caps);
+    size_t total = caps.pres_total;
     ctx->deg_pres_needed = total;
-    if (total <= budget) return;
+    if (total <= budget) { oppc_array_free(pc, ops->n); return; }
+    int32_t C = degrade_pres_cutoff(ctx, ops, pc, budget);
+    oppc_array_free(pc, ops->n);
     /* C is the output position of the first preserve past the budget, in apply order. */
     OpVec out = {0};
     int32_t tp0 = 0, fp0 = 0;
@@ -91,7 +127,7 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
-    degrade_ops_to_journal_budget(ctx, &ops, to, from_size, to_size, A1_JSLOTS);
+    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size, A1_JSLOTS);
     return ops;
 }
 
