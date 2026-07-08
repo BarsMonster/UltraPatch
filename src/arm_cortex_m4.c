@@ -56,10 +56,11 @@ typedef struct {
     litset_t lit;   /* every literal target addr, skipped later in the same scan */
 } dis_t;
 
-static void ldr_common(const uint8_t *f, size_t fsize, uint32_t address, uint32_t imm,
+static void ldr_common(const uint8_t *f, size_t fsize, uint32_t ins, int32_t imm8,
                        map_t *ldr, litset_t *lit) {
-    if ((address % 4) == 2) address -= 2;
-    address += imm;
+    /* scan addresses are always even, so (ins & ~3) matches the historic
+       "round even address back to 4-alignment" step exactly. */
+    uint32_t address = (uint32_t)rc_ldr_target((int32_t)ins, imm8);
     if ((size_t)address + 4 > fsize) return;
     int32_t v = (int32_t)rc_u32le(f + address);
     map_push(ldr, address, v);
@@ -89,9 +90,9 @@ static void disassemble(const uint8_t *f, size_t fsize,
             if ((up & 0xf800) == 0xf000) {            /* bl / b.w */
                 if ((size_t)addr + 2 > fsize) continue;
                 uint16_t lo = rc_u16le(f + addr);
-                if ((lo & 0xd000) == 0xd000) { addr += 2; map_push(&d->bl, ins, rc_bl_imm24s(up, lo)); }
+                if (rc_bl_pattern(up, lo)) { addr += 2; map_push(&d->bl, ins, rc_bl_imm24s(up, lo)); }
             } else if (rc_thumb_ldr_lit(up)) {        /* ldr (literal) */
-                ldr_common(f, fsize, ins, 4 * (up & 0xff) + 4, &d->ldr, &d->lit);
+                ldr_common(f, fsize, ins, up & 0xff, &d->ldr, &d->lit);
             }
         }
     }
