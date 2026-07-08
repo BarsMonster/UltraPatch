@@ -83,12 +83,7 @@ extern void    flash_write(uint32_t addr, uint8_t val);
  * work area, or on a suitably sized stack. */
 typedef struct { uint32_t range, code; } A1RangeDec;
 
-/* ---- UGolomb (uses embedded UG_CTX mirror) ----
- * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
- * of (value+1), so <=31 for any uint32 (RC_UNARY_MAX). For RICE ('r') the prefix is the QUOTIENT
- * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, W=11 =>
- * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
- * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway). */
+/* RC_RICE_UNARY_MAX: adaptive-unary prefix cap (crash-hardening; see s_unary/s_ug_rice below). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 
 /* STREAMED-DELTA per-stream state A1DRStream (bl, ex) is single-sourced in rc_models.h: a
@@ -117,13 +112,11 @@ typedef struct {
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } A1ApplyState;
-/* SA_ARENA: apply-phase reservation follows the actual state object. */
-#define SA_ARENA ((uint32_t)sizeof(A1ApplyState))
-#define ARENA_BYTES (JREGION + SA_ARENA)
+#define ARENA_BYTES (JREGION + (uint32_t)sizeof(A1ApplyState))
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint32_t jbuf[JSLOTS]; union { A1ApplyState sa; uint8_t rsv[SA_ARENA]; } sab; } apply;
+    struct { uint32_t jbuf[JSLOTS]; A1ApplyState sa; } apply;
 } A1Arena;
 
 typedef struct PatchApply {
@@ -185,7 +178,7 @@ typedef struct PatchApply {
 #define g_flash_touched (pa->g_flash_touched)
 #define ARENA (pa->ARENA)
 #define Jbuf (ARENA.apply.jbuf)
-#define SAst (ARENA.apply.sab.sa)
+#define SAst (ARENA.apply.sa)
 #define g_jcount (pa->g_jcount)
 #define g_smap_b (pa->g_smap_b)
 #define g_smap_v (pa->g_smap_v)
@@ -225,9 +218,8 @@ typedef struct PatchApply {
 #define g_psrc_lo (pa->g_psrc_lo)
 #define g_psrc_even (pa->g_psrc_even)
 
-_Static_assert(sizeof(A1ApplyState) <= SA_ARENA, "A1ApplyState apply state exceeds its ARENA reservation");
 _Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
-_Static_assert(offsetof(A1Arena, apply.sab.sa) == JREGION && (offsetof(A1Arena, apply.sab.sa) & 3u)==0u,
+_Static_assert(offsetof(A1Arena, apply.sa) == JREGION && (offsetof(A1Arena, apply.sa) & 3u)==0u,
                "A1ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
 _Static_assert(A1_MAX_IMAGE <= 0x7fffffffu, "A1_MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
@@ -367,8 +359,8 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
 /* ---- UGolomb (uses embedded UG_CTX mirror) ----
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
  * of (value+1), so <=31 for any uint32 (RC_UNARY_MAX). For RICE ('r') the prefix is the QUOTIENT
- * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, W=11 =>
- * up to ~64 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
+ * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, SA_W default
+ * 10 (see patch_config.h) => up to ~32 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
  * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
  * mantissa: rows 1..UG_CTX-1 keep only reachable columns, the clamped row keeps all UG_CTX+1). */
@@ -386,10 +378,10 @@ static uint32_t s_unary(PatchApply *pa, uint16_t*u,uint32_t clampmax,uint32_t ca
     return cl;
 }
 /* shared Rice mantissa: read `cnt` adaptive bits MSB-first (significance-descending) from priors row[].
- * lsb anchors the ctx on significance from the LSB (UG_C(sig)) so the LSB gets ctx 0 and the wide
+ * The ctx is anchored on significance from the LSB (UG_C(sig)) so the LSB gets ctx 0 and the wide
  * MSBs share the clamp. Bit order on the wire stays MSB-first. */
-static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt,int lsb){
-    uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(lsb?sig:cnt-1-sig)])<<sig;
+static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt){
+    uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(sig)])<<sig;
     return v;
 }
 static uint32_t s_ug_mant_gamma(PatchApply *pa, A1UGGamma*g,int cnt){
@@ -400,7 +392,7 @@ static uint32_t s_ug_mant_gamma(PatchApply *pa, A1UGGamma*g,int cnt){
 static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
     uint32_t cl=s_unary(pa,g->u,UG_CTX,RC_RICE_UNARY_MAX);
     if(g_rcerr || (g->k && cl>(UINT32_MAX>>g->k))){ g_rcerr=1; return 0; }
-    return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k,1);
+    return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k);
 }
 static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
     int cl=(int)s_unary(pa,g->u,UG_CTX,RC_UNARY_MAX);
@@ -597,7 +589,7 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* The LZSS ring (size 2^SA_W) is the content history; backref distances <= 2^SA_W.             */
 /* ===================================================================================== */
 /* A1ApplyState type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
- * union (near JREGION), since the union embeds A1ApplyState and reserves SA_ARENA bytes for it. */
+ * union (near JREGION), since the union embeds A1ApplyState directly in its apply phase. */
 A1_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=s_ug_gamma(pa,idx?&M_pg2:&M_pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ g_rcerr=1; return 0; }
@@ -841,9 +833,6 @@ A1_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, i
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
-A1_ALWAYS_INLINE void litcur_next(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
-    litcur_step(pa, s, lc, nl);
-}
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
 static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !g_rcerr;i++){
@@ -856,7 +845,7 @@ static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
 static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
-    if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_next(pa,s,lc,nl); }
+    if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_step(pa,s,lc,nl); }
     if(g_rcerr) return;
     out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_take(s,cc,K)));
 }
@@ -1170,7 +1159,6 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return g_
 #undef JREGION
 #undef SA_RING
 #undef SA_MASK
-#undef SA_ARENA
 #undef ARENA_BYTES
 #undef RC_UNARY_MAX
 #undef A1_ULEB32_OVERFLOW
