@@ -329,4 +329,4 @@ check-analyze-internal:
 	@scripts/check_analyze.sh
 
 clean-internal:
-	rm -f ultrapatch hy_enc hy_dec
+	rm -f ultrapatch $(DECODER_SINGLE_HDR)
