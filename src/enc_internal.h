@@ -17,10 +17,8 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define ENC_NORETURN __attribute__((noreturn))
-#define ENC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #else
 #define ENC_NORETURN
-#define ENC_ALWAYS_INLINE static inline
 #endif
 
 extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
