@@ -21,8 +21,6 @@
  * is no trailer or withhold ring. A single divide-free binary range coder (LZMA bound; no
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
- * Event-driven producers (ISR push) integrate via the optional SPSC ring adapter in
- * patch_apply_push_adapter.h, which stays OUTSIDE this device artifact.
  *
  * Reconstruction is NO-BAKE (A1): NO source writes. The [A] copy reads RAW from[fp]; the new image
  * is corrected at the monotonic output frontier by the to-ordered additive corrections [C]

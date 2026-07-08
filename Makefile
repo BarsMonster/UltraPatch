@@ -29,7 +29,6 @@ LDFLAGS += -Wl,--gc-sections
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
-ADAPTER_HDR := src/patch_apply_push_adapter.h
 DECODER_PUBLIC_HDRS := $(CONFIG_HDR) src/rc_models.h $(APPLY_HDR)
 DECODER_SINGLE_HDR ?= artifacts/patch_apply_single.h
 # Shared host-side NVM emulator, #included by patch_host_backend.c before patch_apply.h.
@@ -101,7 +100,7 @@ decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
 	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
-ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(ADAPTER_HDR) $(NVM_EMU)
+ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU)
 	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
 
 check-internal: ultrapatch
@@ -194,32 +193,6 @@ check-decoder-contract-internal:
 			$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
 		fi; \
 	done; \
-	{ printf '%s\n' '#include <stdint.h>'; \
-	  printf '%s\n' '#include "patch_apply_push_adapter.h"'; \
-	  printf '%s\n' 'typedef struct { PatchRing *r; int calls; } WaitCtx;'; \
-	  printf '%s\n' 'static void wait_feed(void *ctx){ WaitCtx *w=(WaitCtx *)ctx; w->calls++; if(w->calls==1) (void)patch_ring_push(w->r,0x44u); else patch_ring_eof(w->r); }'; \
-	  printf '%s\n' 'static void wait_count(void *ctx){ (*(int *)ctx)++; }'; \
-	  printf '%s\n' 'int main(void){'; \
-	  printf '%s\n' '  PatchRing r; uint8_t buf[2], out=0; int waits=0;'; \
-	  printf '%s\n' '  if(patch_ring_init(&r, buf, 3u, wait_count, &waits)) return 1;'; \
-	  printf '%s\n' '  if(patch_ring_init(&r, buf, 2u, 0, &waits)) return 2;'; \
-	  printf '%s\n' '  if(!patch_ring_init(&r, buf, 2u, wait_count, &waits)) return 3;'; \
-	  printf '%s\n' '  if(!patch_ring_push(&r, 0x11u) || !patch_ring_push(&r, 0x22u)) return 4;'; \
-	  printf '%s\n' '  if(patch_ring_push(&r, 0x33u)) return 5;'; \
-	  printf '%s\n' '  patch_ring_eof(&r);'; \
-	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x11u) return 6;'; \
-	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x22u) return 7;'; \
-	  printf '%s\n' '  if(patch_ring_next(&r, &out) || waits != 0) return 8;'; \
-	  printf '%s\n' '  WaitCtx wc; wc.r=&r; wc.calls=0;'; \
-	  printf '%s\n' '  if(!patch_ring_init(&r, buf, 2u, wait_feed, &wc)) return 9;'; \
-	  printf '%s\n' '  if(!patch_ring_next(&r, &out) || out != 0x44u || wc.calls != 1) return 10;'; \
-	  printf '%s\n' '  if(patch_ring_push(0, 0) || patch_ring_next(0, &out)) return 11;'; \
-	  printf '%s\n' '  patch_ring_eof(0);'; \
-	  printf '%s\n' '  return 0;'; \
-	  printf '%s\n' '}'; \
-	} > "$$tmp/ring.c"; \
-	$(CC) $(CFLAGS) -Isrc "$$tmp/ring.c" -o "$$tmp/ring"; \
-	"$$tmp/ring"; \
 	echo "decoder_contract=OK"
 
 check-models-internal:

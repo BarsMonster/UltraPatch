@@ -7,8 +7,6 @@ Production code lives under `src/`, with third-party code under `vendor/`:
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder entry point;
   ship it with `src/rc_models.h` and `src/patch_config.h`, or generate the
   single public decoder header with `make decoder-header`.
-- `src/patch_apply_push_adapter.h`: optional SPSC ring adapter for event-driven
-  (ISR push) producers; not part of the device decoder artifact or host CLI.
 - `src/patch_host_backend.c`: shared host reference-decoder backend used by
   `ultrapatch --decode` and encoder self-verification, including the host NVM
   emulator.
@@ -108,7 +106,6 @@ Device integration contract:
   `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
   block internally) and the return is the verdict. The decoder parses the
   envelope and verifies both CRC gates itself; there is no coroutine/fiber.
-  Event-driven producers adapt via `src/patch_apply_push_adapter.h`.
 - Do not run concurrent decodes against the same flash image; see
   `docs/device-integration.md` before wiring it into a bootloader.
 

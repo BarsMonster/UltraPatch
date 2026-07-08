@@ -156,22 +156,10 @@ hook. Pet the watchdog INSIDE the integrator's byte callback and flash
 primitives (the per-byte and per-row call-outs the decode already makes), not
 around the single `patch_apply_run` call.
 
-**Event-driven producers (ISR push)** adapt through the optional
-single-producer/single-consumer byte ring in `src/patch_apply_push_adapter.h`:
-the RX interrupt calls `patch_ring_push(&ring, byte)`, and the update task calls
-`patch_apply_run(&state, patch_ring_next, &ring)`. While the ring is empty the adapter
-invokes an integrator wait hook (typically WFI/WFE, an RTOS yield, or a
-transport poll) — the hook must allow the producer to run; never call
-`patch_apply_run` from the producer's own context. The adapter is deliberately
-not part of the device decoder artifact: `patch_apply.h` compiles and gets sized
-without it. `patch_ring_eof()` is only for abort/timeout paths; a valid patch
-finishes from the counted body before the adapter needs EOF.
-
 ### Aborting a transfer
 
 To abandon a decode mid-blob — a lost link, a user cancel, a transport timeout —
-the byte callback returns 0 or the push adapter's wait hook calls
-`patch_ring_eof()`. The decoder latches EOF, zero-fills any later range reads,
+the byte callback returns 0. The decoder latches EOF, zero-fills any later range reads,
 and terminates in BOUNDED time (an `O(to_size)` wind-down at worst, never an
 unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been modified
 when the abort lands, so recovery follows the same terminal-state matrix as any
