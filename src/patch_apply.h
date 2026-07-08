@@ -153,30 +153,19 @@ typedef struct PatchApply {
     uint32_t g_orow_base[OUTROW_DEPTH];
     uint8_t  g_orow_dirty[OUTROW_DEPTH];
 
-    A1UGRice  M_gd;
-    A1UGGamma M_gl, M_gs;
-    A1UGRice  M_go;
-    A1UGGamma M_glo;
-    uint16_t M_outb;
-    uint8_t  g_out_en;
+    A1TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     uint32_t g_oexp;
-    A1UGGamma M_pg;
-    A1UGGamma M_pgn;
-    A1UGGamma M_pg2;
-    A1UGGamma M_gdl, M_gel, M_gadj;
-    A1IdxUnary M_dibl, M_diex;
-    A1BitTree M_lit0[LIT0_CTX], M_lit1;
-    uint8_t g_litprev;
-    A1BitTree M_dval;
-    A1Flag1   M_flag;
-    uint16_t M_rep0[2];
     int g_rep0h;
     uint32_t g_lastdist;
+    A1PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    A1BitTree M_lit0[LIT0_CTX], M_lit1;
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
     A1DRStream DR_BL, DR_EX;
 
     uint32_t g_psrc_ldr[8];
     uint8_t  g_psrc_lo;
+    uint8_t  g_out_en;        /* loose bytes packed into the g_psrc_lo/g_psrc_even alignment hole */
+    uint8_t  g_litprev;
     uint32_t g_psrc_even;
 } PatchApply;
 
@@ -204,28 +193,28 @@ typedef struct PatchApply {
 #define g_orow_buf (pa->g_orow_buf)
 #define g_orow_base (pa->g_orow_base)
 #define g_orow_dirty (pa->g_orow_dirty)
-#define M_gd (pa->M_gd)
-#define M_gl (pa->M_gl)
-#define M_gs (pa->M_gs)
-#define M_go (pa->M_go)
-#define M_glo (pa->M_glo)
-#define M_outb (pa->M_outb)
+#define M_gd (pa->MDL_tok.gd)
+#define M_gl (pa->MDL_tok.gl)
+#define M_gs (pa->MDL_tok.gs)
+#define M_go (pa->MDL_tok.go)
+#define M_glo (pa->MDL_tok.glo)
+#define M_outb (pa->MDL_tok.outb)
 #define g_out_en (pa->g_out_en)
 #define g_oexp (pa->g_oexp)
-#define M_pg (pa->M_pg)
-#define M_pgn (pa->M_pgn)
-#define M_pg2 (pa->M_pg2)
-#define M_gdl (pa->M_gdl)
-#define M_gel (pa->M_gel)
-#define M_gadj (pa->M_gadj)
-#define M_dibl (pa->M_dibl)
-#define M_diex (pa->M_diex)
+#define M_pg (pa->MDL_pre.pg)
+#define M_pgn (pa->MDL_pre.pgn)
+#define M_pg2 (pa->MDL_pre.pg2)
+#define M_gdl (pa->MDL_pre.gdl)
+#define M_gel (pa->MDL_pre.gel)
+#define M_gadj (pa->MDL_pre.gadj)
+#define M_dibl (pa->MDL_pre.dibl)
+#define M_diex (pa->MDL_pre.diex)
 #define M_lit0 (pa->M_lit0)
 #define M_lit1 (pa->M_lit1)
 #define g_litprev (pa->g_litprev)
-#define M_dval (pa->M_dval)
-#define M_flag (pa->M_flag)
-#define M_rep0 (pa->M_rep0)
+#define M_dval (pa->MDL_pre.dval)
+#define M_flag (pa->MDL_tok.flag)
+#define M_rep0 (pa->MDL_tok.rep0)
 #define g_rep0h (pa->g_rep0h)
 #define g_lastdist (pa->g_lastdist)
 #define DR_DIC_BL (pa->DR_DIC_BL)
@@ -383,13 +372,9 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
  * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
  * mantissa: rows 1..UG_CTX-1 keep only reachable columns, the clamped row keeps all UG_CTX+1). */
-/* seed the unary-prefix priors of a gamma model toward "continue" for the first `depth` context
- * positions. Used by per-op geometry (diff_len/adj): firmware delta op magnitudes are essentially
- * never tiny, so cl>=depth almost always — this is a structural prior, NOT a corpus cap, and it
- * makes the very first op (e.g. a one-face update with few ops) as cheap as the warmed-up state. */
-static void ugg_seed_cont(A1UGGamma*g,int depth){
-    rc_seed_cont_u(g->u,UG_CTX,depth);  /* low p == bit1(continue) cheap */
-}
+/* the unary-prefix "continue"-seed helper (per-op geometry: firmware delta op magnitudes are
+ * essentially never tiny, a structural prior that makes the very first op as cheap as the warmed-up
+ * state) is single-sourced as rc_ugg_seed_cont in rc_models.h, folded into rc_init_prekd/rc_init_tok. */
 /* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
  * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
  * corrupt run-on so a zero-fill stream can't spin forever / shift by >=32 (RC_UNARY_MAX for gamma,
@@ -1045,28 +1030,19 @@ static int decode_body(PatchApply *pa){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
      * INLINE during apply (pull_delta in field_at). M_dval (escape/correction bytes), the two MTF
      * dict streams, and the two index UGolombs all persist through apply. ---- */
-    a1_bt_init(&M_dval); rc_dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); rc_dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
-    a1_idx_init(&M_dibl, RC_IDX_SEED); a1_idx_init(&M_diex, RC_IDX_SEED);   /* dict-hit/index seeds mirrored with encoder */
+    rc_dr_init(&DR_BL, DR_DIC_BL, DR_HIT_INIT); rc_dr_init(&DR_EX, DR_DIC_EX, DR_HIT_INIT);
+    /* pre-kd apply-phase models: dval + dict-index seeds + preserve/corr/geometry gammas with their
+     * structural seed_cont priors. This RE-INITs the gdl/gadj borrowed for the map header above; the
+     * whole sequence is single-sourced as rc_init_prekd (rc_models.h, mirror of encoder emit_body). */
+    rc_init_prekd(&pa->MDL_pre);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    rc_ugg_init(&M_pg); rc_ugg_init(&M_pgn);
-    rc_ugg_init(&M_pg2);
-    ugg_seed_cont(&M_pg2,RC_SEED_DEPTH_PG2);  /* rest preserve/corr gaps are strictly-increasing distinct offsets
-                               * => gap>=1 => M_pg2's first unary-prefix bit is ALWAYS continue (a format
-                               * invariant, like M_gl): seed it cheap from symbol 1. */
-    rc_ugg_init(&M_gdl); rc_ugg_init(&M_gel); rc_ugg_init(&M_gadj);
-    ugg_seed_cont(&M_gdl,RC_SEED_DEPTH_GDL); ugg_seed_cont(&M_gadj,RC_SEED_DEPTH_GADJ);
     { A1ApplyState*s=&SAst;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
-      rc_ugr_init(&M_gd,kd); rc_ugg_init(&M_gl); rc_ugg_init(&M_gs);
-      rc_ugr_init(&M_go,ko); rc_ugg_init(&M_glo); M_outb=RC_PHALF;
+      rc_init_tok(&pa->MDL_tok,kd,ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 prior */
       g_oexp=g_FWD?0u:g_to_size;
-      ugg_seed_cont(&M_gl,RC_SEED_DEPTH_GL);   /* matches are always len>=3 (value>=2 => cl>=1): M_gl's first
-                                 * unary prefix bit is ALWAYS continue, so seed it cheap. */
-      a1_fl_init(&M_flag);
-      M_rep0[0]=M_rep0[1]=RC_REP0_INIT;
       if(g_rcerr) return 0;
       /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
        * until tp reaches 0. This is SAFE because sa_apply_op REJECTS any zero-output op (nw==0), so

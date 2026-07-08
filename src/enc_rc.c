@@ -100,11 +100,6 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t) {
 void ugr_init_e(A1UGRice *g, int k) { rc_ugr_init(g, k); }
 void ugg_init_e(A1UGGamma *g) { rc_ugg_init(g); }
 
-/* mirror of decoder ugg_seed_cont: bias the first `depth` unary positions toward continue (bit 1). */
-void ugg_seed_cont_e(A1UGGamma *g, int depth) {
-    rc_seed_cont_u(g->u, UG_CTX, depth);
-}
-
 static uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v) {
     uint32_t cost = 0;
     for (uint32_t pos = 0; pos < v; pos++) {
@@ -155,16 +150,7 @@ void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko) {
     for (int c = 0; c < LIT0_CTX; c++) lit_tree_seed_e(frm, from_size, 0, &m->lit0[c]);
     lit_tree_seed_e(frm, from_size, 1, &m->lit1);
-    a1_fl_init(&m->flag);
-    ugr_init_e(&m->gd, kd);
-    ugg_init_e(&m->gl);
-    ugg_seed_cont_e(&m->gl, RC_SEED_DEPTH_GL);
-    ugg_init_e(&m->gs);
-    ugr_init_e(&m->go, ko);
-    ugg_init_e(&m->glo);
-    m->outb = RC_PHALF;
-    m->rep0[0] = RC_REP0_INIT;
-    m->rep0[1] = RC_REP0_INIT;
+    rc_init_tok(&m->tok, kd, ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 (rc_models.h) */
     m->rep0h = 0;
     m->last_dist = 0;
 }

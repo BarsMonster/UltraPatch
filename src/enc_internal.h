@@ -115,15 +115,10 @@ typedef struct {
 
 typedef struct {
     A1BitTree lit0[LIT0_CTX], lit1;
-    A1Flag1 flag;
-    A1BitTree dval;
-    A1UGRice gd, go;
-    A1UGGamma gl, gs, glo, pg, pgn, pg2, gdl, gel, gadj;
-    uint16_t outb;
-    A1IdxUnary dibl, diex;
+    A1PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    A1TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     DRE dr_bl, dr_ex;
     int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
-    uint16_t rep0[2];
     int rep0h;
     int32_t last_dist;
 } Models;
@@ -222,7 +217,6 @@ void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
 void ugr_init_e(A1UGRice *g, int k);
 void ugg_init_e(A1UGGamma *g);
-void ugg_seed_cont_e(A1UGGamma *g, int depth);
 void ugr_encode(A1UGRice *g, REnc *r, uint32_t v);
 void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);

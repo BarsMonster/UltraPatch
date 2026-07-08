@@ -168,11 +168,15 @@ RC_ALWAYS_INLINE void rc_init_probs(uint16_t*p,int n,uint16_t seed){
  * and the shared neutral-init helpers directly (no per-side wrappers). */
 typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } A1UGRice;
 typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } A1UGGamma;
-static inline void rc_ugr_init(A1UGRice*g,int k){
+/* noinline: these neutral-init loops are the primitives folded into rc_init_prekd/rc_init_tok below.
+ * Keeping them out-of-line preserves the single shared copy the host previously got via the ugg_init_e
+ * wrapper (inlining a copy per model at every apply-init site bloats host .text); on the Cortex-M0+
+ * -Os decoder they were already emitted once, so the attribute costs no ARM .text. */
+static __attribute__((noinline)) void rc_ugr_init(A1UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
-static inline void rc_ugg_init(A1UGGamma*g){
+static __attribute__((noinline)) void rc_ugg_init(A1UGGamma*g){
     for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
     for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
 }
@@ -339,6 +343,50 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
 /* Header raw k-field width: the distance rice parameter kd and (when out-matches are enabled) the
  * out-position rice parameter ko each ship as a fixed RC_KFIELD_BITS-bit raw field. */
 #define RC_KFIELD_BITS 4
+
+/* ---- Apply-phase model groups. The two blocks of field-for-field-identical models embedded in BOTH
+ * the decoder PatchApply (patch_apply.h) and the host encoder Models (enc_internal.h): the COMPILER,
+ * not a "must match" comment, now enforces the layout mirror, and the two rc_init_* helpers below are
+ * the SINGLE source of the ~20-statement apply-phase init call sequence that was hand-mirrored across
+ * decode_body, models_init_content and emit_body. Excluded by design: DR_BL/DR_EX (the host DRE wraps
+ * A1DRStream with its own dict ptr+cap), the literal trees (different seed sources), and rep0h/last_dist
+ * (zeroed by each side's memset). Init is idempotent per model, so either side may run these in whatever
+ * order suits its surrounding code (e.g. the encoder borrows gdl/gadj for the map header, then re-inits
+ * via rc_init_prekd) without moving the wire. */
+typedef struct {
+    A1BitTree  dval;                         /* MTF escape + [C] correction bytes */
+    A1IdxUnary dibl, diex;                   /* MTF dict-index unary priors (bl/ex) */
+    A1UGGamma  pg, pgn, pg2, gdl, gel, gadj; /* preserve/corr gaps + counts + per-op geometry */
+} A1PreKdModels;
+typedef struct {
+    A1UGRice  gd, go;                         /* backref-distance + out-position rice */
+    A1UGGamma gl, gs, glo;                    /* match / span / out-match lengths */
+    uint16_t  outb;                           /* out-match enable bit */
+    A1Flag1   flag;                           /* order-2 token flag */
+    uint16_t  rep0[2];                        /* rep0 (reuse-last-distance) prior */
+} A1TokModels;
+
+/* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
+static inline void rc_ugg_seed_cont(A1UGGamma*g,int depth){ rc_seed_cont_u(g->u,UG_CTX,depth); }
+
+/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (PG2/GDL/GADJ). */
+static inline void rc_init_prekd(A1PreKdModels*m){
+    a1_bt_init(&m->dval);
+    a1_idx_init(&m->dibl,RC_IDX_SEED); a1_idx_init(&m->diex,RC_IDX_SEED);
+    rc_ugg_init(&m->pg); rc_ugg_init(&m->pgn);
+    rc_ugg_init(&m->pg2); rc_ugg_seed_cont(&m->pg2,RC_SEED_DEPTH_PG2);
+    rc_ugg_init(&m->gdl); rc_ugg_init(&m->gel); rc_ugg_init(&m->gadj);
+    rc_ugg_seed_cont(&m->gdl,RC_SEED_DEPTH_GDL); rc_ugg_seed_cont(&m->gadj,RC_SEED_DEPTH_GADJ);
+}
+/* token-loop init: distance/out rice (kd/ko), length gammas, out-enable bit, flag, rep0 prior. */
+static inline void rc_init_tok(A1TokModels*m,int kd,int ko){
+    rc_ugr_init(&m->gd,kd); rc_ugr_init(&m->go,ko);
+    rc_ugg_init(&m->gl); rc_ugg_seed_cont(&m->gl,RC_SEED_DEPTH_GL);
+    rc_ugg_init(&m->gs); rc_ugg_init(&m->glo);
+    m->outb=RC_PHALF;
+    a1_fl_init(&m->flag);
+    m->rep0[0]=m->rep0[1]=RC_REP0_INIT;
+}
 
 #undef RC_ALWAYS_INLINE
 

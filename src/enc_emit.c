@@ -203,23 +203,23 @@ static uint64_t delta_xfer(DRE *D, A1IdxUnary *gix, A1BitTree *dval,
 static void emit_delta(Models *M, REnc *r, int kind, int32_t delta, int *overflow) {
     if (*overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
-    A1IdxUnary *gix = kind == EV_BL ? &M->dibl : &M->diex;
-    (void)delta_xfer(D, gix, &M->dval, r, delta, overflow);
+    A1IdxUnary *gix = kind == EV_BL ? &M->pre.dibl : &M->pre.diex;
+    (void)delta_xfer(D, gix, &M->pre.dval, r, delta, overflow);
 }
 
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
-    ugg_encode(&M->gdl, r, (uint32_t)o->diff_len);
-    ugg_encode(&M->gel, r, (uint32_t)o->extra_len);
-    ugg_encode(&M->gadj, r, rc_zz32(o->adj));
-    ugg_encode(&M->pgn, r, (uint32_t)pc->pres.n);
+    ugg_encode(&M->pre.gdl, r, (uint32_t)o->diff_len);
+    ugg_encode(&M->pre.gel, r, (uint32_t)o->extra_len);
+    ugg_encode(&M->pre.gadj, r, rc_zz32(o->adj));
+    ugg_encode(&M->pre.pgn, r, (uint32_t)pc->pres.n);
     int32_t prev = 0;
-    for (size_t i = 0; i < pc->pres.n; i++) { ugg_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
-    ugg_encode(&M->pgn, r, (uint32_t)pc->corr.n);
+    for (size_t i = 0; i < pc->pres.n; i++) { ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
+    ugg_encode(&M->pre.pgn, r, (uint32_t)pc->corr.n);
     prev = 0;
     for (size_t i = 0; i < pc->corr.n; i++) {
-        ugg_encode(i ? &M->pg2 : &M->pg, r, (uint32_t)(pc->corr.v[i].off - prev));
+        ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, (uint32_t)(pc->corr.v[i].off - prev));
         prev = pc->corr.v[i].off;
-        bt_encode(&M->dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
+        bt_encode(&M->pre.dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
     }
 }
 
@@ -235,21 +235,11 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                      int *overflow) {
     Models M;
     memset(&M, 0, sizeof(M));
-    models_init_content(&M, frm, from_size, kd, ko);
-    a1_bt_init(&M.dval);
-    ugg_init_e(&M.pg);
-    ugg_init_e(&M.pgn);
-    ugg_init_e(&M.pg2);
-    ugg_seed_cont_e(&M.pg2, RC_SEED_DEPTH_PG2);   /* rest preserve/corr gaps >=1 (strictly-increasing distinct
-                                  * offsets) => M_pg2 first unary bit always continue; depth in rc_models.h. */
-    ugg_init_e(&M.gdl);   /* neutral at top: BORROWED to code the map header below, then re-init'd
-                                  * with the seed_cont apply-phase priors after the map, before the token loop. */
-    ugg_init_e(&M.gel);
-    ugg_init_e(&M.gadj);
-    a1_idx_init(&M.dibl, RC_IDX_SEED);   /* dict-index seed from rc_models.h */
-    a1_idx_init(&M.diex, RC_IDX_SEED);
+    models_init_content(&M, frm, from_size, kd, ko);   /* literal trees + token-loop models */
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
+    ugg_init_e(&M.pre.gdl); ugg_init_e(&M.pre.gadj);   /* borrowed NEUTRAL to code the map header below;
+                                  * rc_init_prekd re-inits them (with seed_cont) after the map. */
     *overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
@@ -258,20 +248,19 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     REnc rc;
     re_init(&rc);
     /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
-     * coded through the BORROWED M.gdl (count+gaps) / M.gadj (zz values) gamma models — mirror of the
+     * coded through the BORROWED M.pre.gdl (count+gaps) / M.pre.gadj (zz values) gamma models — mirror of the
      * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ugg_encode). */
-    ugg_encode(&M.gdl, &rc, (uint32_t)mn);
+    ugg_encode(&M.pre.gdl, &rc, (uint32_t)mn);
     { uint32_t prev = 0;
       for (int i = 0; i < mn; i++) {
           uint32_t gap = mb[i] - prev;
-          ugg_encode(&M.gdl, &rc, i ? gap - 1u : gap);
+          ugg_encode(&M.pre.gdl, &rc, i ? gap - 1u : gap);
           prev = mb[i];
-          ugg_encode(&M.gadj, &rc, rc_zz32(mv[i]));
+          ugg_encode(&M.pre.gadj, &rc, rc_zz32(mv[i]));
       } }
-    /* re-init the borrowed models to their apply-phase state (clear map pollution + apply seed_cont),
-     * mirroring the ugg_init/ugg_seed_cont(&M_gdl,&M_gadj) in decode_body before its token loop. */
-    ugg_init_e(&M.gdl);  ugg_seed_cont_e(&M.gdl, RC_SEED_DEPTH_GDL);
-    ugg_init_e(&M.gadj); ugg_seed_cont_e(&M.gadj, RC_SEED_DEPTH_GADJ);
+    /* now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj, inits dval/dibl/diex/
+     * pg/pgn/pg2/gel), mirroring rc_init_prekd() in decode_body before its token loop. */
+    rc_init_prekd(&M.pre);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
      * op loop bounds it (Feature 7, part A). */

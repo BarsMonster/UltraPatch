@@ -211,46 +211,46 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
     cc->cur = cc->seq->v[cc->tok_i++];
     if (cc->cur.type == 'S') {
         if (cc->last_span) die("adjacent span tokens on wire");
-        fl_encode(&M->flag, rc, 0);
-        ugg_encode(&M->gs, rc, (uint32_t)cc->cur.len - 1u);
+        fl_encode(&M->tok.flag, rc, 0);
+        ugg_encode(&M->tok.gs, rc, (uint32_t)cc->cur.len - 1u);
         cc->tok_mode = 'S';
         cc->tok_left = cc->cur.len;
         cc->span_pos = 0;
         cc->last_span = 1;
     } else if (cc->cur.type == 'O') {
-        if (cc->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; cc->last_span = 0; }
-        else fl_encode(&M->flag, rc, 1);
-        if (stats) { stats->r0n_cost += bit_price(M->rep0[M->rep0h], 0); stats->r0n_n++; }
-        re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+        if (cc->last_span) { M->tok.flag.h = ((M->tok.flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        else fl_encode(&M->tok.flag, rc, 1);
+        if (stats) { stats->r0n_cost += bit_price(M->tok.rep0[M->rep0h], 0); stats->r0n_n++; }
+        re_bit(rc, &M->tok.rep0[M->rep0h], 0, RC_S_BIT_RATE);
         M->rep0h = 0;
-        if (stats) { stats->oy_cost += bit_price(M->outb, 1); stats->oy_n++; }
-        re_bit(rc, &M->outb, 1, RC_S_BIT_RATE);
+        if (stats) { stats->oy_cost += bit_price(M->tok.outb, 1); stats->oy_n++; }
+        re_bit(rc, &M->tok.outb, 1, RC_S_BIT_RATE);
         { uint32_t zv = rc_outmatch_delta((uint32_t)cc->cur.dist, cc->oexp);
-          if (stats) { stats->op_cost += ugr_price(&M->go, zv); stats->op_n++; }
-          ugr_encode(&M->go, rc, zv);
+          if (stats) { stats->op_cost += ugr_price(&M->tok.go, zv); stats->op_n++; }
+          ugr_encode(&M->tok.go, rc, zv);
           cc->oexp = rc_outmatch_next_expect(cc->fwd, (uint32_t)cc->cur.dist, (uint32_t)cc->cur.len); }
-        ugg_encode(&M->glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
+        ugg_encode(&M->tok.glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
     } else {
-        if (cc->last_span) { M->flag.h = ((M->flag.h << 1) | 1) & 3; cc->last_span = 0; }
-        else fl_encode(&M->flag, rc, 1);
+        if (cc->last_span) { M->tok.flag.h = ((M->tok.flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        else fl_encode(&M->tok.flag, rc, 1);
         if (cc->cur.dist == M->last_dist) {
-            if (stats) { stats->r0y_cost += bit_price(M->rep0[M->rep0h], 1); stats->r0y_n++; }
-            re_bit(rc, &M->rep0[M->rep0h], 1, RC_S_BIT_RATE);
+            if (stats) { stats->r0y_cost += bit_price(M->tok.rep0[M->rep0h], 1); stats->r0y_n++; }
+            re_bit(rc, &M->tok.rep0[M->rep0h], 1, RC_S_BIT_RATE);
             M->rep0h = 1;
         } else {
-            if (stats) { stats->r0n_cost += bit_price(M->rep0[M->rep0h], 0); stats->r0n_n++; }
-            re_bit(rc, &M->rep0[M->rep0h], 0, RC_S_BIT_RATE);
+            if (stats) { stats->r0n_cost += bit_price(M->tok.rep0[M->rep0h], 0); stats->r0n_n++; }
+            re_bit(rc, &M->tok.rep0[M->rep0h], 0, RC_S_BIT_RATE);
             M->rep0h = 0;
             if (cc->out_en) {
-                if (stats) { stats->on_cost += bit_price(M->outb, 0); stats->on_n++; }
-                re_bit(rc, &M->outb, 0, RC_S_BIT_RATE);
+                if (stats) { stats->on_cost += bit_price(M->tok.outb, 0); stats->on_n++; }
+                re_bit(rc, &M->tok.outb, 0, RC_S_BIT_RATE);
             }
-            ugr_encode(&M->gd, rc, (uint32_t)cc->cur.dist - 1u);
+            ugr_encode(&M->tok.gd, rc, (uint32_t)cc->cur.dist - 1u);
             M->last_dist = cc->cur.dist;
         }
-        ugg_encode(&M->gl, rc, (uint32_t)cc->cur.len - 1u);
+        ugg_encode(&M->tok.gl, rc, (uint32_t)cc->cur.len - 1u);
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
     }
@@ -322,8 +322,8 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware
      * DP (which tracks a forward flag history) value match/span transitions accurately. */
     for (int h = 0; h < 4; h++) {
-        pt->fspan_c[h]  = bit_price(M.flag.m[h], 0);
-        pt->fmatch_c[h] = bit_price(M.flag.m[h], 1);
+        pt->fspan_c[h]  = bit_price(M.tok.flag.m[h], 0);
+        pt->fmatch_c[h] = bit_price(M.tok.flag.m[h], 1);
     }
     /* Fall back to the prior-implied price when a flavor was never used in this parse. */
     pt->rep0_yes = st.r0y_n ? (uint32_t)(st.r0y_cost / st.r0y_n) : bit_price(RC_REP0_INIT, 1);
@@ -332,12 +332,12 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     pt->outb_no  = st.on_n ? (uint32_t)(st.on_cost / st.on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
-    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.go, rc_zz32(256));
-    pt->glo = M.glo;
+    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.tok.go, rc_zz32(256));
+    pt->glo = M.tok.glo;
     for (int c = 0; c < LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)bt_price_static(&M.lit0[c], (uint8_t)b);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)bt_price_static(&M.lit1, (uint8_t)b);
-    pt->gs = M.gs; pt->gl = M.gl; pt->gd = M.gd;
+    pt->gs = M.tok.gs; pt->gl = M.tok.gl; pt->gd = M.tok.gd;
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 0;
 }
