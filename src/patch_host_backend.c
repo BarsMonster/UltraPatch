@@ -33,16 +33,6 @@ static int host_commit_image(FILE *mf, const char *image_path, const uint8_t *da
     return 0;
 }
 
-typedef struct {
-    long erases, programs, inversions;
-    uint32_t rows, amplified, max_row_erases;
-} NvmStats;
-
-static NvmStats nvm_stats(void){
-    NvmStats st = { sc_erases, sc_programs, sc_finv, sc_erows, sc_amplified, sc_max_erase };
-    return st;
-}
-
 #include "patch_apply.h"
 
 typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
@@ -70,42 +60,6 @@ static int host_apply_blob(const uint8_t *blob, size_t blob_n,
     return 0;
 }
 
-static int nvm_safety_ok(const NvmStats *st){
-    return st->amplified==0 && st->max_row_erases<=1 && st->inversions==0;
-}
-
-enum {
-    HOST_VERIFY_OK = 0,
-    HOST_VERIFY_REJECTED,
-    HOST_VERIFY_TRAILING,
-    HOST_VERIFY_FROM_SIZE,
-    HOST_VERIFY_TO_SIZE,
-    HOST_VERIFY_NVM
-};
-
-static int host_verify_apply(const HostApply *ha, size_t blob_n,
-                             uint32_t from_n, uint32_t to_n, int check_to,
-                             int *reject_out)
-{
-    if (ha->rc != PATCH_APPLY_DONE) {
-        int rj = patch_apply_reject(&ha->pa);
-        if (!rj) rj = REJ_CORRUPT;
-        if (reject_out) *reject_out = rj;
-        return HOST_VERIFY_REJECTED;
-    }
-    if (ha->consumed != blob_n) return HOST_VERIFY_TRAILING;
-    if (patch_apply_from_size(&ha->pa) != from_n) return HOST_VERIFY_FROM_SIZE;
-    if (check_to && patch_apply_to_size(&ha->pa) != to_n) return HOST_VERIFY_TO_SIZE;
-    return HOST_VERIFY_OK;
-}
-
-static int host_verify_nvm(NvmStats *st_out)
-{
-    NvmStats st = nvm_stats();
-    if (st_out) *st_out = st;
-    return nvm_safety_ok(&st) ? HOST_VERIFY_OK : HOST_VERIFY_NVM;
-}
-
 const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
                          const uint8_t *to, size_t to_n)
@@ -117,30 +71,21 @@ const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
     HostApply ha;
     const char *err = NULL;
     if (host_apply_blob(blob, blob_n, from, (uint32_t)from_n, span, pad_seed, &ha)) return "selfcheck out of memory";
-    { NvmStats st;
-      int reject = REJ_NONE;
-      switch (host_verify_apply(&ha, blob_n, (uint32_t)from_n, (uint32_t)to_n, 1, &reject)) {
-      case HOST_VERIFY_OK:
-          if (to_n && memcmp(sc_flash, to, to_n) != 0) err = "decoded image differs from target";
-          else if (host_verify_nvm(&st) == HOST_VERIFY_NVM)
-              err = st.amplified ? "NVM row erased more than once (write amplification)"
-                                 : "NVM erase frontier inversion";
-          break;
-      case HOST_VERIFY_REJECTED:
-          err = reject == REJ_RESOURCE ? "reference decoder rejected the patch (resource cap)"
-                                       : "reference decoder rejected the patch";
-          break;
-      case HOST_VERIFY_TRAILING:
-          err = "decoder did not consume the whole blob";
-          break;
-      case HOST_VERIFY_FROM_SIZE:
-      case HOST_VERIFY_TO_SIZE:
-          err = "header size mismatch";
-          break;
-      default:
-          err = "reference decoder rejected the patch";
-          break;
-      } }
+    if (ha.rc != PATCH_APPLY_DONE) {
+        err = patch_apply_reject(&ha.pa) == REJ_RESOURCE
+                  ? "reference decoder rejected the patch (resource cap)"
+                  : "reference decoder rejected the patch";
+    } else if (ha.consumed != blob_n) {
+        err = "decoder did not consume the whole blob";
+    } else if (patch_apply_from_size(&ha.pa) != (uint32_t)from_n
+               || patch_apply_to_size(&ha.pa) != (uint32_t)to_n) {
+        err = "header size mismatch";
+    } else if (to_n && memcmp(sc_flash, to, to_n) != 0) {
+        err = "decoded image differs from target";
+    } else if (!(sc_amplified == 0 && sc_max_erase <= 1 && sc_finv == 0)) {
+        err = sc_amplified ? "NVM row erased more than once (write amplification)"
+                           : "NVM erase frontier inversion";
+    }
     nvm_free();
     return err;
 }
@@ -158,30 +103,25 @@ int decode_a1(const char *image_path, const char *patch_path){
       uint32_t span = image_n>A1_MAX_IMAGE ? image_n : A1_MAX_IMAGE;
       if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, image_n, &ha)){ rc = 2; goto out; } }
 
-    NvmStats st;
-    { int reject = REJ_NONE;
-      switch(host_verify_apply(&ha, blob.n, (uint32_t)image.n, 0, 0, &reject)){
-      case HOST_VERIFY_OK:
-          break;
-      case HOST_VERIFY_REJECTED:
+    if(ha.rc != PATCH_APPLY_DONE){
+        int reject = patch_apply_reject(&ha.pa);
+        if(!reject) reject = REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", reject,
                 reject==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
         rc = 1; goto out;
-      case HOST_VERIFY_TRAILING:
+    }
+    if(ha.consumed != blob.n){
         fprintf(stderr,"decode error - trailing bytes after counted patch body\n");
         rc = 1; goto out;
-      case HOST_VERIFY_FROM_SIZE:
+    }
+    if(patch_apply_from_size(&ha.pa) != (uint32_t)image.n){
         fprintf(stderr,"decode error - patch from_size=%u does not match current image size=%zu\n",
                 patch_apply_from_size(&ha.pa), image.n);
         rc = 1; goto out;
-      case HOST_VERIFY_TO_SIZE:
-          rc = 1; goto out;
-      default:
-          rc = 1; goto out;
-      } }
-    if(host_verify_nvm(&st)==HOST_VERIFY_NVM){
+    }
+    if(!(sc_amplified==0 && sc_max_erase<=1 && sc_finv==0)){
         fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
-                st.amplified,st.max_row_erases,st.inversions);
+                sc_amplified,sc_max_erase,sc_finv);
         rc = 1; goto out;
     }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
@@ -192,7 +132,7 @@ int decode_a1(const char *image_path, const char *patch_path){
     if(rc) goto out;
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
-            st.erases,st.rows,st.programs,st.amplified,st.max_row_erases,st.inversions,span,(span+255)/256);
+            sc_erases,sc_erows,sc_programs,sc_amplified,sc_max_erase,sc_finv,span,(span+255)/256);
     rc = 0;
 out:
     if(mf) (void)host_close_file(&mf, image_path);
