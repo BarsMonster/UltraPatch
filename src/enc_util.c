@@ -146,23 +146,6 @@ OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start) {
     return w;
 }
 
-void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user) {
-    const Op *o = we->o;
-    if (fwd) {
-        for (int32_t k = 0; k < o->diff_len; k++) fn(user, we, k, 1, o->diff[k]);
-        for (int32_t e = 0; e < o->extra_len; e++) {
-            int32_t off = o->diff_len + e;
-            fn(user, we, off, 0, o->extra[e]);
-        }
-    } else {
-        for (int32_t e = o->extra_len; e-- > 0;) {
-            int32_t off = o->diff_len + e;
-            fn(user, we, off, 0, o->extra[e]);
-        }
-        for (int32_t k = o->diff_len; k-- > 0;) fn(user, we, k, 1, o->diff[k]);
-    }
-}
-
 int read_file_buf(const char *path, Buf *out, uint64_t max_size) {
     FILE *f = fopen(path, "rb");
     Buf b = {0};

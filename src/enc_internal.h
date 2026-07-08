@@ -47,7 +47,6 @@ typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
-typedef void (*OpWalkByteFn)(void *user, const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte);
 typedef struct { int32_t from_offset, n; int32_t *values; } Block;
 typedef struct { Block *v; size_t n, cap; } BlockVec;
 typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
@@ -167,7 +166,6 @@ void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 void blockvec_array_free(BlockVec blocks[STREAM_N]);
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
-void opwalk_each_byte(int fwd, const OpWalkEnt *we, OpWalkByteFn fn, void *user);
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
 }
