@@ -10,7 +10,6 @@
 *$py.class
 
 # Native and firmware build products.
-/model_diff
 /ultrapatch
 *.o
 *.a
