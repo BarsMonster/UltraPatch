@@ -160,44 +160,17 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
  * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
  * computes exactly the untransformed plan (bit-identical wire). */
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start, const Buf *from, const Buf *to,
-                               const FieldDeltaVec *fd) {
+                               const FieldDeltaVec *fd, PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     OpPC *pc = NULL;
     for (int pass = 0;; pass++) {
-        pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d, fd, from_size, to_size);
+        pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d, fd, from_size, to_size, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
         if (!split_any) break;
         oppc_array_free(pc, old_n);
     }
     return pc;
-}
-
-static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *pc,
-                              int32_t fp_start, uint32_t to_size, int32_t *fp_endp) {
-    int ok = 1;
-    size_t tpres = 0;
-    int32_t fp_end = fp_start;
-    int32_t tp = ctx->fwd ? 0 : (int32_t)to_size;
-    for (size_t step = 0; step < ops->n; step++) {
-        const OpPC *p = &pc[step];
-        size_t oi = opwalk_apply_index(ops->n, ctx->fwd, step);
-        const Op *o = &ops->v[oi];
-        if (!ctx->fwd) tp -= o->diff_len + o->extra_len;
-        fp_end += o->diff_len + o->adj;
-        if (p->corr.n > A1_OPC_CAP) ok = 0;
-        for (size_t i = 0; i < p->corr.n; i++)
-            if ((uint32_t)p->corr.v[i].off >= RC_PACKED_POS_LIMIT) ok = 0;
-        for (size_t i = 0; i < p->pres.n; i++) {
-            uint32_t pos = (uint32_t)tp + (uint32_t)p->pres.v[i];
-            if (pos >= RC_PACKED_POS_LIMIT) ok = 0;
-        }
-        if (ctx->fwd) tp += o->diff_len + o->extra_len;
-        tpres += p->pres.n;
-    }
-    if (tpres > A1_JSLOTS) ok = 0;
-    *fp_endp = fp_end;
-    return ok;
 }
 
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
@@ -212,13 +185,13 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
     OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd);
-    int32_t fp_end_s;
+    PlanCaps caps;
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &caps);
     /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
-    int feasible = plan_caps_feasible(ctx, &ops, pc, fp_start_s, to_size, &fp_end_s);
+    int feasible = caps.ok;
     Buf body = {0};
     if (feasible) {
         int emit_overflow = 0;
@@ -235,7 +208,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
     opvec_free_deep(&ops);
     buf_free(&from_df); buf_free(&to_df);
     r.body = body;
-    r.fp_end = fp_end_s;
+    r.fp_end = caps.fp_end;
     r.fp_start = fp_start_s;
     return r;
 }

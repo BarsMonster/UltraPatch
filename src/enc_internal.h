@@ -63,6 +63,7 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
+typedef struct { int ok; int32_t fp_end; size_t pres_total; } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
@@ -211,7 +212,8 @@ size_t preserve_budget_cutoff(const EncCtx *ctx, const OpVec *ops, uint32_t from
                               uint32_t to_size, size_t budget, int32_t *cutoff);
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
-                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size);
+                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                              PlanCaps *caps);
 
 void re_init(REnc *r);
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
