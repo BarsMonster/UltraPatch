@@ -629,14 +629,13 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* ===================================================================================== */
 /* A1ApplyState type + SA_RING/SA_MASK + the SAst accessor and the arena asserts live up with the ARENA
  * union (near JREGION), since the union embeds A1ApplyState and reserves SA_ARENA bytes for it. */
-static int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
+A1_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=s_ug_gamma(pa,idx?&M_pg2:&M_pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ g_rcerr=1; return 0; }
     *off+=gap;
     if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ g_rcerr=1; return 0; }
     return 1;
 }
-
 typedef struct { int32_t i, step; } A1CorrCur;
 static void corr_cur_init(A1CorrCur*c, A1ApplyState*s, int fwd){
     c->step=fwd?1:-1; c->i=fwd?0:s->op_nc-1;
@@ -927,26 +926,28 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
      * a corrupt adj walk can park fp0 near INT32_MAX and make the bare fp0+dl overflow (UB).
      * Valid streams keep fp inside the image plus small overshoot, so this never fires there. */
     if(fp0>(int32_t)0x7fffffff-dl){ g_rcerr=1; return; }
-    /* ---- [P] preserves: journal eagerly (offset deltas) ---- */
-    uint32_t np=s_ug_gamma(pa,&M_pgn);
-    if(np>(uint32_t)nw){ g_rcerr=1; return; }
-    uint32_t poff=0, nwu=(uint32_t)nw;
-    for(uint32_t i=0;i<np && !g_rcerr;i++){
-        if(!op_next_offset(pa,&poff,i,nwu)) return;
-        sa_journal(pa,tp0+(int32_t)poff);
+    /* ---- [P]/[C] op-local offsets: journal preserves eagerly, then fill sorted corrections. ---- */
+    uint32_t nwu=(uint32_t)nw;
+    int corr=0;
+    uint32_t n=s_ug_gamma(pa,&M_pgn);
+    for(;;){
+        uint32_t off=0;
+        if(corr && n>(uint32_t)OPC_CAP){ g_rcerr=1; g_reject=REJ_RESOURCE; return; }
+        if(n>nwu){ g_rcerr=1; return; }
+        if(corr) s->op_nc=(int32_t)n;
+        for(uint32_t i=0;i<n && !g_rcerr;i++){
+            if(!op_next_offset(pa,&off,i,nwu)) return;
+            if(corr){
+                int cbyte=s_bt(pa,&M_dval, RC_DVAL_RATE);
+                s->op_corr[i]=(off<<8)|(uint32_t)cbyte;
+            } else {
+                sa_journal(pa,tp0+(int32_t)off);
+            }
+        }
+        if(g_rcerr) return;
+        if(corr) break;
+        corr=1; n=s_ug_gamma(pa,&M_pgn);
     }
-    if(g_rcerr) return;
-    /* ---- [C] corrections (sorted cursor array, count-bounded). Correction bytes share M_dval's
-     * adaptive byte tree with DEREL escape bytes; this costs no extra resident model state. ---- */
-    uint32_t nc=s_ug_gamma(pa,&M_pgn);
-    if(nc>(uint32_t)OPC_CAP){ g_rcerr=1; g_reject=REJ_RESOURCE; return; }
-    if(nc>(uint32_t)nw){ g_rcerr=1; return; }
-    s->op_nc=(int32_t)nc; { uint32_t coff=0;
-        for(uint32_t i=0;i<nc && !g_rcerr;i++){
-            if(!op_next_offset(pa,&coff,i,nwu)) return;
-            int cbyte=s_bt(pa,&M_dval, RC_DVAL_RATE);
-            s->op_corr[i]=(coff<<8)|(uint32_t)cbyte; } }
-    if(g_rcerr) return;
     /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
      * are derived per op (ldr_targets). */
     /* ---- CONTENT decode + streaming write with inline field detection ----
