@@ -165,8 +165,6 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     free(ao); free(bo); free(m.v);
 }
 
-void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
-
 void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
                         const Ranges *fr, const Ranges *tr) {
     memset(pa, 0, sizeof(*pa));

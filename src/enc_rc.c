@@ -165,12 +165,6 @@ void ug_encode(void *vg, REnc *r, uint32_t v) {
     (void)ug_xfer(vg, r, v);
 }
 
-/* MTF dict-index model: IDX_CTX / A1IdxUnary / a1_idx_init single-sourced in rc_models.h (decoder mirror).
- * The encoded index value v is ~54% zero; unary fits that concentration and drops the per-stream A1UGGamma. */
-void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v) {
-    (void)unary_xfer(r, g->u, IDX_CTX - 1u, v);
-}
-
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
 void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
 

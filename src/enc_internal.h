@@ -41,7 +41,7 @@ static inline int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
     return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
 }
 
-enum { STREAM_BL, STREAM_LDR, STREAM_N };
+enum { STREAM_BL, STREAM_LDR };
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
@@ -226,7 +226,6 @@ void ug_init_e_impl(void *g, char code, int k, size_t sz);
 #define ug_init_e(g, code, k) ug_init_e_impl((g), (code), (k), sizeof(*(g)))
 void ug_seed_cont_e(void *g, int depth);
 void ug_encode(void *g, REnc *r, uint32_t v);
-void idx_encode(A1IdxUnary *g, REnc *r, uint32_t v);
 void fl_encode(A1Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
 uint32_t ug_price(const void *g, uint32_t v);
