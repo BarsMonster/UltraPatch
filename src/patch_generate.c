@@ -36,19 +36,15 @@ static uint32_t checked_image_size(const Buf *b, const char *name) {
     return (uint32_t)b->n;
 }
 
-static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
-                             uint32_t from_size, uint32_t to_size, int desc,
-                             int32_t fp_end, int32_t fp_start, const Buf *body) {
-    if (body->n < 5u || body->d[0] != 0 || body->n - 1u > UINT32_MAX) return SIZE_MAX;
+/* Emit the full patch envelope into a fresh `blob`. The body's leading range-coder cache
+ * byte is dropped on the wire. The validity guard is an encoder-bug-only path (a well-formed
+ * plan_encode body always begins with a 0 tag and is >= 5 bytes). */
+static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
+                           uint32_t from_size, uint32_t to_size, int desc,
+                           int32_t fp_end, int32_t fp_start, const Buf *body) {
+    if (body->n < 5u || body->d[0] != 0 || body->n - 1u > UINT32_MAX)
+        die("encoder produced a malformed range-coder body");
     uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
-    size_t n = 8u;                                      /* CRC32(from), CRC32(to) */
-    n += (size_t)rc_uleb_len(from_size);
-    n += (size_t)rc_uleb_len(zd) + (rc_dir_is_natural(from_size, to_size, desc) ? 0u : 1u);
-    if (desc) n += (size_t)rc_uleb_len(rc_zz32(fp_end - (int32_t)from_size));
-    if (!desc) n += (size_t)rc_uleb_len(rc_zz32(fp_start));
-    n += (size_t)rc_uleb_len((uint32_t)(body->n - 1u));
-    n += body->n - 1u;                                  /* range coder leading cache byte is dropped */
-    if (!blob) return n;
     buf_put_u32le(blob, from_crc);
     buf_put_u32le(blob, to_crc);
     put_uleb(blob, from_size);
@@ -58,7 +54,6 @@ static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
     if (!desc) put_uleb(blob, rc_zz32(fp_start));
     put_uleb(blob, (uint32_t)(body->n - 1u));
     buf_write(blob, body->d + 1, body->n - 1);
-    return n;
 }
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
@@ -84,9 +79,9 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
     };
     enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
+    uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
-    PlanResult best = {0}; int bestv = -1; int best_desc = 0;
-    size_t best_tot = 0;
+    Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1; int best_desc = 0;
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
      * the unnatural direction is swept ONLY when the natural winner engaged journal-budget
@@ -99,16 +94,18 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
-        if (pass && bestv >= 0 && !best.st.deg_engaged) break;
+        if (pass && bestv >= 0 && !best_st.deg_engaged) break;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
             PlanResult pr = plan_encode(&ctx, &from, &to, &pa, PLANS[v]);
             if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
-            size_t tot = emit_wire_blob(NULL, 0, 0, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
-            if (bestv < 0 || tot < best_tot) {
-                buf_free(&best.body); best = pr; bestv = v; best_desc = dir; best_tot = tot;
-            } else buf_free(&pr.body);
+            Buf cand = {0};
+            emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
+            buf_free(&pr.body);                                          /* blob holds the copy */
+            if (bestv < 0 || cand.n < best_blob.n) {
+                buf_free(&best_blob); best_blob = cand; best_st = pr.st; bestv = v; best_desc = dir;
+            } else buf_free(&cand);
         }
     }
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
@@ -119,21 +116,17 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                 "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
                 best_desc ? "bwd" : "fwd",
                 rc_dir_is_natural(from_size, to_size, best_desc),
-                best.st.deg_engaged, best.st.deg_pres_needed, best.st.deg_converted, best.st.opc_splits, sweep_opc_splits,
+                best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted, best_st.opc_splits, sweep_opc_splits,
                 (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
-    Buf blob = {0};
-    size_t wire_n = emit_wire_blob(&blob, crc32_buf(from.d, from.n), crc32_buf(to.d, to.n),
-                                   from_size, to_size, best_desc, best.fp_end, best.fp_start, &best.body);
-    if (wire_n == SIZE_MAX || blob.n != best_tot) die("candidate size accounting drifted from emitted blob");
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
      * cannot prove applies. */
-    { const char *scerr = a1_selfcheck(blob.d, blob.n, from.d, from.n, to.d, to.n);
+    { const char *scerr = a1_selfcheck(best_blob.d, best_blob.n, from.d, from.n, to.d, to.n);
       if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
                    die("emitted patch failed reference-decoder self-verification"); } }
-    write_file(patch_out, blob.d, blob.n);
-    buf_free(&best.body); buf_free(&blob); buf_free(&from); buf_free(&to);
+    write_file(patch_out, best_blob.d, best_blob.n);
+    buf_free(&best_blob); buf_free(&from); buf_free(&to);
     pair_analysis_free(&pa);
     free(felf); free(telf);
 }
