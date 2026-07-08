@@ -63,13 +63,7 @@ typedef struct {
 } NvmStats;
 
 static NvmStats nvm_stats(void){
-    NvmStats st = { sc_erases, sc_programs, sc_finv, 0, 0, 0 };
-    for(uint32_t i=0;i<sc_nrows;i++){
-        uint8_t e = sc_erasecnt[i];
-        st.rows += e>0;
-        st.amplified += e>1;
-        if(e>st.max_row_erases) st.max_row_erases=e;
-    }
+    NvmStats st = { sc_erases, sc_programs, sc_finv, sc_erows, sc_amplified, sc_max_erase };
     return st;
 }
 

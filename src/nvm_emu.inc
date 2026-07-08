@@ -17,7 +17,7 @@
 #define NVM_ROW 256u
 #endif
 static uint8_t *sc_flash, *sc_erasecnt;
-static uint32_t sc_flash_n, sc_nrows;
+static uint32_t sc_flash_n, sc_erows, sc_amplified, sc_max_erase;
 static long sc_erases, sc_programs, sc_finv;
 static uint32_t sc_last_erow;
 static int sc_edir, sc_ecount;
@@ -25,7 +25,7 @@ static int sc_edir, sc_ecount;
 static void nvm_free(void){
     free(sc_flash); free(sc_erasecnt);
     sc_flash = NULL; sc_erasecnt = NULL;
-    sc_flash_n = sc_nrows = 0;
+    sc_flash_n = 0;
 }
 
 /* Load `from` into a fresh span-sized flash and reset every counter. The beyond-`from`
@@ -35,14 +35,16 @@ static void nvm_free(void){
  * Returns -1 on allocation failure. */
 static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_t pad_seed){
     nvm_free();
-    sc_flash_n = span; sc_nrows = (span+NVM_ROW-1)/NVM_ROW;
+    sc_flash_n = span;
+    uint32_t nrows = (span+NVM_ROW-1)/NVM_ROW;
     sc_flash = (uint8_t*)malloc(span?span:1);
-    sc_erasecnt = (uint8_t*)calloc(sc_nrows?sc_nrows:1, 1);
+    sc_erasecnt = (uint8_t*)calloc(nrows?nrows:1, 1);
     if(!sc_flash || !sc_erasecnt){ nvm_free(); return -1; }
     if(from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
     if(span>from_n){ uint32_t r=pad_seed;
         for(uint32_t a=from_n;a<span;a++){ r=r*1664525u+1013904223u; sc_flash[a]=(uint8_t)(r>>24); } }
     sc_erases = sc_programs = sc_finv = 0;
+    sc_erows = sc_amplified = sc_max_erase = 0;
     sc_last_erow = 0; sc_edir = 0; sc_ecount = 0;
     return 0;
 }
@@ -54,8 +56,13 @@ void flash_write(uint32_t a, uint8_t v){
     if((uint8_t)(cur & v) != v){          /* 0->1 needed: erase the whole row to 0xFF */
         uint32_t row = (a/NVM_ROW)*NVM_ROW, end = row+NVM_ROW; if(end>sc_flash_n) end=sc_flash_n;
         memset(sc_flash+row, 0xFF, end-row);
-        sc_erases++; if(sc_erasecnt[a/NVM_ROW]<255) sc_erasecnt[a/NVM_ROW]++;
         uint32_t er = a/NVM_ROW;
+        uint8_t e = sc_erasecnt[er];
+        sc_erases++;
+        if(e<255) sc_erasecnt[er] = ++e;
+        if(e==1) sc_erows++;
+        else if(e==2) sc_amplified++;
+        if(e>sc_max_erase) sc_max_erase=e;
         if(sc_ecount){ int d = (er>sc_last_erow) ? 1 : (er<sc_last_erow ? -1 : 0);
             if(d){ if(sc_edir==0) sc_edir=d; else if(d!=sc_edir) sc_finv++; } }
         sc_last_erow = er; sc_ecount++;
