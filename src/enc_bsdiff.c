@@ -58,9 +58,8 @@ static int cmp_match(const void *a, const void *b) {
     return (x->size > y->size) - (x->size < y->size);
 }
 
-static Match find_longest_match(const int32_t *a, int32_t la, const int32_t *b, int32_t lb,
+static Match find_longest_match(const int32_t *a, const int32_t *b, int32_t lb,
                                 B2JIndex *b2j, int32_t alo, int32_t ahi, int32_t blo, int32_t bhi) {
-    (void)la;
     int32_t besti = alo, bestj = blo, bestsize = 0;
     int32_t *prev = (int32_t *)xcalloc((size_t)lb + 1, sizeof(int32_t));
     int32_t *cur = (int32_t *)xcalloc((size_t)lb + 1, sizeof(int32_t));
@@ -103,7 +102,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
     MatchVec raw = {0};
     while (qn) {
         Region r = q[--qn];
-        Match m = find_longest_match(a, la, b, lb, &b2j, r.alo, r.ahi, r.blo, r.bhi);
+        Match m = find_longest_match(a, b, lb, &b2j, r.alo, r.ahi, r.blo, r.bhi);
         if (m.size) {
             match_push(&raw, m);
             if (r.alo < m.a && r.blo < m.b) {
@@ -157,14 +156,12 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
         }
         if (nz < 5) { free(vals); continue; }
         blockvec_push(out, fo, vals, sz);
-        vals = NULL;
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
             a = to_s->a[to + k].addr;
             if (a + 4 <= to_mut->n) memset(to_mut->d + a, 0, 4);
         }
-        free(vals);
     }
     free(ao); free(bo); free(m.v);
 }

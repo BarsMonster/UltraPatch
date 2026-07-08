@@ -11,17 +11,16 @@
 /* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
 typedef struct { uint32_t type, off, addr, size, entsize; } Shdr;
-typedef struct { uint32_t begin, end, sec; } Range;
+typedef struct { uint32_t begin, end; } Range;
 
 static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
-static void range_add(Range *r, uint32_t begin, uint32_t size, uint32_t sec) {
+static void range_add(Range *r, uint32_t begin, uint32_t size) {
     uint32_t end = begin + size;
     if (end < begin) return;
     if (r->begin == UINT32_MAX || begin < r->begin) r->begin = begin;
     if (end > r->end) r->end = end;
-    r->sec = sec;
 }
 
 static void best_range(Range *best, Range r) {
@@ -30,9 +29,9 @@ static void best_range(Range *best, Range r) {
 
 static Range trim_data_range(Range r, Range code) {
     if (r.begin < code.begin && code.begin < r.end) {
-        Range left = { r.begin, code.begin, r.sec };
+        Range left = { r.begin, code.begin };
         if (r.begin < code.end && code.end < r.end) {
-            Range right = { code.end, r.end, r.sec };
+            Range right = { code.end, r.end };
             r = ((left.end - left.begin) > (right.end - right.begin)) ? left : right;
         } else {
             r = left;
@@ -113,14 +112,14 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
             if ((type != 1 && type != 2) || size == 0) continue;
             uint16_t sec = rd16le(p + 14);
             if (sec >= shnum || value < sh[sec].addr || (uint64_t)value >= (uint64_t)sh[sec].addr + sh[sec].size) continue;
-            range_add(type == 2 ? &code_by_sec[sec] : &data_by_sec[sec], value, size, sec);
+            range_add(type == 2 ? &code_by_sec[sec] : &data_by_sec[sec], value, size);
         }
     }
-    Range code = {0, 0, 0}, data = {0, 0, 0};
+    Range code = {0, 0}, data = {0, 0};
     for (uint16_t si = 0; si < shnum; si++) best_range(&code, code_by_sec[si]);
     for (uint16_t si = 0; si < shnum; si++) best_range(&data, trim_data_range(data_by_sec[si], code));
     uint32_t doff = data_offset_in_bin(&e, bin, phoff, phentsize, phnum, data, which);
-    Ranges r = { doff, data.begin, data.end, code.begin, code.end };
+    Ranges r = { doff, data.begin, data.end };
     free(sh); free(code_by_sec); free(data_by_sec); buf_free(&e);
     return r;
 }

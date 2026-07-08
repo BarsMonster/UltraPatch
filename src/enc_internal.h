@@ -56,7 +56,7 @@ typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
-typedef struct { uint32_t data_off_begin, data_begin, data_end, code_begin, code_end; } Ranges;
+typedef struct { uint32_t data_off_begin, data_begin, data_end; } Ranges;
 typedef struct {
     m4_stream_t from_st[M4_NSTREAMS];
     m4_stream_t to_st[M4_NSTREAMS];
