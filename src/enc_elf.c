@@ -114,7 +114,7 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     for (uint16_t si = 0; si < shnum; si++) best_range(&code, sec[si].code);
     for (uint16_t si = 0; si < shnum; si++) best_range(&data, trim_data_range(sec[si].data, code));
     uint32_t doff = data_offset_in_bin(&e, bin, phoff, phentsize, phnum, data, which);
-    Ranges r = { doff, data.begin, data.end };
+    Ranges r = { doff, doff + (data.end - data.begin) };
     free(sec); buf_free(&e);
     return r;
 }

@@ -38,11 +38,11 @@ NVM_EMU := src/nvm_emu.inc
 # the device decoder remains header-only for integrators.
 ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
-GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/arm_cortex_m4.h src/enc_internal.h
+GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/enc_internal.h
 # The host backend owns the single reference-decoder copy used by encode
 # selfcheck, CLI decode, and standalone decoder builds.
 HOST_BACKEND_SRC := src/patch_host_backend.c
-ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) src/arm_cortex_m4.c $(HOST_BACKEND_SRC) $(DIVSUF)
+ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
 DEC_SRCS := $(HOST_BACKEND_SRC)
 TOOL_SRCS := $(ENC_SRCS)
 

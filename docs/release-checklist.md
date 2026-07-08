@@ -70,7 +70,7 @@ The release source artifact is the Git commit. The device decoder artifact is
 either the generated single header from `make decoder-header` or the decoder
 source header set rooted at `src/patch_apply.h`. The host tool is the unified
 `ultrapatch` CLI built from `src/patch_generate.c`, the `src/enc_*.c` subsystem
-modules, `src/arm_cortex_m4.c`, `src/patch_host_backend.c`, and the vendored
+modules, `src/patch_host_backend.c`, and the vendored
 `vendor/libdivsufsort/` sources; encode is its default mode, while `--decode`
 is the host reference/debug mode.
 
@@ -85,8 +85,9 @@ For traceability, release notes should include:
 - `make gate` output.
 - Toolchain package/version used for `check-arm`.
 - License statement: project MIT except vendored libdivsufsort, which retains
-  its upstream notice; `src/arm_cortex_m4.c` includes an attribution note for
-  the detools Python implementation that informed the C reimplementation.
+  its upstream notice; `src/enc_bsdiff.c` includes an attribution note for
+  the detools Python implementation that informed the ARM Cortex-M scanner
+  reimplementation.
 
 ## Scope Boundary
 

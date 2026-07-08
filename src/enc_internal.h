@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "arm_cortex_m4.h"
 #include "rc_models.h"
 
 /* Encoder mirror knobs. Host-only: they derive from the RC_*_DEFAULT constants (rc_models.h ->
@@ -88,8 +87,6 @@ static inline int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
     return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
 }
 
-enum { STREAM_BL, STREAM_LDR };
-
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
@@ -100,10 +97,17 @@ typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { IVec pres; CorrVec corr; } OpPC;
-typedef struct { uint32_t data_off_begin, data_begin, data_end; } Ranges;
+/* File-offset window of the .data-style segment inside the load image (from elf_ranges);
+ * a zero-initialized Ranges is an empty (0,0) window: the raw-binary path with no ELF sidecar. */
+typedef struct { uint32_t data_off_begin, data_off_end; } Ranges;
+/* Sorted (addr, val) field list for one relocation stream.
+ * val = unpacked bl imm, or the s32 literal-pool word for ldr. */
+typedef struct { uint32_t addr; int32_t val; } m4_field_t;
+typedef struct { m4_field_t *a; size_t n; } m4_stream_t;
+enum { STREAM_BL, STREAM_LDR, STREAM_NSTREAMS };
 typedef struct {
-    m4_stream_t from_st[M4_NSTREAMS];
-    m4_stream_t to_st[M4_NSTREAMS];
+    m4_stream_t from_st[STREAM_NSTREAMS];
+    m4_stream_t to_st[STREAM_NSTREAMS];
 } PairAnalysis;
 typedef struct {
     int    deg_engaged;

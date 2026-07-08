@@ -1,12 +1,109 @@
 /*
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
+ * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- diff core: SequenceMatcher field deltas (create_patch_block/data_format_encode) + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
+ * A1 host encoder module -- diff core: ARM Cortex-M relocation field scanner
+ * (disassemble/create_patch_block/data_format_encode) + SequenceMatcher field
+ * deltas + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
  * Compiled as a normal internal encoder translation unit.
+ *
+ * The ARM Cortex-M relocation field scanner (disassemble and its helpers) is a
+ * C reimplementation written after studying detools'
+ * detools/data_format/arm_cortex_m4.py ARM Cortex-M data-format logic.
  */
 
 #include "enc_internal.h"
+/* ------------------------------------------------------------------------------------- */
+/* ARM Cortex-M relocation field scanner (bl/ldr streams).                                  */
+/* ------------------------------------------------------------------------------------- */
+/* ---------- address->value maps ---------- */
+typedef struct { m4_field_t *a; size_t n, cap; } map_t;
+
+static void map_push(map_t *m, uint32_t addr, int32_t val) {
+    m->a = (m4_field_t *)vec_reserve(m->a, &m->cap, m->n + 1, sizeof(m->a[0]), 256);
+    m->a[m->n].addr = addr; m->a[m->n].val = val; m->n++;
+}
+static int kv_cmp(const void *x, const void *y) {
+    uint32_t a = ((const m4_field_t*)x)->addr, b = ((const m4_field_t*)y)->addr;
+    return (a > b) - (a < b);
+}
+/* sort by addr, drop duplicate addrs (keep last seen, mirroring dict overwrite) */
+static void map_finalize(map_t *m) {
+    if (m->n == 0) return;
+    /* Duplicate addresses here carry equal values, so sort + unique-by-address
+       preserves the scanner result. */
+    a1_sort(m->a, m->n, sizeof(*m->a), kv_cmp);
+    size_t w = 0;
+    for (size_t i = 0; i < m->n; i++) {
+        if (w > 0 && m->a[w-1].addr == m->a[i].addr) m->a[w-1] = m->a[i];
+        else m->a[w++] = m->a[i];
+    }
+    m->n = w;
+}
+/* ---------- literal-pool address bitset (host-only; one bit per 4-byte word) ---------- */
+typedef struct { uint8_t *bits; size_t nbits; } litset_t;
+static void litset_init(litset_t *s, size_t fsize) {
+    s->nbits = (fsize + 3u) >> 2;
+    s->bits = (uint8_t *)xcalloc((s->nbits + 7u) >> 3, 1);
+}
+static void litset_add(litset_t *s, uint32_t k) {
+    size_t i = (size_t)(k >> 2);
+    if (s->bits && i < s->nbits) s->bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+}
+static int litset_has(const litset_t *s, uint32_t k) {
+    size_t i = (size_t)(k >> 2);
+    return !(k & 3u) && s->bits && i < s->nbits && (s->bits[i >> 3] & (uint8_t)(1u << (i & 7u)));
+}
+static void litset_free(litset_t *s){ free(s->bits); s->bits=NULL; s->nbits=0; }
+
+/* ---------- disassemble (port of arm_cortex_m4.disassemble) ---------- */
+/* Records literal-pool target addresses as it finds them, then skips those words later in
+ * the same pass; fills the caller's [STREAM_BL]/[STREAM_LDR] streams directly. */
+static void disassemble(const uint8_t *f, size_t fsize,
+                        uint32_t data_off_begin, uint32_t data_off_end,
+                        m4_stream_t out[STREAM_NSTREAMS]) {
+    map_t bl = {0}, ldr = {0};
+    litset_t lit;
+    litset_init(&lit, fsize);
+    uint32_t addr = 0;
+    while (addr < fsize) {
+        if (data_off_begin <= addr && addr < data_off_end) {
+            if ((size_t)addr + 4 > fsize) break;
+            addr += 4;
+        } else if (litset_has(&lit, addr)) {
+            addr += 4;
+        } else {
+            if ((size_t)addr + 2 > fsize) break;
+            uint16_t up = rc_u16le(f + addr);
+            uint32_t ins = addr;
+            addr += 2;
+            if ((up & 0xf800) == 0xf000) {            /* bl / b.w */
+                if ((size_t)addr + 2 > fsize) continue;
+                uint16_t lo = rc_u16le(f + addr);
+                if (rc_bl_pattern(up, lo)) { addr += 2; map_push(&bl, ins, rc_bl_imm24s(up, lo)); }
+            } else if (rc_thumb_ldr_lit(up)) {        /* ldr (literal) */
+                /* scan addresses are always even, so (ins & ~3) matches the historic
+                   "round even address back to 4-alignment" step exactly. */
+                uint32_t address = (uint32_t)rc_ldr_target((int32_t)ins, up & 0xff);
+                if ((size_t)address + 4 <= fsize) {
+                    int32_t v = (int32_t)rc_u32le(f + address);
+                    map_push(&ldr, address, v);
+                    litset_add(&lit, address);
+                }
+            }
+        }
+    }
+    litset_free(&lit);   /* only needed during the scan */
+    map_finalize(&ldr);
+    out[STREAM_BL].a = bl.a;   out[STREAM_BL].n = bl.n;
+    out[STREAM_LDR].a = ldr.a; out[STREAM_LDR].n = ldr.n;
+}
+
+static void free_streams(m4_stream_t streams[STREAM_NSTREAMS]) {
+    for (int s = 0; s < STREAM_NSTREAMS; s++) { free(streams[s].a); streams[s].a = NULL; streams[s].n = 0; }
+}
+
 /* ------------------------------------------------------------------------------------- */
 /* SequenceMatcher-style subset for create_patch_block().                                  */
 /* ------------------------------------------------------------------------------------- */
@@ -168,16 +265,14 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
 void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
                         const Ranges *fr, const Ranges *tr) {
     memset(pa, 0, sizeof(*pa));
-    a1_m4_disassemble(from->d, from->n, fr->data_off_begin, fr->data_begin, fr->data_end,
-                      pa->from_st);
-    a1_m4_disassemble(to->d, to->n, tr->data_off_begin, tr->data_begin, tr->data_end,
-                      pa->to_st);
+    disassemble(from->d, from->n, fr->data_off_begin, fr->data_off_end, pa->from_st);
+    disassemble(to->d, to->n, tr->data_off_begin, tr->data_off_end, pa->to_st);
 }
 
 void pair_analysis_free(PairAnalysis *pa) {
     if (!pa) return;
-    a1_m4_free_streams(pa->from_st);
-    a1_m4_free_streams(pa->to_st);
+    free_streams(pa->from_st);
+    free_streams(pa->to_st);
 }
 
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
@@ -186,9 +281,9 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
     if (to->n) memcpy(to_mut->d, to->d, to->n);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_BL], &pa->to_st[M4_BL],
+    create_patch_block(from_mut, to_mut, &pa->from_st[STREAM_BL], &pa->to_st[STREAM_BL],
                        STREAM_BL, fd);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_LDR], &pa->to_st[M4_LDR],
+    create_patch_block(from_mut, to_mut, &pa->from_st[STREAM_LDR], &pa->to_st[STREAM_LDR],
                        STREAM_LDR, fd);
     fd_finalize(fd);
     if (mask_bl) {

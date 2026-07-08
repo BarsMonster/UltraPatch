@@ -120,6 +120,6 @@ otherwise.
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.
 
 Vendored files under `vendor/libdivsufsort/` keep their upstream license
-notices. `src/arm_cortex_m4.c` includes an attribution note for the detools
-Python implementation that informed the C reimplementation. See
+notices. `src/enc_bsdiff.c` includes an attribution note for the detools
+Python implementation that informed the ARM Cortex-M scanner reimplementation. See
 `THIRD_PARTY_NOTICES.md`.

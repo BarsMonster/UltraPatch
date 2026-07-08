@@ -39,7 +39,7 @@ analyze() { # analyze <src> <extra-defines>
     "$CC" $2 $COMMON "$1" 2>>"$log" || rc=1
 }
 
-# Special-cased first-party TUs: entrypoint main + arm + host-backend variants.
+# Special-cased first-party TUs: entrypoint main + host-backend variants.
 # These carry bespoke defines and are kept verbatim; the plain encoder modules
 # come from $ENC_MODULES (single-sourced from the Makefile's ENC_MODULE_SRCS)
 # so a newly added src/enc_*.c is analyzed automatically. When run directly
@@ -50,7 +50,6 @@ analyze src/patch_generate.c ""
 for m in $ENC_MODULES; do
     analyze "$m" ""
 done
-analyze src/arm_cortex_m4.c ""
 analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L"
 analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN"
 
