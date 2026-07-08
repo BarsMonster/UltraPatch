@@ -13,9 +13,6 @@
 typedef struct { uint32_t begin, end; } Range;
 typedef struct { uint32_t type, off, addr, size, entsize; Range code, data; } Sec;
 
-static uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
-
 static void range_add(Range *r, uint32_t begin, uint32_t size) {
     uint32_t end = begin + size;
     if (end < begin) return;
@@ -49,13 +46,13 @@ static uint32_t data_offset_in_bin(const Buf *elf, const Buf *bin, uint32_t phof
     uint64_t base = UINT64_MAX;
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *p = elf->d + phoff + (uint32_t)i * phentsize;
-        if (rd32le(p) == 1 && rd32le(p + 16) && rd32le(p + 12) < base) base = rd32le(p + 12);
+        if (rc_u32le(p) == 1 && rc_u32le(p + 16) && rc_u32le(p + 12) < base) base = rc_u32le(p + 12);
     }
     if (base == UINT64_MAX) die("ELF has no loadable data");
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *p = elf->d + phoff + (uint32_t)i * phentsize;
-        if (rd32le(p) != 1) continue;                 /* PT_LOAD */
-        uint32_t vaddr = rd32le(p + 8), paddr = rd32le(p + 12), filesz = rd32le(p + 16);
+        if (rc_u32le(p) != 1) continue;                 /* PT_LOAD */
+        uint32_t vaddr = rc_u32le(p + 8), paddr = rc_u32le(p + 12), filesz = rc_u32le(p + 16);
         if (vaddr <= data.begin && (uint64_t)data.end <= (uint64_t)vaddr + filesz) {
             uint64_t off = (uint64_t)paddr - base + (data.begin - vaddr);
             if (off + (data.end - data.begin) <= bin->n) return (uint32_t)off;
@@ -81,19 +78,19 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
 #pragma GCC diagnostic ignored "-Wanalyzer-out-of-bounds"
 #endif
     if (e.n < 52 || memcmp(e.d, "\177" "ELF", 4) || e.d[4] != 1 || e.d[5] != 1) die("expected ELF32 little-endian");
-    uint32_t phoff = rd32le(e.d + 28), shoff = rd32le(e.d + 32);
-    uint16_t phentsize = rd16le(e.d + 42), phnum = rd16le(e.d + 44);
-    uint16_t shentsize = rd16le(e.d + 46), shnum = rd16le(e.d + 48);
+    uint32_t phoff = rc_u32le(e.d + 28), shoff = rc_u32le(e.d + 32);
+    uint16_t phentsize = rc_u16le(e.d + 42), phnum = rc_u16le(e.d + 44);
+    uint16_t shentsize = rc_u16le(e.d + 46), shnum = rc_u16le(e.d + 48);
     if (!phoff || !phnum || phentsize < 32 || (uint64_t)phoff + (uint64_t)phentsize * phnum > e.n) die("bad ELF program headers");
     if (!shoff || !shnum || shentsize < 40 || (uint64_t)shoff + (uint64_t)shentsize * shnum > e.n) die("bad ELF sections");
     Sec *sec = (Sec *)xcalloc(shnum, sizeof(*sec));
     for (uint16_t i = 0; i < shnum; i++) {
         const uint8_t *p = e.d + shoff + (uint32_t)i * shentsize;
-        sec[i].type = rd32le(p + 4);
-        sec[i].addr = rd32le(p + 12);
-        sec[i].off = rd32le(p + 16);
-        sec[i].size = rd32le(p + 20);
-        sec[i].entsize = rd32le(p + 36);
+        sec[i].type = rc_u32le(p + 4);
+        sec[i].addr = rc_u32le(p + 12);
+        sec[i].off = rc_u32le(p + 16);
+        sec[i].size = rc_u32le(p + 20);
+        sec[i].entsize = rc_u32le(p + 36);
         sec[i].code.begin = sec[i].data.begin = UINT32_MAX;
     }
 #if defined(__GNUC__) && !defined(__clang__)
@@ -105,10 +102,10 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
         size_t n = sec[si].size / sec[si].entsize;
         for (size_t k = 0; k < n; k++) {
             const uint8_t *p = e.d + sec[si].off + k * sec[si].entsize;
-            uint32_t value = rd32le(p + 4), size = rd32le(p + 8);
+            uint32_t value = rc_u32le(p + 4), size = rc_u32le(p + 8);
             uint8_t type = p[12] & 0x0f;
             if ((type != 1 && type != 2) || size == 0) continue;
-            uint16_t dst = rd16le(p + 14);
+            uint16_t dst = rc_u16le(p + 14);
             if (dst >= shnum || value < sec[dst].addr || (uint64_t)value >= (uint64_t)sec[dst].addr + sec[dst].size) continue;
             range_add(type == 2 ? &sec[dst].code : &sec[dst].data, value, size);
         }
