@@ -53,12 +53,12 @@ CORPUS_MANIFEST ?= test-bench/corpus.sha256
 FOREIGN_MANIFEST ?= test-bench/foreign.sha256
 CORPUS_SIZE_BASELINE ?= test-bench/home-size-baseline.tsv
 
-BASE_FULL_TOTAL ?= 4151493
+BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
-BASE_FOREIGN_TOTAL ?= 1333402
-BASE_ONEFACE_GROW ?= 574
+BASE_FOREIGN_TOTAL ?= 1333390
+BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
 BASE_ARM_TEXT ?= 6065
 BASE_ARM_DATA ?= 0

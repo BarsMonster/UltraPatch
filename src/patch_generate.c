@@ -45,7 +45,7 @@ static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
     n += (size_t)rc_uleb_len(from_size);
     n += (size_t)rc_uleb_len(zd) + (rc_dir_is_natural(from_size, to_size, desc) ? 0u : 1u);
     if (desc) n += (size_t)rc_uleb_len(rc_zz32(fp_end - (int32_t)from_size));
-    n += (size_t)rc_uleb_len(rc_zz32(fp_start));
+    if (!desc) n += (size_t)rc_uleb_len(rc_zz32(fp_start));
     n += (size_t)rc_uleb_len((uint32_t)(body->n - 1u));
     n += body->n - 1u;                                  /* range coder leading cache byte is dropped */
     if (!blob) return n;
@@ -55,7 +55,7 @@ static size_t emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
     if (rc_dir_is_natural(from_size, to_size, desc)) put_uleb(blob, zd);
     else put_uleb_overlong(blob, zd);
     if (desc) put_uleb(blob, rc_zz32(fp_end - (int32_t)from_size));
-    put_uleb(blob, rc_zz32(fp_start));
+    if (!desc) put_uleb(blob, rc_zz32(fp_start));
     put_uleb(blob, (uint32_t)(body->n - 1u));
     buf_write(blob, body->d + 1, body->n - 1);
     return n;

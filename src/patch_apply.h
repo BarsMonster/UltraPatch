@@ -974,7 +974,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
 /* that patch_apply_run primes before invoking decode_body.                                  */
 /* ===================================================================================== */
 /* ---- envelope header (strict reads): CRC32(from)[4] | CRC32(to)[4] | from_size uLEB |
- * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | zz(fp_start) |
+ * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | [zz(fp_start) iff ascending] |
  * compressed_body_len. The decoder derives the apply direction and the image span itself
  * and verifies CRC32(from) over flash BEFORE the first flash write — a truncated header,
  * implausible sizes, or a wrong/dirty current image all reject cleanly with flash untouched.
@@ -999,9 +999,9 @@ static int A1_NOINLINE decode_header(PatchApply *pa){
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !env_zz_abs(pa,fs,&fpe)) return 0;
       g_FWD=!desc; }
-    /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped for both directions right after
-     * the (grow-only) fp_end field. Plain signed zigzag (NOT delta-vs-a-base) — usually 0. */
-    { uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
+    /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
+     * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
+    if(g_FWD){ uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
       g_fp_start=bb_unzz(pa,z2); if(g_rcerr) return 0; }
     if(!env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     g_from_size=fs; g_to_size=ts; g_want_to=want_to;
@@ -1075,10 +1075,9 @@ static int decode_body(PatchApply *pa){
        * stream decodes zero-fill garbage that trips a geometry/frontier guard or lands a wrong image
        * that CRC32(to) rejects. */
       while(!g_rcerr && (g_FWD ? s->tp!=(int32_t)g_to_size : s->tp!=0)) sa_apply_op(pa,s);
-      /* tp must land exactly (the loop guarantees it on the clean path); grow additionally must land
-       * fp exactly on the initial source seek g_fp_start (was 0 pre-7B). FWD fp is unchecked (fp_end
-       * is not shipped for FWD — CRC32(to) validates). */
-      if(!g_rcerr && (s->tp!=(g_FWD?(int32_t)g_to_size:0) || (!g_FWD && s->fp!=g_fp_start))) g_rcerr=1;
+      /* tp must land exactly (the loop guarantees it on the clean path). fp is unchecked in both
+       * directions (no fp_start/fp_end landing check) — CRC32(to) validates the final image. */
+      if(!g_rcerr && s->tp!=(g_FWD?(int32_t)g_to_size:0)) g_rcerr=1;
       if(!g_rcerr && s->tok_mode!=0) g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
       if(g_rcerr) return 0;
       orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
