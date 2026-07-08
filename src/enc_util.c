@@ -125,16 +125,6 @@ void oppc_array_free(OpPC *pc, size_t n) {
     free(pc);
 }
 
-void blockvec_array_free(BlockVec blocks[STREAM_N]) {
-    if (!blocks) return;
-    for (int s = 0; s < STREAM_N; s++) {
-        for (size_t i = 0; i < blocks[s].n; i++) free(blocks[s].v[i].values);
-        free(blocks[s].v);
-        blocks[s].v = NULL;
-        blocks[s].n = blocks[s].cap = 0;
-    }
-}
-
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start) {
     OpWalkEnt *w = (OpWalkEnt *)xmalloc((ops->n ? ops->n : 1) * sizeof(*w));
     int32_t tp = 0, fp = fp_start;
@@ -255,14 +245,6 @@ int cmp_corr(const void *a, const void *b) {
 void opvec_push(OpVec *v, Op o) {
     v->v = (Op *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 64);
     v->v[v->n++] = o;
-}
-
-void blockvec_push(BlockVec *v, int32_t fo, int32_t *vals, int32_t n) {
-    v->v = (Block *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 8);
-    Block *b = &v->v[v->n++];
-    b->from_offset = fo;
-    b->n = n;
-    b->values = vals;
 }
 
 static int cmp_fd(const void *a, const void *b) {

@@ -47,8 +47,6 @@ typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
 typedef struct { Op *v; size_t n, cap; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
-typedef struct { int32_t from_offset, n; int32_t *values; } Block;
-typedef struct { Block *v; size_t n, cap; } BlockVec;
 typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
 typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
@@ -164,7 +162,6 @@ void buf_put_u32le(Buf *b, uint32_t v);
 void buf_free(Buf *b);
 void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
-void blockvec_array_free(BlockVec blocks[STREAM_N]);
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
@@ -183,7 +180,6 @@ void corr_push(CorrVec *v, int32_t off, uint8_t byte);
 int cmp_i32(const void *a, const void *b);
 int cmp_corr(const void *a, const void *b);
 void opvec_push(OpVec *v, Op o);
-void blockvec_push(BlockVec *v, int32_t fo, int32_t *vals, int32_t n);
 void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta);
 void fd_finalize(FieldDeltaVec *v);
 const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
@@ -193,7 +189,7 @@ void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
                         const Ranges *fr, const Ranges *tr);
 void pair_analysis_free(PairAnalysis *pa);
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
-                        Buf *from_df, Buf *to_df, BlockVec blocks[STREAM_N], int mask_bl);
+                        Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
@@ -206,7 +202,6 @@ int32_t field_residual(int kind, const uint8_t *frm, uint32_t fpk, int32_t delta
                        const uint32_t *mb, const int32_t *mv, int mn);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv);
-FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
                            const FieldDeltaVec *fd);
 Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj);

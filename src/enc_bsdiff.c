@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- diff core: SequenceMatcher data blocks (create_patch_block/data_format_encode) + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
+ * A1 host encoder module -- diff core: SequenceMatcher field deltas (create_patch_block/data_format_encode) + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -134,7 +134,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
 }
 
 static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *from_s,
-                               const m4_stream_t *to_s, BlockVec *out) {
+                               const m4_stream_t *to_s, int kind, FieldDeltaVec *out) {
     if (!from_s->n || !to_s->n) return;
     int32_t la = (int32_t)from_s->n - 1, lb = (int32_t)to_s->n - 1;
     if (la <= 0 || lb <= 0) return;
@@ -147,17 +147,16 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
         int32_t fo = m.v[mi].a, to = m.v[mi].b, sz = m.v[mi].size;
         if (sz < 6) continue;
         sz += 1;
-        int32_t *vals = (int32_t *)xmalloc((size_t)sz * sizeof(int32_t));
         int nz = 0;
         for (int32_t k = 0; k < sz; k++) {
             int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
-            vals[k] = delta;
             if (delta != 0) nz++;
         }
-        if (nz < 5) { free(vals); continue; }
-        blockvec_push(out, fo, vals, sz);
+        if (nz < 5) continue;
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
+            int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
+            fd_put(out, a, kind, delta);
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
             a = to_s->a[to + k].addr;
             if (a + 4 <= to_mut->n) memset(to_mut->d + a, 0, 4);
@@ -184,13 +183,16 @@ void pair_analysis_free(PairAnalysis *pa) {
 }
 
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
-                               Buf *from_mut, Buf *to_mut, BlockVec blocks[STREAM_N], int mask_bl) {
+                        Buf *from_mut, Buf *to_mut, FieldDeltaVec *fd, int mask_bl) {
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
     if (to->n) memcpy(to_mut->d, to->d, to->n);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_BL], &pa->to_st[M4_BL], &blocks[STREAM_BL]);
-    create_patch_block(from_mut, to_mut, &pa->from_st[M4_LDR], &pa->to_st[M4_LDR], &blocks[STREAM_LDR]);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_BL], &pa->to_st[M4_BL],
+                       STREAM_BL, fd);
+    create_patch_block(from_mut, to_mut, &pa->from_st[M4_LDR], &pa->to_st[M4_LDR],
+                       STREAM_LDR, fd);
+    fd_finalize(fd);
     if (mask_bl) {
         mask_bl_imms(from->d, from_mut->d, from->n);
         mask_bl_imms(to->d, to_mut->d, to->n);

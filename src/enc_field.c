@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, build_field_deltas, proxy pricing, split runs, preserve/corrections.
+ * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, proxy pricing, split runs, preserve/corrections.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -340,22 +340,6 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
     }
     free(pool);
     return mn;
-}
-
-FieldDeltaVec build_field_deltas(const PairAnalysis *pa, const BlockVec blocks[STREAM_N]) {
-    FieldDeltaVec out = {0};
-    for (int s = 0; s < STREAM_N; s++) {
-        const m4_stream_t *ms = &pa->from_st[s];
-        for (size_t bi = 0; bi < blocks[s].n; bi++) {
-            const Block *b = &blocks[s].v[bi];
-            for (int32_t k = 0; k < b->n; k++) {
-                size_t idx = (size_t)b->from_offset + (size_t)k;
-                if (idx < ms->n) fd_put(&out, ms->a[idx].addr, s, b->values[k]);
-            }
-        }
-    }
-    fd_finalize(&out);
-    return out;
 }
 
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,

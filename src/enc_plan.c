@@ -82,14 +82,12 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
 
 static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
                                  const PairAnalysis *pa, PlanCfg cfg,
-                                 BlockVec blocks[STREAM_N], Buf *from_df, Buf *to_df,
-                                 FieldDeltaVec *fd) {
+                                 Buf *from_df, Buf *to_df, FieldDeltaVec *fd) {
     int variant = cfg.variant;
-    data_format_encode(from, to, pa, from_df, to_df, blocks,
+    data_format_encode(from, to, pa, from_df, to_df, fd,
                        variant >= 2 ? 1 : 0);
     OpVec ops = bsdiff_ops(from_df, to_df, cfg.fuzz);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    *fd = build_field_deltas(pa, blocks);
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
@@ -209,10 +207,9 @@ static int plan_caps_feasible(const EncCtx *ctx, const OpVec *ops, const OpPC *p
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa, PlanCfg cfg) {
     PlanResult r = {0};
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
-    BlockVec blocks[STREAM_N] = {{0}};
     Buf from_df = {0}, to_df = {0};
     FieldDeltaVec fd = {0};
-    OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, blocks, &from_df, &to_df, &fd);
+    OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, &from_df, &to_df, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
     OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd);
@@ -236,7 +233,6 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
     free(fd.v);
     oppc_array_free(pc, ops.n);
     opvec_free_deep(&ops);
-    blockvec_array_free(blocks);
     buf_free(&from_df); buf_free(&to_df);
     r.body = body;
     r.fp_end = fp_end_s;
