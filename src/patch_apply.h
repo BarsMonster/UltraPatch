@@ -852,11 +852,12 @@ static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, i
 static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&M_gdl), el_u=s_ug_gamma(pa,&M_gel), adj_u=s_ug_gamma(pa,&M_gadj);
     int32_t adj=bb_unzz(pa,adj_u);
-    if(g_rcerr || dl_u>0x7fffffffu || el_u>0x7fffffffu){ g_rcerr=1; return; }
+    /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= A1_MAX_IMAGE via
+     * decode_header envelope checks + _Static_assert), so this pure 32-bit headroom test (check dl,
+     * then el against the rest of span) also subsumes the dl_u/el_u < 2^31 bound: any value >= 2^31
+     * exceeds the span and is rejected here. Cast to int32 only after the guard passes. */
+    if(g_rcerr || dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ g_rcerr=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
-    /* nw = dl+el (op output bytes). dl,el in [0,2^31) and the image span is < 2^31 (design invariant),
-     * so the overflow guard is a pure 32-bit headroom test: check dl, then el against the rest of span. */
-    if(dl_u>(uint32_t)g_image_span || el_u>(uint32_t)g_image_span-dl_u){ g_rcerr=1; return; }
     int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
     /* Feature 7B termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
      * writes >=1 byte. REJECT nw==0 here (do NOT trust the encoder): it is what guarantees the
