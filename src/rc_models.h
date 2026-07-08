@@ -97,7 +97,10 @@ static inline void a1_fl_init(A1Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF;
 /* =====================================================================================
  * Shared PURE wire semantics — hand-mirrored decoder<->encoder helpers single-sourced here so
  * the COMPILER (not a "must match" comment) enforces the mirror, exactly as bt_/fl_ above already
- * do. Each is used verbatim by BOTH src/patch_apply.h (device decoder) and the host encoder; all
+ * do. Most are used verbatim by BOTH src/patch_apply.h (device decoder) and the host encoder; the
+ * decoder-direction mirrors kept here (rc_unzz32_valid/value, rc_zz_abs, rc_uleb_overlong,
+ * rc_outmatch_pos) are decoder-only — their encoder-side twins (rc_zz32, rc_uleb_len,
+ * rc_natural_desc/rc_dir_is_natural, rc_outmatch_delta) live in src/enc_internal.h. All
  * are 64-bit-free and (the one-time literal-seed rounding divide aside) divide-free, and preserve
  * the exact dataflow so the Cortex-M0+ decoder codegen does not shift.
  * ===================================================================================== */
@@ -121,13 +124,9 @@ static inline void rc_u32le_put(uint8_t *p, uint32_t v){
     p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
 }
 
-/* Zigzag values used by the envelope and by adaptive gamma fields. The decoder rejects the
+/* Zigzag decode mirrors (encode-side rc_zz32 lives in src/enc_internal.h). The decoder rejects the
  * single unrepresentable int32 value (0xffffffff -> -2147483648) instead of relying on
  * implementation-defined casts or signed overflow at call sites. */
-static inline uint32_t rc_zz32(int32_t v){
-    uint32_t u=(uint32_t)v;
-    return v<0 ? ((0u-u)<<1)-1u : u<<1;
-}
 static inline int rc_unzz32_valid(uint32_t u){ return u!=0xffffffffu; }
 static inline int32_t rc_unzz32_value(uint32_t u){
     return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
@@ -138,19 +137,7 @@ static inline int rc_zz_abs(uint32_t base,uint32_t z,uint32_t max,uint32_t*out){
     return 1;
 }
 
-static inline int rc_uleb_len(uint32_t v){
-    int n=1;
-    while(v>>=7) n++;
-    return n;
-}
 static inline int rc_uleb_overlong(int n,uint8_t last){ return n>1 && last==0u; }
-
-/* Envelope direction marker. The natural direction is descending iff the image grows;
- * the overlong uLEB marker flips that choice. */
-static inline int rc_natural_desc(uint32_t from_size,uint32_t to_size){ return to_size>from_size; }
-static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc){
-    return desc==rc_natural_desc(from_size,to_size);
-}
 
 static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
     for(int i=0;i<depth && i<=maxidx;i++) u[i]=(uint16_t)(RC_PBIT/16);
@@ -325,9 +312,6 @@ RC_ALWAYS_INLINE void rc_dr_init(A1DRStream*d,int32_t*dic,uint16_t hitseed){
  * so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
 #define RC_OUTMATCH_MIN 4u
 
-static inline uint32_t rc_outmatch_delta(uint32_t pos, uint32_t expected){
-    return rc_zz32((int32_t)(pos - expected));
-}
 static inline uint32_t rc_outmatch_pos(uint32_t expected, int32_t delta){
     return expected + (uint32_t)delta;
 }

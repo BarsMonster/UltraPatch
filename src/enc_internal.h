@@ -42,6 +42,28 @@ static inline uint32_t rc_u32le(const uint8_t *p){
     return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
 }
 
+/* Encode-side zigzag/uLEB/envelope-direction/out-match helpers. Each mirrors a decoder-direction
+ * twin in rc_models.h (rc_unzz32_valid/value, rc_zz_abs, rc_uleb_overlong, rc_outmatch_pos); no
+ * decoder call site reads these, so they stay out of the shipped decoder headers. */
+static inline uint32_t rc_zz32(int32_t v){
+    uint32_t u=(uint32_t)v;
+    return v<0 ? ((0u-u)<<1)-1u : u<<1;
+}
+static inline uint32_t rc_outmatch_delta(uint32_t pos, uint32_t expected){
+    return rc_zz32((int32_t)(pos - expected));
+}
+static inline int rc_uleb_len(uint32_t v){
+    int n=1;
+    while(v>>=7) n++;
+    return n;
+}
+/* Envelope direction marker. The natural direction is descending iff the image grows;
+ * the overlong uLEB marker flips that choice. */
+static inline int rc_natural_desc(uint32_t from_size,uint32_t to_size){ return to_size>from_size; }
+static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc){
+    return desc==rc_natural_desc(from_size,to_size);
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 #define ENC_NORETURN __attribute__((noreturn))
 #else
