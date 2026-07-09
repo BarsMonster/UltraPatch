@@ -8,7 +8,19 @@ MAKE_CMD="${MAKE:-make}"
 . "$(dirname "$0")/tempdir.sh"
 rc=0
 
-echo "running gate (all legs concurrent): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-corpus..."
+# The corpus encoder saturates every core by itself, while several other gate legs also encode
+# nontrivial fixtures.  Leave one quarter of the machine to those concurrent legs; otherwise a
+# 32-worker corpus pool oversubscribes the 32-core reference host and approaches the 60 s cap.
+# An explicit `make gate JOBS=N` remains authoritative.  Standalone check-corpus still uses nproc.
+if [ -n "${JOBS:-}" ]; then
+  corpus_jobs=$JOBS
+else
+  cores=$(nproc 2>/dev/null || echo 4)
+  corpus_jobs=$((cores * 3 / 4))
+  [ "$corpus_jobs" -gt 0 ] || corpus_jobs=1
+fi
+
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-corpus..."
 
 LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-corpus-internal:m.txt:check-corpus"
 
@@ -21,7 +33,11 @@ for spec in $LEGS; do
   # the seconds between the pre-fork build and this loop). Without it, several legs that
   # list ultrapatch as a prerequisite could race concurrent `-o ultrapatch` links on the
   # same path while other legs exec it (ETXTBSY / half-written exec).
-  "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
+  if [ "$target" = check-corpus-internal ]; then
+    "$MAKE_CMD" --no-print-directory -o ultrapatch JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
+  else
+    "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
+  fi
   pids="$pids $!"
 done
 for p in $pids; do
@@ -49,7 +65,7 @@ kvs 'a.txt|soft_div_calls|ARM   soft-divide calls  : '
 awk -F= '/^stack_bound_bytes=/{b=$2}/^stack_ceiling_o2=/{c=$2}END{if(b!="")printf "caller-stack bound       : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : '
 awk -F= '/^home_size_better=/{b=$2}/^home_size_worse=/{w=$2}/^home_size_equal=/{e=$2}END{if(b!="")printf "home size split         : %s better / %s worse / %s equal\n",b,w,e}' "$tmp/m.txt"
-kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM rows amplified       : ' 'm.txt|max_maxrowerase|NVM max erases-per-row   : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_journal|journal peak slots      : '
+kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'm.txt|wire_identity|corpus wire identity    : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM rows amplified       : ' 'm.txt|max_maxrowerase|NVM max erases-per-row   : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_journal|journal peak slots      : '
 if [ "$rc" = 0 ]; then
   echo "robustness check         : PASS (round-trip both dirs + corrupt/truncated/CRC rejects)"
   echo "RESULT                   : ALL GATES PASS"

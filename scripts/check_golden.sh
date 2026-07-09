@@ -16,7 +16,7 @@ set -eu
 MODE="${1:-check}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 IMG="${IMAGES:-test-bench/images}"
-MANIFEST="test-bench/golden.sha256"
+MANIFEST="${GOLDEN_MANIFEST:-test-bench/golden.sha256}"
 
 . "$(dirname "$0")/tempdir.sh"
 

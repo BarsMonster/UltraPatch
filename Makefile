@@ -50,6 +50,7 @@ FOREIGN ?= test-bench/foreign
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
 FOREIGN_MANIFEST ?= test-bench/foreign.sha256
 CORPUS_SIZE_BASELINE ?= test-bench/home-size-baseline.tsv
+CORPUS_WIRE_MANIFEST ?= test-bench/corpus-wire.sha256
 
 BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
@@ -83,7 +84,7 @@ BASE_STACK_CEIL_O2 ?= 480
 # an explicit error instead of a bare status 124. One-off override (never commit a
 # longer default): GATE_TIMEOUT=<secs> make <target>.
 GATE_TIMEOUT ?= 60
-CAPPED := all decoder-header check check-arm check-stack check-assets check-decoder-contract \
+CAPPED := all decoder-header check check-arm check-stack check-assets check-decoder-contract check-decoder-sanitize \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -217,8 +218,15 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
+	CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
+
+# Pointer-rich in-memory decoder/backend contract under dynamic sanitizers. Standalone so its
+# instrumented compile does not contend with the CPU-saturated corpus workers in `make gate`.
+check-decoder-sanitize-internal: ultrapatch
+	@CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" \
+	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
 
 check-models-internal:
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_models.sh
@@ -255,12 +263,42 @@ check-degrade-internal: ultrapatch
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
-# `make golden-update` and commit the manifest (plus size baselines) in the SAME commit.
+# `make golden-update`: it stages the eight-blob golden manifest, all 290 corpus hashes, and the
+# 256 home per-pair sizes, validates the full round-trip/write-safety matrix before replacement,
+# then atomically replaces each completed file. Update the printed Makefile aggregate/one-face
+# ratchets and commit all of them in the SAME commit.
 check-golden-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check
 
 golden-update-internal: ultrapatch
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh update
+	@set -e; \
+	. ./scripts/tempdir.sh; \
+	cp test-bench/golden.sha256 "$$tmp/golden.sha256"; \
+	FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$$tmp/golden.sha256" \
+	  scripts/check_golden.sh update >"$$tmp/golden.out"; \
+	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="" \
+	  CORPUS_SIZE_DUMP="$$tmp/home-size-baseline.tsv" CORPUS_WIRE_MANIFEST="" \
+	  CORPUS_WIRE_DUMP="$$tmp/corpus-wire.sha256" BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" \
+	  ./check_corpus.sh $(JOBS) >"$$tmp/corpus.out"; \
+	test "$$(wc -l <"$$tmp/golden.sha256")" -eq 8; \
+	test "$$(wc -l <"$$tmp/home-size-baseline.tsv")" -eq 256; \
+	test "$$(wc -l <"$$tmp/corpus-wire.sha256")" -eq 290; \
+	ng="test-bench/.golden.sha256.$$$$.tmp"; \
+	ns="test-bench/.home-size-baseline.tsv.$$$$.tmp"; \
+	nw="test-bench/.corpus-wire.sha256.$$$$.tmp"; \
+	cleanup_update(){ rm -f "$$ng" "$$ns" "$$nw"; rm -rf "$$tmp"; }; \
+	trap 'cleanup_update' EXIT; \
+	trap 'cleanup_update; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
+	trap 'cleanup_update; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
+	cp "$$tmp/golden.sha256" "$$ng"; cp "$$tmp/home-size-baseline.tsv" "$$ns"; \
+	cp "$$tmp/corpus-wire.sha256" "$$nw"; \
+	mv "$$ng" test-bench/golden.sha256; mv "$$ns" test-bench/home-size-baseline.tsv; \
+	mv "$$nw" test-bench/corpus-wire.sha256; \
+	ng=; ns=; nw=; \
+	cat "$$tmp/golden.out"; cat "$$tmp/corpus.out"; \
+	awk '$$3=="oneface_grow.blob"{print "oneface_grow=" $$2} \
+	     $$3=="oneface_revert.blob"{print "oneface_revert=" $$2}' test-bench/golden.sha256; \
+	echo "wire manifests and home per-pair sizes updated; update Makefile BASE_* ratchets to the printed metrics"
 
 # The 256 home (from,to) pairs PLUS 34 foreign pair-directions (a second, unrelated Cortex-M0+
 # lineage — CircuitPython feather_m0_express; see docs/foreign-firmware-study.md) are independent,
@@ -274,6 +312,7 @@ golden-update-internal: ultrapatch
 # (defaults to nproc).
 check-corpus-internal: ultrapatch
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" \
+	CORPUS_WIRE_MANIFEST="$(CORPUS_WIRE_MANIFEST)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	./check_corpus.sh $(JOBS)
 
@@ -297,7 +336,7 @@ check-corpus-internal: ultrapatch
 # it). The sub-makes still stat sources for their own rules; only the prebuilt binary is pinned.
 gate-internal: all-internal
 	@MAKE="$(MAKE)" BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
-	BASE_ARM_BSS="$(BASE_ARM_BSS)" scripts/run_gate.sh
+	BASE_ARM_BSS="$(BASE_ARM_BSS)" JOBS="$(JOBS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-

@@ -34,6 +34,10 @@
 #   CORPUS_SIZE_BASELINE   TSV to split home pairs against; set to "" to skip the split entirely
 #                          (bare per-pair measurement, e.g. when generating a fresh baseline).
 #   CORPUS_SIZE_DUMP       if set, write the home per-pair "<from> <to> <size>" TSV to this path.
+# Wire identity handling:
+#   CORPUS_WIRE_MANIFEST   TSV pinning SHA-256 for every scheduled home/foreign blob; set to ""
+#                          only for an intentional manifest-generation measurement.
+#   CORPUS_WIRE_DUMP       if set, write the sorted "<tag> <from> <to> <sha256>" TSV.
 # Expected home/foreign pair counts are derived from the generated job stream, so a reduced
 # IMAGES/FOREIGN subset still validates that every scheduled job produced a metric line.
 set -u
@@ -41,9 +45,11 @@ JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
 SIZE_BASE="${CORPUS_SIZE_BASELINE-test-bench/home-size-baseline.tsv}"
+WIRE_BASE="${CORPUS_WIRE_MANIFEST-test-bench/corpus-wire.sha256}"
 UP="${ULTRAPATCH:-./ultrapatch}"
 UPD="${ULTRAPATCH_DECODE:-$UP}"
 DUMP="${CORPUS_SIZE_DUMP:-}"
+WIRE_DUMP="${CORPUS_WIRE_DUMP:-}"
 export UP UPD
 
 # Foreign lineage, pinned release order; adjacent pairs are the update steps. Two contiguous
@@ -51,7 +57,7 @@ export UP UPD
 FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
-#   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions>"
+#   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions> <sha256>"
 # tag is C (home matrix) or F (foreign) so the aggregator can total each set separately while
 # taking NVM write-safety maxima across BOTH. (A single short printf is < PIPE_BUF, so parallel
 # workers' lines never interleave.)
@@ -66,12 +72,14 @@ cm_work() {
   trap 'rm -rf "$d"; trap - TERM INT EXIT; kill -s INT "$$"' INT
   "$UP" "$from/watch.bin" "$to/watch.bin" "$d/p.blob" >/dev/null 2>&1
   sz=$(wc -c < "$d/p.blob")
+  hash=$(sha256sum "$d/p.blob")
+  hash=${hash%% *}
   cp "$from/watch.bin" "$d/mem.bin"
   "$UPD" --decode "$d/mem.bin" "$d/p.blob" >/dev/null 2>"$d/log"
   if cmp -s "$d/mem.bin" "$to/watch.bin"; then ok=1; else ok=0; fi
   j=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$d/log")
   v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$d/log")
-  printf '%s %s %s %s %s %s %s\n' "$tag" "${from##*/}" "${to##*/}" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA}"
+  printf '%s %s %s %s %s %s %s %s\n' "$tag" "${from##*/}" "${to##*/}" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA}" "$hash"
   rm -rf "$d"
 }
 export -f cm_work
@@ -103,6 +111,10 @@ if [ -n "$SIZE_BASE" ] && [ ! -f "$SIZE_BASE" ]; then
   echo "check_corpus.sh: missing home size baseline: $SIZE_BASE" >&2
   exit 3
 fi
+if [ -n "$WIRE_BASE" ] && [ ! -f "$WIRE_BASE" ]; then
+  echo "check_corpus.sh: missing wire manifest: $WIRE_BASE" >&2
+  exit 3
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -117,7 +129,10 @@ EXP_FGN=$(grep -c '^F' "$tmp/jobs.txt")
 xargs -P "$JOBS" -L1 bash -c 'cm_work "$0" "$1" "$2"' < "$tmp/jobs.txt" > "$tmp/pairs.txt"
 
 # Optional per-pair home-size dump (used by ab_matrix.sh to build an A/B baseline from any encoder).
-[ -n "$DUMP" ] && awk '$1=="C"{print $2"\t"$3"\t"$4}' "$tmp/pairs.txt" > "$DUMP"
+# Sort because worker completion order is intentionally nondeterministic.
+[ -n "$DUMP" ] && awk '$1=="C"{print $2"\t"$3"\t"$4}' "$tmp/pairs.txt" | sort > "$DUMP"
+# Optional all-pair wire dump.  Sorting makes a parallel run byte-reproducible.
+[ -n "$WIRE_DUMP" ] && awk '$1=="C"||$1=="F"{print $1"\t"$2"\t"$3"\t"$10}' "$tmp/pairs.txt" | sort > "$WIRE_DUMP"
 
 agg=$(
   awk '{ tag=$1; sz=$4; ok=$5; j=$6; amp=$7; row=$8; inv=$9;
@@ -162,20 +177,59 @@ EOF
 else
   hbetter=NA; hworse=NA; hequal=NA; hmissing=0; hbase="$EXP_HOME"
 fi
+
+# Every corpus blob is a wire artifact, not merely a byte count.  Compare hashes from the
+# already-produced worker blobs, so this closes the size-neutral wire-drift gap without a
+# second encode pass.
+if [ -n "$WIRE_BASE" ]; then
+  wire=$(
+    awk '
+      FNR==NR {
+        if($0 ~ /^[[:space:]]*$/ || $1 ~ /^#/) next
+        if(NF!=4 || ($1!="C" && $1!="F") || length($4)!=64 || $4 !~ /^[0-9a-f]+$/){badfmt++; next}
+        key=$1 SUBSEP $2 SUBSEP $3
+        if(key in want) dup++
+        want[key]=$4
+        bcount++
+        next
+      }
+      $1=="C" || $1=="F" {
+        key=$1 SUBSEP $2 SUBSEP $3
+        if(key in seen) dup++
+        seen[key]=1
+        if(!(key in want)){missing++; next}
+        if($10==want[key]) same++
+        else mismatch++
+      }
+      END {
+        printf "%d %d %d %d %d\n", same+0,mismatch+0,missing+0,bcount+0,dup+badfmt
+      }' "$WIRE_BASE" "$tmp/pairs.txt"
+  )
+  read wmatch wmismatch wmissing wbase wbad <<EOF
+$wire
+EOF
+else
+  wmatch=NA; wmismatch=0; wmissing=0; wbase=$((EXP_HOME + EXP_FGN)); wbad=0
+fi
+wire_full_bad=0
+if [ "$EXP_HOME" -eq 256 ] && [ "$EXP_FGN" -eq 34 ] && [ "$wbase" -ne 290 ]; then
+  wire_full_bad=1
+fi
 if [ "$cn" -ne "$EXP_HOME" ] || [ "$fn" -ne "$EXP_FGN" ] || [ "$bad" -ne 0 ] \
-   || [ "$hbase" -ne "$EXP_HOME" ] || [ "$hmissing" -ne 0 ]; then
-  echo "check_corpus.sh: structural error (home=$cn/$EXP_HOME foreign=$fn/$EXP_FGN baseline=$hbase/$EXP_HOME missing=$hmissing bad_parse=$bad)" >&2
+   || [ "$hbase" -ne "$EXP_HOME" ] || [ "$hmissing" -ne 0 ] \
+   || [ "$wmissing" -ne 0 ] || [ "$wbad" -ne 0 ] || [ "$wire_full_bad" -ne 0 ]; then
+  echo "check_corpus.sh: structural error (home=$cn/$EXP_HOME foreign=$fn/$EXP_FGN baseline=$hbase/$EXP_HOME missing=$hmissing wire_manifest=$wbase scheduled=$((EXP_HOME + EXP_FGN)) wire_missing=$wmissing wire_bad=$wbad full_manifest_bad=$wire_full_bad bad_parse=$bad)" >&2
   exit 3
 fi
 
-printf 'matrix_ok=%d/%d\nfull_total=%d\nhome_size_better=%s\nhome_size_worse=%s\nhome_size_equal=%s\nforeign_ok=%d/%d\nforeign_total=%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\n' \
-  "$cok" "$EXP_HOME" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$EXP_FGN" "$ffull" "$mj" "$ma" "$mr" "$mi"
+printf 'matrix_ok=%d/%d\nfull_total=%d\nhome_size_better=%s\nhome_size_worse=%s\nhome_size_equal=%s\nforeign_ok=%d/%d\nforeign_total=%d\nwire_identity=%s/%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\n' \
+  "$cok" "$EXP_HOME" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$EXP_FGN" "$ffull" "$wmatch" "$((EXP_HOME + EXP_FGN))" "$mj" "$ma" "$mr" "$mi"
 
 # ---- gate assertions (single source; the Makefile corpus leg just runs this script) ----
 # Correctness / write-safety (unconditional; only a broken candidate, never a regression, trips it):
 if [ "$cok" -ne "$EXP_HOME" ] || [ "$fok" -ne "$EXP_FGN" ] \
-   || [ "$ma" -ne 0 ] || [ "$mr" -gt 1 ] || [ "$mi" -ne 0 ]; then
-  echo "check_corpus.sh: correctness/write-safety gate (matrix=$cok/$EXP_HOME foreign=$fok/$EXP_FGN amplified=$ma maxrowerase=$mr inversions=$mi)" >&2
+   || [ "$wmismatch" -ne 0 ] || [ "$ma" -ne 0 ] || [ "$mr" -gt 1 ] || [ "$mi" -ne 0 ]; then
+  echo "check_corpus.sh: correctness/wire/write-safety gate (matrix=$cok/$EXP_HOME foreign=$fok/$EXP_FGN wire_mismatch=$wmismatch amplified=$ma maxrowerase=$mr inversions=$mi)" >&2
   exit 4
 fi
 # The split must account for every home pair (only meaningful when a baseline was supplied).
