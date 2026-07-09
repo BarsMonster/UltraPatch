@@ -15,49 +15,9 @@ one="$FIX/v1_one_face"
 
 rejects=0
 
-emit_byte() {
-  printf "\\$(printf '%03o' "$1")" >> "$2"
-}
-
-put_uleb() {
-  v=$1
-  out=$2
-  while :; do
-    b=$((v & 127))
-    v=$((v >> 7))
-    if [ "$v" -ne 0 ]; then b=$((b | 128)); fi
-    emit_byte "$b" "$out"
-    [ "$v" -eq 0 ] && break
-  done
-}
-
-byte_at() {
-  od -An -tu1 -j "$2" -N1 "$1" | tr -d ' '
-}
-
-uleb_end_excl() {
-  blob=$1
-  off=$2
-  while :; do
-    b=$(byte_at "$blob" "$off")
-    off=$((off + 1))
-    [ $((b & 128)) -eq 0 ] && break
-  done
-  printf '%u\n' "$off"
-}
-
-make_overlong_uleb_at() {
-  in=$1
-  start=$2
-  out=$3
-  end=$(uleb_end_excl "$in" "$start")
-  last_off=$((end - 1))
-  last=$(byte_at "$in" "$last_off")
-  head -c "$last_off" "$in" > "$out"
-  emit_byte "$((last | 128))" "$out"
-  emit_byte 0 "$out"
-  tail -c "+$((end + 1))" "$in" >> "$out"
-}
+# Shared wire-envelope helper: the single source of the header uLEB layout (field walk, overlong
+# synthesis/detection, header synthesis). See scripts/wire_envelope.py.
+wire() { python3 "$(dirname "$0")/wire_envelope.py" "$@"; }
 
 zeros() {
   dd if=/dev/zero bs=1 count="$1" 2>/dev/null
@@ -77,16 +37,9 @@ expect_reject_unchanged() {
   rejects=$((rejects + 1))
 }
 
-mk_header_blob() {
-  out=$1
-  from_size=$2
-  to_delta_zz=$3
-  : > "$out"
-  head -c 8 "$tmp/grow.blob" >> "$out"   # CRC32(from)[4] | CRC32(to)[4]
-  put_uleb "$from_size" "$out"
-  put_uleb "$to_delta_zz" "$out"
-  zeros 16 >> "$out"
-}
+# Synthesize a header blob with a chosen from_size / zigzag size-delta, borrowing the real blob's
+# CRC32(from)|CRC32(to) pair. (16 zero pad bytes follow, per wire_envelope.py header.)
+mk_header_blob() { wire header "$1" "$tmp/grow.blob" "$2" "$3"; }
 
 base_bin="$base/watch.bin"
 one_bin="$one/watch.bin"
@@ -109,22 +62,18 @@ printf '\200\200\200\200\020' >> "$tmp/overflow5_from_size.blob"
 zeros 8 >> "$tmp/overflow5_from_size.blob"
 expect_reject_unchanged overflow5_from_size "$tmp/overflow5_from_size.blob" "$base_bin"
 
-from_start=8
-from_end=$(uleb_end_excl "$tmp/grow.blob" "$from_start")
-delta_end=$(uleb_end_excl "$tmp/grow.blob" "$from_end")
-fp_end_end=$(uleb_end_excl "$tmp/grow.blob" "$delta_end")
-fp_start_end=$(uleb_end_excl "$tmp/grow.blob" "$fp_end_end")
-
-make_overlong_uleb_at "$tmp/grow.blob" "$from_start" "$tmp/overlong_from_size.blob"
+# grow.blob is a DESCENDING grow patch, so its header ulebs are (0) from_size, (1) size-delta,
+# (2) fp_end, (3) body_len — fp_start is absent (descending). Overlong-encoding any of the three
+# plain-uleb fields (from_size/fp_end/body_len) is malformed and must reject; the size-delta uleb
+# is NOT tested here because an overlong size-delta is the legitimate direction-flip marker
+# (exercised by check_degrade case (c)), not a malformation.
+wire overlong "$tmp/grow.blob" 0 "$tmp/overlong_from_size.blob"
 expect_reject_unchanged overlong_from_size "$tmp/overlong_from_size.blob" "$base_bin"
 
-make_overlong_uleb_at "$tmp/grow.blob" "$delta_end" "$tmp/overlong_fp_end.blob"
+wire overlong "$tmp/grow.blob" 2 "$tmp/overlong_fp_end.blob"
 expect_reject_unchanged overlong_fp_end "$tmp/overlong_fp_end.blob" "$base_bin"
 
-make_overlong_uleb_at "$tmp/grow.blob" "$fp_end_end" "$tmp/overlong_fp_start.blob"
-expect_reject_unchanged overlong_fp_start "$tmp/overlong_fp_start.blob" "$base_bin"
-
-make_overlong_uleb_at "$tmp/grow.blob" "$fp_start_end" "$tmp/overlong_body_len.blob"
+wire overlong "$tmp/grow.blob" 3 "$tmp/overlong_body_len.blob"
 expect_reject_unchanged overlong_body_len "$tmp/overlong_body_len.blob" "$base_bin"
 
 mk_header_blob "$tmp/from_size_mismatch.blob" 1 0
@@ -167,4 +116,4 @@ expect_reject_unchanged trunc_tail4 "$tmp/trunc_tail4.blob" "$base_bin"
 expect_reject_unchanged wrong_current_image "$tmp/grow.blob" "$one_bin"
 
 printf 'malformed_rejects=%u\n' "$rejects"
-test "$rejects" -eq 30
+test "$rejects" -eq 29

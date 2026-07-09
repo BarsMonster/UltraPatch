@@ -164,21 +164,8 @@ fi
 # =========================================================================================
 dpin dir synth_unnatural_dir               # == golden pin (rshift 4096 444 256 3400 600)
 if enc dir; then
-  ov=$(python3 - "$tmp/dir.blob" <<'EOF'
-import sys
-b = open(sys.argv[1], "rb").read()
-p = 8                                   # skip CRC32(from)[4] | CRC32(to)[4]
-def uleb(p):
-    v = sh = n = 0
-    while True:
-        x = b[p]; p += 1; v |= (x & 0x7f) << sh; sh += 7; n += 1
-        if not (x & 0x80): break
-    return v, p, n, x
-_, p, _, _ = uleb(p)                    # from_size
-_, p, n, last = uleb(p)                 # size-delta: overlong iff multi-byte ending in 0x00
-print("OVERLONG" if (n > 1 and last == 0) else "canonical")
-EOF
-)
+  # Header uleb #1 is the size-delta; the shared wire helper reports the overlong marker.
+  ov=$(python3 "$(dirname "$0")/wire_envelope.py" detect "$tmp/dir.blob" 1)
   natflag=$(sed -n 's/.*natural=\([0-9]\).*/\1/p' "$tmp/dir.deg")
   r=$(dec ./ultrapatch dir)
   dir_flip=$ov
