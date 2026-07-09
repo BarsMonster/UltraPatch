@@ -15,7 +15,13 @@ LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check c
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
-  "$MAKE_CMD" --no-print-directory "$target" >"$tmp/$file" 2>&1 &
+  # gate-internal already linked ./ultrapatch before this fork. Pass `-o ultrapatch`
+  # (assume-old) so each forked leg treats the prebuilt binary as up-to-date and never
+  # relinks it, even if a source mtime is newer at sub-make startup (an edit landing in
+  # the seconds between the pre-fork build and this loop). Without it, several legs that
+  # list ultrapatch as a prerequisite could race concurrent `-o ultrapatch` links on the
+  # same path while other legs exec it (ETXTBSY / half-written exec).
+  "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
   pids="$pids $!"
 done
 for p in $pids; do

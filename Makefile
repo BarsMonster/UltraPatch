@@ -288,8 +288,11 @@ check-corpus-internal: ultrapatch
 # check-corpus). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
-# metric is visible. Binaries are built BEFORE the legs fork, so concurrent sub-makes
-# never race on a compile; legs run undisturbed even if sources change mid-gate.
+# metric is visible. ultrapatch is linked BEFORE the legs fork; run_gate.sh then invokes
+# each forked leg with make's `-o ultrapatch` (assume-old), so no leg relinks the shared
+# binary even if a source mtime became newer at sub-make startup (which would otherwise let
+# several legs race concurrent `-o ultrapatch` links on the same path while other legs exec
+# it). The sub-makes still stat sources for their own rules; only the prebuilt binary is pinned.
 gate-internal: all-internal
 	@MAKE="$(MAKE)" BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
 	BASE_ARM_BSS="$(BASE_ARM_BSS)" scripts/run_gate.sh
