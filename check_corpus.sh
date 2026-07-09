@@ -58,6 +58,12 @@ FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 
 cm_work() {
   tag=$1; from=$2; to=$3
   d=$(mktemp -d)
+  # Clean this worker's dir on the 60 s-cap kill path too: a mid-matrix SIGTERM would
+  # otherwise leak up to JOBS of these mktemp dirs. On TERM/INT clean up, restore the
+  # default disposition, and re-raise so the worker dies by the signal.
+  trap 'rm -rf "$d"' EXIT
+  trap 'rm -rf "$d"; trap - TERM INT EXIT; kill -s TERM "$$"' TERM
+  trap 'rm -rf "$d"; trap - TERM INT EXIT; kill -s INT "$$"' INT
   "$UP" "$from/watch.bin" "$to/watch.bin" "$d/p.blob" >/dev/null 2>&1
   sz=$(wc -c < "$d/p.blob")
   cp "$from/watch.bin" "$d/mem.bin"
