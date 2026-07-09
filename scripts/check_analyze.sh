@@ -19,14 +19,14 @@
 # target). Auto-skips (success) where gcc -fanalyzer is unavailable.
 set -u
 
-CC="${CC:-gcc}"
+: "${CC:?check_analyze.sh: CC not set — run 'make check-analyze' (it supplies CC/CONTRACT_FLAGS)}"
+: "${CONTRACT_FLAGS:?check_analyze.sh: CONTRACT_FLAGS not set — run 'make check-analyze'}"
 if ! "$CC" -fanalyzer -x c -c /dev/null -o /dev/null >/dev/null 2>&1; then
     echo "analyze=SKIPPED (no working '$CC -fanalyzer')"
     exit 0
 fi
 
-COMMON="-DCORTEX_M0 -std=c99 -I. -Isrc -Ivendor/libdivsufsort -fanalyzer \
-        -Wno-analyzer-tainted-assertion -c -o /dev/null"
+COMMON="$CONTRACT_FLAGS -fanalyzer -Wno-analyzer-tainted-assertion -c -o /dev/null"
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 rc=0

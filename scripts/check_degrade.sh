@@ -34,7 +34,7 @@
 # LCG) — no committed binaries. Cases (a) and (c) request its two NAMED golden pins, so they are
 # byte-identical to the check_golden manifest entries by construction.
 #
-# Usage: check_degrade.sh     (needs ./ultrapatch already built)
+# Usage: make check-degrade   (supplies CC + the standalone-decoder TU list/defines; needs ./ultrapatch built)
 set -u
 
 CC_HOST="${CC:-cc}"
@@ -101,8 +101,8 @@ JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0
 # production D=2 build. Same source as the host backend, its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
 D1="$tmp/ultrapatch_d1_decode"
-if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -DOUTROW_DEPTH=1 -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L \
-      -Isrc src/patch_host_backend.c src/enc_util.c -o "$D1" 2>"$tmp/d1build.log"; then
+if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -Isrc $DEC_DEMO_DEFINES -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
+      -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
 fi

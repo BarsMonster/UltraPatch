@@ -5,9 +5,9 @@
 CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
-# Target-family wire contract: CORTEX_M0 must be defined for BOTH the encoder and the
-# decoder TU. CORTEX_M4 is reserved (future wire).
-CFLAGS += -DCORTEX_M0
+# Semantic build-contract flags, single-sourced into CFLAGS below and the analyzer leg (warning/optimization policy stays leg-local).
+CONTRACT_FLAGS := -DCORTEX_M0 -std=c99 -I. -Isrc -Ivendor/libdivsufsort
+CFLAGS += $(CONTRACT_FLAGS)
 CFLAGS += -g
 CFLAGS += -Wall
 CFLAGS += -Wextra
@@ -16,13 +16,9 @@ CFLAGS += -Wfloat-equal
 CFLAGS += -Wformat=2
 CFLAGS += -Wshadow
 CFLAGS += -Werror
-CFLAGS += -std=c99
 CFLAGS += $(OPT)
 CFLAGS += -ffunction-sections
 CFLAGS += -fdata-sections
-CFLAGS += -I.
-CFLAGS += -Isrc
-CFLAGS += -Ivendor/libdivsufsort
 CFLAGS += $(CFLAGS_EXTRA)
 LDFLAGS += -Wl,--gc-sections
 
@@ -42,7 +38,9 @@ GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/enc_internal.h
 # selfcheck, CLI decode, and standalone decoder builds.
 HOST_BACKEND_SRC := src/patch_host_backend.c
 ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
-DEC_SRCS := $(HOST_BACKEND_SRC)
+# Standalone host-decoder TU pair + demo defines, shared once by dec_portable, check_degrade's D=1, and all-internal.
+DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
+DEC_DEMO_DEFINES := -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L
 TOOL_SRCS := $(ENC_SRCS)
 
 FIXTURES ?= test-bench/fixtures
@@ -94,7 +92,7 @@ $(CAPPED): %:
 	exit $$s
 
 all-internal: ultrapatch
-	$(CC) $(CFLAGS) -Wconversion -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN -c $(DEC_SRCS) -o /dev/null
+	$(CC) $(CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
@@ -214,8 +212,8 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	     inours { line = $$0; gsub(/__builtin_offsetof/, "", line); \
 	              if (line ~ /__attribute__|__builtin_/) { print "GNU construct in portable decoder build: " $$0; bad=1 } } \
 	     END { exit bad ? 1 : 0 }'; \
-	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN \
-	    src/patch_host_backend.c src/enc_util.c -o "$$tmp/dec_portable"; \
+	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) $(DEC_DEMO_DEFINES) \
+	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
@@ -250,7 +248,7 @@ check-edge-internal: ultrapatch
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: ultrapatch
-	@CC="$(CC)" scripts/check_degrade.sh
+	@CC="$(CC)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
@@ -302,7 +300,7 @@ gate-internal: all-internal
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
-	@ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
+	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
 
 clean-internal:
 	rm -f ultrapatch $(DECODER_SINGLE_HDR)
