@@ -188,7 +188,7 @@ every on-stack return address; no per-call addend is added.
 
 The number **includes** all first-party decoder frames. It **excludes** the integrator's own
 externs - `flash_read`, `flash_write`, and the byte callback (their stack is the integrator's
-cost) — and the small toolchain leaves (`memmove`/`memset`/`__aeabi_uidiv`); budget those plus
+cost) — and the small toolchain leaves (`memmove`/`memset`); budget those plus
 your worst-case interrupt-nesting frame on top. `make gate` re-baselines the gcc -O2 bound via
 `check-stack` and fails if it exceeds the pinned ceiling; the static bound above is authoritative
 for the device.

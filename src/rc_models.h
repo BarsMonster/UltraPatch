@@ -141,13 +141,21 @@ static inline uint16_t rc_adapt(uint32_t p, int bit, int rate){
     return (uint16_t)(bit ? p-(p>>rate) : p+((RC_PBIT-p)>>rate));
 }
 
-/* histogram-seeded literal-tree node prob: rounded (2*RC_PBIT*num)/(2*den) clamped to 1..RC_PBIT-1
- * (an empty context degenerates to RC_PHALF). The rounding divide is one-time header init (software-
- * divided on M0+; the ARM gate pins exactly one soft-divide call). Shared by decoder
- * lit_tree_from_hist and encoder lit_tree_seed_e. */
+/* Histogram-seeded literal-tree node prob: round(RC_PBIT*num/den) half-up, then clamp to
+ * 1..RC_PBIT-1 (an empty context degenerates to RC_PHALF). Long division emits one rounding bit
+ * beyond the 12-bit fraction; num<=den and MAX_IMAGE<=2^26 keep every doubled remainder in u32.
+ * The rounded result is 0..RC_PBIT, so subtracting its high bit performs the upper clamp.
+ * Shared by decoder lit_tree_from_hist and encoder lit_tree_seed_e. */
 static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
-    uint32_t pr = den ? (2u*RC_PBIT*num+den)/(2u*den) : RC_PHALF;
-    return (uint16_t)(pr<1 ? 1 : (pr>RC_PBIT-1 ? RC_PBIT-1 : pr));
+    if(!den) return RC_PHALF;
+    uint32_t pr=0;
+    int bits=(int)RC_PROB_BITS+1;
+    do {
+        num<<=1; pr<<=1;
+        if(num>=den){ num-=den; pr++; }
+    } while(--bits);
+    pr=(pr+1u)>>1;
+    return (uint16_t)(pr ? pr-(pr>>RC_PROB_BITS) : 1u);
 }
 
 static inline void rc_u32le_put(uint8_t *p, uint32_t v){

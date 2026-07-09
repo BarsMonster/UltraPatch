@@ -57,10 +57,10 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 5845
+BASE_ARM_TEXT ?= 5849
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
-BASE_ARM_SOFT_DIV ?= 1
+BASE_ARM_SOFT_DIV ?= 0
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 # The production ARM size gate intentionally measures the static-state wrapper integration
 # used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;

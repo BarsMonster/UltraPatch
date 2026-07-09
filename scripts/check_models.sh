@@ -16,6 +16,92 @@ set -eu
 
 . "$(dirname "$0")/tempdir.sh"
 
+cat > "$tmp/seed_prob_probe.inc" <<'EOF'
+/* Host-only oracle for the decoder's divide-free literal histogram seed. */
+#define SEED_SCALE 4096u
+
+static uint16_t seed_prob_oracle(uint32_t num, uint32_t den){
+    uint64_t pr;
+    if(!den) return 2048u;
+    pr=(2u*(uint64_t)SEED_SCALE*num+den)/(2u*(uint64_t)den);
+    return (uint16_t)(pr<1u ? 1u : (pr>SEED_SCALE-1u ? SEED_SCALE-1u : pr));
+}
+
+static uint16_t seed_prob_legacy(uint32_t num, uint32_t den){
+    uint32_t pr=(2u*SEED_SCALE*num+den)/(2u*den);
+    return (uint16_t)(pr<1u ? 1u : (pr>SEED_SCALE-1u ? SEED_SCALE-1u : pr));
+}
+
+static int check_seed_case(uint32_t num, uint32_t den){
+    CHECK(rc_lit_seed_prob(num,den)==seed_prob_oracle(num,den));
+    /* Where every operation in the old expression fit u32, require byte-for-byte compatibility. */
+    if(den && num<=(UINT32_MAX-den)/(2u*SEED_SCALE))
+        CHECK(rc_lit_seed_prob(num,den)==seed_prob_legacy(num,den));
+    return 0;
+}
+
+static int check_seed_window(uint32_t center, uint32_t den){
+    uint32_t lo=center>3u ? center-3u : 0u;
+    uint32_t hi=den-center>3u ? center+3u : den;
+    for(uint32_t num=lo;;num++){
+        int r=check_seed_case(num,den);
+        if(r) return r;
+        if(num==hi) break;
+    }
+    return 0;
+}
+
+static int check_seed_prob(void){
+    static const uint32_t dens[] = {
+        1u,2u,3u,7u,31u,255u,256u,257u,1023u,1024u,1025u,
+        524287u,524288u,524289u,1048575u,1048576u,1048577u,
+        MAX_IMAGE-1u,MAX_IMAGE
+    };
+    int r;
+
+    CHECK(rc_lit_seed_prob(0u,0u)==2048u);
+    CHECK(rc_lit_seed_prob(MAX_IMAGE,0u)==2048u);
+
+    /* Exhaust every valid fraction in a dense small domain. */
+    for(uint32_t den=1u;den<=1024u;den++)
+        for(uint32_t num=0u;num<=den;num++){
+            r=check_seed_case(num,den);
+            if(r) return r;
+        }
+
+    /* Exercise zeros, tails, balanced/skewed ratios, and the old 8192*num wrap seam. */
+    for(size_t i=0;i<sizeof(dens)/sizeof(dens[0]);i++){
+        uint32_t den=dens[i];
+        static const uint32_t wrap[] = { 524287u,524288u,524289u };
+        uint32_t centers[] = { 0u,1u,den/8192u,den/4096u,den/2u,den-1u,den };
+        for(size_t j=0;j<sizeof(centers)/sizeof(centers[0]);j++){
+            r=check_seed_window(centers[j],den);
+            if(r) return r;
+        }
+        for(size_t j=0;j<sizeof(wrap)/sizeof(wrap[0]);j++) if(wrap[j]<=den){
+            r=check_seed_window(wrap[j],den);
+            if(r) return r;
+        }
+    }
+
+    /* Probe both sides of every half-up quantization boundary at the 64 MiB product cap. */
+    for(uint32_t q=0u;q<=SEED_SCALE;q++){
+        uint32_t center=(uint32_t)(((2u*(uint64_t)q+1u)*MAX_IMAGE)/(2u*SEED_SCALE));
+        r=check_seed_window(center,MAX_IMAGE);
+        if(r) return r;
+    }
+
+    /* At MAX_IMAGE, sweep every numerator for which the historical u32 formula was defined. */
+    for(uint32_t num=0u;num<=(UINT32_MAX-MAX_IMAGE)/(2u*SEED_SCALE);num++){
+        r=check_seed_case(num,MAX_IMAGE);
+        if(r) return r;
+    }
+    return 0;
+}
+
+#undef SEED_SCALE
+EOF
+
 cat > "$tmp/model_probe.c" <<'EOF'
 #include "enc_internal.h"
 
@@ -40,6 +126,8 @@ enum {
 
 #define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
 #define COUNT_OF(x) (sizeof(x) / sizeof((x)[0]))
+
+#include "seed_prob_probe.inc"
 
 /* Encoder and decoder share one define per knob (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
  * from patch_config.h, so a wire-knob mismatch is impossible by construction — no mirror asserts. */
@@ -140,6 +228,7 @@ static int check_reloc_helpers(void){
 int main(int argc, char **argv){
     (void)argv;
     int r;
+    if((r = check_seed_prob())) return r;
     if((r = check_gamma_index())) return r;
     if((r = check_shared_models())) return r;
     if((r = check_zigzag())) return r;
@@ -154,4 +243,31 @@ EOF
 
 "$CC" $CFLAGS "$tmp/model_probe.c" -o "$tmp/model_probe"
 "$tmp/model_probe"
+
+# Exercise the same helper as end-users receive it: generate a private fresh single header, then
+# compile and run the identical oracle suite without any encoder headers in the translation unit.
+python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
+    src/patch_config.h src/rc_models.h src/patch_apply.h
+cat > "$tmp/single_model_probe.c" <<'EOF'
+#include <stdint.h>
+#include "patch_apply_single.h"
+
+#define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
+#include "seed_prob_probe.inc"
+
+uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
+void flash_write(uint32_t addr, uint8_t val){ (void)addr; (void)val; }
+static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; return 0; }
+
+int main(int argc, char **argv){
+    (void)argv;
+    int r=check_seed_prob();
+    if(r) return r;
+    if(argc==12345){ PatchApply pa; return patch_apply_run(&pa,no_bytes_single,0); }
+    return 0;
+}
+EOF
+"$CC" $CFLAGS -I"$tmp" "$tmp/single_model_probe.c" -o "$tmp/single_model_probe"
+"$tmp/single_model_probe"
+echo "model_seed_prob=OK (source + generated single header)"
 echo "model_contract=OK"
