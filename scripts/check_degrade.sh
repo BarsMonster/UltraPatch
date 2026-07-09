@@ -101,7 +101,7 @@ JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0
 # production D=2 build. Same source as the host backend, its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
 D1="$tmp/ultrapatch_d1_decode"
-if ! $CC_HOST -O2 -std=c99 -DCORTEX_M0 -Isrc $DEC_DEMO_DEFINES -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
+if ! $CC_HOST $CONTRACT_FLAGS $OPT $DEC_DEMO_DEFINES -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
       -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
