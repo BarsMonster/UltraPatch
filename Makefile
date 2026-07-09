@@ -80,15 +80,15 @@ BASE_STACK_CEIL_O2 ?= 480
 # *-internal twin: coreutils `timeout` bounds the whole subtree (it runs the child in
 # its own process group, so backgrounded gate legs die with it) and an overrun reports
 # an explicit error instead of a bare status 124. One-off override (never commit a
-# longer default): A1_TIMEOUT=<secs> make <target>.
-A1_TIMEOUT ?= 60
+# longer default): GATE_TIMEOUT=<secs> make <target>.
+GATE_TIMEOUT ?= 60
 CAPPED := all decoder-header check check-arm check-stack check-assets check-decoder-contract \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
 $(CAPPED): %:
-	@timeout $(A1_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
-	if [ $$s -eq 124 ]; then echo "Execution timelimit $(A1_TIMEOUT) exceeded" >&2; fi; \
+	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
+	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 all-internal: ultrapatch
