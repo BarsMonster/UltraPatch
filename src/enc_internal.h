@@ -99,10 +99,10 @@ typedef struct { int ok; int32_t fp_end; size_t pres_total; } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
-/* UGRice/UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
- * them directly (no runtime 'code' tag). DRE wraps the shared DRStream with the host-only MTF dict
+/* up_UGRice/up_UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
+ * them directly (no runtime 'code' tag). DRE wraps the shared up_DRStream with the host-only MTF dict
  * pointer + cap; the shared fields (K/rep/hit/rh) live in .s so rc_dr_init can init both sides. */
-typedef struct { int32_t *dic; uint16_t cap; DRStream s; } DRE;
+typedef struct { int32_t *dic; uint16_t cap; up_DRStream s; } DRE;
 
 typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
@@ -140,18 +140,18 @@ typedef struct {
     int fwd;
     uint16_t lit0[LIT0_CTX][256];
     uint16_t lit1[256];
-    UGGamma gs, gl;
-    UGRice gd;
-    UGGamma glo;
+    up_UGGamma gs, gl;
+    up_UGRice gd;
+    up_UGGamma glo;
     int fixed_dist_bits;
     int bootstrap_simple;
     int out_en;
 } PriceTab;
 
 typedef struct {
-    BitTree lit0[LIT0_CTX], lit1;
-    PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
-    TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
+    up_BitTree lit0[LIT0_CTX], lit1;
+    up_PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    up_TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     DRE dr_bl, dr_ex;
     int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
     int rep0h;
@@ -244,21 +244,21 @@ void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
 void re_raw(REnc *r, int bit);
 Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
-void bt_encode(BitTree *t, REnc *r, uint8_t byte, int rate);
-void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t);
-void ugr_init_e(UGRice *g, int k);
-void ugg_init_e(UGGamma *g);
-void ugr_encode(UGRice *g, REnc *r, uint32_t v);
-void ugg_encode(UGGamma *g, REnc *r, uint32_t v);
+void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate);
+void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t);
+void ugr_init_e(up_UGRice *g, int k);
+void ugg_init_e(up_UGGamma *g);
+void ugr_encode(up_UGRice *g, REnc *r, uint32_t v);
+void ugg_encode(up_UGGamma *g, REnc *r, uint32_t v);
 uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit, int adapt);
 uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int adapt);
-void fl_encode(Flag1 *f, REnc *r, int b);
+void fl_encode(up_Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
-uint32_t ugr_price(const UGRice *g, uint32_t v);
-uint32_t ugg_price(const UGGamma *g, uint32_t v);
-uint32_t bt_price_static(const BitTree *t, uint8_t byte);
+uint32_t ugr_price(const up_UGRice *g, uint32_t v);
+uint32_t ugg_price(const up_UGGamma *g, uint32_t v);
+uint32_t bt_price_static(const up_BitTree *t, uint8_t byte);
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
-uint64_t bt_price_update(BitTree *t, uint8_t byte, int rate);
+uint64_t bt_price_update(up_BitTree *t, uint8_t byte, int rate);
 
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,

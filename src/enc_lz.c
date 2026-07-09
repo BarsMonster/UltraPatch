@@ -165,7 +165,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
 }
 
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
- * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-BitTree litbits) systematically
+ * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-up_BitTree litbits) systematically
  * mis-prices tokens because the wire uses *adaptive* range-coder models whose steady-state
  * probabilities diverge from the time-0 literal-tree seed and from a flat 1-bit flag. We run a
  * trial encode of the previous-pass token stream, read off the resulting model probabilities,
@@ -290,7 +290,7 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
  * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in the bootstrap parse
  * and the split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
-    BitTree t0, t1;
+    up_BitTree t0, t1;
     lit_tree_seed_e(frm, n, 0, &t0);
     lit_tree_seed_e(frm, n, 1, &t1);
     for (int b = 0; b < 256; b++) {
@@ -318,7 +318,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     content_cursor_to(&cc, cc.content_n, &st);
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
-     * order-2 model on the previous two token kinds (Flag1, 4 contexts); a scalar span/match
+     * order-2 model on the previous two token kinds (up_Flag1, 4 contexts); a scalar span/match
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware
      * DP (which tracks a forward flag history) value match/span transitions accurately. */
     for (int h = 0; h < 4; h++) {
@@ -347,7 +347,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
  * bit (rep0) instead of re-coding the whole gd distance value. That is a forward dependency
  * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
  * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
- * there. The wire's token flag is also an order-2 model (Flag1, 4 contexts on the previous two
+ * there. The wire's token flag is also an order-2 model (up_Flag1, 4 contexts on the previous two
  * token kinds), so the flag history h=(prev2<<1|prev1) is part of the forward state too: we keep
  * one DP state per (position, h) and price each flag under its real context fspan_c[h]/fmatch_c[h]
  * instead of a washed-out scalar average. Cheapest-arrival-per-state keeps it O(n*4); the chosen

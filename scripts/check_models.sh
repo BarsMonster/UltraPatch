@@ -78,10 +78,10 @@ static int check_gamma_index(void){
 }
 
 static int check_shared_models(void){
-    BitTree bt;
-    Flag1 fl;
-    IdxUnary idx;
-    DRStream ds;
+    up_BitTree bt;
+    up_Flag1 fl;
+    up_IdxUnary idx;
+    up_DRStream ds;
     int32_t dic[4] = { 123, 456, 789, 111 };
     CHECK(PROBE_RC_PROB_BITS == 12);
     CHECK(PROBE_RC_PBIT == (1 << PROBE_RC_PROB_BITS));

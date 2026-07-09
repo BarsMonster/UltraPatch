@@ -89,7 +89,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
  * mirror of the decoder apply_op window skeleton. FWD/descending asymmetry is preserved exactly:
  * grow writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
- * cc is a READ-AHEAD cursor: like the decoder LitCur, the next literal's gap+byte is consumed before
+ * cc is a READ-AHEAD cursor: like the decoder up_LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
 static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd,
@@ -129,7 +129,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
 }
 
 /* MTF escape value: zigzag uLEB, each byte through the adaptive dval bit-tree (mirror s_bv). */
-static uint64_t bv_xfer(BitTree *t, REnc *r, int32_t x) {
+static uint64_t bv_xfer(up_BitTree *t, REnc *r, int32_t x) {
     uint32_t v = rc_zz32(x);
     uint64_t c = 0;
     for (;;) {
@@ -170,7 +170,7 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
     return tr;
 }
 
-static uint64_t delta_xfer(DRE *D, IdxUnary *gix, BitTree *dval,
+static uint64_t delta_xfer(DRE *D, up_IdxUnary *gix, up_BitTree *dval,
                            REnc *r, int32_t delta, int *overflow) {
     DRTrans tr = dr_transition(D, delta);
     if (tr.kind == DR_TR_REP) {
@@ -191,7 +191,7 @@ static uint64_t delta_xfer(DRE *D, IdxUnary *gix, BitTree *dval,
 static void emit_delta(Models *M, REnc *r, int kind, int32_t delta, int *overflow) {
     if (*overflow) return;   /* stream already infeasible: state frozen, output discarded */
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
-    IdxUnary *gix = kind == EV_BL ? &M->pre.dibl : &M->pre.diex;
+    up_IdxUnary *gix = kind == EV_BL ? &M->pre.dibl : &M->pre.diex;
     (void)delta_xfer(D, gix, &M->pre.dval, r, delta, overflow);
 }
 
@@ -318,7 +318,7 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
 
 /* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
  * decoder dict cap prices +infinity so an infeasible map can never win. */
-static uint64_t px_delta(DRE *D, IdxUnary *gix, BitTree *dval, int32_t delta, int *overflow) {
+static uint64_t px_delta(DRE *D, up_IdxUnary *gix, up_BitTree *dval, int32_t delta, int *overflow) {
     return delta_xfer(D, gix, dval, NULL, delta, overflow);
 }
 
@@ -340,8 +340,8 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
                              const FieldKey *fk, size_t nfr, int32_t *dic_bl, int32_t *dic_ex) {
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
-    BitTree dval; bt_init(&dval);
+    up_IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
+    up_BitTree dval; bt_init(&dval);
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < nfr; i++) {

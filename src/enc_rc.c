@@ -10,7 +10,7 @@
 /* ------------------------------------------------------------------------------------- */
 /* Binary range encoder and models.                                                        */
 /* ------------------------------------------------------------------------------------- */
-/* byte trees use the shared packed BitTree + bt_get/bt_set/bt_init from rc_models.h (decoder-identical) */
+/* byte trees use the shared packed up_BitTree + bt_get/bt_set/bt_init from rc_models.h (decoder-identical) */
 
 static void re_shift_low(REnc *r) {
     if (r->low < 0xff000000ull || r->low > 0xffffffffull) {
@@ -65,7 +65,7 @@ void put_raw_bits(REnc *r, uint32_t v, int nb) {
 
 enum { BT_XFER_ENC, BT_XFER_PRICE, BT_XFER_PRICE_UPDATE };
 
-static uint64_t bt_xfer(BitTree *t, REnc *r, uint8_t byte, int rate, int mode) {
+static uint64_t bt_xfer(up_BitTree *t, REnc *r, uint8_t byte, int rate, int mode) {
     int m = 1;
     uint64_t cost = 0;
     for (int i = 7; i >= 0; i--) {
@@ -83,11 +83,11 @@ static uint64_t bt_xfer(BitTree *t, REnc *r, uint8_t byte, int rate, int mode) {
     return cost;
 }
 
-void bt_encode(BitTree *t, REnc *r, uint8_t byte, int rate) {
+void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate) {
     (void)bt_xfer(t, r, byte, rate, BT_XFER_ENC);
 }
 
-void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t) {
+void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t) {
     uint32_t hist[256], w[512];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
@@ -97,8 +97,8 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t) {
 
 /* Neutral-init entry points: thin out-of-line wrappers over the shared rc_ugr_init/rc_ugg_init
  * (rc_models.h) so the host keeps ONE copy of each init loop instead of inlining it at every model. */
-void ugr_init_e(UGRice *g, int k) { rc_ugr_init(g, k); }
-void ugg_init_e(UGGamma *g) { rc_ugg_init(g); }
+void ugr_init_e(up_UGRice *g, int k) { rc_ugr_init(g, k); }
+void ugg_init_e(up_UGGamma *g) { rc_ugg_init(g); }
 
 /* Shared single-bit transfer: encode (r!=NULL) or price. adapt=0 leaves the prob untouched (the frozen
  * ugr_price/ugg_price snapshots); adapt=1 advances it via bit_price_update (the adaptive delta streams). */
@@ -120,7 +120,7 @@ uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int ada
 
 /* Rice/Gamma transfer cores: statically typed, sharing the unary-prefix + bit transfer helpers.
  * These snapshots are frozen (adapt=0): the prob state never advances during pricing. */
-static uint32_t ugr_xfer(UGRice *g, REnc *r, uint32_t v) {
+static uint32_t ugr_xfer(up_UGRice *g, REnc *r, uint32_t v) {
     uint32_t cl = v >> g->k;
     uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
     for (int pos = 0; pos < g->k; pos++)
@@ -128,7 +128,7 @@ static uint32_t ugr_xfer(UGRice *g, REnc *r, uint32_t v) {
                             (int)((v >> (g->k - 1 - pos)) & 1u), 0);  /* rice: LSB-anchored ctx */
     return cost;
 }
-static uint32_t ugg_xfer(UGGamma *g, REnc *r, uint32_t v) {
+static uint32_t ugg_xfer(up_UGGamma *g, REnc *r, uint32_t v) {
     uint32_t mm = v + 1u;
     uint32_t cl = (uint32_t)bitlen32(mm) - 1u;
     int row = UG_C((int)cl);
@@ -139,11 +139,11 @@ static uint32_t ugg_xfer(UGGamma *g, REnc *r, uint32_t v) {
     return cost;
 }
 
-void ugr_encode(UGRice *g, REnc *r, uint32_t v) { (void)ugr_xfer(g, r, v); }
-void ugg_encode(UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
+void ugr_encode(up_UGRice *g, REnc *r, uint32_t v) { (void)ugr_xfer(g, r, v); }
+void ugg_encode(up_UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
 
-/* order-2 token flag: the Flag1 struct + fl_init are single-sourced in rc_models.h (decoder mirror). */
-void fl_encode(Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = rc_fl_hist(f->h, b); }
+/* order-2 token flag: the up_Flag1 struct + fl_init are single-sourced in rc_models.h (decoder mirror). */
+void fl_encode(up_Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = rc_fl_hist(f->h, b); }
 
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko) {
     lit_tree_seed_e(frm, from_size, 0, &m->lit0[0]);            /* one parity-0 image scan... */
@@ -154,11 +154,11 @@ void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int 
     m->last_dist = 0;
 }
 
-uint32_t ugr_price(const UGRice *g, uint32_t v) { return ugr_xfer((UGRice *)g, NULL, v); }
-uint32_t ugg_price(const UGGamma *g, uint32_t v) { return ugg_xfer((UGGamma *)g, NULL, v); }
+uint32_t ugr_price(const up_UGRice *g, uint32_t v) { return ugr_xfer((up_UGRice *)g, NULL, v); }
+uint32_t ugg_price(const up_UGGamma *g, uint32_t v) { return ugg_xfer((up_UGGamma *)g, NULL, v); }
 
-uint32_t bt_price_static(const BitTree *t, uint8_t byte) {
-    return (uint32_t)bt_xfer((BitTree *)t, NULL, byte, 0, BT_XFER_PRICE);
+uint32_t bt_price_static(const up_BitTree *t, uint8_t byte) {
+    return (uint32_t)bt_xfer((up_BitTree *)t, NULL, byte, 0, BT_XFER_PRICE);
 }
 
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
@@ -167,6 +167,6 @@ uint32_t bit_price_update(uint16_t *prob, int bit, int rate) {
     return cost;
 }
 
-uint64_t bt_price_update(BitTree *t, uint8_t byte, int rate) {
+uint64_t bt_price_update(up_BitTree *t, uint8_t byte, int rate) {
     return bt_xfer(t, NULL, byte, rate, BT_XFER_PRICE_UPDATE);
 }

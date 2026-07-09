@@ -60,12 +60,12 @@ extern void    flash_write(uint32_t addr, uint8_t val);
 /* Decoder state is owned by the integrator and passed to patch_apply_run(). The header keeps no
  * file-scope storage: embedded users may place this object in .bss, noinit, a bootloader-owned
  * work area, or on a suitably sized stack. */
-typedef struct { uint32_t range, code; } RangeDec;
+typedef struct { uint32_t range, code; } up_RangeDec;
 
 /* RC_RICE_UNARY_MAX: adaptive-unary prefix cap (crash-hardening; see s_unary/s_ug_rice below). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 
-/* STREAMED-DELTA per-stream state DRStream (bl, ex) is single-sourced in rc_models.h: a
+/* STREAMED-DELTA per-stream state up_DRStream (bl, ex) is single-sourced in rc_models.h: a
  * MOVE-TO-FRONT dict of distinct delta values + an adaptive "repeat-last" bit + an adaptive
  * "dict-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (in dict? -> MTF index
  * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
@@ -76,13 +76,13 @@ typedef struct { uint32_t range, code; } RangeDec;
  * as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly here
  * (REJ_RESOURCE). */
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
-/* LZSS window W (defined here so ApplyState can size the apply phase). Default value above
+/* LZSS window W (defined here so up_ApplyState can size the apply phase). Default value above
  * keeps the decoder within the 12 KiB SRAM cap; WINDOW_LOG is a single shared knob, so the encoder's
  * distance coding uses the exact same window by construction. */
 /* WINDOW_LOG is configured above. */
 #define RING (1u<<WINDOW_LOG)
 #define MASK (RING-1u)
-/* ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
+/* up_ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
  * per-op correction array + the streaming scalars/cursors. */
 typedef struct {
     uint8_t ring[RING]; uint32_t ototal;       /* content history (masked) + total produced */
@@ -91,13 +91,13 @@ typedef struct {
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
-} ApplyState;
-#define ARENA_BYTES (JREGION + (uint32_t)sizeof(ApplyState))
+} up_ApplyState;
+#define ARENA_BYTES (JREGION + (uint32_t)sizeof(up_ApplyState))
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint32_t jbuf[JSLOTS]; ApplyState sa; } apply;
-} Arena;
+    struct { uint32_t jbuf[JSLOTS]; up_ApplyState sa; } apply;
+} up_Arena;
 
 typedef struct PatchApply {
     uint32_t g_image_span;
@@ -119,12 +119,12 @@ typedef struct PatchApply {
                          * assigned once at the patch_apply_run boundary for every other failure */
     uint8_t g_flash_touched;
 
-    RangeDec RC;
+    up_RangeDec RC;
     /* g_jcount + g_smap_n pair fills RC's 4-byte tail up to the ARENA boundary (both uint16). */
     uint16_t g_jcount;
     uint16_t g_smap_n;
 
-    Arena ARENA;
+    up_Arena ARENA;
 
     uint32_t g_smap_b[SMAP_CAP];
     int32_t  g_smap_v[SMAP_CAP];
@@ -135,14 +135,14 @@ typedef struct PatchApply {
     uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
     uint32_t g_orow_base[OUTROW_DEPTH];
 
-    TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
+    up_TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     uint32_t g_oexp;
     int g_rep0h;
     uint32_t g_lastdist;
-    PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
-    BitTree M_lit0[LIT0_CTX], M_lit1;
+    up_PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    up_BitTree M_lit0[LIT0_CTX], M_lit1;
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
-    DRStream DR_BL, DR_EX;
+    up_DRStream DR_BL, DR_EX;
 
     uint32_t g_psrc_ldr[8];
     uint32_t g_psrc_even;     /* aligned word leads; the 3 loose flag bytes below pack into the
@@ -152,12 +152,12 @@ typedef struct PatchApply {
     uint8_t  g_litprev;
 } PatchApply;
 
-_Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
-_Static_assert(offsetof(Arena, apply.sa) == JREGION && (offsetof(Arena, apply.sa) & 3u)==0u,
-               "ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
+_Static_assert(sizeof(up_Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
+_Static_assert(offsetof(up_Arena, apply.sa) == JREGION && (offsetof(up_Arena, apply.sa) & 3u)==0u,
+               "up_ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
-_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 DRStream.K (else the REJ_RESOURCE refuse wraps)");
+_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 up_DRStream.K (else the REJ_RESOURCE refuse wraps)");
 
 /* Patch geometry — decoder-OWNED. decode_body parses it from the blob envelope; the
  * integrator no longer supplies sizes/direction/span (footguns removed), it only provides
@@ -180,7 +180,7 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 static int decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
-static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
+static void lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w);
 enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 
 /* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
@@ -266,7 +266,7 @@ static int s_raw(PatchApply *pa){ return rc_decode(pa,pa->RC.range>>1); }
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(pa); return v; }
 /* ---- bit-tree byte ---- */
-static int s_bt(PatchApply *pa, BitTree*t,int rate){
+static int s_bt(PatchApply *pa, up_BitTree*t,int rate){
     int m=1;
     for(int i=0;i<8;i++){
         uint16_t p=bt_get(t,m-1);
@@ -281,7 +281,7 @@ static int32_t bb_unzz(PatchApply *pa, uint32_t u){
     return rc_unzz32_value(u);
 }
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
-static int32_t s_bv(PatchApply *pa, BitTree*t,int rate){
+static int32_t s_bv(PatchApply *pa, up_BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
         b=s_bt(pa,t,rate);
@@ -318,26 +318,26 @@ static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt){
     uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(sig)])<<sig;
     return v;
 }
-static uint32_t s_ug_mant_gamma(PatchApply *pa, UGGamma*g,int cnt){
+static uint32_t s_ug_mant_gamma(PatchApply *pa, up_UGGamma*g,int cnt){
     uint32_t v=0; int row=UG_C(cnt);
     for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&g->m[rc_ugg_mant_idx(row,cnt-1-sig)])<<sig;
     return v;
 }
-static uint32_t s_ug_rice(PatchApply *pa, UGRice*g){
+static uint32_t s_ug_rice(PatchApply *pa, up_UGRice*g){
     uint32_t cl=s_unary(pa,g->u,UG_CTX,RC_RICE_UNARY_MAX);
     if(pa->g_rcerr || (g->k && cl>(UINT32_MAX>>g->k))){ pa->g_rcerr=1; return 0; }
     return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k);
 }
-static uint32_t s_ug_gamma(PatchApply *pa, UGGamma*g){
+static uint32_t s_ug_gamma(PatchApply *pa, up_UGGamma*g){
     int cl=(int)s_unary(pa,g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant_gamma(pa,g,cl)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / IdxUnary / idx_init are single-sourced
+/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / up_IdxUnary / idx_init are single-sourced
  * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
-static int s_flag(PatchApply *pa, Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
+static int s_flag(PatchApply *pa, up_Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
 
 /* ===================================================================================== */
 /* CRC32 (zlib polynomial) over flash bytes                                               */
@@ -497,7 +497,7 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(PatchApply *pa, DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
+static int32_t pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=rc_dr_rep_ctx(d->rh,dic[0]);
       int rb=s_bit(pa,&d->rep[ri]); d->rh=(uint8_t)rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
@@ -523,8 +523,8 @@ static int32_t pull_delta(PatchApply *pa, DRStream*d, IdxUnary*gix, int32_t*dic,
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
 /* The LZSS ring (size 2^WINDOW_LOG) is the content history; backref distances <= 2^WINDOW_LOG.             */
 /* ===================================================================================== */
-/* ApplyState type + RING/MASK + the arena asserts live up with the ARENA
- * union (near JREGION), since the union embeds ApplyState directly in its apply phase. */
+/* up_ApplyState type + RING/MASK + the arena asserts live up with the ARENA
+ * union (near JREGION), since the union embeds up_ApplyState directly in its apply phase. */
 RC_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=s_ug_gamma(pa,idx?&pa->MDL_pre.pg2:&pa->MDL_pre.pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
@@ -532,11 +532,11 @@ RC_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx,
     if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; return 0; }
     return 1;
 }
-typedef struct { int32_t i, step; } CorrCur;
-static void corr_cur_init(CorrCur*c, ApplyState*s, int fwd){
+typedef struct { int32_t i, step; } up_CorrCur;
+static void corr_cur_init(up_CorrCur*c, up_ApplyState*s, int fwd){
     c->step=fwd?1:-1; c->i=fwd?0:s->op_nc-1;
 }
-static int32_t corr_take(ApplyState*s, CorrCur*c, int32_t off){
+static int32_t corr_take(up_ApplyState*s, up_CorrCur*c, int32_t off){
     if(c->i>=0 && c->i<s->op_nc){
         uint32_t slot=s->op_corr[c->i];
         if((int32_t)(slot>>8)==off){ c->i+=c->step; return (int32_t)(slot&0xffu); }
@@ -582,9 +582,9 @@ static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t 
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
  * the next span selects M_lit0[rc_lit0_sel(content[pos-1])] regardless of which token produced pos-1.
  * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
-static void emit_ring(PatchApply *pa, ApplyState*s, uint8_t b){ s->ring[s->ototal & MASK]=b; s->ototal++; pa->g_litprev=b; }
+static void emit_ring(PatchApply *pa, up_ApplyState*s, uint8_t b){ s->ring[s->ototal & MASK]=b; s->ototal++; pa->g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
-static uint8_t next_content(PatchApply *pa, ApplyState*s, int tag){
+static uint8_t next_content(PatchApply *pa, up_ApplyState*s, int tag){
     for(;;){
         if(pa->g_rcerr) goto fail;
         if(s->tok_left>0){
@@ -632,7 +632,7 @@ fail:
     return 0;
 }
 /* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
-static uint32_t read_uleb(PatchApply *pa, ApplyState*s){
+static uint32_t read_uleb(PatchApply *pa, up_ApplyState*s){
     uint32_t acc=0; int sh=0;
     for(;;){ if(pa->g_rcerr) return 0;
         uint8_t b=next_content(pa,s,0);
@@ -748,8 +748,8 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
-typedef struct { int32_t nextpos, litb, li, step, lim; } LitCur;
-static void RC_NOINLINE litcur_step(PatchApply *pa, ApplyState*s, LitCur*lc, int32_t nl){
+typedef struct { int32_t nextpos, litb, li, step, lim; } up_LitCur;
+static void RC_NOINLINE litcur_step(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, int32_t nl){
     if(lc->li<nl){
         uint32_t g=read_uleb(pa,s);
         /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
@@ -763,13 +763,13 @@ static void RC_NOINLINE litcur_step(PatchApply *pa, ApplyState*s, LitCur*lc, int
     }
     else lc->nextpos=-1;
 }
-RC_ALWAYS_INLINE void litcur_init(PatchApply *pa, ApplyState*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
+RC_ALWAYS_INLINE void litcur_init(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, int fwd, int32_t nl, int32_t dl){
     lc->step = fwd ? 1 : -1; lc->lim = dl;
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-static void wr_extras(PatchApply *pa, ApplyState*s, CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
+static void wr_extras(PatchApply *pa, up_ApplyState*s, up_CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !pa->g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=next_content(pa,s,(int)((tp0+dl+e)&1));
@@ -778,7 +778,7 @@ static void wr_extras(PatchApply *pa, ApplyState*s, CorrCur*cc, int fwd, int32_t
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-static void wr_copy(PatchApply *pa, ApplyState*s, LitCur*lc, CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+static void wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_step(pa,s,lc,nl); }
     if(pa->g_rcerr) return;
@@ -786,7 +786,7 @@ static void wr_copy(PatchApply *pa, ApplyState*s, LitCur*lc, CorrCur*cc, int32_t
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
-static void RC_NOINLINE apply_op(PatchApply *pa, ApplyState*s){
+static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=s_ug_gamma(pa,&pa->MDL_pre.gadj);
     int32_t adj=bb_unzz(pa,adj_u);
     /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= MAX_IMAGE via
@@ -855,8 +855,8 @@ static void RC_NOINLINE apply_op(PatchApply *pa, ApplyState*s){
     uint8_t packed[4];
     int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
     if(fwd){ memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX; }
-    LitCur lc;
-    CorrCur cc; corr_cur_init(&cc,s,fwd);
+    up_LitCur lc;
+    up_CorrCur cc; corr_cur_init(&cc,s,fwd);
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
@@ -924,7 +924,7 @@ static int RC_NOINLINE decode_header(PatchApply *pa){
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&pa->M_lit0[c],hist0,w);
       lit_tree_from_hist(&pa->M_lit1,hist1,w); }
-    { ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
+    { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -964,7 +964,7 @@ static int decode_body(PatchApply *pa){
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    { ApplyState*s=&pa->ARENA.apply.sa;
+    { up_ApplyState*s=&pa->ARENA.apply.sa;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=pa->g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
       rc_init_tok(&pa->MDL_tok,kd,ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 prior */
@@ -992,7 +992,7 @@ static int decode_body(PatchApply *pa){
 /* ===================================================================================== */
 /* public API: patch_apply_run(state, callback, ctx) -> DONE / ERROR                       */
 /* ===================================================================================== */
-static void RC_NOINLINE lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
+static void RC_NOINLINE lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w){
     rc_lit_tree_from_hist(t,hist,w);
 }
 
