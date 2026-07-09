@@ -276,10 +276,6 @@ static int s_bt(PatchApply *pa, up_BitTree*t,int rate){
     }
     return m-256;
 }
-static int32_t bb_unzz(PatchApply *pa, uint32_t u){
-    if(!rc_unzz32_valid(u)){ pa->g_rcerr=1; return 0; }
-    return rc_unzz32_value(u);
-}
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
 static int32_t s_bv(PatchApply *pa, up_BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
@@ -288,7 +284,7 @@ static int32_t s_bv(PatchApply *pa, up_BitTree*t,int rate){
         if(ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
     }while(b&0x80);
-    return bb_unzz(pa,acc);
+    return rc_unzz32_value(acc);
 }
 /* ---- UGolomb (uses embedded UG_CTX mirror) ----
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
@@ -600,7 +596,7 @@ static uint8_t next_content(PatchApply *pa, up_ApplyState*s, int tag){
             int rb=s_bit(pa,&pa->MDL_tok.rep0[pa->g_rep0h]); pa->g_rep0h=rb;
             if(rb){ d=pa->g_lastdist; }                         /* rep0: reuse last distance */
             else if(pa->g_out_en && s_bit(pa,&pa->MDL_tok.outb)){         /* fresh + out-bit: long-range OUTPUT match */
-                int32_t dpos=bb_unzz(pa,s_ug_rice(pa,&pa->MDL_tok.go)); /* position as zigzag delta vs expected */
+                int32_t dpos=rc_unzz32_value(s_ug_rice(pa,&pa->MDL_tok.go)); /* position as zigzag delta vs expected */
                 uint32_t p=rc_outmatch_pos(pa->g_oexp,dpos);
                 uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.glo)+RC_OUTMATCH_MIN;
                 /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
@@ -772,7 +768,7 @@ static void wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur*cc
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
 static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=s_ug_gamma(pa,&pa->MDL_pre.gadj);
-    int32_t adj=bb_unzz(pa,adj_u);
+    int32_t adj=rc_unzz32_value(adj_u);
     /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= MAX_IMAGE via
      * decode_header envelope checks + _Static_assert), so this pure 32-bit headroom test (check dl,
      * then el against the rest of span) also subsumes the dl_u/el_u < 2^31 bound: any value >= 2^31
@@ -903,7 +899,7 @@ static int RC_NOINLINE decode_header(PatchApply *pa){
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
     if(pa->g_FWD){ uint32_t z2; if(!env_uleb(pa,&z2,0)) return 0;
-      fp_start=bb_unzz(pa,z2); if(pa->g_rcerr) return 0; }
+      fp_start=rc_unzz32_value(z2); }
     if(!env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
@@ -936,7 +932,7 @@ static int decode_body(PatchApply *pa){
           uint32_t gap=s_ug_gamma(pa,&pa->MDL_pre.gdl); if(i) gap+=1u;
           if(gap>UINT32_MAX-b){ pa->g_rcerr=1; break; }
           b+=gap;
-          pa->g_smap_b[i]=b; pa->g_smap_v[i]=bb_unzz(pa,s_ug_gamma(pa,&pa->MDL_pre.gadj));
+          pa->g_smap_b[i]=b; pa->g_smap_v[i]=rc_unzz32_value(s_ug_gamma(pa,&pa->MDL_pre.gadj));
       }
       if(pa->g_rcerr) return 0;
       pa->g_smap_n=(uint16_t)mn; }

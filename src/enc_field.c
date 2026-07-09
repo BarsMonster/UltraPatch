@@ -252,8 +252,13 @@ static int cmp_seg(const void *a, const void *b) {
  * weight-trimmed to SMAP_POOL_MAX, sorted, adjacent-boundary-deduped keeping later EX entries. */
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv) {
+    /* Op-derived shifts are bounded by MAX_IMAGE. EX needs may span all int32_t values, but the
+     * modular inverse of INT32_MIN is still INT32_MIN, whose zigzag UINT32_MAX cannot be gamma-coded
+     * (gamma stores value+1). Leave that one residual on the full-domain dval path instead; this also
+     * keeps INT32_MIN available as fit_shift_map_scored's private removal sentinel. */
     size_t nex = 0;
-    for (size_t i = 0; i < nfr; i++) nex += fk[i].kind == EV_EX;
+    for (size_t i = 0; i < nfr; i++)
+        nex += fk[i].kind == EV_EX && fk[i].need != INT32_MIN;
     /* candidate union: op walk + terminator + exact EX value runs (weight = fields in run) */
     size_t pcap = ops->n + 2 + (nex ? nex : 1), pn = 0;
     SegCand *pool = (SegCand *)xmalloc(pcap * sizeof(*pool));
@@ -271,7 +276,11 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         SegCand *ex = (SegCand *)xmalloc(nex * sizeof(*ex));
         size_t en = 0;
         for (size_t i = 0; i < nfr; i++)
-            if (fk[i].kind == EV_EX) { ex[en].b = fk[i].k2; ex[en].v = -fk[i].need; en++; }
+            if (fk[i].kind == EV_EX && fk[i].need != INT32_MIN) {
+                ex[en].b = fk[i].k2;
+                ex[en].v = (int32_t)(0u - (uint32_t)fk[i].need);
+                en++;
+            }
         sort(ex, en, sizeof(*ex), cmp_seg);
         for (size_t i = 0; i < en;) {
             size_t j = i;

@@ -128,7 +128,7 @@ static inline int rc_fl_hist(int h,int b){ return ((h<<1)|b)&3; }
  * Shared PURE wire semantics — hand-mirrored decoder<->encoder helpers single-sourced here so
  * the COMPILER (not a "must match" comment) enforces the mirror, exactly as bt_/fl_ above already
  * do. Most are used verbatim by BOTH src/patch_apply.h (device decoder) and the host encoder; the
- * decoder-direction mirrors kept here (rc_unzz32_valid/value, rc_zz_abs, rc_uleb_overlong,
+ * decoder-direction mirrors kept here (rc_unzz32_value, rc_zz_abs, rc_uleb_overlong,
  * rc_outmatch_pos) are decoder-only — their encoder-side twins (rc_zz32, rc_uleb_len,
  * rc_natural_desc/rc_dir_is_natural, rc_outmatch_delta) live in src/enc_internal.h. All
  * are 64-bit-free and (the one-time literal-seed rounding divide aside) divide-free, and preserve
@@ -154,12 +154,11 @@ static inline void rc_u32le_put(uint8_t *p, uint32_t v){
     p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
 }
 
-/* Zigzag decode mirrors (encode-side rc_zz32 lives in src/enc_internal.h). The decoder rejects the
- * single unrepresentable int32 value (0xffffffff -> -2147483648) instead of relying on
- * implementation-defined casts or signed overflow at call sites. */
-static inline int rc_unzz32_valid(uint32_t u){ return u!=0xffffffffu; }
+/* Zigzag decode mirror (encode-side rc_zz32 lives in src/enc_internal.h). The odd arm expresses
+ * every negative value as an in-range offset from INT32_MIN, so UINT32_MAX reaches INT32_MIN without
+ * relying on an overflowing signed negation or an out-of-range unsigned-to-signed conversion. */
 static inline int32_t rc_unzz32_value(uint32_t u){
-    return (u&1u)? -(int32_t)((u+1u)>>1) : (int32_t)(u>>1);
+    return (u&1u) ? INT32_MIN+(int32_t)((UINT32_MAX-u)>>1) : (int32_t)(u>>1);
 }
 static inline int rc_zz_abs(uint32_t base,uint32_t z,uint32_t max,uint32_t*out){
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>base) return 0; *out=base-m; }

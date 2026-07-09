@@ -103,6 +103,19 @@ static int check_shared_models(void){
     return 0;
 }
 
+static int check_zigzag(void){
+    static const int32_t cases[] = {
+        INT32_MIN, INT32_MIN + 1, -123456789, -1, 0, 1, 123456789, INT32_MAX
+    };
+    CHECK(rc_zz32(INT32_MIN) == UINT32_MAX);
+    CHECK(rc_zz32(INT32_MAX) == UINT32_MAX - 1u);
+    CHECK(rc_unzz32_value(UINT32_MAX) == INT32_MIN);
+    CHECK(rc_unzz32_value(UINT32_MAX - 1u) == INT32_MAX);
+    for(size_t i = 0; i < COUNT_OF(cases); i++)
+        CHECK(rc_unzz32_value(rc_zz32(cases[i])) == cases[i]);
+    return 0;
+}
+
 static int check_reloc_helpers(void){
     static const uint32_t cases[] = {
         0u, 1u, 2u, 0x3ffu, 0x800u, 0x12345u, 0x7fffffu, 0x800000u, 0xffffffu
@@ -129,6 +142,7 @@ int main(int argc, char **argv){
     int r;
     if((r = check_gamma_index())) return r;
     if((r = check_shared_models())) return r;
+    if((r = check_zigzag())) return r;
     if((r = check_reloc_helpers())) return r;
     if(argc == 12345){
         PatchApply pa;

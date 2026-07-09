@@ -27,7 +27,7 @@ static inline uint32_t rc_u32le(const uint8_t *p){
 }
 
 /* Encode-side zigzag/uLEB/envelope-direction/out-match helpers. Each mirrors a decoder-direction
- * twin in rc_models.h (rc_unzz32_valid/value, rc_zz_abs, rc_uleb_overlong, rc_outmatch_pos); no
+ * twin in rc_models.h (rc_unzz32_value, rc_zz_abs, rc_uleb_overlong, rc_outmatch_pos); no
  * decoder call site reads these, so they stay out of the shipped decoder headers. */
 static inline uint32_t rc_zz32(int32_t v){
     uint32_t u=(uint32_t)v;
