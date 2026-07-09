@@ -162,14 +162,18 @@ check-stack-internal:
 	test "$$bound" -le "$(BASE_STACK_CEIL_O2)"
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
-# attributes/builtins are optional codegen hints behind #if __GNUC__||__clang__ guards with live
-# fallbacks (rc_models.h RC_NOINLINE note). Wire correctness is compiler-independent; only the
-# gated size/stack budgets are GNU-toolchain-measured. Enforced below two ways: (a) both header
-# forms smoke-compile with the fallback branch forced (-U__GNUC__; -U_FORTIFY_SOURCE silences the
-# glibc features.h warning that masking __GNUC__ triggers), (b) a host decoder whose FIRST-PARTY
-# code sees no __GNUC__/__clang__ (masked after the system headers, which stay on the GNU path)
-# must round-trip the real one-face patch byte-exactly.
-PORTABLE_FALLBACK_FLAGS := -U__GNUC__ -U_FORTIFY_SOURCE
+# attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
+# note). -DA1_NO_GNU_EXTENSIONS is the documented knob that forces the fallback branch — a
+# first-party switch, so system headers are untouched (no fragile __GNUC__ masking against
+# glibc). Wire correctness is compiler-independent; only the gated size/stack budgets are
+# GNU-toolchain-measured. Enforced below three ways: (a) both header forms smoke-compile with
+# the fallbacks forced, (b) the preprocessed fallback smoke TU must contain ZERO
+# __attribute__/__builtin_ tokens in first-party (src/) lines — this catches a future bare
+# GNU-ism that a gcc compile alone would accept (__builtin_offsetof is exempt: it is the
+# SYSTEM stddef.h's conforming implementation of the standard offsetof macro our asserts use;
+# a non-GNU toolchain's stddef.h supplies its own), (c) a fallback-built host decoder must
+# round-trip the real one-face patch byte-exactly.
+PORTABLE_FALLBACK_FLAGS := -DA1_NO_GNU_EXTENSIONS
 check-decoder-contract-internal: ultrapatch
 	@set -e; \
 	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \
@@ -204,17 +208,16 @@ check-decoder-contract-internal: ultrapatch
 			$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
 		fi; \
 	done; \
-	{ printf '%s\n' '#include <limits.h>' '#include <stdint.h>' '#include <stddef.h>' \
-	    '#include <stdio.h>' '#include <stdlib.h>' '#include <string.h>' \
-	    '#include <sys/types.h>' '#include <unistd.h>' \
-	    '#undef __GNUC__' '#undef __GNUC_MINOR__' '#undef __clang__' \
-	    '#include "patch_host_backend.c"'; \
-	} > "$$tmp/dec_portable.c"; \
-	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN \
-	    "$$tmp/dec_portable.c" src/enc_util.c -o "$$tmp/dec_portable"; \
+	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -DCORTEX_M0 -Isrc -E "$$tmp/patch_apply_smoke.c" | \
+	awk '/^# [0-9]+ "/ { inours = ($$3 ~ /"src\//) } \
+	     inours { line = $$0; gsub(/__builtin_offsetof/, "", line); \
+	              if (line ~ /__attribute__|__builtin_/) { print "GNU construct in portable decoder build: " $$0; bad=1 } } \
+	     END { exit bad ? 1 : 0 }'; \
+	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN \
+	    src/patch_host_backend.c src/enc_util.c -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
-	echo "decoder_portable=OK (non-GNU fallback branch: compile + one-face round-trip)"; \
+	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
 
 check-models-internal:

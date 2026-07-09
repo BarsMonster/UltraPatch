@@ -19,9 +19,11 @@
 /* GNU attributes are OPTIONAL codegen hints (host-text / ARM-size / stack shaping), never
  * correctness: the #else fallbacks keep this header standard C (C99 + C11 _Static_assert), so
  * non-GNU compilers build a wire-identical decoder — only the gated size/stack budgets, which
- * are measured on the GNU arm-none-eabi path, may differ. The fallback branch is kept honest
- * by the check-decoder-contract gate leg (compile + round-trip with -U__GNUC__). */
-#if defined(__GNUC__) || defined(__clang__)
+ * are measured on the GNU arm-none-eabi path, may differ. -DA1_NO_GNU_EXTENSIONS forces the
+ * plain-C fallbacks even when __GNUC__ is visible (for compilers that define it for
+ * compatibility without full attribute support); the check-decoder-contract gate leg builds
+ * and round-trips that variant and asserts its preprocessed first-party code is GNU-free. */
+#if !defined(A1_NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define RC_NOINLINE __attribute__((noinline))
 #else

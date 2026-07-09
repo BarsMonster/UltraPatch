@@ -46,7 +46,7 @@
 
 #include "rc_models.h"
 
-#if defined(__GNUC__) || defined(__clang__)
+#if !defined(A1_NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
 #define A1_NOINLINE __attribute__((noinline))
 #define A1_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define A1_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
