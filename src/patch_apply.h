@@ -90,13 +90,14 @@ typedef struct { uint32_t range, code; } A1RangeDec;
  * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
  * dict array is outside the struct so bl/ex get separate caps (distinct-value peaks: bl 180, ex 106). */
 
-/* JSLOTS is configured above. The ENCODER mirrors this budget
- * (A1_JSLOTS in patch_generate) and DEGRADES over-budget plans host-side
- * (over-budget reads ship as extra bytes), so a valid blob never exceeds it;
- * an over-cap stream still refuses cleanly here (REJ_RESOURCE). */
+/* JSLOTS is configured above (one shared define, used by encoder and decoder alike). The ENCODER
+ * plans against this same budget and DEGRADES over-budget plans host-side (over-budget reads ship
+ * as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly here
+ * (REJ_RESOURCE). */
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
 /* LZSS window W (defined here so A1ApplyState can size the apply phase). Default value above
- * keeps the decoder within the 12 KiB SRAM cap; the encoder PATHE_W MUST match this SA_W. */
+ * keeps the decoder within the 12 KiB SRAM cap; SA_W is a single shared knob, so the encoder's
+ * distance coding uses the exact same window by construction. */
 /* SA_W is configured above. */
 #define SA_RING (1u<<SA_W)
 #define SA_MASK (SA_RING-1u)
@@ -428,19 +429,20 @@ static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 /* nvm_rows_amplified=0); reads of the dirty buffered row are served from RAM. Source reads of */
 /* not-yet-overwritten flash go straight to physical flash (free). 256 B SRAM.                */
 /* ===================================================================================== */
-/* OUTROW is configured above (encoder mirror: A1_OUTROW). */
+/* OUTROW is configured above (one shared define, used by encoder and decoder alike). */
 /* Row-window depth — keep the last OUTROW_DEPTH rows uncommitted. Monotonic writes touch
  * rows in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (row_number % D) is an
  * exact FIFO: the slot's previous occupant is always the row exactly D rows behind,
  * committed on eviction. The point: OLD flash content of uncommitted rows stays physically
  * readable through hy_src_peek's plain flash_read, and the ENCODER's a1_row_covered oracle
  * exploits exactly that window (journal-free old reads behind the frontier).
- * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH must match the encoder's
- * A1_OUTROW x A1_ROW_DEPTH assumption. Compatibility is monotone: a decoder whose
- * uncommitted window is a superset (larger aligned rows and/or a deeper ring) still decodes
- * correctly — old bytes survive strictly longer than the encoder assumed; a smaller window
- * rejects via CRC32(to), never silent-wrong. */
-/* OUTROW_DEPTH is configured above (encoder mirror: A1_ROW_DEPTH). */
+ * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH is one shared define pair, used by
+ * the encoder's a1_row_covered oracle and the decoder alike, so the uncommitted-window
+ * assumption matches by construction. (The apply is still monotone-safe: a decoder built with a
+ * superset window — larger aligned rows and/or a deeper ring — would decode old blobs correctly,
+ * since old bytes survive strictly longer than assumed; a smaller window rejects via CRC32(to),
+ * never silent-wrong.) */
+/* OUTROW_DEPTH is configured above (one shared define, used by encoder and decoder alike). */
 #define OROW_NONE UINT32_MAX
 #define OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
 /* OROW_SLOT / out_read / out_write use /OUTROW and %OUTROW_DEPTH; both must stay powers of two so

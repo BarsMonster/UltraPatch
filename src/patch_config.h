@@ -24,43 +24,31 @@
 #define A1_MAX_IMAGE (64u<<20)
 #endif
 
-/* Decoder resource-cap / window DEFAULTS. Encoder and decoder expose separate override
- * names where compatibility allows it, but every default lives here. */
-#define RC_JSLOTS_DEFAULT      768u
-#define RC_OPC_CAP_DEFAULT     80
-#define RC_DR_KCAP_BL_DEFAULT  208
-#define RC_DR_KCAP_EX_DEFAULT  128
-#define RC_WINDOW_LOG_DEFAULT  10
-
-/* NVM row-window DEFAULTS. A decoder may be a monotone-compatible superset of the
- * encoder assumption, so encoder and decoder override names remain separate. */
-#define RC_OUTROW_DEFAULT      256u
-#define RC_ROW_DEPTH_DEFAULT   2u
-
-/* Encoder mirror knobs live in src/enc_internal.h (host-only), derived from the RC_*_DEFAULT
- * constants above so they stay pinned to the decoder knobs below. */
-
-/* Decoder knobs. */
+/* Wire-affecting knobs. Each is a SINGLE shared define used by both the decoder and the host
+ * encoder (encoder TUs reach these via rc_models.h -> patch_config.h), so encoder and decoder
+ * cannot disagree about the wire. Each stays overridable with a matching -D, which moves BOTH
+ * sides at once. SA_W is the LZ window log; JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the
+ * encoder plans against; OUTROW x OUTROW_DEPTH is the uncommitted NVM row window. */
 #ifndef SA_W
-#define SA_W RC_WINDOW_LOG_DEFAULT
+#define SA_W 10
 #endif
 #ifndef JSLOTS
-#define JSLOTS RC_JSLOTS_DEFAULT
+#define JSLOTS 768u
 #endif
 #ifndef OPC_CAP
-#define OPC_CAP RC_OPC_CAP_DEFAULT
+#define OPC_CAP 80
 #endif
 #ifndef DR_KCAP_BL
-#define DR_KCAP_BL RC_DR_KCAP_BL_DEFAULT
+#define DR_KCAP_BL 208
 #endif
 #ifndef DR_KCAP_EX
-#define DR_KCAP_EX RC_DR_KCAP_EX_DEFAULT
+#define DR_KCAP_EX 128
 #endif
 #ifndef OUTROW
-#define OUTROW RC_OUTROW_DEFAULT
+#define OUTROW 256u
 #endif
 #ifndef OUTROW_DEPTH
-#define OUTROW_DEPTH RC_ROW_DEPTH_DEFAULT
+#define OUTROW_DEPTH 2u
 #endif
 
 #endif /* A1_PATCH_CONFIG_H */

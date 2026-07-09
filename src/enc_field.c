@@ -108,7 +108,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
     if (preserve) {
         ivec_push(&pc->pres, off);
         pw->caps->pres_total++;
-        if ((uint32_t)tp >= RC_PACKED_POS_LIMIT || pw->caps->pres_total > A1_JSLOTS)
+        if ((uint32_t)tp >= RC_PACKED_POS_LIMIT || pw->caps->pres_total > JSLOTS)
             pw->caps->ok = 0;
         pw->jhas[tp] = 1;
     }
@@ -128,7 +128,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
     uint8_t corr = (uint8_t)(want - produced);
     if (corr) {
         corr_push(&pc->corr, off, corr);
-        if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > A1_OPC_CAP)
+        if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > OPC_CAP)
             pw->caps->ok = 0;
     }
     pw->buf[tp] = want;

@@ -14,24 +14,9 @@
 
 #include "rc_models.h"
 
-/* Encoder mirror knobs. Host-only: they derive from the RC_*_DEFAULT constants (rc_models.h ->
- * patch_config.h) so they stay pinned to the decoder knobs; check_models.sh statically asserts
- * each equals its decoder twin. Kept out of the shipped decoder headers. */
-#ifndef PATHE_W
-#define PATHE_W RC_WINDOW_LOG_DEFAULT
-#endif
-#ifndef A1_JSLOTS
-#define A1_JSLOTS RC_JSLOTS_DEFAULT
-#endif
-#ifndef A1_OPC_CAP
-#define A1_OPC_CAP RC_OPC_CAP_DEFAULT
-#endif
-#ifndef A1_OUTROW
-#define A1_OUTROW RC_OUTROW_DEFAULT
-#endif
-#ifndef A1_ROW_DEPTH
-#define A1_ROW_DEPTH RC_ROW_DEPTH_DEFAULT
-#endif
+/* The encoder uses the shared decoder knobs (SA_W, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
+ * directly from patch_config.h — there is exactly one define per knob, so encoder and decoder
+ * cannot disagree by construction. */
 
 /* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32, so these host-only
  * readers stay out of the shipped decoder headers (rc_u32le_put IS decoder-used and remains in
@@ -83,8 +68,8 @@ typedef struct {
 } EncCtx;
 
 static inline int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
-    if (ctx->fwd) return a / A1_OUTROW >= t / A1_OUTROW - (A1_ROW_DEPTH - 1);
-    return a / A1_OUTROW <= t / A1_OUTROW + (A1_ROW_DEPTH - 1);
+    if (ctx->fwd) return a / OUTROW >= t / OUTROW - (OUTROW_DEPTH - 1);
+    return a / OUTROW <= t / OUTROW + (OUTROW_DEPTH - 1);
 }
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;

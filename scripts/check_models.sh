@@ -41,11 +41,8 @@ enum {
 #define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
 #define COUNT_OF(x) (sizeof(x) / sizeof((x)[0]))
 
-_Static_assert(PATHE_W == SA_W, "encoder/decoder LZ windows must match");
-_Static_assert(A1_JSLOTS == JSLOTS, "encoder/decoder journal caps must match");
-_Static_assert(A1_OPC_CAP == OPC_CAP, "encoder/decoder per-op correction caps must match");
-_Static_assert(A1_OUTROW == OUTROW, "encoder/decoder row sizes must match");
-_Static_assert(A1_ROW_DEPTH == OUTROW_DEPTH, "encoder/decoder row depths must match");
+/* Encoder and decoder share one define per knob (SA_W, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
+ * from patch_config.h, so a wire-knob mismatch is impossible by construction — no mirror asserts. */
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
 void flash_write(uint32_t addr, uint8_t val){ (void)addr; (void)val; }

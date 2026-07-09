@@ -258,27 +258,27 @@ compiles both packaging forms and verifies the generated header without `-Isrc`.
 The encoder uses the same source headers, and model/golden gates enforce
 bit-exactness.
 
-The encoder window `PATHE_W` must match decoder `SA_W`. The production default is
-`PATHE_W=10` / `SA_W=10`, and this is what `make gate` verifies.
+The LZ window `SA_W` is a single shared define in `src/patch_config.h`, used by
+both the decoder and the encoder's distance coding, so the two cannot disagree.
+The production default is `SA_W=10`, and `make gate` verifies it.
 
 **NVM row window (encoding-affecting).** The decoder keeps its last
 `OUTROW_DEPTH` output rows (of `OUTROW` bytes) uncommitted in RAM, and the
 encoder's plans exploit the fact that the OLD flash content of uncommitted
 rows is still physically readable (journal-free reads behind the write
-frontier). `OUTROW x OUTROW_DEPTH` must therefore match the encoder's
-`A1_OUTROW x A1_ROW_DEPTH` assumption — production default 256 x 2 (512 B of
-row buffers in `.bss`). Compatibility is monotone: a decoder whose uncommitted
-window is a superset (larger aligned rows and/or a deeper ring, e.g. a
-1024-byte-row part) decodes such blobs correctly, because old bytes survive
-strictly longer than the encoder assumed; a smaller window rejects at the
-`CRC32(to)` gate — safe, never silent-wrong. Encode for the smallest window
-among deployment targets.
+frontier). `OUTROW` and `OUTROW_DEPTH` are single shared defines used by both
+the encoder's `a1_row_covered` oracle and the decoder — production default
+256 x 2 (512 B of row buffers in `.bss`) — so the window assumption matches by
+construction. (The apply stays monotone-safe underneath: a decoder built with a
+superset window — larger aligned rows and/or a deeper ring, e.g. a 1024-byte-row
+part — would still decode old blobs, because old bytes survive strictly longer
+than assumed; a smaller window rejects at the `CRC32(to)` gate — safe, never
+silent-wrong.)
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
-intentional reject limits on the decoder. The ENCODER mirrors them
-(`A1_JSLOTS`/`A1_OPC_CAP` in `src/enc_internal.h`; both sides single-source the
-default caps from `RC_JSLOTS_DEFAULT`/`RC_OPC_CAP_DEFAULT` in `src/patch_config.h`,
-so retune those two constants to move both sides together)
+intentional reject limits on the decoder. Each is a single shared define in
+`src/patch_config.h`, so the encoder plans against the exact same cap (retune
+the one define to move both sides together)
 and degrades gracefully instead of refusing where the plan allows it: reads
 that would overflow the journal budget ship as plain extra bytes, and ops
 whose per-op corrections exceed `OPC_CAP` are split — worse compression, never

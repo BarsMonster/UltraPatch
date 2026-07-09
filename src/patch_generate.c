@@ -117,7 +117,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                 best_desc ? "bwd" : "fwd",
                 rc_dir_is_natural(from_size, to_size, best_desc),
                 best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted, best_st.opc_splits, sweep_opc_splits,
-                (unsigned)A1_JSLOTS, (unsigned)A1_OPC_CAP);
+                (unsigned)JSLOTS, (unsigned)OPC_CAP);
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it

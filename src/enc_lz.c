@@ -389,7 +389,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
-    uint32_t maxrun = LZ_MAX_RUN, win = 1u << PATHE_W;
+    uint32_t maxrun = LZ_MAX_RUN, win = 1u << SA_W;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. slen is only ever indexed by a span/rep run length
      * (<= maxrun == LZ_MAX_RUN) and mlen by a match length (candidate lens clamp to LZ_MAX_MATCH
@@ -650,7 +650,7 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
     ugg_init_e(&pt->gs);
     ugg_init_e(&pt->gl);
-    ugr_init_e(&pt->gd, PATHE_W);
+    ugr_init_e(&pt->gd, SA_W);
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
 }
@@ -662,7 +662,7 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
                                 const uint8_t L0[256], const uint8_t L1[256],
                                 int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
-    int32_t win = 1 << PATHE_W, maxm = LZ_MAX_MATCH;
+    int32_t win = 1 << SA_W, maxm = LZ_MAX_MATCH;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
     int32_t *head = hash3_heads_new();
@@ -701,8 +701,8 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
     free(head); free(prev);
     PriceTab pt;
     bootstrap_prices(&pt, L0, L1);
-    pt.gd.k = PATHE_W;
-    pt.fixed_dist_bits = PATHE_W;
+    pt.gd.k = SA_W;
+    pt.fixed_dist_bits = SA_W;
     TokenVec seq = lz_parse_priced(n, data, tags, cands, ncand, NULL, NULL, &pt);
     int k = fit_k_tokens(&seq);
     int parsed_k = -1;

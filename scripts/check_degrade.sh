@@ -91,11 +91,11 @@ fail=0
 note() { echo "check_degrade: $*" >&2; }
 bad()  { echo "DEGRADE FAILURE: $*" >&2; fail=$((fail+1)); }
 
-# The decoder mirrors these; keep the asserts self-documenting. Derive the journal-degradation
-# budget from the decoder's RC_JSLOTS_DEFAULT rather than hand-mirroring it.
-JBUDGET=$(sed -n 's/^#define[[:space:]]\+RC_JSLOTS_DEFAULT[[:space:]]\+\([0-9][0-9]*\)u\?.*/\1/p' \
+# Derive the journal-degradation budget from the shared JSLOTS knob (one define, used by both
+# encoder and decoder) rather than hand-mirroring it.
+JBUDGET=$(sed -n 's/^#define[[:space:]]\+JSLOTS[[:space:]]\+\([0-9][0-9]*\)u\?.*/\1/p' \
   "$(dirname "$0")/../src/patch_config.h" | head -1)
-[ -n "$JBUDGET" ] || { echo "check_degrade: RC_JSLOTS_DEFAULT not found in src/patch_config.h" >&2; exit 2; }
+[ -n "$JBUDGET" ] || { echo "check_degrade: JSLOTS not found in src/patch_config.h" >&2; exit 2; }
 
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
 # production D=2 build. Same source as the host backend, its own binary. Used only to prove

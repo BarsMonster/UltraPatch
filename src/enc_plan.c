@@ -8,13 +8,13 @@
 
 #include "enc_internal.h"
 /* ---- journal-budget degradation (encoder-only; wire format and decoder untouched) ----
- * The decoder's never-evict journal holds at most A1_JSLOTS overwritten source bytes. When
+ * The decoder's never-evict journal holds at most JSLOTS overwritten source bytes. When
  * the ideal op plan needs more, convert the OVER-BUDGET read-after-overwrite copy regions
  * into plain extra bytes (the exact to-image bytes, shipped in the content stream):
  * compression degrades — those bytes code as literals/LZ instead of free copies — but the
  * plan becomes journal-feasible instead of refusing. Preserves are journaled in apply order
  * (strictly ascending output positions for FWD, descending for grow — the NVM gate pins
- * frontier monotonicity), so the first A1_JSLOTS preserves in that order stay protected and
+ * frontier monotonicity), so the first JSLOTS preserves in that order stay protected and
  * every read of a later (unprotected) overwritten position is converted. A read-behind-
  * frontier within one op sits at the constant offset fp0-tp0, so the conversion range is
  * contiguous per op and each affected op splits into at most two wire ops. Every remaining
@@ -127,7 +127,7 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
-    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size, A1_JSLOTS);
+    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size, JSLOTS);
     return ops;
 }
 
@@ -159,7 +159,7 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
     int32_t *cut = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
     for (size_t i = 0; i < ops->n; i++) cut[i] = -1;
     for (size_t step = 0; step < ops->n; step++) {
-        if (pc[step].corr.n <= A1_OPC_CAP) continue;
+        if (pc[step].corr.n <= OPC_CAP) continue;
         size_t oi = FWDD ? step : ops->n - 1 - step;
         int32_t dl = ops->v[oi].diff_len;
         if (dl < 2) continue;                       /* cannot split further: stays infeasible */
