@@ -276,7 +276,9 @@ among deployment targets.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
 intentional reject limits on the decoder. The ENCODER mirrors them
-(`A1_JSLOTS`/`A1_OPC_CAP` in `src/patch_config.h` -- retune both sides together)
+(`A1_JSLOTS`/`A1_OPC_CAP` in `src/enc_internal.h`; both sides single-source the
+default caps from `RC_JSLOTS_DEFAULT`/`RC_OPC_CAP_DEFAULT` in `src/patch_config.h`,
+so retune those two constants to move both sides together)
 and degrades gracefully instead of refusing where the plan allows it: reads
 that would overflow the journal budget ship as plain extra bytes, and ops
 whose per-op corrections exceed `OPC_CAP` are split — worse compression, never

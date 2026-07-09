@@ -69,8 +69,9 @@ and the two one-face fixtures; `test-bench/foreign` provides the second
 Cortex-M0+ lineage. The root `Makefile` uses those paths by default; override
 them with `IMAGES=...`, `FIXTURES=...`, `FOREIGN=...`, and matching manifest
 variables when running checks elsewhere. The expected contents are pinned by
-`test-bench/corpus.sha256` and `test-bench/foreign.sha256`; `make gate` runs
-`make check-assets` before the matrix so stale or partial corpora fail early.
+`test-bench/corpus.sha256` and `test-bench/foreign.sha256`; the `check-assets`
+leg of `make gate` runs concurrently with the matrix, so a stale or partial
+corpus still fails the gate deterministically.
 `make gate` also runs `make check-decoder-contract` (source-header-set and
 generated-single-header/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
@@ -92,8 +93,8 @@ Create a deterministic standalone corpus bundle, if needed, with:
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
 
-CI verifies the tracked corpus with `make check-assets` before the same
-`make gate` command runs.
+CI verifies the tracked corpus via the `check-assets` leg of the same
+`make gate` command.
 
 Device integration contract:
 
