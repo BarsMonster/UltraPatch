@@ -15,10 +15,7 @@
 } } while (0)
 
 static Op zero_op(int32_t dl, int32_t el, int32_t adj) {
-    Op o;
-    o.diff_len = dl; o.adj = adj; o.diff = (uint8_t *)xcalloc((size_t)dl, 1);
-    o.extra_len = el; o.extra = (uint8_t *)xcalloc((size_t)el, 1);
-    return o;
+    return (Op){ dl, el, adj };
 }
 
 static Buf wire_blob(uint32_t from_crc, uint32_t to_crc,
@@ -66,9 +63,12 @@ static int check_preserve_seam(void) {
     const uint32_t from_n = (uint32_t)(a0 + hazard_n + tail_n);
     Buf from = { (uint8_t *)xcalloc(from_n, 1), from_n, from_n };
     Buf to = { (uint8_t *)xcalloc(to_n, 1), to_n, to_n };
+    to.d[kept] = 0xa5u;
     FieldDeltaVec fd = {0};
     EncCtx ctx = {0}; ctx.fwd = 0;
     OpVec ops = {0};
+    ops.payload = (uint8_t *)xcalloc(to_n, 1);
+    ops.payload[kept] = 0x3cu; /* normalized residual, deliberately unlike true target */
     opvec_push(&ops, zero_op(0, 0, a0));       /* folded into fp_start after degradation */
     opvec_push(&ops, zero_op(hazard_n, 0, 0)); /* source [a0,lim] -> low output */
     opvec_push(&ops, zero_op(tail_n, 0, 0));   /* descending writer crosses [a0,lim] first */
@@ -82,6 +82,7 @@ static int check_preserve_seam(void) {
 
     degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd, from_n, to_n);
     CHECK(ctx.deg_engaged && ctx.deg_converted == 1u);
+    CHECK(ops.payload[kept] == to.d[kept]); /* degraded extras come from true `to` */
     int32_t fp_start = fold_zero_ops(&ops);
     CHECK(fp_start == a0);
     PlanCaps caps;
@@ -89,8 +90,39 @@ static int check_preserve_seam(void) {
     CHECK(caps.ok && caps.pres_total == JSLOTS && caps.pres_kept == JSLOTS);
     CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, fp_start, 1) == 0);
 
-    oppc_array_free(pc, ops.n); opvec_free_deep(&ops);
+    oppc_array_free(pc, ops.n); opvec_free(&ops);
     buf_free(&from); buf_free(&to);
+    return 0;
+}
+
+/* The shared arena's byte domain follows geometry: bsdiff/split extras carry normalized
+ * target bytes, while the journal-degraded case above deliberately checks true target bytes. */
+static int check_normalized_extra_origins(void) {
+    Buf empty = { (uint8_t *)xcalloc(1, 1), 0, 1 };
+    Buf norm = { (uint8_t *)xmalloc(8), 8, 8 };
+    memset(norm.d, 0x6du, norm.n);
+    OpVec ops = bsdiff_ops(&empty, &norm, 11);
+    CHECK(ops.n == 1u && ops.v[0].diff_len == 0 && ops.v[0].extra_len == 8);
+    CHECK(memcmp(ops.payload, norm.d, norm.n) == 0); /* original extras use normalized `to_df` */
+    opvec_free(&ops); buf_free(&empty); buf_free(&norm);
+
+    enum { N = 256 };
+    Buf from = { (uint8_t *)xmalloc(N), N, N };
+    norm = (Buf){ (uint8_t *)xmalloc(N), N, N };
+    memset(from.d, 0x11, N); memset(norm.d, 0x55, N);
+    ops = (OpVec){0}; ops.payload = (uint8_t *)xmalloc(N);
+    memset(ops.payload, 0x44, N); opvec_push(&ops, zero_op(N, 0, 0));
+    EncCtx ctx = {0}; ctx.fwd = 1;
+    split_nonzero_diff_runs(&ctx, &ops, &from, &norm);
+    size_t extras = 0; int32_t tp = 0;
+    for (size_t i = 0; i < ops.n; i++) {
+        for (int32_t e = 0; e < ops.v[i].extra_len; e++)
+            CHECK(ops.payload[tp + ops.v[i].diff_len + e] == 0x55u);
+        extras += (size_t)ops.v[i].extra_len;
+        tp += ops.v[i].diff_len + ops.v[i].extra_len;
+    }
+    CHECK(extras != 0); /* split-generated extras were actually selected */
+    opvec_free(&ops); buf_free(&from); buf_free(&norm);
     return 0;
 }
 
@@ -104,10 +136,12 @@ static int check_correction_seam(void) {
     to.d[lim] = 1;
     FieldDeltaVec fd = {0};
     EncCtx ctx = {0}; ctx.fwd = 1;
-    OpVec ops = {0}; opvec_push(&ops, zero_op((int32_t)n, 0, 0));
+    OpVec ops = {0}; ops.payload = (uint8_t *)xcalloc(n, 1);
+    opvec_push(&ops, zero_op((int32_t)n, 0, 0));
 
     PlanCaps before;
-    OpPC *pc = preserve_corrections_pc(&ctx, &ops, 0, from.d, to.d, &fd, n, n, &before);
+    OpPC *pc = preserve_corrections_pc(&ctx, &ops, 0, from.d, to.d,
+                                       &fd, n, n, &before);
     CHECK(!before.ok && pc[0].corr.n == 1u && (uint32_t)pc[0].corr.v[0].off == lim);
     oppc_array_free(pc, ops.n);
 
@@ -117,7 +151,7 @@ static int check_correction_seam(void) {
     CHECK(pc[1].corr.n == 1u && pc[1].corr.v[0].off == 0);
     CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, 0, 0) == 0);
 
-    oppc_array_free(pc, ops.n); opvec_free_deep(&ops);
+    oppc_array_free(pc, ops.n); opvec_free(&ops);
     buf_free(&from); buf_free(&to);
     return 0;
 }
@@ -147,11 +181,13 @@ static int check_repeated_extra_split(void) {
     CHECK(walk[0].tp == 0 && walk[0].fp == 13);
     CHECK(walk[1].tp == lim && walk[1].fp == 13 + lim);
     CHECK(walk[2].tp == 2 * lim && walk[2].fp == 13 + lim);
-    free(walk); opvec_free_deep(&ops);
+    free(walk); opvec_free(&ops);
     return 0;
 }
 
 int main(void) {
+    if (check_normalized_extra_origins()) return 1;
+    printf("payload_origins=OK original=normalized split=normalized journal=true\n");
     if (check_preserve_seam()) return 1;
     printf("packed_seam_preserve=OK high_unpacked=1 journal_kept=%u converted=1\n",
            (unsigned)JSLOTS);

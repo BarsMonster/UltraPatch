@@ -69,8 +69,10 @@ static inline int row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
 }
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
-typedef struct { int32_t diff_len, adj; uint8_t *diff; uint8_t *extra; int32_t extra_len; } Op;
-typedef struct { Op *v; size_t n, cap; } OpVec;
+/* Plan geometry only. Payload bytes live in one target-indexed arena: copy spans hold
+ * normalized source deltas, while extra spans hold the literal target bytes to ship. */
+typedef struct { int32_t diff_len, extra_len, adj; } Op;
+typedef struct { Op *v; size_t n, cap; uint8_t *payload; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
 typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
 typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
@@ -129,7 +131,7 @@ typedef struct { int type; int32_t delta; } Event;
 typedef struct {
     int fwd; int32_t dl, k;
     const uint8_t *frm; uint32_t from_size;
-    const FieldDeltaVec *fd; const Op *o; int32_t fp0;
+    const FieldDeltaVec *fd; const uint8_t *diff; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
 typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
@@ -193,7 +195,7 @@ void buf_put(Buf *b, uint8_t v);
 void buf_write(Buf *b, const void *p, size_t n);
 void buf_put_u32le(Buf *b, uint32_t v);
 void buf_free(Buf *b);
-void opvec_free_deep(OpVec *v);
+void opvec_free(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
 /* Decoder-order index for step `step` of an n-op apply walk (forward: 0..n-1; reverse: n-1..0).
@@ -227,17 +229,16 @@ OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-             const FieldDeltaVec *fd, const Op *o, int32_t fp0, int32_t dl);
+             const FieldDeltaVec *fd, const uint8_t *diff, int32_t fp0, int32_t dl);
 int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv);
-void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                           const FieldDeltaVec *fd);
-Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj);
-#define op_free_payload(o_) do { free((o_)->diff); free((o_)->extra); } while (0)
-void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to);
+void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
+                           uint32_t from_size, const FieldDeltaVec *fd);
+void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
+                             const Buf *from, const Buf *to);
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,

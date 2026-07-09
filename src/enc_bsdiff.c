@@ -317,7 +317,8 @@ static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t fro
     return suffix_search(sa, from, from_size, to, to_size, begin, x, pos);
 }
 
-static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
+static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
+                           const uint8_t *from, int32_t from_size,
                            const uint8_t *to, int32_t to_size, int32_t scan,
                            int32_t pos, int32_t *last_scan_p,
                            int32_t *last_pos_p, int32_t *last_offset_p) {
@@ -351,15 +352,11 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
     }
     int32_t extra_pos = last_scan + diff_size;
     int32_t extra_size = scan - lenb - extra_pos;
-    Op o;
-    o.diff_len = diff_size;
-    o.diff = (uint8_t *)xmalloc((size_t)diff_size);
-    for (int32_t i = 0; i < diff_size; i++) o.diff[i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
-    o.extra_len = extra_size;
-    o.extra = (uint8_t *)xmalloc((size_t)extra_size);
-    for (int32_t i = 0; i < extra_size; i++) o.extra[i] = to[extra_pos + i];
-    o.adj = (pos - lenb) - (last_pos + diff_size);
-    opvec_push(ops, o);
+    for (int32_t i = 0; i < diff_size; i++)
+        payload[last_scan + i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
+    if (extra_size) memcpy(payload + extra_pos, to + extra_pos, (size_t)extra_size);
+    opvec_push(ops, (Op){ diff_size, extra_size,
+                          (pos - lenb) - (last_pos + diff_size) });
     *last_scan_p = scan - lenb;
     *last_pos_p = pos - lenb;
     *last_offset_p = pos - scan;
@@ -368,6 +365,7 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
     OpVec ops = {0};
     int32_t from_size = (int32_t)from->n, to_size = (int32_t)to->n;
+    ops.payload = (uint8_t *)xmalloc(to->n);
     int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(int32_t));
     sa[0] = from_size;
     if (from_size && divsufsort(from->d, &sa[1], from_size) != 0) die("divsufsort failed");
@@ -384,7 +382,7 @@ OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
             if ((scan + last_offset < from_size) && (from->d[scan + last_offset] == to->d[scan])) from_score--;
         }
         if ((len != from_score) || (scan == to_size))
-            emit_bsdiff_op(&ops, from->d, from_size, to->d, to_size, scan, pos,
+            emit_bsdiff_op(&ops, ops.payload, from->d, from_size, to->d, to_size, scan, pos,
                            &last_scan, &last_pos, &last_offset);
     }
     free(sa);

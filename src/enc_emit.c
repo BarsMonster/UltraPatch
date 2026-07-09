@@ -50,7 +50,7 @@ static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD, FieldKe
 }
 
 typedef struct {
-    const Op *o;
+    const uint8_t *payload;
     const IVec *lits;
     Buf *tmp;
     Buf *content;
@@ -78,7 +78,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
     put_uleb(lc->tmp, (uint32_t)(lc->FWD ? k - lc->cprev : lc->cprev - k));
     buf_write(lc->content, lc->tmp->d, lc->tmp->n);
     for (size_t i = 0; i < lc->tmp->n; i++) buf_put(lc->tags, 0);
-    buf_put(lc->content, lc->o->diff[k]);
+    buf_put(lc->content, lc->payload[k]);
     buf_put(lc->tags, 0);
     lc->cprev = k;
 }
@@ -91,23 +91,24 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
  * cc is a READ-AHEAD cursor: like the decoder up_LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
-static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t from_size,
+static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
+                            const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd,
                             Buf *content, Buf *tags, InjVec *out) {
     IVec lits = {0};
-    for (int32_t k = 0; k < o->diff_len; k++) if (o->diff[k]) ivec_push(&lits, k);
+    for (int32_t k = 0; k < o->diff_len; k++) if (payload[k]) ivec_push(&lits, k);
     Buf tmp = {0};
     put_uleb(&tmp, (uint32_t)lits.n);
     buf_write(content, tmp.d, tmp.n);
     for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
     int32_t exstart = tp0 + o->diff_len;
     if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
-        for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-    EncLitCursor lc = { o, &lits, &tmp, content, tags,
+        for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+    EncLitCursor lc = { payload, &lits, &tmp, content, tags,
         (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len),
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
-    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, o, fp0, o->diff_len);
+    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, payload, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
             uint32_t fpk = (uint32_t)(fp0 + w.pos), k2;
@@ -124,7 +125,7 @@ static void op_emit_content(const Op *o, int FWD, const uint8_t *frm, uint32_t f
         } else if (w.pos == lc.nextpos) { enc_litcur_emit(&lc, w.pos); enc_litcur_step(&lc); }
     }
     if (FWD)
-        for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, o->extra[e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+        for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
     free(lits.v); buf_free(&tmp);
 }
 
@@ -469,7 +470,8 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &walk[opwalk_apply_index(ops->n, FWD, step)];
-        op_emit_content(we->o, FWD, frm, from_size, we->fp, we->tp, fd, &content, &tags, &inj[step]);
+        op_emit_content(we->o, ops->payload + we->tp, FWD, frm, from_size,
+                        we->fp, we->tp, fd, &content, &tags, &inj[step]);
         ends[step] = content.n;
     }
     uint8_t L0[256], L1[256];

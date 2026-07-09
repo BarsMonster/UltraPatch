@@ -64,7 +64,7 @@ typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } Preser
 typedef struct {
     const EncCtx *ctx;
     const int32_t *readarr;
-    const uint8_t *frm, *true_to;
+    const uint8_t *payload, *frm, *true_to;
     uint8_t *buf, *jhas;
     uint32_t from_size;
     PlanCaps *caps;
@@ -152,18 +152,18 @@ static void preserve_corr_op(PreserveCorrWalk *cw, PreserveFieldCursor *fc, OpPC
     for (int32_t i = 0; i < n; i++) {
         int32_t off = FWD ? i : n - 1 - i;
         int is_diff = off < o->diff_len;
-        uint8_t byte = is_diff ? o->diff[off] : o->extra[off - o->diff_len];
+        uint8_t byte = cw->payload[we->tp + off];
         preserve_corr_byte(cw, fc, pc, we, off, is_diff, byte);
     }
 }
 
-/* o==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
+/* diff==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
  * EV_SBL) — coerce_reloc_literals uses that to detect fields before their literals are zeroed. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
-                            const Op *o, int32_t fp0, int32_t dl, int32_t k) {
+                            const uint8_t *diff, int32_t fp0, int32_t dl, int32_t k) {
     uint32_t fpk;
     if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
-    int pure = !o || (o->diff[k] == 0 && o->diff[k + 1] == 0 && o->diff[k + 2] == 0 && o->diff[k + 3] == 0);
+    int pure = !diff || (diff[k] == 0 && diff[k + 1] == 0 && diff[k + 2] == 0 && diff[k + 3] == 0);
     if (is_local_bl(frm, from_size, fpk)) {
         if (!pure) return (Event){ EV_SBL, 0 };
         const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
@@ -182,15 +182,15 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
  * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
  * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-                    const FieldDeltaVec *fd, const Op *o, int32_t fp0, int32_t dl) {
+                    const FieldDeltaVec *fd, const uint8_t *diff, int32_t fp0, int32_t dl) {
     w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
-    w->frm = frm; w->from_size = from_size; w->fd = fd; w->o = o; w->fp0 = fp0;
+    w->frm = frm; w->from_size = from_size; w->fd = fd; w->diff = diff; w->fp0 = fp0;
 }
 int fw_next(FieldWalk *w) {
     if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
     int32_t a0 = w->fwd ? w->k : w->k - 3;
     if (a0 >= 0 && a0 + 4 <= w->dl) {
-        Event ev = classify_field(w->frm, w->from_size, w->fd, w->o, w->fp0, w->dl, a0);
+        Event ev = classify_field(w->frm, w->from_size, w->fd, w->diff, w->fp0, w->dl, a0);
         if (ev.type != EV_NONE) {
             w->is_field = 1; w->pos = a0; w->ev = ev; w->k += w->fwd ? 4 : -4;
             return 1;
@@ -318,13 +318,14 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
     return mn;
 }
 
-void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                                  const FieldDeltaVec *fd) {
+void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
+                           uint32_t from_size, const FieldDeltaVec *fd) {
     int FWD = ctx->fwd;
-    int32_t fp0 = 0;
+    uint8_t *payload = ops->payload;
+    int32_t fp0 = 0, tp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
-        /* o==NULL => assume-pure: a still-dirty field classifies as EV_BL/EV_EX so its
+        /* diff==NULL => assume-pure: a still-dirty field classifies as EV_BL/EV_EX so its
          * literals get zeroed here before they would suppress the field on the wire. */
         FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, NULL, fp0, o->diff_len);
         while (fw_next(&w)) {
@@ -332,22 +333,12 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm, ui
             int32_t k = w.pos;
             uint32_t fpk = (uint32_t)(fp0 + k);
             const FieldDelta *real = fd_find_kind(fd, fpk, w.ev.type == EV_BL ? STREAM_BL : STREAM_LDR);
-            if (real && (o->diff[k] || o->diff[k+1] || o->diff[k+2] || o->diff[k+3])) memset(o->diff + k, 0, 4);
+            uint8_t *d = payload + tp0 + k;
+            if (real && (d[0] || d[1] || d[2] || d[3])) memset(d, 0, 4);
         }
+        tp0 += o->diff_len + o->extra_len;
         fp0 += o->diff_len + o->adj;
     }
-}
-
-Op op_copy(int32_t diff_len, const uint8_t *diff, int32_t extra_len, const uint8_t *extra, int32_t adj) {
-    Op o;
-    o.diff_len = diff_len;
-    o.diff = (uint8_t *)xmalloc((size_t)diff_len);
-    if (diff_len) memcpy(o.diff, diff, (size_t)diff_len);
-    o.extra_len = extra_len;
-    o.extra = (uint8_t *)xmalloc((size_t)extra_len);
-    if (extra_len) memcpy(o.extra, extra, (size_t)extra_len);
-    o.adj = adj;
-    return o;
 }
 
 static uint64_t dz_bits_u32(uint32_t x) {
@@ -402,20 +393,22 @@ static uint64_t split_diff_bits(const SplitScratch *sc, const Run *runs,
  * exact raw geometry code lengths. */
 enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
-void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to) {
+void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
+                             const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
+    uint8_t *payload = ops->payload;
     from_lit_proxy_bits(from->d, from->n, L0, L1);
-    OpVec out = {0};
+    OpVec out = { .payload = payload };
     int32_t tp = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
         Run *runs = NULL;
         size_t nr = 0, rcap = 0;
         for (int32_t scan = 0; scan < o->diff_len;) {
-            while (scan < o->diff_len && o->diff[scan] == 0) scan++;
+            while (scan < o->diff_len && payload[tp + scan] == 0) scan++;
             if (scan >= o->diff_len) break;
             int32_t begin = scan++;
-            while (scan < o->diff_len && o->diff[scan] != 0) scan++;
+            while (scan < o->diff_len && payload[tp + scan] != 0) scan++;
             runs = (Run *)vec_reserve(runs, &rcap, nr + 1, sizeof(runs[0]), 16);
             runs[nr++] = (Run){ begin, scan };
         }
@@ -445,7 +438,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
         sc[0].w = 0; sc[0].cnt = 0; sc[0].gp = 0;
         for (size_t j = 0; j < nr; j++) {
             uint64_t w = 0;
-            for (int32_t k = runs[j].begin; k < runs[j].end; k++) w += L0[o->diff[k]];
+            for (int32_t k = runs[j].begin; k < runs[j].end; k++) w += L0[payload[tp + k]];
             w += (uint64_t)(runs[j].end - runs[j].begin - 1) * uleb1;
             sc[j + 1].w = sc[j].w + w;
             sc[j + 1].cnt = sc[j].cnt + (uint32_t)(runs[j].end - runs[j].begin);
@@ -483,16 +476,17 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops, const Buf *from, con
               size_t s = (size_t)sc[p].ft;
               int32_t len = runs[s].end - runs[s].begin;
               int32_t pre = runs[s].begin - seg;
-              opvec_push(&out, op_copy(pre, o->diff + seg, len,
-                                       to->d + (size_t)tp + (size_t)runs[s].begin, len));
+              opvec_push(&out, (Op){ pre, len, len });
+              /* Split-generated extras stay in the normalized data-format domain. */
+              memcpy(payload + tp + runs[s].begin,
+                     to->d + (size_t)tp + (size_t)runs[s].begin, (size_t)len);
               seg = runs[s].end;
               p = s + 1;
           } }
         if (seg) {
             int32_t tail = o->diff_len - seg;
             if (tail || o->extra_len || o->adj)
-                opvec_push(&out, op_copy(tail, o->diff + seg, o->extra_len, o->extra, o->adj));
-            op_free_payload(o);
+                opvec_push(&out, (Op){ tail, o->extra_len, o->adj });
         } else {
             opvec_push(&out, *o);
         }
@@ -522,12 +516,13 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     memcpy(buf, frm, from_size);
     uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, readarr, frm, true_to, buf, jhas, from_size, caps };
+    PreserveCorrWalk cw = { ctx, readarr, ops->payload, frm, true_to, buf, jhas, from_size, caps };
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &m[opwalk_apply_index(ops->n, FWD, step)];
         PreserveFieldCursor fc;
-        fw_init(&fc.w, FWD, frm, from_size, fd, we->o, we->fp, we->o->diff_len);
+        fw_init(&fc.w, FWD, frm, from_size, fd, ops->payload + we->tp,
+                we->fp, we->o->diff_len);
         fc.have = 0;
         OpPC *pc = &out[step];
         preserve_corr_op(&cw, &fc, pc, we);

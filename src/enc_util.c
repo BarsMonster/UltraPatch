@@ -105,14 +105,11 @@ void buf_put_u32le(Buf *b, uint32_t v) {
 
 void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
 
-void opvec_free_deep(OpVec *v) {
+void opvec_free(OpVec *v) {
     if (!v) return;
-    for (size_t i = 0; i < v->n; i++) {
-        free(v->v[i].diff);
-        free(v->v[i].extra);
-    }
-    free(v->v);
+    free(v->v); free(v->payload);
     v->v = NULL;
+    v->payload = NULL;
     v->n = v->cap = 0;
 }
 
