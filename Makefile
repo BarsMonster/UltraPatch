@@ -249,7 +249,7 @@ check-edge-internal: ultrapatch
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: ultrapatch
-	@scripts/check_degrade.sh
+	@CC="$(CC)" scripts/check_degrade.sh
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run

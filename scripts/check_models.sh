@@ -8,8 +8,11 @@
 # that would otherwise drift silently between comments, structs, and helpers.
 set -eu
 
-CC="${CC:-gcc}"
-CFLAGS="${CFLAGS:--DCORTEX_M0 -g -Wall -Wextra -Wdouble-promotion -Wfloat-equal -Wformat=2 -Wshadow -Werror -std=c99 -O2 -ffunction-sections -fdata-sections -I. -Isrc -Ivendor/libdivsufsort}"
+# CC/CFLAGS are the project build contract; the Makefile (check-models-internal) supplies
+# both. Require them rather than carrying a hardcoded flag copy here that would silently drift
+# from the real CFLAGS block. Direct invocation must therefore go through `make check-models`.
+: "${CC:?check_models.sh: CC not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
+: "${CFLAGS:?check_models.sh: CFLAGS not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
 
 . "$(dirname "$0")/tempdir.sh"
 
