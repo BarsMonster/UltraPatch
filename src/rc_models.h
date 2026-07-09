@@ -101,6 +101,8 @@ static inline uint8_t rc_lit0_sel(uint8_t p){
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } A1Flag1;
 static inline void a1_fl_init(A1Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
+/* flag-history context update, shared by decoder/encoder/DP pricing (wire-affecting mirror). */
+static inline int rc_fl_hist(int h,int b){ return ((h<<1)|b)&3; }
 
 /* =====================================================================================
  * Shared PURE wire semantics — hand-mirrored decoder<->encoder helpers single-sourced here so

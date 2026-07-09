@@ -345,7 +345,7 @@ static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
-static int s_flag(PatchApply *pa, A1Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=((f->h<<1)|b)&3; return b; }
+static int s_flag(PatchApply *pa, A1Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
 
 /* ===================================================================================== */
 /* CRC32 (zlib polynomial) over flash bytes                                               */
@@ -608,7 +608,7 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
          * span/match flag is IMPLICITLY "match": skip the coded bit but keep the order-2
          * flag history tracking the true token kinds (mirror emit_body last_span). */
         int is_match;
-        if(s->last_span){ pa->MDL_tok.flag.h=((pa->MDL_tok.flag.h<<1)|1)&3; is_match=1; }
+        if(s->last_span){ pa->MDL_tok.flag.h=rc_fl_hist(pa->MDL_tok.flag.h,1); is_match=1; }
         else is_match=s_flag(pa,&pa->MDL_tok.flag);
         if(!is_match){
             uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.gs)+1u;

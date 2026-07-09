@@ -218,7 +218,7 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
         cc->span_pos = 0;
         cc->last_span = 1;
     } else if (cc->cur.type == 'O') {
-        if (cc->last_span) { M->tok.flag.h = ((M->tok.flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        if (cc->last_span) { M->tok.flag.h = rc_fl_hist(M->tok.flag.h, 1); cc->last_span = 0; }
         else fl_encode(&M->tok.flag, rc, 1);
         if (stats) { stats->r0n_cost += bit_price(M->tok.rep0[M->rep0h], 0); stats->r0n_n++; }
         re_bit(rc, &M->tok.rep0[M->rep0h], 0, RC_S_BIT_RATE);
@@ -233,7 +233,7 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
     } else {
-        if (cc->last_span) { M->tok.flag.h = ((M->tok.flag.h << 1) | 1) & 3; cc->last_span = 0; }
+        if (cc->last_span) { M->tok.flag.h = rc_fl_hist(M->tok.flag.h, 1); cc->last_span = 0; }
         else fl_encode(&M->tok.flag, rc, 1);
         if (cc->cur.dist == M->last_dist) {
             if (stats) { stats->r0y_cost += bit_price(M->tok.rep0[M->rep0h], 1); stats->r0y_n++; }
@@ -501,7 +501,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
              * priced under the wire's order-1 prev-byte context (rc_lit0_sel of content[p-1]); that
              * context is deterministic per position now, so the whole span cost is the exact prefix
              * difference span_lit[j] - span_lit[i] (first literal included). No carried prevlit. */
-            int hs = (h << 1) & 3;               /* history after a span flag (bit 0) */
+            int hs = rc_fl_hist(h, 0);           /* history after a span flag (bit 0) */
             uint64_t span_base = ci + pt->fspan_c[h];
             size_t lim = n < i + maxrun ? n : i + maxrun;
             size_t dense_end = i + 8 < lim ? i + 8 : lim;
@@ -520,7 +520,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             }
             /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
              * distance equals the incoming rep distance. New flag history after a match: h' = (h<<1|1)&3. */
-            int hm = ((h << 1) | 1) & 3;
+            int hm = rc_fl_hist(h, 1);
             { int32_t prevl = 2;
               uint64_t fbase = ci + fresh_extra[h];
               for (int k = 0; k < nc; k++) {

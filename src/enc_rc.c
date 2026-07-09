@@ -143,7 +143,7 @@ void ugr_encode(A1UGRice *g, REnc *r, uint32_t v) { (void)ugr_xfer(g, r, v); }
 void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
 
 /* order-2 token flag: the A1Flag1 struct + a1_fl_init are single-sourced in rc_models.h (decoder mirror). */
-void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = ((f->h << 1) | b) & 3; }
+void fl_encode(A1Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = rc_fl_hist(f->h, b); }
 
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko) {
     lit_tree_seed_e(frm, from_size, 0, &m->lit0[0]);            /* one parity-0 image scan... */
