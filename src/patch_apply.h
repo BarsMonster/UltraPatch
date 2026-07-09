@@ -351,11 +351,11 @@ static uint32_t crc32_flash(uint32_t n){
 
 /* ===================================================================================== */
 /* never-evict journal — FLAT SORTED uint32 slots, each packed (pos<<8)|byte (the op_corr      */
-/* packing). Sorted by pos, so lookup is one binary search on slot>>8. RC_PACKED_POS_BITS      */
-/* positions span 16 MiB.                                                                       */
-/* — any realistic image. NEVER-EVICT: the first write to a pos wins; over-depth (would exceed */
-/* JSLOTS) is REFUSED before any write. Lives in the apply phase ONLY (overlaid in ARENA       */
-/* front).                                                                                     */
+/* packing). Preserve positions are globally monotonic: ascending for FWD; grow stores each    */
+/* ascending wire block into reverse destination indices, making the array globally descending. */
+/* Lookup is one direction-aware binary search on slot>>8. RC_PACKED_POS_BITS positions span   */
+/* 16 MiB. Over-depth (would exceed JSLOTS) is REFUSED before writing the op. Lives in the      */
+/* apply phase ONLY (overlaid in ARENA front).                                                  */
 /* ===================================================================================== */
 /* DEREL dict cap (corpus distinct-value peak ~179 per substream + margin). The STREAMED-DELTA wire
  * (12 KiB build) holds NO resident per-detection store — only a small MOVE-TO-FRONT dict of the
@@ -366,29 +366,18 @@ static uint32_t crc32_flash(uint32_t n){
 /* DR_KCAP_* and OPC_CAP are configured above. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
-/* Binary search on slot>>8 over [0, g_jcount). On a hit *at is the matching slot and the return
- * is 1; on a miss *at is the sorted insertion index and the return is 0. */
-static int jr_find(PatchApply *pa, uint32_t pos, int*at){
+/* Direction-aware binary search on slot>>8 over [0, g_jcount). */
+static int jr_find(PatchApply *pa, uint32_t pos){
     int lo=0, hi=(int)pa->g_jcount-1;
     while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1);
         uint32_t k=pa->ARENA.apply.jbuf[mid]>>8;
-        if(k==pos){ *at=mid; return 1; } if(k<pos) lo=mid+1; else hi=mid-1; }
-    *at=lo;
-    return 0;
-}
-static int jr_put(PatchApply *pa, uint32_t pos, uint8_t b){
-    if(pos>=RC_PACKED_POS_LIMIT) return -1;          /* slot packs pos in RC_PACKED_POS_BITS */
-    int at;
-    if(jr_find(pa,pos,&at)) return 0;                /* never-evict: keep the first write */
-    if(pa->g_jcount>=JSLOTS) return -1;                  /* over-depth: refuse BEFORE any write */
-    if(at<(int)pa->g_jcount) memmove(pa->ARENA.apply.jbuf+at+1, pa->ARENA.apply.jbuf+at, (size_t)((int)pa->g_jcount-at)*4u);
-    pa->ARENA.apply.jbuf[at]=(pos<<8)|b;
-    pa->g_jcount++;
-    return 0;
+        if(k==pos) return mid;
+        if(pa->g_FWD ? k<pos : k>pos) lo=mid+1; else hi=mid-1; }
+    return -1;
 }
 static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
-    int at;
-    if(jr_find(pa,pos,&at)){ *out=(uint8_t)pa->ARENA.apply.jbuf[at]; return 1; }
+    int at=jr_find(pa,pos);
+    if(at>=0){ *out=(uint8_t)pa->ARENA.apply.jbuf[at]; return 1; }
     return 0;
 }
 
@@ -641,11 +630,6 @@ static uint32_t read_uleb(PatchApply *pa, up_ApplyState*s){
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
 }
-/* journal one preserve site (old flash byte captured BEFORE any write of this op). */
-static void journal(PatchApply *pa, int32_t tp){
-    if(tp>=0 && tp<(int32_t)pa->g_from_size){ if(jr_put(pa,(uint32_t)tp, flash_read((uint32_t)tp))){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; }
-    }
-}
 static uint8_t hy_src_peek(PatchApply *pa, int32_t fp){
     if(fp>=0 && (uint32_t)fp<pa->g_from_size){ uint8_t jb; return jr_get(pa,(uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
     return 0;
@@ -827,6 +811,7 @@ static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
     for(;;){
         uint32_t off=0;
         if(corr && n>(uint32_t)OPC_CAP){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
+        if(!corr && n>(uint32_t)JSLOTS-pa->g_jcount){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
         if(n>nwu){ pa->g_rcerr=1; return; }
         if(corr) s->op_nc=(int32_t)n;
         for(uint32_t i=0;i<n && !pa->g_rcerr;i++){
@@ -835,10 +820,15 @@ static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
                 int cbyte=s_bt(pa,&pa->MDL_pre.dval, RC_DVAL_RATE);
                 s->op_corr[i]=(off<<8)|(uint32_t)cbyte;
             } else {
-                journal(pa,tp0+(int32_t)off);
+                uint32_t pos=(uint32_t)(tp0+(int32_t)off);
+                if(pos>=pa->g_from_size){ pa->g_rcerr=1; return; }
+                if(pos>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
+                uint32_t at=(uint32_t)pa->g_jcount+(pa->g_FWD?i:n-1u-i);
+                pa->ARENA.apply.jbuf[at]=(pos<<8)|flash_read(pos);
             }
         }
         if(pa->g_rcerr) return;
+        if(!corr) pa->g_jcount=(uint16_t)(pa->g_jcount+n);
         if(corr) break;
         corr=1; n=s_ug_gamma(pa,&pa->MDL_pre.pgn);
     }
