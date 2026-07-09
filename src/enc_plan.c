@@ -24,45 +24,16 @@
 static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_t k,
                              uint32_t from_size, uint32_t to_size, int32_t cutoff) {
     int64_t a = (int64_t)fp0 + k, t = (int64_t)tp0 + k;
-    return a >= 0 &&
-           (ctx->fwd ? (a < (int64_t)to_size && a >= cutoff)
-                     : (a < (int64_t)from_size && a <= cutoff)) &&
+    int unprotected = ctx->fwd ? a >= cutoff
+                               : a >= RC_PACKED_POS_LIMIT || (cutoff >= 0 && a <= cutoff);
+    return a >= 0 && a < (int64_t)from_size && a < (int64_t)to_size &&
+           unprotected &&
            !row_covered(ctx, a, t);
-}
-
-/* Output position of the (budget+1)-th preserve in apply order, i.e. the cutoff C that
- * degrade_hazard_at compares against. preserve_corrections_pc already accumulated the identical
- * preserve set: caps.pres_total is the count and pc[step] holds each op's preserves. Within an op,
- * FWD pushes ascending offsets (== apply order) while grow re-sorts pres ascending, so grow apply
- * order is pc->pres reversed. Each op's output base tp tiles from 0 (opwalk_build), so the position
- * of a preserve is tp + off. Only called when total > budget, so the (budget+1)-th preserve exists. */
-static int32_t degrade_pres_cutoff(const EncCtx *ctx, const OpVec *ops, const OpPC *pc, size_t budget) {
-    int FWD = ctx->fwd;
-    size_t n = ops->n;
-    int32_t *tp_of = (int32_t *)xmalloc((n ? n : 1) * sizeof(int32_t));
-    int32_t tp = 0;
-    for (size_t i = 0; i < n; i++) { tp_of[i] = tp; tp += ops->v[i].diff_len + ops->v[i].extra_len; }
-    int32_t cutoff = 0;
-    size_t seen = 0;
-    for (size_t step = 0; step < n; step++) {
-        const IVec *pres = &pc[step].pres;
-        for (size_t j = 0; j < pres->n; j++) {
-            if (seen == budget) {
-                int32_t off = FWD ? pres->v[j] : pres->v[pres->n - 1u - j];
-                cutoff = tp_of[opwalk_apply_index(n, FWD, step)] + off;
-                free(tp_of);
-                return cutoff;
-            }
-            seen++;
-        }
-    }
-    free(tp_of);
-    return cutoff;
 }
 
 static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
                                           const uint8_t *frm, const FieldDeltaVec *fd,
-                                          uint32_t from_size, uint32_t to_size, size_t budget) {
+                                          uint32_t from_size, uint32_t to_size) {
     int FWD = ctx->fwd;
     /* Derive the preserve total and cutoff from a single preserve_corrections_pc pass over the same
      * opwalk+readarr machinery (fp_start=0: degrade runs before fold_zero_ops). */
@@ -70,10 +41,11 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
     OpPC *pc = preserve_corrections_pc(ctx, ops, 0, frm, to->d, fd, from_size, to_size, &caps);
     size_t total = caps.pres_total;
     ctx->deg_pres_needed = total;
-    if (total <= budget) { oppc_array_free(pc, ops->n); return; }
-    int32_t C = degrade_pres_cutoff(ctx, ops, pc, budget);
+    if (total == caps.pres_kept) { oppc_array_free(pc, ops->n); return; }
+    int32_t C = caps.pres_cutoff;
     oppc_array_free(pc, ops->n);
-    /* C is the output position of the first preserve past the budget, in apply order. */
+    /* FWD protects [0,C). Grow protects [C+1,2^24): high unrepresentable positions are
+     * skipped before consuming its budget, then C is the first lower over-budget preserve. */
     OpVec out = {0};
     int32_t tp0 = 0, fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
@@ -127,7 +99,7 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
-    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size, JSLOTS);
+    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size);
     return ops;
 }
 
@@ -159,13 +131,21 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
     int32_t *cut = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
     for (size_t i = 0; i < ops->n; i++) cut[i] = -1;
     for (size_t step = 0; step < ops->n; step++) {
-        if (pc[step].corr.n <= OPC_CAP) continue;
+        size_t nc = pc[step].corr.n;
+        int high = nc && (uint32_t)pc[step].corr.v[nc - 1u].off >= RC_PACKED_POS_LIMIT;
+        if (nc <= OPC_CAP && !high) continue;
         size_t oi = FWDD ? step : ops->n - 1 - step;
         int32_t dl = ops->v[oi].diff_len;
-        if (dl < 2) continue;                       /* cannot split further: stays infeasible */
-        int32_t m = pc[step].corr.v[pc[step].corr.n / 2].off;
-        if (m <= 0 || m >= dl) m = dl / 2;
-        if (m <= 0 || m >= dl) continue;
+        int32_t nw = dl + ops->v[oi].extra_len;
+        int32_t m;
+        if (high) {
+            m = (int32_t)RC_PACKED_POS_LIMIT;
+        } else {
+            if (dl < 2) continue;                   /* cannot split further: stays infeasible */
+            m = pc[step].corr.v[nc / 2].off;
+            if (m <= 0 || m >= dl) m = dl / 2;
+        }
+        if (m <= 0 || m >= nw) continue;
         cut[oi] = m;
         ctx->opc_splits++;
         split_any = 1;
@@ -175,11 +155,13 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
         for (size_t oi = 0; oi < ops->n; oi++) {
             Op *o = &ops->v[oi];
             if (cut[oi] < 0) { opvec_push(&out2, *o); continue; }
-            /* split keeps the tp/fp walk exact: sub1 advances fp by cut (adj 0),
-             * sub2 carries the remaining diff + the original extras and adj. */
-            opvec_push(&out2, op_copy(cut[oi], o->diff, 0, NULL, 0));
-            opvec_push(&out2, op_copy(o->diff_len - cut[oi], o->diff + cut[oi],
-                                      o->extra_len, o->extra, o->adj));
+            /* Split at an arbitrary output offset. If it falls in extras, sub1 carries
+             * their prefix and sub2 is extra-only; source still advances exactly dl+adj. */
+            int32_t d1 = cut[oi] < o->diff_len ? cut[oi] : o->diff_len;
+            int32_t e1 = cut[oi] - d1;
+            opvec_push(&out2, op_copy(d1, o->diff, e1, o->extra, 0));
+            opvec_push(&out2, op_copy(o->diff_len - d1, o->diff + d1,
+                                      o->extra_len - e1, o->extra + e1, o->adj));
             op_free_payload(o);
         }
         free(ops->v);

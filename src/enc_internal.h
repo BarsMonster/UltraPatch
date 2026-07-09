@@ -95,7 +95,11 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
-typedef struct { int ok; int32_t fp_end; size_t pres_total; } PlanCaps;
+typedef struct {
+    int ok;
+    int32_t fp_end, pres_cutoff;
+    size_t pres_total, pres_kept;
+} PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;

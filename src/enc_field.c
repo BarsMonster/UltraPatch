@@ -108,8 +108,18 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
     if (preserve) {
         ivec_push(&pc->pres, off);
         pw->caps->pres_total++;
-        if ((uint32_t)tp >= RC_PACKED_POS_LIMIT || pw->caps->pres_total > JSLOTS)
+        if ((uint32_t)tp < RC_PACKED_POS_LIMIT && pw->caps->pres_kept < JSLOTS) {
+            pw->caps->pres_kept++;
+        } else {
             pw->caps->ok = 0;
+            /* Preserves arrive in actual apply order. FWD's first unkept position starts
+             * its high suffix; grow skips the unrepresentable >=16 MiB prefix, then the
+             * first over-budget representable position starts its low suffix. */
+            if ((uint32_t)tp < RC_PACKED_POS_LIMIT &&
+                (pw->ctx->fwd ? pw->caps->pres_cutoff == (int32_t)RC_PACKED_POS_LIMIT
+                              : pw->caps->pres_cutoff < 0))
+                pw->caps->pres_cutoff = tp;
+        }
         pw->jhas[tp] = 1;
     }
     uint8_t produced;
@@ -501,7 +511,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
-    *caps = (PlanCaps){ 1, fp_start, 0 };
+    *caps = (PlanCaps){ 1, fp_start,
+        FWD ? (int32_t)RC_PACKED_POS_LIMIT : -1, 0, 0 };
     if (ops->n) {
         const OpWalkEnt *last = &m[ops->n - 1u];
         caps->fp_end = last->fp + last->o->diff_len + last->o->adj;

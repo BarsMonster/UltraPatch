@@ -37,6 +37,7 @@ GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/enc_internal.h
 # The host backend owns the single reference-decoder copy used by encode
 # selfcheck, CLI decode, and standalone decoder builds.
 HOST_BACKEND_SRC := src/patch_host_backend.c
+ENC_SEAM_SRCS := $(filter-out src/enc_plan.c,$(ENC_MODULE_SRCS)) $(HOST_BACKEND_SRC) $(DIVSUF)
 ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
 # Standalone host-decoder TU pair + demo defines, shared once by dec_portable, check_degrade's D=1, and all-internal.
 DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
@@ -248,7 +249,9 @@ check-edge-internal: ultrapatch
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: ultrapatch
-	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" OPT="$(OPT)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
+	@CC="$(CC)" CFLAGS="$(CFLAGS)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" OPT="$(OPT)" \
+	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
+	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
 
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run

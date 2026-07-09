@@ -24,6 +24,10 @@
 #       reads at source >= 393216 (the old 6-page journal table refused this late in
 #       selfcheck); the flat 24-bit journal spans 16 MiB, so it must encode and round-trip
 #       with the over-budget preserves degraded to extras.
+#   (f,g) packed-position seam       — real >16 MiB plan geometry proves descending journal
+#       planning skips an unrepresentable high preserve before keeping JSLOTS lower entries,
+#       and that a correction at local offset 2^24 is split/rebased. Both plans emit real
+#       bodies and pass production selfcheck; direct construction avoids a >60 s suffix sort.
 #
 # ultrapatch self-verifies every emitted blob on the reference decoder, so a round-trip failure is
 # already impossible for an accepted blob; this gate additionally pins that the SPECIFIC path
@@ -39,6 +43,8 @@ set -u
 
 CC_HOST="${CC:-cc}"
 IMG="${IMAGES:-test-bench/images}"
+: "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
+: "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
 . "$(dirname "$0")/tempdir.sh"
 
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
@@ -107,7 +113,29 @@ if ! $CC_HOST $CONTRACT_FLAGS $OPT $DEC_DEMO_DEFINES -DOUTROW_DEPTH=1 $DEC_STAND
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
 fi
 
-j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA
+j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA; seam_pres=NA; seam_corr=NA
+
+# =========================================================================================
+# (f,g) 24-BIT PACKED-POSITION SEAM — this first-party probe includes the real private plan
+# normalizers, constructs actual >16 MiB image spans without running bsdiff, emits production
+# range-coded bodies/envelopes, and sends both through the production decoder selfcheck.
+# =========================================================================================
+SEAM="$tmp/packed-seam-probe"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L test-bench/packed-seam-probe.c \
+      $ENC_SEAM_SRCS -Wl,--gc-sections -o "$SEAM" 2>"$tmp/seam-build.log"; then
+  note "could not build the packed-position seam probe:"; sed 's/^/    /' "$tmp/seam-build.log" >&2
+  echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
+fi
+if "$SEAM" >"$tmp/seam.out" 2>"$tmp/seam.err"; then
+  cat "$tmp/seam.out"
+  seam_pres=$(sed -n 's/^packed_seam_preserve=\([^ ]*\).*/\1/p' "$tmp/seam.out")
+  seam_corr=$(sed -n 's/^packed_seam_correction=\([^ ]*\).*/\1/p' "$tmp/seam.out")
+  [ "$seam_pres" = OK ] || bad "packed-position preserve seam did not report OK"
+  [ "$seam_corr" = OK ] || bad "packed-position correction seam did not report OK"
+  note "(f,g) packed seam: preserve=$seam_pres correction=$seam_corr (>16 MiB, selfchecked)"
+else
+  bad "packed-position seam probe failed: $(cat "$tmp/seam.err")"
+fi
 
 # =========================================================================================
 # (a) JOURNAL-BUDGET DEGRADATION — block swap: block A (first half) moves to the top and is
@@ -214,8 +242,8 @@ else
   bad "big-span pair was refused (rc=$?)"
 fi
 
-cases=5
-printf 'degrade_journal_peak=%s\ndegrade_opc_splits=%s\ndegrade_direction=%s\ndegrade_rowwindow=%s\ndegrade_bigspan=%s\ndegrade_cases=%s\ndegrade_fail=%s\n' \
-  "$j_peak" "$opc_n" "$dir_flip" "$rw" "$bigspan" "$cases" "$fail"
-test "$cases" -eq 5
+cases=7
+printf 'degrade_journal_peak=%s\ndegrade_opc_splits=%s\ndegrade_direction=%s\ndegrade_rowwindow=%s\ndegrade_bigspan=%s\ndegrade_packed_preserve=%s\ndegrade_packed_correction=%s\ndegrade_cases=%s\ndegrade_fail=%s\n' \
+  "$j_peak" "$opc_n" "$dir_flip" "$rw" "$bigspan" "$seam_pres" "$seam_corr" "$cases" "$fail"
+test "$cases" -eq 7
 test "$fail" -eq 0
