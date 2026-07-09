@@ -1030,8 +1030,6 @@ static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return pa->
 static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
 static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa->g_jcount; }
 
-/* RC_ALWAYS_INLINE / RC_NOINLINE / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW belong to the shared shim in
- * rc_models.h and are intentionally NOT undef'd here. */
 #undef RC_RICE_UNARY_MAX
 #undef JREGION
 #undef RING
@@ -1048,7 +1046,15 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
  * Only the documented -D override knobs (JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
  * DR_KCAP_EX, MAX_IMAGE and the RC_*_DEFAULT constants they derive from) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
- * #undefs never reach the encoder side of the mirror. */
+ * #undefs never reach the encoder side of the mirror.
+ *
+ * The RC_ portability shim is sealed here too: rc_models.h keeps it defined for the encoder (which
+ * never includes this header), but it is an implementation detail that must not leak to integrators. */
+#undef RC_ALWAYS_INLINE
+#undef RC_NOINLINE
+#undef RC_NORETURN
+#undef RC_ADD_OVERFLOW
+#undef RC_SUB_OVERFLOW
 #undef RC_KTOP
 #undef RC_PROB_BITS
 #undef RC_PBIT

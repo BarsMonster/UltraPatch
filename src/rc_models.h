@@ -397,7 +397,8 @@ static inline void rc_init_tok(up_TokModels*m,int kd,int ko){
 }
 
 /* RC_ALWAYS_INLINE / RC_NOINLINE / RC_NORETURN / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW are the shared
- * portability shim: they intentionally persist to downstream headers (patch_apply.h) and TUs,
- * like every other RC_* constant defined here. */
+ * portability shim. They persist out of this header for the encoder TUs (which include rc_models.h
+ * directly); the decoder public header patch_apply.h seals them at its end so they never leak to
+ * integrators. */
 
 #endif
