@@ -16,10 +16,17 @@
 #include <string.h>
 #include "patch_config.h"
 
+/* GNU attributes are OPTIONAL codegen hints (host-text / ARM-size / stack shaping), never
+ * correctness: the #else fallbacks keep this header standard C (C99 + C11 _Static_assert), so
+ * non-GNU compilers build a wire-identical decoder — only the gated size/stack budgets, which
+ * are measured on the GNU arm-none-eabi path, may differ. The fallback branch is kept honest
+ * by the check-decoder-contract gate leg (compile + round-trip with -U__GNUC__). */
 #if defined(__GNUC__) || defined(__clang__)
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
+#define RC_NOINLINE __attribute__((noinline))
 #else
 #define RC_ALWAYS_INLINE static inline
+#define RC_NOINLINE
 #endif
 
 #define RC_KTOP (1u<<24)
@@ -154,11 +161,11 @@ typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } A1UGGamma;
  * Keeping them out-of-line preserves the single shared copy the host previously got via the ugg_init_e
  * wrapper (inlining a copy per model at every apply-init site bloats host .text); on the Cortex-M0+
  * -Os decoder they were already emitted once, so the attribute costs no ARM .text. */
-static __attribute__((noinline)) void rc_ugr_init(A1UGRice*g,int k){
+static RC_NOINLINE void rc_ugr_init(A1UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
-static __attribute__((noinline)) void rc_ugg_init(A1UGGamma*g){
+static RC_NOINLINE void rc_ugg_init(A1UGGamma*g){
     for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
     for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
 }
@@ -367,5 +374,6 @@ static inline void rc_init_tok(A1TokModels*m,int kd,int ko){
 }
 
 #undef RC_ALWAYS_INLINE
+#undef RC_NOINLINE
 
 #endif
