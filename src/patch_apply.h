@@ -125,24 +125,33 @@ typedef struct PatchApply {
 
     int (*g_pull_fn)(void*, uint8_t*);
     void *g_pull_ctx;
+    /* HOT-FLAG PLACEMENT INVARIANT: these decode error/EOF/reject latches are touched on nearly
+     * every range-coder step, so they are packed into the low alignment hole right after the two
+     * pointers (offsets ~32..35) instead of being sunk to the struct tail. Thumb-1 ldrb/strb take
+     * only a 5-bit immediate offset, so a flag byte at a LOW struct offset stays reachable cheaply,
+     * whereas a tail byte forces an extra address add. Keep any future hot flag byte HERE (low), not
+     * appended at the end: a naive "all loose bytes at the tail" layout was measured at +72 B .text. */
     uint8_t g_pull_eof;
-
-    A1RangeDec RC;
     uint8_t g_rcerr;
     uint8_t g_reject;   /* only REJ_RESOURCE cap sites set this during decode; REJ_CORRUPT is
                          * assigned once at the patch_apply_run boundary for every other failure */
     uint8_t g_flash_touched;
 
-    A1Arena ARENA;
+    A1RangeDec RC;
+    /* g_jcount + g_smap_n pair fills RC's 4-byte tail up to the ARENA boundary (both uint16). */
     uint16_t g_jcount;
+    uint16_t g_smap_n;
+
+    A1Arena ARENA;
 
     uint32_t g_smap_b[SMAP_CAP];
     int32_t  g_smap_v[SMAP_CAP];
-    uint16_t g_smap_n;
 
+    /* g_orow_dirty (the 2 flag bytes) leads g_orow_buf so g_orow_base lands 4-aligned with no gap;
+     * the old order left a 2-byte hole before the 4-aligned MDL_tok. */
+    uint8_t  g_orow_dirty[OUTROW_DEPTH];
     uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
     uint32_t g_orow_base[OUTROW_DEPTH];
-    uint8_t  g_orow_dirty[OUTROW_DEPTH];
 
     A1TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     uint32_t g_oexp;
@@ -154,10 +163,11 @@ typedef struct PatchApply {
     A1DRStream DR_BL, DR_EX;
 
     uint32_t g_psrc_ldr[8];
+    uint32_t g_psrc_even;     /* aligned word leads; the 3 loose flag bytes below pack into the
+                               * struct's final tail (only 1 byte of end padding then remains). */
     uint8_t  g_psrc_lo;
-    uint8_t  g_out_en;        /* loose bytes packed into the g_psrc_lo/g_psrc_even alignment hole */
+    uint8_t  g_out_en;
     uint8_t  g_litprev;
-    uint32_t g_psrc_even;
 } PatchApply;
 
 _Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
