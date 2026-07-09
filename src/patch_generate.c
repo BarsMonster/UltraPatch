@@ -28,9 +28,9 @@ static int optional_sidecar_present(const char *path) {
 }
 
 static uint32_t checked_image_size(const Buf *b, const char *name) {
-    if (b->n > A1_MAX_IMAGE) {
+    if (b->n > MAX_IMAGE) {
         fprintf(stderr, "%s image too large for this decoder build: %zu > %u\n",
-                name, b->n, (unsigned)A1_MAX_IMAGE);
+                name, b->n, (unsigned)MAX_IMAGE);
         exit(2);
     }
     return (uint32_t)b->n;
@@ -111,9 +111,9 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
-    if (getenv("A1_DEGRADE_STATS"))
+    if (getenv("DEGRADE_STATS"))
         fprintf(stderr,
-                "A1_DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
+                "DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
                 best_desc ? "bwd" : "fwd",
                 rc_dir_is_natural(from_size, to_size, best_desc),
                 best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted, best_st.opc_splits, sweep_opc_splits,
@@ -122,7 +122,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
      * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
      * cannot prove applies. */
-    { const char *scerr = a1_selfcheck(best_blob.d, best_blob.n, from.d, from.n, to.d, to.n);
+    { const char *scerr = selfcheck(best_blob.d, best_blob.n, from.d, from.n, to.d, to.n);
       if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(patch_out, best_blob.d, best_blob.n);

@@ -27,7 +27,7 @@ static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_
     return a >= 0 &&
            (ctx->fwd ? (a < (int64_t)to_size && a >= cutoff)
                      : (a < (int64_t)from_size && a <= cutoff)) &&
-           !a1_row_covered(ctx, a, t);
+           !row_covered(ctx, a, t);
 }
 
 /* Output position of the (budget+1)-th preserve in apply order, i.e. the cutoff C that
@@ -223,7 +223,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
     int32_t fp_start_s = fold_zero_ops(&ops);
     PlanCaps caps;
     OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &caps);
-    /* degradation snapshot: load-bearing for direction-sweep pruning and A1_DEGRADE_STATS */
+    /* degradation snapshot: load-bearing for direction-sweep pruning and DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
      * would be rejected on-device; treat as infeasible so a lower variant ships instead. */

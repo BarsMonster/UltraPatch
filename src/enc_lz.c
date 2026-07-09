@@ -165,7 +165,7 @@ void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
 }
 
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
- * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-A1BitTree litbits) systematically
+ * The DP proxy (1-bit flag + gamma/rice bit-length + seeded-BitTree litbits) systematically
  * mis-prices tokens because the wire uses *adaptive* range-coder models whose steady-state
  * probabilities diverge from the time-0 literal-tree seed and from a flat 1-bit flag. We run a
  * trial encode of the previous-pass token stream, read off the resulting model probabilities,
@@ -290,7 +290,7 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
  * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in the bootstrap parse
  * and the split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
-    A1BitTree t0, t1;
+    BitTree t0, t1;
     lit_tree_seed_e(frm, n, 0, &t0);
     lit_tree_seed_e(frm, n, 1, &t1);
     for (int b = 0; b < 256; b++) {
@@ -318,7 +318,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     content_cursor_to(&cc, cc.content_n, &st);
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
-     * order-2 model on the previous two token kinds (A1Flag1, 4 contexts); a scalar span/match
+     * order-2 model on the previous two token kinds (Flag1, 4 contexts); a scalar span/match
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware
      * DP (which tracks a forward flag history) value match/span transitions accurately. */
     for (int h = 0; h < 4; h++) {
@@ -347,7 +347,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
  * bit (rep0) instead of re-coding the whole gd distance value. That is a forward dependency
  * (the price of a match depends on the distance chosen earlier), so this is a FORWARD DP
  * carrying, per reachable position, the cheapest arrival cost plus the rep distance in effect
- * there. The wire's token flag is also an order-2 model (A1Flag1, 4 contexts on the previous two
+ * there. The wire's token flag is also an order-2 model (Flag1, 4 contexts on the previous two
  * token kinds), so the flag history h=(prev2<<1|prev1) is part of the forward state too: we keep
  * one DP state per (position, h) and price each flag under its real context fspan_c[h]/fmatch_c[h]
  * instead of a washed-out scalar average. Cheapest-arrival-per-state keeps it O(n*4); the chosen
@@ -389,7 +389,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
                                 OCand (*ocands)[OC_MAX], const uint8_t *nocand,
                                 const PriceTab *pt) {
-    uint32_t maxrun = LZ_MAX_RUN, win = 1u << SA_W;
+    uint32_t maxrun = LZ_MAX_RUN, win = 1u << WINDOW_LOG;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. slen is only ever indexed by a span/rep run length
      * (<= maxrun == LZ_MAX_RUN) and mlen by a match length (candidate lens clamp to LZ_MAX_MATCH
@@ -650,7 +650,7 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
     ugg_init_e(&pt->gs);
     ugg_init_e(&pt->gl);
-    ugr_init_e(&pt->gd, SA_W);
+    ugr_init_e(&pt->gd, WINDOW_LOG);
     pt->fixed_dist_bits = -1;
     pt->bootstrap_simple = 1;
 }
@@ -662,7 +662,7 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
                                 const uint8_t L0[256], const uint8_t L1[256],
                                 int *k_out,
                                 Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out) {
-    int32_t win = 1 << SA_W, maxm = LZ_MAX_MATCH;
+    int32_t win = 1 << WINDOW_LOG, maxm = LZ_MAX_MATCH;
     Cand (*cands)[LZ_CAND_MAX] = (Cand (*)[LZ_CAND_MAX])xcalloc(n ? n : 1, sizeof(Cand[LZ_CAND_MAX]));
     uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1, 1);
     int32_t *head = hash3_heads_new();
@@ -701,8 +701,8 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
     free(head); free(prev);
     PriceTab pt;
     bootstrap_prices(&pt, L0, L1);
-    pt.gd.k = SA_W;
-    pt.fixed_dist_bits = SA_W;
+    pt.gd.k = WINDOW_LOG;
+    pt.fixed_dist_bits = WINDOW_LOG;
     TokenVec seq = lz_parse_priced(n, data, tags, cands, ncand, NULL, NULL, &pt);
     int k = fit_k_tokens(&seq);
     int parsed_k = -1;

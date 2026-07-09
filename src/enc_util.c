@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- util/IO: die/allocators, a1_sort stable mergesort, Buf, slurp/write_file, crc32, varints, vector + compare helpers.
+ * A1 host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, slurp/write_file, crc32, varints, vector + compare helpers.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -33,7 +33,7 @@ void *xcalloc(size_t n, size_t s) {
  * comparators legitimately compare equal on distinct elements (same-address ELF symbols,
  * equal-value b2j entries, equal-boundary map segments); stability pins those ties to
  * insertion order, which every producer in this file generates deterministically. */
-void a1_sort(void *base, size_t n, size_t esz,
+void sort(void *base, size_t n, size_t esz,
                     int (*cmp)(const void *, const void *)) {
     unsigned char *src = (unsigned char *)base, *tmp;
     if (n < 2) return;
@@ -263,7 +263,7 @@ void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta) {
 
 void fd_finalize(FieldDeltaVec *v) {
     if (!v->n) return;
-    a1_sort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
+    sort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
     size_t w = 0;
     for (size_t i = 0; i < v->n; i++) {
         if (w && v->v[w - 1].addr == v->v[i].addr && v->v[w - 1].kind == v->v[i].kind) v->v[w - 1] = v->v[i];

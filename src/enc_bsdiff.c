@@ -33,7 +33,7 @@ static void map_finalize(map_t *m) {
     if (m->n == 0) return;
     /* Duplicate addresses here carry equal values, so sort + unique-by-address
        preserves the scanner result. */
-    a1_sort(m->a, m->n, sizeof(*m->a), kv_cmp);
+    sort(m->a, m->n, sizeof(*m->a), kv_cmp);
     size_t w = 0;
     for (size_t i = 0; i < m->n; i++) {
         if (w > 0 && m->a[w-1].addr == m->a[i].addr) m->a[w-1] = m->a[i];
@@ -122,7 +122,7 @@ static int cmp_b2j_ent(const void *a, const void *b) {
 static void b2j_build(B2JIndex *m, const int32_t *b, int32_t lb) {
     m->ent = (B2JEnt *)xmalloc((size_t)(lb ? lb : 1) * sizeof(*m->ent));
     for (int32_t i = 0; i < lb; i++) m->ent[i] = (B2JEnt){ b[i], i };
-    a1_sort(m->ent, (size_t)lb, sizeof(*m->ent), cmp_b2j_ent);
+    sort(m->ent, (size_t)lb, sizeof(*m->ent), cmp_b2j_ent);
     for (int32_t i = 0; i < lb;) {
         int32_t j = i + 1;
         while (j < lb && m->ent[j].val == m->ent[i].val) j++;
@@ -212,7 +212,7 @@ static MatchVec sequence_matching_blocks(const int32_t *a, int32_t la, const int
             }
         }
     }
-    a1_sort(raw.v, raw.n, sizeof(raw.v[0]), cmp_match);
+    sort(raw.v, raw.n, sizeof(raw.v[0]), cmp_match);
     MatchVec out = {0};
     int32_t i1 = 0, j1 = 0, k1 = 0;
     for (size_t i = 0; i < raw.n; i++) {

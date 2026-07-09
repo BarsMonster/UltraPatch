@@ -27,7 +27,7 @@
 #
 # ultrapatch self-verifies every emitted blob on the reference decoder, so a round-trip failure is
 # already impossible for an accepted blob; this gate additionally pins that the SPECIFIC path
-# engaged, using the wire-neutral A1_DEGRADE_STATS stderr line (blob bytes unaffected — the
+# engaged, using the wire-neutral DEGRADE_STATS stderr line (blob bytes unaffected — the
 # golden gate proves it) and the decoder's existing journal-peak metric.
 #
 # All fixtures are generated deterministically by the shared scripts/synth_gen.py (fixed-seed
@@ -67,13 +67,13 @@ dpin() {
   python3 "$(dirname "$0")/synth_gen.py" pin "$tmp/${name}_to/watch.bin"   to   "$pin"
 }
 
-# enc <name> -> writes $tmp/<name>.blob, captures A1_DEGRADE line in $tmp/<name>.deg; returns encoder rc
+# enc <name> -> writes $tmp/<name>.blob, captures DEGRADE line in $tmp/<name>.deg; returns encoder rc
 enc() {
   name=$1
-  A1_DEGRADE_STATS=1 ./ultrapatch "$tmp/${name}_from/watch.bin" "$tmp/${name}_to/watch.bin" "$tmp/$name.blob" \
+  DEGRADE_STATS=1 ./ultrapatch "$tmp/${name}_from/watch.bin" "$tmp/${name}_to/watch.bin" "$tmp/$name.blob" \
     >/dev/null 2>"$tmp/$name.encerr"
   rc=$?
-  grep '^A1_DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
+  grep '^DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
   return $rc
 }
 
@@ -142,7 +142,7 @@ fi
 # runs (opc_splits_sweep). Assert the split machinery engaged and that the blob round-trips. The
 # corpus round-trip gate only checks round-trips (never asserts the split) and no WINNING plan
 # here ships a split (a cleaner variant wins) — this gate is what actually pins the op-split path.
-if A1_DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watch.bin" "$tmp/opc.blob" \
+if DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watch.bin" "$tmp/opc.blob" \
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")

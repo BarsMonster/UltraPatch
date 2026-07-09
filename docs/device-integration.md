@@ -258,16 +258,16 @@ compiles both packaging forms and verifies the generated header without `-Isrc`.
 The encoder uses the same source headers, and model/golden gates enforce
 bit-exactness.
 
-The LZ window `SA_W` is a single shared define in `src/patch_config.h`, used by
+The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, used by
 both the decoder and the encoder's distance coding, so the two cannot disagree.
-The production default is `SA_W=10`, and `make gate` verifies it.
+The production default is `WINDOW_LOG=10`, and `make gate` verifies it.
 
 **NVM row window (encoding-affecting).** The decoder keeps its last
 `OUTROW_DEPTH` output rows (of `OUTROW` bytes) uncommitted in RAM, and the
 encoder's plans exploit the fact that the OLD flash content of uncommitted
 rows is still physically readable (journal-free reads behind the write
 frontier). `OUTROW` and `OUTROW_DEPTH` are single shared defines used by both
-the encoder's `a1_row_covered` oracle and the decoder — production default
+the encoder's `row_covered` oracle and the decoder — production default
 256 x 2 (512 B of row buffers in `.bss`) — so the window assumption matches by
 construction. (The apply stays monotone-safe underneath: a decoder built with a
 superset window — larger aligned rows and/or a deeper ring, e.g. a 1024-byte-row

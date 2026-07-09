@@ -60,12 +60,12 @@ extern void    flash_write(uint32_t addr, uint8_t val);
 /* Decoder state is owned by the integrator and passed to patch_apply_run(). The header keeps no
  * file-scope storage: embedded users may place this object in .bss, noinit, a bootloader-owned
  * work area, or on a suitably sized stack. */
-typedef struct { uint32_t range, code; } A1RangeDec;
+typedef struct { uint32_t range, code; } RangeDec;
 
 /* RC_RICE_UNARY_MAX: adaptive-unary prefix cap (crash-hardening; see s_unary/s_ug_rice below). */
 #define RC_RICE_UNARY_MAX (1u<<20)
 
-/* STREAMED-DELTA per-stream state A1DRStream (bl, ex) is single-sourced in rc_models.h: a
+/* STREAMED-DELTA per-stream state DRStream (bl, ex) is single-sourced in rc_models.h: a
  * MOVE-TO-FRONT dict of distinct delta values + an adaptive "repeat-last" bit + an adaptive
  * "dict-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (in dict? -> MTF index
  * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
@@ -76,28 +76,28 @@ typedef struct { uint32_t range, code; } A1RangeDec;
  * as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly here
  * (REJ_RESOURCE). */
 #define JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
-/* LZSS window W (defined here so A1ApplyState can size the apply phase). Default value above
- * keeps the decoder within the 12 KiB SRAM cap; SA_W is a single shared knob, so the encoder's
+/* LZSS window W (defined here so ApplyState can size the apply phase). Default value above
+ * keeps the decoder within the 12 KiB SRAM cap; WINDOW_LOG is a single shared knob, so the encoder's
  * distance coding uses the exact same window by construction. */
-/* SA_W is configured above. */
-#define SA_RING (1u<<SA_W)
-#define SA_MASK (SA_RING-1u)
-/* A1ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
+/* WINDOW_LOG is configured above. */
+#define RING (1u<<WINDOW_LOG)
+#define MASK (RING-1u)
+/* ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
  * per-op correction array + the streaming scalars/cursors. */
 typedef struct {
-    uint8_t ring[SA_RING]; uint32_t ototal;       /* content history (masked) + total produced */
+    uint8_t ring[RING]; uint32_t ototal;       /* content history (masked) + total produced */
     uint32_t tok_left, tok_src;                   /* token replay count + ring/output source */
     int32_t tp, fp;                               /* running accumulators (apply order) */
     uint32_t op_corr[OPC_CAP]; int32_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
-} A1ApplyState;
-#define ARENA_BYTES (JREGION + (uint32_t)sizeof(A1ApplyState))
+} ApplyState;
+#define ARENA_BYTES (JREGION + (uint32_t)sizeof(ApplyState))
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint32_t jbuf[JSLOTS]; A1ApplyState sa; } apply;
-} A1Arena;
+    struct { uint32_t jbuf[JSLOTS]; ApplyState sa; } apply;
+} Arena;
 
 typedef struct PatchApply {
     uint32_t g_image_span;
@@ -119,12 +119,12 @@ typedef struct PatchApply {
                          * assigned once at the patch_apply_run boundary for every other failure */
     uint8_t g_flash_touched;
 
-    A1RangeDec RC;
+    RangeDec RC;
     /* g_jcount + g_smap_n pair fills RC's 4-byte tail up to the ARENA boundary (both uint16). */
     uint16_t g_jcount;
     uint16_t g_smap_n;
 
-    A1Arena ARENA;
+    Arena ARENA;
 
     uint32_t g_smap_b[SMAP_CAP];
     int32_t  g_smap_v[SMAP_CAP];
@@ -135,14 +135,14 @@ typedef struct PatchApply {
     uint8_t  g_orow_buf[OUTROW_DEPTH][OUTROW];
     uint32_t g_orow_base[OUTROW_DEPTH];
 
-    A1TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
+    TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     uint32_t g_oexp;
     int g_rep0h;
     uint32_t g_lastdist;
-    A1PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
-    A1BitTree M_lit0[LIT0_CTX], M_lit1;
+    PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    BitTree M_lit0[LIT0_CTX], M_lit1;
     int32_t DR_DIC_BL[DR_KCAP_BL], DR_DIC_EX[DR_KCAP_EX];
-    A1DRStream DR_BL, DR_EX;
+    DRStream DR_BL, DR_EX;
 
     uint32_t g_psrc_ldr[8];
     uint32_t g_psrc_even;     /* aligned word leads; the 3 loose flag bytes below pack into the
@@ -152,12 +152,12 @@ typedef struct PatchApply {
     uint8_t  g_litprev;
 } PatchApply;
 
-_Static_assert(sizeof(A1Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
-_Static_assert(offsetof(A1Arena, apply.sa) == JREGION && (offsetof(A1Arena, apply.sa) & 3u)==0u,
-               "A1ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
-_Static_assert(A1_MAX_IMAGE <= 0x7fffffffu, "A1_MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
+_Static_assert(sizeof(Arena) == ARENA_BYTES, "arena union size drifted from ARENA_BYTES (.bss would change)");
+_Static_assert(offsetof(Arena, apply.sa) == JREGION && (offsetof(Arena, apply.sa) & 3u)==0u,
+               "ApplyState must sit at JREGION and be >=4-aligned (it holds uint32 fields)");
+_Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
-_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 A1DRStream.K (else the REJ_RESOURCE refuse wraps)");
+_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 DRStream.K (else the REJ_RESOURCE refuse wraps)");
 
 /* Patch geometry — decoder-OWNED. decode_body parses it from the blob envelope; the
  * integrator no longer supplies sizes/direction/span (footguns removed), it only provides
@@ -166,7 +166,7 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 /* Feature 7B initial source seek: the source position where the ascending op walk BEGINS. Seeds
  * s->fp for FWD (was implicitly 0) and is the exact grow LANDING point (grow's final s->fp must
  * equal it). Carries a leading zero-output op's seek that was folded off the wire; almost always 0. */
-/* A1_MAX_IMAGE is configured above. */
+/* MAX_IMAGE is configured above. */
 
 /* ===================================================================================== */
 /* byte source: the integrator supplies a (possibly blocking) callback and calls           */
@@ -180,7 +180,7 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 static int decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
-static void lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w);
+static void lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w);
 enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 
 /* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
@@ -210,21 +210,21 @@ static int env_u32le(PatchApply *pa, uint32_t*out){
     for(int i=0;i<4;i++){ if(!env_byte(pa,&b)) return 0; v|=(uint32_t)b<<(8*i); }
     *out=v; return 1;
 }
-#define A1_ULEB32_OVERFLOW(sh,b) ((sh)==28 && (uint8_t)(b)>15u)
+#define ULEB32_OVERFLOW(sh,b) ((sh)==28 && (uint8_t)(b)>15u)
 /* uLEB with a NON-CANONICAL-encoding flag: a canonical multi-byte uLEB never ends in a 0x00
  * byte (emission stops once the remaining value is zero; a lone 0x00 is the value 0), so one
  * redundant trailing continuation byte is a legal, value-neutral 1-bit side channel. The
  * envelope permits it ONLY on the size-delta field as the UNNATURAL-apply-direction marker. */
 static int env_uleb(PatchApply *pa, uint32_t*out, uint8_t*ov){
     uint32_t v=0; int sh=0, n=0; uint8_t b;
-    do{ if(!env_byte(pa,&b) || A1_ULEB32_OVERFLOW(sh,b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
+    do{ if(!env_byte(pa,&b) || ULEB32_OVERFLOW(sh,b)) return 0; v|=(uint32_t)(b&0x7fu)<<sh; sh+=7; n++; }while(b&0x80u);
     { uint8_t o=(uint8_t)rc_uleb_overlong(n,b); if(o && !ov) return 0; if(ov) *ov=o; }
     *out=v; return 1;
 }
 /* zigzag-uLEB absolute around `base` (to_size and fp_end are delta-coded vs from_size). */
 static int env_zz_abs(PatchApply *pa, uint32_t base, uint32_t*out){
     uint32_t z; if(!env_uleb(pa,&z,0)) return 0;
-    return rc_zz_abs(base,z,A1_MAX_IMAGE,out);
+    return rc_zz_abs(base,z,MAX_IMAGE,out);
 }
 
 /* divide-free range decoder reading through the (possibly blocking) byte source. */
@@ -266,12 +266,12 @@ static int s_raw(PatchApply *pa){ return rc_decode(pa,pa->RC.range>>1); }
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(pa); return v; }
 /* ---- bit-tree byte ---- */
-static int s_bt(PatchApply *pa, A1BitTree*t,int rate){
+static int s_bt(PatchApply *pa, BitTree*t,int rate){
     int m=1;
     for(int i=0;i<8;i++){
-        uint16_t p=a1_bt_get(t,m-1);
+        uint16_t p=bt_get(t,m-1);
         int b=s_bit_r(pa,&p,rate);
-        a1_bt_set(t,m-1,p);
+        bt_set(t,m-1,p);
         m=(m<<1)|b;
     }
     return m-256;
@@ -281,11 +281,11 @@ static int32_t bb_unzz(PatchApply *pa, uint32_t u){
     return rc_unzz32_value(u);
 }
 /* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
-static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
+static int32_t s_bv(PatchApply *pa, BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
         b=s_bt(pa,t,rate);
-        if(A1_ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
+        if(ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
     }while(b&0x80);
     return bb_unzz(pa,acc);
@@ -293,7 +293,7 @@ static int32_t s_bv(PatchApply *pa, A1BitTree*t,int rate){
 /* ---- UGolomb (uses embedded UG_CTX mirror) ----
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
  * of (value+1), so <=31 for any uint32 (RC_UNARY_MAX). For RICE ('r') the prefix is the QUOTIENT
- * value>>k, which for a legit field (e.g. backref_dist <= window 2^SA_W with no-split, SA_W default
+ * value>>k, which for a legit field (e.g. backref_dist <= window 2^WINDOW_LOG with no-split, WINDOW_LOG default
  * 10 (see patch_config.h) => up to ~32 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
  * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
@@ -318,26 +318,26 @@ static uint32_t s_ug_mant(PatchApply *pa, uint16_t*row,int cnt){
     uint32_t v=0; for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&row[UG_C(sig)])<<sig;
     return v;
 }
-static uint32_t s_ug_mant_gamma(PatchApply *pa, A1UGGamma*g,int cnt){
+static uint32_t s_ug_mant_gamma(PatchApply *pa, UGGamma*g,int cnt){
     uint32_t v=0; int row=UG_C(cnt);
     for(int sig=cnt-1;sig>=0;sig--) v|=(uint32_t)s_bit(pa,&g->m[rc_ugg_mant_idx(row,cnt-1-sig)])<<sig;
     return v;
 }
-static uint32_t s_ug_rice(PatchApply *pa, A1UGRice*g){
+static uint32_t s_ug_rice(PatchApply *pa, UGRice*g){
     uint32_t cl=s_unary(pa,g->u,UG_CTX,RC_RICE_UNARY_MAX);
     if(pa->g_rcerr || (g->k && cl>(UINT32_MAX>>g->k))){ pa->g_rcerr=1; return 0; }
     return (cl<<g->k) | s_ug_mant(pa,g->m[UG_C((int)cl)],g->k);
 }
-static uint32_t s_ug_gamma(PatchApply *pa, A1UGGamma*g){
+static uint32_t s_ug_gamma(PatchApply *pa, UGGamma*g){
     int cl=(int)s_unary(pa,g->u,UG_CTX,RC_UNARY_MAX);
     return ((1u<<cl) | s_ug_mant_gamma(pa,g,cl)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / A1IdxUnary / a1_idx_init are single-sourced
+/* MTF dict-index model: a lean adaptive UNARY code. IDX_CTX / IdxUnary / idx_init are single-sourced
  * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
-static int s_flag(PatchApply *pa, A1Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
+static int s_flag(PatchApply *pa, Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
 
 /* ===================================================================================== */
 /* CRC32 (zlib polynomial) over flash bytes                                               */
@@ -415,10 +415,10 @@ static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
  * rows in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (row_number % D) is an
  * exact FIFO: the slot's previous occupant is always the row exactly D rows behind,
  * committed on eviction. The point: OLD flash content of uncommitted rows stays physically
- * readable through hy_src_peek's plain flash_read, and the ENCODER's a1_row_covered oracle
+ * readable through hy_src_peek's plain flash_read, and the ENCODER's row_covered oracle
  * exploits exactly that window (journal-free old reads behind the frontier).
  * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH is one shared define pair, used by
- * the encoder's a1_row_covered oracle and the decoder alike, so the uncommitted-window
+ * the encoder's row_covered oracle and the decoder alike, so the uncommitted-window
  * assumption matches by construction. (The apply is still monotone-safe: a decoder built with a
  * superset window — larger aligned rows and/or a deeper ring — would decode old blobs correctly,
  * since old bytes survive strictly longer than assumed; a smaller window rejects via CRC32(to),
@@ -497,7 +497,7 @@ static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
  *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
  *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
  *   then last=v. */
-static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*dic, uint32_t cap){
+static int32_t pull_delta(PatchApply *pa, DRStream*d, IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=rc_dr_rep_ctx(d->rh,dic[0]);
       int rb=s_bit(pa,&d->rep[ri]); d->rh=(uint8_t)rb; if(rb==1) return dic[0]; }  /* repeat-last, order-1 + zero ctx */
     int32_t v;
@@ -521,10 +521,10 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* then PULLS the op's CONTENT bytes from the cut whole-stream LZSS token stream and writes     */
 /* each output byte immediately (ascending FWD / descending grow). Literal patches are consumed */
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
-/* The LZSS ring (size 2^SA_W) is the content history; backref distances <= 2^SA_W.             */
+/* The LZSS ring (size 2^WINDOW_LOG) is the content history; backref distances <= 2^WINDOW_LOG.             */
 /* ===================================================================================== */
-/* A1ApplyState type + SA_RING/SA_MASK + the arena asserts live up with the ARENA
- * union (near JREGION), since the union embeds A1ApplyState directly in its apply phase. */
+/* ApplyState type + RING/MASK + the arena asserts live up with the ARENA
+ * union (near JREGION), since the union embeds ApplyState directly in its apply phase. */
 RC_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=s_ug_gamma(pa,idx?&pa->MDL_pre.pg2:&pa->MDL_pre.pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
@@ -532,11 +532,11 @@ RC_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx,
     if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; return 0; }
     return 1;
 }
-typedef struct { int32_t i, step; } A1CorrCur;
-static void corr_cur_init(A1CorrCur*c, A1ApplyState*s, int fwd){
+typedef struct { int32_t i, step; } CorrCur;
+static void corr_cur_init(CorrCur*c, ApplyState*s, int fwd){
     c->step=fwd?1:-1; c->i=fwd?0:s->op_nc-1;
 }
-static int32_t corr_take(A1ApplyState*s, A1CorrCur*c, int32_t off){
+static int32_t corr_take(ApplyState*s, CorrCur*c, int32_t off){
     if(c->i>=0 && c->i<s->op_nc){
         uint32_t slot=s->op_corr[c->i];
         if((int32_t)(slot>>8)==off){ c->i+=c->step; return (int32_t)(slot&0xffu); }
@@ -582,18 +582,18 @@ static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t 
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
  * the next span selects M_lit0[rc_lit0_sel(content[pos-1])] regardless of which token produced pos-1.
  * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
-static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; pa->g_litprev=b; }
+static void emit_ring(PatchApply *pa, ApplyState*s, uint8_t b){ s->ring[s->ototal & MASK]=b; s->ototal++; pa->g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
-static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
+static uint8_t next_content(PatchApply *pa, ApplyState*s, int tag){
     for(;;){
         if(pa->g_rcerr) goto fail;
         if(s->tok_left>0){
             uint8_t b;
             if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&pa->M_lit1:&pa->M_lit0[rc_lit0_sel(pa->g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
-            else if(s->tok_mode==2){ b=s->ring[s->tok_src & SA_MASK]; s->tok_src++; }
+            else if(s->tok_mode==2){ b=s->ring[s->tok_src & MASK]; s->tok_src++; }
             else { b=out_read(pa,s->tok_src); s->tok_src+=(uint32_t)(pa->g_FWD?1:-1); }
             if(pa->g_rcerr) goto fail;
-            sa_emit_ring(pa,s,b); s->tok_left--;
+            emit_ring(pa,s,b); s->tok_left--;
             if(s->tok_left==0) s->tok_mode=0;
             return b;
         }
@@ -623,7 +623,7 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
             }
             else { d=s_ug_rice(pa,&pa->MDL_tok.gd)+1u; pa->g_lastdist=d; }
             uint32_t ln=s_ug_gamma(pa,&pa->MDL_tok.gl)+1u;
-            if(d==0 || d>s->ototal || d-1u>=SA_RING) goto fail; /* reject before-start / ring-overrun */
+            if(d==0 || d>s->ototal || d-1u>=RING) goto fail; /* reject before-start / ring-overrun */
             s->tok_mode=2; s->tok_src=s->ototal-d; s->tok_left=ln; s->last_span=0;
         }
     }
@@ -632,17 +632,17 @@ fail:
     return 0;
 }
 /* read a uLEB from the content stream (one byte pulled per iteration from the LZSS token replay). */
-static uint32_t sa_read_uleb(PatchApply *pa, A1ApplyState*s){
+static uint32_t read_uleb(PatchApply *pa, ApplyState*s){
     uint32_t acc=0; int sh=0;
     for(;;){ if(pa->g_rcerr) return 0;
-        uint8_t b=sa_next_content(pa,s,0);
+        uint8_t b=next_content(pa,s,0);
         if(pa->g_rcerr) return 0;
-        if(A1_ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
+        if(ULEB32_OVERFLOW(sh,b)){ pa->g_rcerr=1; return 0; }
         acc|=(uint32_t)(b&0x7f)<<sh; sh+=7;
         if(!(b&0x80)) return acc; }
 }
 /* journal one preserve site (old flash byte captured BEFORE any write of this op). */
-static void sa_journal(PatchApply *pa, int32_t tp){
+static void journal(PatchApply *pa, int32_t tp){
     if(tp>=0 && tp<(int32_t)pa->g_from_size){ if(jr_put(pa,(uint32_t)tp, flash_read((uint32_t)tp))){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; }
     }
 }
@@ -743,42 +743,42 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
 }
 /* Literal cursor over the op's content stream + the per-byte write helpers. The cursor advances in
  * wire order regardless of write direction; the copy/extra helpers are plain static functions so the
- * two call sites share one body instead of duplicating the write loops inside sa_apply_op. */
+ * two call sites share one body instead of duplicating the write loops inside apply_op. */
 /* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
  * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
-typedef struct { int32_t nextpos, litb, li, step, lim; } A1LitCur;
-static void RC_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
+typedef struct { int32_t nextpos, litb, li, step, lim; } LitCur;
+static void RC_NOINLINE litcur_step(PatchApply *pa, ApplyState*s, LitCur*lc, int32_t nl){
     if(lc->li<nl){
-        uint32_t g=sa_read_uleb(pa,s);
+        uint32_t g=read_uleb(pa,s);
         /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
          * the cursor inside [0,lim] (lim==dl; the encoder emits only in-range positions), so
          * bound the gap and the stepped position in pure uint32 (no wrap can slip through:
          * g<=lim and base<=lim keep base+g < 2^32; a backward underflow lands >lim). */
         uint32_t np=(lc->step>0)? (uint32_t)lc->nextpos+g : (uint32_t)lc->nextpos-g;
         if(g>(uint32_t)lc->lim || np>(uint32_t)lc->lim){ pa->g_rcerr=1; lc->nextpos=-1; return; }
-        lc->nextpos=(int32_t)np; lc->litb=sa_next_content(pa,s,0);
+        lc->nextpos=(int32_t)np; lc->litb=next_content(pa,s,0);
         if(pa->g_rcerr){ lc->nextpos=-1; return; }
     }
     else lc->nextpos=-1;
 }
-RC_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int fwd, int32_t nl, int32_t dl){
+RC_ALWAYS_INLINE void litcur_init(PatchApply *pa, ApplyState*s, LitCur*lc, int fwd, int32_t nl, int32_t dl){
     lc->step = fwd ? 1 : -1; lc->lim = dl;
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
-static void wr_extras(PatchApply *pa, A1ApplyState*s, A1CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
+static void wr_extras(PatchApply *pa, ApplyState*s, CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !pa->g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
-        uint8_t eb=sa_next_content(pa,s,(int)((tp0+dl+e)&1));
+        uint8_t eb=next_content(pa,s,(int)((tp0+dl+e)&1));
         if(pa->g_rcerr) return;
         out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_take(s,cc,dl+e)));
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+static void wr_copy(PatchApply *pa, ApplyState*s, LitCur*lc, CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_step(pa,s,lc,nl); }
     if(pa->g_rcerr) return;
@@ -786,10 +786,10 @@ static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, i
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
-static void RC_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
+static void RC_NOINLINE apply_op(PatchApply *pa, ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=s_ug_gamma(pa,&pa->MDL_pre.gadj);
     int32_t adj=bb_unzz(pa,adj_u);
-    /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= A1_MAX_IMAGE via
+    /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= MAX_IMAGE via
      * decode_header envelope checks + _Static_assert), so this pure 32-bit headroom test (check dl,
      * then el against the rest of span) also subsumes the dl_u/el_u < 2^31 bound: any value >= 2^31
      * exceeds the span and is rejected here. Cast to int32 only after the guard passes. */
@@ -835,7 +835,7 @@ static void RC_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
                 int cbyte=s_bt(pa,&pa->MDL_pre.dval, RC_DVAL_RATE);
                 s->op_corr[i]=(off<<8)|(uint32_t)cbyte;
             } else {
-                sa_journal(pa,tp0+(int32_t)off);
+                journal(pa,tp0+(int32_t)off);
             }
         }
         if(pa->g_rcerr) return;
@@ -850,13 +850,13 @@ static void RC_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
      * body (FWD: after; grow: before), and (c) the literal-cursor gap encoding (FWD: absolute forward
      * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
      * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
-    int32_t nl=(int32_t)sa_read_uleb(pa,s);
+    int32_t nl=(int32_t)read_uleb(pa,s);
     if(nl<0||nl>dl){ pa->g_rcerr=1; return; }
     uint8_t packed[4];
     int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
     if(fwd){ memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX; }
-    A1LitCur lc;
-    A1CorrCur cc; corr_cur_init(&cc,s,fwd);
+    LitCur lc;
+    CorrCur cc; corr_cur_init(&cc,s,fwd);
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
@@ -897,9 +897,9 @@ static void RC_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
 static int RC_NOINLINE decode_header(PatchApply *pa){
     uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
     int32_t fp_start=0;
-    if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs,0) || fs>A1_MAX_IMAGE || !env_uleb(pa,&z,&ov)) return 0;
+    if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs,0) || fs>MAX_IMAGE || !env_uleb(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
-    else    { uint32_t d=z>>1; if(d>A1_MAX_IMAGE||fs>A1_MAX_IMAGE-d) return 0; ts=fs+d; }
+    else    { uint32_t d=z>>1; if(d>MAX_IMAGE||fs>MAX_IMAGE-d) return 0; ts=fs+d; }
     /* Apply direction is an ENCODER CHOICE. The NATURAL direction (descending iff the image
      * grows — the historical derived rule, so a canonically-coded envelope decodes exactly
      * as before) ships as a canonical size-delta uLEB; the UNNATURAL direction is signaled
@@ -924,7 +924,7 @@ static int RC_NOINLINE decode_header(PatchApply *pa){
       for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&pa->M_lit0[c],hist0,w);
       lit_tree_from_hist(&pa->M_lit1,hist1,w); }
-    { A1ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
+    { ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
 }
 static int decode_body(PatchApply *pa){
@@ -964,21 +964,21 @@ static int decode_body(PatchApply *pa){
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via pull_delta), write via out_write. ---- */
-    { A1ApplyState*s=&pa->ARENA.apply.sa;
+    { ApplyState*s=&pa->ARENA.apply.sa;
       int kd=(int)s_raw_bits(pa,RC_KFIELD_BITS);
       int ko=pa->g_out_en?(int)s_raw_bits(pa,RC_KFIELD_BITS):0;
       rc_init_tok(&pa->MDL_tok,kd,ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 prior */
       pa->g_oexp=pa->g_FWD?0u:pa->g_to_size;
       if(pa->g_rcerr) return 0;
       /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
-       * until tp reaches 0. This is SAFE because sa_apply_op REJECTS any zero-output op (nw==0), so
+       * until tp reaches 0. This is SAFE because apply_op REJECTS any zero-output op (nw==0), so
        * every accepted op advances the frontier by >=1 and the overshoot/underrun guards cap it: the
        * loop runs at most to_size times, then rejects (a corrupt stream cannot spin). A truncated
        * stream decodes zero-fill garbage that trips a geometry/frontier guard or lands a wrong image
        * that CRC32(to) rejects. */
-      while(!pa->g_rcerr && (pa->g_FWD ? s->tp!=(int32_t)pa->g_to_size : s->tp!=0)) sa_apply_op(pa,s);
+      while(!pa->g_rcerr && (pa->g_FWD ? s->tp!=(int32_t)pa->g_to_size : s->tp!=0)) apply_op(pa,s);
       /* tp must land exactly; the loop guarantees it on the clean path (it exits only on g_rcerr or
-       * tp==target, and sa_apply_op's frontier guards make overshoot impossible), so no post-loop tp
+       * tp==target, and apply_op's frontier guards make overshoot impossible), so no post-loop tp
        * landing check is needed. fp is unchecked in both directions — CRC32(to) validates the image. */
       if(!pa->g_rcerr && s->tok_mode!=0) pa->g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
       if(pa->g_rcerr) return 0;
@@ -992,7 +992,7 @@ static int decode_body(PatchApply *pa){
 /* ===================================================================================== */
 /* public API: patch_apply_run(state, callback, ctx) -> DONE / ERROR                       */
 /* ===================================================================================== */
-static void RC_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
+static void RC_NOINLINE lit_tree_from_hist(BitTree*t,const uint32_t*hist,uint32_t*w){
     rc_lit_tree_from_hist(t,hist,w);
 }
 
@@ -1034,19 +1034,19 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
  * rc_models.h and are intentionally NOT undef'd here. */
 #undef RC_RICE_UNARY_MAX
 #undef JREGION
-#undef SA_RING
-#undef SA_MASK
+#undef RING
+#undef MASK
 #undef ARENA_BYTES
 #undef RC_UNARY_MAX
-#undef A1_ULEB32_OVERFLOW
+#undef ULEB32_OVERFLOW
 #undef OROW_NONE
 #undef OROW_SLOT
 #undef PSRC_TGT_MASK
 
 /* Seal the non-knob model/wire macros that rc_models.h + patch_config.h define and that this
  * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
- * Only the documented -D override knobs (JSLOTS, SA_W, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
- * DR_KCAP_EX, A1_MAX_IMAGE and the RC_*_DEFAULT constants they derive from) stay defined. The
+ * Only the documented -D override knobs (JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
+ * DR_KCAP_EX, MAX_IMAGE and the RC_*_DEFAULT constants they derive from) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
  * #undefs never reach the encoder side of the mirror. */
 #undef RC_KTOP

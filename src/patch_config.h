@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef A1_PATCH_CONFIG_H
-#define A1_PATCH_CONFIG_H
+#ifndef PATCH_CONFIG_H
+#define PATCH_CONFIG_H
 
 /* ---- target-family wire contract ----
  * The A1 wire is target-family-specific. CORTEX_M0 (Thumb-1/ARMv6-M, the implemented
@@ -20,17 +20,17 @@
 
 /* Plausibility cap on envelope image sizes. A deployment may tighten this to its real
  * flash size; keep it <2^31 because decoder cursors are signed 32-bit. */
-#ifndef A1_MAX_IMAGE
-#define A1_MAX_IMAGE (64u<<20)
+#ifndef MAX_IMAGE
+#define MAX_IMAGE (64u<<20)
 #endif
 
 /* Wire-affecting knobs. Each is a SINGLE shared define used by both the decoder and the host
  * encoder (encoder TUs reach these via rc_models.h -> patch_config.h), so encoder and decoder
  * cannot disagree about the wire. Each stays overridable with a matching -D, which moves BOTH
- * sides at once. SA_W is the LZ window log; JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the
+ * sides at once. WINDOW_LOG is the LZ window log; JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the
  * encoder plans against; OUTROW x OUTROW_DEPTH is the uncommitted NVM row window. */
-#ifndef SA_W
-#define SA_W 10
+#ifndef WINDOW_LOG
+#define WINDOW_LOG 10
 #endif
 #ifndef JSLOTS
 #define JSLOTS 768u
@@ -51,4 +51,4 @@
 #define OUTROW_DEPTH 2u
 #endif
 
-#endif /* A1_PATCH_CONFIG_H */
+#endif /* PATCH_CONFIG_H */

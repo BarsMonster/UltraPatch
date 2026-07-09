@@ -161,7 +161,7 @@ check-stack-internal:
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
 # attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
-# note). -DA1_NO_GNU_EXTENSIONS is the documented knob that forces the fallback branch — a
+# note). -DNO_GNU_EXTENSIONS is the documented knob that forces the fallback branch — a
 # first-party switch, so system headers are untouched (no fragile __GNUC__ masking against
 # glibc). Wire correctness is compiler-independent; only the gated size/stack budgets are
 # GNU-toolchain-measured. Enforced below three ways: (a) both header forms smoke-compile with
@@ -171,7 +171,7 @@ check-stack-internal:
 # SYSTEM stddef.h's conforming implementation of the standard offsetof macro our asserts use;
 # a non-GNU toolchain's stddef.h supplies its own), (c) a fallback-built host decoder must
 # round-trip the real one-face patch byte-exactly.
-PORTABLE_FALLBACK_FLAGS := -DA1_NO_GNU_EXTENSIONS
+PORTABLE_FALLBACK_FLAGS := -DNO_GNU_EXTENSIONS
 check-decoder-contract-internal: ultrapatch decoder-header-internal
 	@set -e; \
 	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \

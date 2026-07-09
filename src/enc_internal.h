@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef A1_ENC_INTERNAL_H
-#define A1_ENC_INTERNAL_H
+#ifndef ENC_INTERNAL_H
+#define ENC_INTERNAL_H
 
 #include <limits.h>
 #include <stdint.h>
@@ -14,7 +14,7 @@
 
 #include "rc_models.h"
 
-/* The encoder uses the shared decoder knobs (SA_W, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
+/* The encoder uses the shared decoder knobs (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
  * directly from patch_config.h — there is exactly one define per knob, so encoder and decoder
  * cannot disagree by construction. */
 
@@ -50,7 +50,7 @@ static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc
 
 /* RC_NORETURN comes from the shared portability shim in rc_models.h. */
 
-extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
+extern const char *selfcheck(const uint8_t *blob, size_t blob_n,
                                 const uint8_t *from, size_t from_n,
                                 const uint8_t *to, size_t to_n);
 int divsufsort(const uint8_t *T, int32_t *suffix_array, int32_t n);
@@ -63,7 +63,7 @@ typedef struct {
     size_t opc_splits;
 } EncCtx;
 
-static inline int a1_row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
+static inline int row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
     if (ctx->fwd) return a / OUTROW >= t / OUTROW - (OUTROW_DEPTH - 1);
     return a / OUTROW <= t / OUTROW + (OUTROW_DEPTH - 1);
 }
@@ -99,10 +99,10 @@ typedef struct { int ok; int32_t fp_end; size_t pres_total; } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
-/* A1UGRice/A1UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
- * them directly (no runtime 'code' tag). DRE wraps the shared A1DRStream with the host-only MTF dict
+/* UGRice/UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
+ * them directly (no runtime 'code' tag). DRE wraps the shared DRStream with the host-only MTF dict
  * pointer + cap; the shared fields (K/rep/hit/rh) live in .s so rc_dr_init can init both sides. */
-typedef struct { int32_t *dic; uint16_t cap; A1DRStream s; } DRE;
+typedef struct { int32_t *dic; uint16_t cap; DRStream s; } DRE;
 
 typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
@@ -140,18 +140,18 @@ typedef struct {
     int fwd;
     uint16_t lit0[LIT0_CTX][256];
     uint16_t lit1[256];
-    A1UGGamma gs, gl;
-    A1UGRice gd;
-    A1UGGamma glo;
+    UGGamma gs, gl;
+    UGRice gd;
+    UGGamma glo;
     int fixed_dist_bits;
     int bootstrap_simple;
     int out_en;
 } PriceTab;
 
 typedef struct {
-    A1BitTree lit0[LIT0_CTX], lit1;
-    A1PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
-    A1TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
+    BitTree lit0[LIT0_CTX], lit1;
+    PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     DRE dr_bl, dr_ex;
     int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
     int rep0h;
@@ -184,7 +184,7 @@ void die(const char *msg) RC_NORETURN;
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t s);
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap);
-void a1_sort(void *base, size_t n, size_t esz, int (*cmp)(const void *, const void *));
+void sort(void *base, size_t n, size_t esz, int (*cmp)(const void *, const void *));
 void buf_put(Buf *b, uint8_t v);
 void buf_write(Buf *b, const void *p, size_t n);
 void buf_put_u32le(Buf *b, uint32_t v);
@@ -244,21 +244,21 @@ void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
 void re_raw(REnc *r, int bit);
 Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
-void bt_encode(A1BitTree *t, REnc *r, uint8_t byte, int rate);
-void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, A1BitTree *t);
-void ugr_init_e(A1UGRice *g, int k);
-void ugg_init_e(A1UGGamma *g);
-void ugr_encode(A1UGRice *g, REnc *r, uint32_t v);
-void ugg_encode(A1UGGamma *g, REnc *r, uint32_t v);
+void bt_encode(BitTree *t, REnc *r, uint8_t byte, int rate);
+void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, BitTree *t);
+void ugr_init_e(UGRice *g, int k);
+void ugg_init_e(UGGamma *g);
+void ugr_encode(UGRice *g, REnc *r, uint32_t v);
+void ugg_encode(UGGamma *g, REnc *r, uint32_t v);
 uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit, int adapt);
 uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int adapt);
-void fl_encode(A1Flag1 *f, REnc *r, int b);
+void fl_encode(Flag1 *f, REnc *r, int b);
 void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
-uint32_t ugr_price(const A1UGRice *g, uint32_t v);
-uint32_t ugg_price(const A1UGGamma *g, uint32_t v);
-uint32_t bt_price_static(const A1BitTree *t, uint8_t byte);
+uint32_t ugr_price(const UGRice *g, uint32_t v);
+uint32_t ugg_price(const UGGamma *g, uint32_t v);
+uint32_t bt_price_static(const BitTree *t, uint8_t byte);
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
-uint64_t bt_price_update(A1BitTree *t, uint8_t byte, int rate);
+uint64_t bt_price_update(BitTree *t, uint8_t byte, int rate);
 
 void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
@@ -294,4 +294,4 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAn
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
 int decode_a1(const char *image_path, const char *patch_path);
 
-#endif /* A1_ENC_INTERNAL_H */
+#endif /* ENC_INTERNAL_H */

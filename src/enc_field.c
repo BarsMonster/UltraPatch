@@ -50,7 +50,7 @@ static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
                 int32_t t = we->tp + k;
                 /* a read behind the frontier that the row window covers reads OLD flash
                  * directly — it must not force a journal entry. */
-                if ((FWD ? a < t : a > t) && a1_row_covered(ctx, a, t)) continue;
+                if ((FWD ? a < t : a > t) && row_covered(ctx, a, t)) continue;
                 if (FWD) { if (readarr[a] < t) readarr[a] = t; }
                 else { if (readarr[a] > t) readarr[a] = t; }
             }
@@ -120,7 +120,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         uint8_t src = 0;
         if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
             int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
-            src = (pw->jhas[fp] || (behind && a1_row_covered(pw->ctx, fp, tp))) ? pw->frm[fp] : pw->buf[fp];
+            src = (pw->jhas[fp] || (behind && row_covered(pw->ctx, fp, tp))) ? pw->frm[fp] : pw->buf[fp];
         }
         produced = (uint8_t)(byte + src);
     }
@@ -166,7 +166,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
     return (Event){ EV_NONE, 0 };
 }
 
-/* The single encoder mirror of the decoder's sa_apply_op 4-byte-window skeleton (patch_apply.h).
+/* The single encoder mirror of the decoder's apply_op 4-byte-window skeleton (patch_apply.h).
  * fw_next yields, in wire consume order, either a classified field window (is_field=1, pos=window
  * anchor, ev) or one copy position (is_field=0, pos). Direction-parametrized: FWD ascends from 0
  * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
@@ -272,7 +272,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         size_t en = 0;
         for (size_t i = 0; i < nfr; i++)
             if (fk[i].kind == EV_EX) { ex[en].b = fk[i].k2; ex[en].v = -fk[i].need; en++; }
-        a1_sort(ex, en, sizeof(*ex), cmp_seg);
+        sort(ex, en, sizeof(*ex), cmp_seg);
         for (size_t i = 0; i < en;) {
             size_t j = i;
             while (j < en && ex[j].v == ex[i].v) j++;
@@ -289,7 +289,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
         pn--;
     }
     /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
-    a1_sort(pool, pn, sizeof(*pool), cmp_seg);
+    sort(pool, pn, sizeof(*pool), cmp_seg);
     int mn = 0;
     for (size_t i = 0; i < pn; i++) {
         if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
@@ -512,8 +512,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
         OpPC *pc = &out[step];
         preserve_corr_op(&cw, &fc, pc, we);
         if (!FWD) {
-            if (pc->pres.n > 1) a1_sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
-            if (pc->corr.n > 1) a1_sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+            if (pc->pres.n > 1) sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            if (pc->corr.n > 1) sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
     free(buf); free(jhas); free(m); free(readarr);

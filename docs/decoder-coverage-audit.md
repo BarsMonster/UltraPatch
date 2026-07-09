@@ -32,7 +32,7 @@ Every unreached branch was classified by hand; none is dead product logic:
 
 | Class | Sites | Assessment |
 |---|---|---|
-| Corrupt-stream overflow/UB guards needing ~2^31-magnitude coded values (`s_bv` shift cap, `bb_unzz` 0xFFFFFFFF, `sa_apply_op` dl/el/fp/gap overflow checks) | 197, 609, 873, 886, 891, 898, 905, 919 | Defensive by design; make hostile streams *defined*, not reachable-cheap. Keep. |
+| Corrupt-stream overflow/UB guards needing ~2^31-magnitude coded values (`s_bv` shift cap, `bb_unzz` 0xFFFFFFFF, `apply_op` dl/el/fp/gap overflow checks) | 197, 609, 873, 886, 891, 898, 905, 919 | Defensive by design; make hostile streams *defined*, not reachable-cheap. Keep. |
 | Unreachable-by-construction invariant guards (out_read/out_write span gates, `ldr_targets` window bound) | 468, 474, 641 | Belt-and-braces on internal invariants; correct to keep in a frozen safety artifact. |
 | Fuzzer-blind by harness design, covered by deterministic suites | `CRC32(from)` mismatch (982; harness force-fixes it), post-op error exit (1054) | Covered by `make check` / `check-malformed`. |
 | Data-dependent clamps never hit on real images | `lit_tree_from_hist` probability clamp (1070) | Correctness clamp; keep. |

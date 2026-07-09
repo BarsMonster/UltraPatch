@@ -148,8 +148,8 @@ Home journal lags are function-scale (>=256 B, from code displaced by whole
 inserted/removed functions between distant releases — the measured peak pair
 sheds nothing at D=1 and 25 slots at D=2), while the foreign small-lag mass is
 relinker micro-drift (<256 B) that D=2 covers completely. A deployment whose
-firmware drifts in the 512 B–2 KB band can retune with `-DOUTROW_DEPTH=4` +
-`-DA1_ROW_DEPTH=4` on its own blobs; compatibility toward deeper decoders is
+firmware drifts in the 512 B–2 KB band can retune with `-DOUTROW_DEPTH=4`
+on its own blobs; compatibility toward deeper decoders is
 monotone, and the degradation logger's lag histogram re-derives the right
 depth for any new corpus.
 

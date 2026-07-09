@@ -60,7 +60,7 @@ static int host_apply_blob(const uint8_t *blob, size_t blob_n,
     return 0;
 }
 
-const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
+const char *selfcheck(const uint8_t *blob, size_t blob_n,
                          const uint8_t *from, size_t from_n,
                          const uint8_t *to, size_t to_n)
 {
@@ -100,7 +100,7 @@ int decode_a1(const char *image_path, const char *patch_path){
     if(image.n > UINT32_MAX){ fprintf(stderr,"image too large for host decoder: %zu\n", image.n); rc = 2; goto out; }
     HostApply ha;
     { uint32_t image_n = (uint32_t)image.n;
-      uint32_t span = image_n>A1_MAX_IMAGE ? image_n : A1_MAX_IMAGE;
+      uint32_t span = image_n>MAX_IMAGE ? image_n : MAX_IMAGE;
       if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, image_n, &ha)){ rc = 2; goto out; } }
 
     if(ha.rc != PATCH_APPLY_DONE){

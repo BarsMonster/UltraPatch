@@ -41,7 +41,7 @@ enum {
 #define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
 #define COUNT_OF(x) (sizeof(x) / sizeof((x)[0]))
 
-/* Encoder and decoder share one define per knob (SA_W, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
+/* Encoder and decoder share one define per knob (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
  * from patch_config.h, so a wire-knob mismatch is impossible by construction — no mirror asserts. */
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
@@ -78,21 +78,21 @@ static int check_gamma_index(void){
 }
 
 static int check_shared_models(void){
-    A1BitTree bt;
-    A1Flag1 fl;
-    A1IdxUnary idx;
-    A1DRStream ds;
+    BitTree bt;
+    Flag1 fl;
+    IdxUnary idx;
+    DRStream ds;
     int32_t dic[4] = { 123, 456, 789, 111 };
     CHECK(PROBE_RC_PROB_BITS == 12);
     CHECK(PROBE_RC_PBIT == (1 << PROBE_RC_PROB_BITS));
     CHECK((uint32_t)PROBE_RC_PROB_BOUND == (0xffffffffu >> 12) * (uint32_t)PROBE_RC_PHALF);
-    a1_bt_init(&bt);
-    for(int i = 0; i < (int)PROBE_BT_PROBS; i++) CHECK(a1_bt_get(&bt, i) == PROBE_RC_PHALF);
+    bt_init(&bt);
+    for(int i = 0; i < (int)PROBE_BT_PROBS; i++) CHECK(bt_get(&bt, i) == PROBE_RC_PHALF);
     for(int p = 0; p < 256; p++) CHECK(rc_lit0_sel((uint8_t)p) < PROBE_LIT0_CTX);
-    a1_fl_init(&fl);
+    fl_init(&fl);
     CHECK(fl.h == 0);
     for(int i = 0; i < 4; i++) CHECK(fl.m[i] == PROBE_RC_PHALF);
-    a1_idx_init(&idx, 1234u);
+    idx_init(&idx, 1234u);
     for(int i = 0; i < PROBE_IDX_CTX; i++) CHECK(idx.u[i] == 1234u);
     rc_dr_init(&ds, dic, PROBE_DR_HIT_INIT);
     CHECK(ds.K == 1 && dic[0] == 0 && ds.hit == PROBE_DR_HIT_INIT && ds.rh == 0);
