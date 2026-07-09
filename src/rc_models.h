@@ -66,17 +66,18 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
  * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
 #define BT_PROBS 255u
 #define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
-typedef struct { uint8_t p[BT_BYTES + 1u]; } up_BitTree;  /* +1 lets accessors read/write 3 bytes */
+/* idx*12 has a byte shift of 0 or 4, so every 12-bit entry fits in two bytes. */
+typedef struct { uint8_t p[BT_BYTES]; } up_BitTree;
 static inline uint16_t bt_get(const up_BitTree*t,int idx){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
+    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
     return (uint16_t)((v>>sh)&0xfffu);
 }
 static inline void bt_set(up_BitTree*t,int idx,uint16_t prob){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8) | ((uint32_t)t->p[off+2u]<<16);
+    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
     v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
-    t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8); t->p[off+2u]=(uint8_t)(v>>16);
+    t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8);
 }
 static inline void bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) bt_set(t,i,RC_PHALF); }
 

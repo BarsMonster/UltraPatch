@@ -57,9 +57,9 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 5897
+BASE_ARM_TEXT ?= 5877
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10300
+BASE_ARM_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 1
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 # The production ARM size gate intentionally measures the static-state wrapper integration

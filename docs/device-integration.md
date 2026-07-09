@@ -177,7 +177,7 @@ storage if the bootloader stack is tight. The worst-case caller-stack cost of
 
 | Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
 | --------------------------------- | ----------------------- |
-| **gcc -O2 (gated ceiling: 480 B)** | **400 B** |
+| **gcc -O2 (gated ceiling: 480 B)** | **384 B** |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
