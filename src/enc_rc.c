@@ -119,8 +119,10 @@ uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int ada
 }
 
 /* Rice/Gamma transfer cores: statically typed, sharing the unary-prefix + bit transfer helpers.
- * These snapshots are frozen (adapt=0): the prob state never advances during pricing. */
-static uint32_t ugr_xfer(up_UGRice *g, REnc *r, uint32_t v) {
+ * These snapshots are frozen (adapt=0): the prob state never advances during pricing. Keep Rice
+ * out of line so the feasibility arm does not clone the whole unary loop for price and emit. */
+static uint32_t RC_NOINLINE ugr_xfer(up_UGRice *g, REnc *r, uint32_t v) {
+    if (!rc_rice_feasible(v, g->k)) { if (r) r->rice_overflow = 1; return UINT32_MAX; }
     uint32_t cl = v >> g->k;
     uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
     for (int pos = 0; pos < g->k; pos++)

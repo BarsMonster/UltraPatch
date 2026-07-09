@@ -619,6 +619,7 @@ int fit_k_tokens(const TokenVec *tv) {
         uint64_t c = 0;
         for (size_t i = 0; i < tv->n; i++) if (tv->v[i].type == 'R') {
             uint32_t v = (uint32_t)tv->v[i].dist - 1u;
+            if (!rc_rice_feasible(v, (uint32_t)k)) { c = UINT64_MAX; break; }
             c += (v >> k) + 1u + (uint32_t)k;
         }
         if (c < bestc) { bestc = c; best = k; }
@@ -636,6 +637,7 @@ int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
             any = 1;
             uint32_t v = rc_outmatch_delta((uint32_t)tv->v[i].dist, exp);
             exp = rc_outmatch_next_expect(fwd, (uint32_t)tv->v[i].dist, (uint32_t)tv->v[i].len);
+            if (!rc_rice_feasible(v, (uint32_t)k)) { c = UINT64_MAX; break; }
             c += (v >> k) + 1u + (uint32_t)k;
         }
         if (c < bestc) { bestc = c; best = k; }

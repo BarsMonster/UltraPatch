@@ -102,7 +102,7 @@ typedef struct {
 } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
-typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; } REnc;
+typedef struct { uint64_t low; uint32_t range; uint8_t cache; uint32_t csz; Buf out; int rice_overflow; } REnc;
 /* up_UGRice/up_UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
  * them directly (no runtime 'code' tag). DRE wraps the shared up_DRStream with the host-only MTF dict
  * pointer + cap; the shared fields (K/rep/hit/rh) live in .s so rc_dr_init can init both sides. */

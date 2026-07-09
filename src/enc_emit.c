@@ -282,6 +282,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         content_cursor_to(&ec, op_end, NULL);
     }
     if (ec.pos != content->n || ec.tok_i != seq->n || ec.tok_mode) die("content token cursor out of sync");
+    if (rc.rice_overflow) *overflow = 1;
     return re_flush_opt(&rc);
 }
 

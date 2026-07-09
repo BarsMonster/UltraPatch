@@ -116,6 +116,7 @@ enum {
     PROBE_RC_PBIT       = RC_PBIT,
     PROBE_RC_PHALF      = RC_PHALF,
     PROBE_RC_PROB_BOUND = RC_PROB_BOUND(0xffffffffu, RC_PHALF),
+    PROBE_RC_RICE_MAX   = RC_RICE_UNARY_MAX,
     PROBE_BT_PROBS      = BT_PROBS,
     PROBE_LIT0_CTX      = LIT0_CTX,
     PROBE_IDX_CTX       = IDX_CTX,
@@ -188,6 +189,12 @@ static int check_shared_models(void){
     CHECK(rc_dr_rep_ctx(1, 0) == 3);
     CHECK(rc_dr_rep_ctx(1, 5) == 1);
     for(int i = 0; i < 4; i++) CHECK(ds.rep[i] == PROBE_RC_PHALF);
+    CHECK(PROBE_RC_RICE_MAX == (1 << 20));
+    CHECK(rc_rice_feasible(PROBE_RC_RICE_MAX - 1u, 0u));
+    CHECK(rc_rice_feasible(PROBE_RC_RICE_MAX, 0u));
+    CHECK(!rc_rice_feasible(PROBE_RC_RICE_MAX + 1u, 0u));
+    CHECK(!rc_rice_feasible(UINT32_MAX, 11u));
+    CHECK(rc_rice_feasible(UINT32_MAX, 12u));
     return 0;
 }
 
@@ -244,6 +251,79 @@ EOF
 "$CC" $CFLAGS "$tmp/model_probe.c" -o "$tmp/model_probe"
 "$tmp/model_probe"
 
+# Exercise the host contract at all three decision layers: frozen-model pricing and emission stop
+# before an over-cap unary prefix, and both existing k sweeps choose a decoder-feasible alternative
+# even when the raw codelength optimum would be the infeasible k=0. The half-million cheap tokens
+# make that latter case real without weakening the production cap for a test build.
+cat > "$tmp/rice_fit_probe.c" <<'EOF'
+#include "enc_internal.h"
+
+#define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
+
+static int check_chosen(const TokenVec *tv,int k,int out){
+    uint32_t exp=0;
+    for(size_t i=0;i<tv->n;i++) if(tv->v[i].type==(out?'O':'R')){
+        uint32_t v=out ? rc_outmatch_delta((uint32_t)tv->v[i].dist,exp)
+                       : (uint32_t)tv->v[i].dist-1u;
+        if(out) exp=rc_outmatch_next_expect(1,(uint32_t)tv->v[i].dist,(uint32_t)tv->v[i].len);
+        CHECK(rc_rice_feasible(v,(uint32_t)k));
+    }
+    return 0;
+}
+
+int main(void){
+    const uint32_t bad=RC_RICE_UNARY_MAX+2u;
+    const size_t n=(size_t)(bad/2u)+2u;
+    Token *v=(Token *)xcalloc(n,sizeof(*v));
+    TokenVec tv={v,n,n};
+    up_UGRice g,before_g;
+    REnc rc,before;
+    Buf out;
+    int k,r;
+
+    ugr_init_e(&g,0);
+    CHECK(ugr_price(&g,RC_RICE_UNARY_MAX-1u)!=UINT32_MAX);
+    CHECK(ugr_price(&g,RC_RICE_UNARY_MAX)!=UINT32_MAX);
+    CHECK(ugr_price(&g,RC_RICE_UNARY_MAX+1u)==UINT32_MAX);
+    re_init(&rc);
+    ugr_encode(&g,&rc,RC_RICE_UNARY_MAX);
+    CHECK(!rc.rice_overflow);
+    out=re_flush_opt(&rc); buf_free(&out);
+    ugr_init_e(&g,0); re_init(&rc); before=rc; before_g=g;
+    ugr_encode(&g,&rc,RC_RICE_UNARY_MAX+1u);
+    CHECK(rc.rice_overflow);
+    CHECK(rc.low==before.low && rc.range==before.range && rc.cache==before.cache &&
+          rc.csz==before.csz && rc.out.d==before.out.d && rc.out.n==before.out.n);
+    CHECK(memcmp(&g,&before_g,sizeof(g))==0);
+    buf_free(&rc.out);
+
+    for(size_t i=0;i<n;i++) v[i]=(Token){'R',0,1,1};
+    v[n-1u].dist=(int32_t)bad+1;
+    CHECK(!rc_rice_feasible((uint32_t)v[n-1u].dist-1u,0u));
+    k=fit_k_tokens(&tv);
+    CHECK(k==1);
+    if((r=check_chosen(&tv,k,0))) return r;
+
+    { uint32_t exp=0;
+      for(size_t i=0;i<n-1u;i++){
+          v[i]=(Token){'O',0,(int32_t)RC_OUTMATCH_MIN,(int32_t)exp};
+          exp=rc_outmatch_next_expect(1,exp,RC_OUTMATCH_MIN);
+      }
+      v[n-1u]=(Token){'O',0,(int32_t)RC_OUTMATCH_MIN,(int32_t)(exp+bad/2u)};
+    }
+    CHECK(!rc_rice_feasible(rc_outmatch_delta((uint32_t)v[n-1u].dist,
+          (uint32_t)(RC_OUTMATCH_MIN*(n-1u))),0u));
+    k=fit_k_out(&tv,15,0u,1);
+    CHECK(k==1);
+    if((r=check_chosen(&tv,k,1))) return r;
+    free(v);
+    return 0;
+}
+EOF
+"$CC" $CFLAGS "$tmp/rice_fit_probe.c" src/enc_util.c src/enc_rc.c src/enc_lz.c \
+    -Wl,--gc-sections -o "$tmp/rice_fit_probe"
+"$tmp/rice_fit_probe"
+
 # Exercise the same helper as end-users receive it: generate a private fresh single header, then
 # compile and run the identical oracle suite without any encoder headers in the translation unit.
 python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
@@ -263,6 +343,9 @@ int main(int argc, char **argv){
     (void)argv;
     int r=check_seed_prob();
     if(r) return r;
+    CHECK(rc_rice_feasible((1u<<20)-1u,0u));
+    CHECK(rc_rice_feasible(1u<<20,0u));
+    CHECK(!rc_rice_feasible((1u<<20)+1u,0u));
     if(argc==12345){ PatchApply pa; return patch_apply_run(&pa,no_bytes_single,0); }
     return 0;
 }
@@ -270,4 +353,5 @@ EOF
 "$CC" $CFLAGS -I"$tmp" "$tmp/single_model_probe.c" -o "$tmp/single_model_probe"
 "$tmp/single_model_probe"
 echo "model_seed_prob=OK (source + generated single header)"
+echo "model_rice_cap=OK (boundary + crafted fit + emission feasibility)"
 echo "model_contract=OK"

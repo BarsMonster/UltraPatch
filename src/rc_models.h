@@ -57,6 +57,13 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
 #define RC_PROB_BOUND(range, prob) (((range) >> RC_PROB_BITS) * (prob))
 #define RC_PACKED_POS_BITS 24u
 #define RC_PACKED_POS_LIMIT (1u<<RC_PACKED_POS_BITS)
+/* Inclusive maximum Rice quotient accepted by the decoder's adaptive-unary reader. Keep the
+ * encoder on the same bound: a larger quotient would make an otherwise valid generated patch
+ * fail as a malformed run-on at apply time. */
+#define RC_RICE_UNARY_MAX (1u<<20)
+static inline int rc_rice_feasible(uint32_t v,uint32_t k){
+    return k<32u && (v>>k)<=RC_RICE_UNARY_MAX;
+}
 
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into

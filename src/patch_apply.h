@@ -62,9 +62,6 @@ extern void    flash_write(uint32_t addr, uint8_t val);
  * work area, or on a suitably sized stack. */
 typedef struct { uint32_t range, code; } up_RangeDec;
 
-/* RC_RICE_UNARY_MAX: adaptive-unary prefix cap (crash-hardening; see s_unary/s_ug_rice below). */
-#define RC_RICE_UNARY_MAX (1u<<20)
-
 /* STREAMED-DELTA per-stream state up_DRStream (bl, ex) is single-sourced in rc_models.h: a
  * MOVE-TO-FRONT dict of distinct delta values + an adaptive "repeat-last" bit + an adaptive
  * "dict-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (in dict? -> MTF index
