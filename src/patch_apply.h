@@ -587,7 +587,7 @@ static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t 
 }
 /* g_litprev = the actual previous CONTENT-stream byte (order-1 tag0 literal context): updated for
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
- * the next span selects M_lit0[LIT0_SEL(content[pos-1])] regardless of which token produced pos-1.
+ * the next span selects M_lit0[rc_lit0_sel(content[pos-1])] regardless of which token produced pos-1.
  * BL/EX field bytes are de-reloc'd outside the content stream and correctly do not update it. */
 static void sa_emit_ring(PatchApply *pa, A1ApplyState*s, uint8_t b){ s->ring[s->ototal & SA_MASK]=b; s->ototal++; pa->g_litprev=b; }
 /* pull the next CONTENT byte from the cut LZSS token stream, decoding tokens lazily. */
@@ -596,7 +596,7 @@ static uint8_t sa_next_content(PatchApply *pa, A1ApplyState*s, int tag){
         if(pa->g_rcerr) goto fail;
         if(s->tok_left>0){
             uint8_t b;
-            if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&pa->M_lit1:&pa->M_lit0[LIT0_SEL(pa->g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
+            if(s->tok_mode==1) b=(uint8_t)s_bt(pa,tag?&pa->M_lit1:&pa->M_lit0[rc_lit0_sel(pa->g_litprev)], tag?RC_LIT1_RATE:RC_LIT0_RATE);
             else if(s->tok_mode==2){ b=s->ring[s->tok_src & SA_MASK]; s->tok_src++; }
             else { b=out_read(pa,s->tok_src); s->tok_src+=(uint32_t)(pa->g_FWD?1:-1); }
             if(pa->g_rcerr) goto fail;
@@ -1072,7 +1072,6 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 #undef UG_GAMMA_MANT
 #undef SMAP_CAP
 #undef LIT0_CTX
-#undef LIT0_SEL
 #undef IDX_CTX
 #undef RC_S_BIT_RATE
 #undef RC_LIT0_RATE

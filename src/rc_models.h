@@ -88,7 +88,6 @@ static inline uint8_t rc_lit0_sel(uint8_t p){
     )[p>>2];
     return p==247u ? 4u : (uint8_t)((v >> ((p&3u)*2u)) & 3u);
 }
-#define LIT0_SEL(p) rc_lit0_sel((uint8_t)(p))
 
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } A1Flag1;

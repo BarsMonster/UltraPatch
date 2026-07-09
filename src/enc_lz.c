@@ -193,7 +193,7 @@ uint32_t bit_price(uint32_t p, int bit) {
     return intbits - fracbits;                 /* (12 - log2(pr)) * PR_SCALE */
 }
 
-/* LIT0_CTX / LIT0_SEL / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
+/* LIT0_CTX / rc_lit0_sel / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
@@ -265,7 +265,7 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
             for (size_t i = 0; i < nn; i++) {
                 uint8_t byte = cc->content[(size_t)cc->cur.start + cc->span_pos + i];
                 int tag = cc->tags[cc->pos];
-                bt_encode(tag ? &cc->M->lit1 : &cc->M->lit0[LIT0_SEL(cc->prevlit)],
+                bt_encode(tag ? &cc->M->lit1 : &cc->M->lit0[rc_lit0_sel(cc->prevlit)],
                           cc->rc, byte, tag ? RC_LIT1_RATE : RC_LIT0_RATE);
                 cc->prevlit = byte;
                 cc->pos++;
@@ -283,7 +283,7 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
 /* Per-byte integer bit-length literal proxy from the wire's time-0 seeded literal BitTrees -- the
  * exact model the real emit uses at seed (lit_tree_seed_e), replacing the from-image static-Huffman
  * code that used to feed the pre-parse and the diff-run splitter. Context policy: tag0 bytes price
- * under the parity-0 seed tree, tag1 under parity-1; at seed every LIT0_SEL context shares one seed,
+ * under the parity-0 seed tree, tag1 under parity-1; at seed every rc_lit0_sel context shares one seed,
  * so no previous-byte context need be chosen here -- adaptation (and the real pricing refinement)
  * happen later in the price-feedback loop, which this proxy only bootstraps. Units: bt_price is
  * 1/64-bit fixed point (PR_SCALE); round to nearest integer bit (floor 1, like a Huffman length) so
@@ -372,7 +372,7 @@ static uint64_t *span_lit_prefix(size_t n, const uint8_t *content, const uint8_t
     sum[0] = 0;
     for (size_t i = 0; i < n; i++) {
         uint8_t byte = content[i];
-        uint32_t c = tags[i] ? pt->lit1[byte] : pt->lit0[LIT0_SEL(i ? content[i - 1] : 0)][byte];
+        uint32_t c = tags[i] ? pt->lit1[byte] : pt->lit0[rc_lit0_sel(i ? content[i - 1] : 0u)][byte];
         sum[i + 1] = sum[i] + c;
     }
     return sum;
@@ -498,7 +498,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             uint64_t ci = cost[si]; int32_t ri = rep[si];
             /* spans: emit one span flag (kind 0) under context h, then the gamma length and the
              * tag0/tag1 literals. New flag history after a span: h' = (h<<1|0)&3. tag0 literals are
-             * priced under the wire's order-1 prev-byte context (LIT0_SEL of content[p-1]); that
+             * priced under the wire's order-1 prev-byte context (rc_lit0_sel of content[p-1]); that
              * context is deterministic per position now, so the whole span cost is the exact prefix
              * difference span_lit[j] - span_lit[i] (first literal included). No carried prevlit. */
             int hs = (h << 1) & 3;               /* history after a span flag (bit 0) */
