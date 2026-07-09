@@ -48,11 +48,7 @@ static inline int rc_dir_is_natural(uint32_t from_size,uint32_t to_size,int desc
     return desc==rc_natural_desc(from_size,to_size);
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-#define ENC_NORETURN __attribute__((noreturn))
-#else
-#define ENC_NORETURN
-#endif
+/* RC_NORETURN comes from the shared portability shim in rc_models.h. */
 
 extern const char *a1_selfcheck(const uint8_t *blob, size_t blob_n,
                                 const uint8_t *from, size_t from_n,
@@ -184,7 +180,7 @@ typedef struct {
     Token cur;
 } ContentCursor;
 
-void die(const char *msg) ENC_NORETURN;
+void die(const char *msg) RC_NORETURN;
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t s);
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap);
@@ -196,11 +192,11 @@ void buf_free(Buf *b);
 void opvec_free_deep(OpVec *v);
 void oppc_array_free(OpPC *pc, size_t n);
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
+/* Decoder-order index for step `step` of an n-op apply walk (forward: 0..n-1; reverse: n-1..0).
+ * Callers loop `for (step=0; step<n; step++) we = &walk[opwalk_apply_index(n, fwd, step)];`. */
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
 }
-#define OP_EVENT_FOR(we_, walk_, n_, fwd_, step_) \
-    for (size_t step_ = 0; step_ < (n_) && (((we_) = &(walk_)[opwalk_apply_index((n_), (fwd_), step_)]), 1); step_++)
 int read_file_buf(const char *path, Buf *out, uint64_t max_size);
 Buf slurp(const char *path);
 void write_file(const char *path, const void *p, size_t n);

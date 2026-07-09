@@ -23,12 +23,31 @@
  * plain-C fallbacks even when __GNUC__ is visible (for compilers that define it for
  * compatibility without full attribute support); the check-decoder-contract gate leg builds
  * and round-trips that variant and asserts its preprocessed first-party code is GNU-free. */
+/* Single portability shim for the whole project (decoder + host encoder). GNU attributes are
+ * codegen/warning hints only, so the #else keeps everything standard C; -DA1_NO_GNU_EXTENSIONS
+ * forces the plain-C path uniformly across all three (decoder, shared models, encoder). */
 #if !defined(A1_NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define RC_NOINLINE __attribute__((noinline))
+#define RC_NORETURN __attribute__((noreturn))
+#define RC_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
+#define RC_SUB_OVERFLOW(a,b,out) __builtin_sub_overflow((a),(b),(out))
 #else
 #define RC_ALWAYS_INLINE static inline
 #define RC_NOINLINE
+#define RC_NORETURN
+static inline int rc_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
+    if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
+    *out=(int32_t)(a+b);
+    return 0;
+}
+static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
+    if((b<0 && a>INT32_MAX+b) || (b>0 && a<INT32_MIN+b)) return 1;
+    *out=(int32_t)(a-b);
+    return 0;
+}
+#define RC_ADD_OVERFLOW(a,b,out) rc_add_overflow_i32((a),(b),(out))
+#define RC_SUB_OVERFLOW(a,b,out) rc_sub_overflow_i32((a),(b),(out))
 #endif
 
 #define RC_KTOP (1u<<24)
@@ -377,7 +396,8 @@ static inline void rc_init_tok(A1TokModels*m,int kd,int ko){
     m->rep0[0]=m->rep0[1]=RC_REP0_INIT;
 }
 
-#undef RC_ALWAYS_INLINE
-#undef RC_NOINLINE
+/* RC_ALWAYS_INLINE / RC_NOINLINE / RC_NORETURN / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW are the shared
+ * portability shim: they intentionally persist to downstream headers (patch_apply.h) and TUs,
+ * like every other RC_* constant defined here. */
 
 #endif

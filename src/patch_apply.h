@@ -46,27 +46,8 @@
 
 #include "rc_models.h"
 
-#if !defined(A1_NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
-#define A1_NOINLINE __attribute__((noinline))
-#define A1_ALWAYS_INLINE static inline __attribute__((always_inline))
-#define A1_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
-#define A1_SUB_OVERFLOW(a,b,out) __builtin_sub_overflow((a),(b),(out))
-#else
-#define A1_NOINLINE
-#define A1_ALWAYS_INLINE static inline
-static inline int a1_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
-    if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
-    *out=(int32_t)(a+b);
-    return 0;
-}
-static inline int a1_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
-    if((b<0 && a>INT32_MAX+b) || (b>0 && a<INT32_MIN+b)) return 1;
-    *out=(int32_t)(a-b);
-    return 0;
-}
-#define A1_ADD_OVERFLOW(a,b,out) a1_add_overflow_i32((a),(b),(out))
-#define A1_SUB_OVERFLOW(a,b,out) a1_sub_overflow_i32((a),(b),(out))
-#endif
+/* Inline/noinline/overflow attribute macros come from the shared portability shim in
+ * rc_models.h (RC_ALWAYS_INLINE / RC_NOINLINE / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW). */
 
 /* ===================================================================================== */
 /* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */
@@ -544,7 +525,7 @@ static int32_t pull_delta(PatchApply *pa, A1DRStream*d, A1IdxUnary*gix, int32_t*
 /* ===================================================================================== */
 /* A1ApplyState type + SA_RING/SA_MASK + the arena asserts live up with the ARENA
  * union (near JREGION), since the union embeds A1ApplyState directly in its apply phase. */
-A1_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
+RC_ALWAYS_INLINE int op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=s_ug_gamma(pa,idx?&pa->MDL_pre.pg2:&pa->MDL_pre.pg);
     if((idx && gap==0u) || gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
     *off+=gap;
@@ -768,7 +749,7 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
 typedef struct { int32_t nextpos, litb, li, step, lim; } A1LitCur;
-static void A1_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
+static void RC_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int32_t nl){
     if(lc->li<nl){
         uint32_t g=sa_read_uleb(pa,s);
         /* corrupt-stream guard (also removes a signed-overflow UB): a valid gap always keeps
@@ -782,7 +763,7 @@ static void A1_NOINLINE litcur_step(PatchApply *pa, A1ApplyState*s, A1LitCur*lc,
     }
     else lc->nextpos=-1;
 }
-A1_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int fwd, int32_t nl, int32_t dl){
+RC_ALWAYS_INLINE void litcur_init(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, int fwd, int32_t nl, int32_t dl){
     lc->step = fwd ? 1 : -1; lc->lim = dl;
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
@@ -805,7 +786,7 @@ static void wr_copy(PatchApply *pa, A1ApplyState*s, A1LitCur*lc, A1CorrCur*cc, i
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
-static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
+static void RC_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     uint32_t dl_u=s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=s_ug_gamma(pa,&pa->MDL_pre.gadj);
     int32_t adj=bb_unzz(pa,adj_u);
     /* nw = dl+el (op output bytes). The image span is < 2^31 (g_image_span <= A1_MAX_IMAGE via
@@ -822,16 +803,16 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
     int32_t tp0,fp0;
     if(pa->g_FWD){
         /* tp+nw must stay <= to_size (tp,nw >= 0: a 32-bit headroom test); fp+dl+adj must stay in int32,
-         * checked with A1_ADD_OVERFLOW (no 64-bit math). (For a valid stream fp is a small
+         * checked with RC_ADD_OVERFLOW (no 64-bit math). (For a valid stream fp is a small
          * in-range position, so this never trips.) */
         int32_t nfp;
         if(nw>(int32_t)pa->g_to_size || s->tp>(int32_t)pa->g_to_size-nw ||
-           A1_ADD_OVERFLOW(s->fp,dl,&nfp) || A1_ADD_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
+           RC_ADD_OVERFLOW(s->fp,dl,&nfp) || RC_ADD_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
         tp0=s->tp; fp0=s->fp; s->tp=s->tp+nw; s->fp=nfp;
     } else {
         int32_t nfp;
         if(s->tp<nw ||
-           A1_SUB_OVERFLOW(s->fp,dl,&nfp) || A1_SUB_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
+           RC_SUB_OVERFLOW(s->fp,dl,&nfp) || RC_SUB_OVERFLOW(nfp,adj,&nfp)){ pa->g_rcerr=1; return; }
         s->tp=s->tp-nw; s->fp=nfp; tp0=s->tp; fp0=s->fp;
     }
     /* fp headroom: the copy loop and the ldr back-scan form fp0+K for K<=dl, so fp0+dl must be
@@ -913,7 +894,7 @@ static void A1_NOINLINE sa_apply_op(PatchApply *pa, A1ApplyState*s){
  * overlays it). noinline: this runs ONCE at the top of decode_body, so keeping its locals in
  * their own frame (not merged into decode_body's) keeps them off the deep apply call chain
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
-static int A1_NOINLINE decode_header(PatchApply *pa){
+static int RC_NOINLINE decode_header(PatchApply *pa){
     uint32_t want_from, want_to, fs, ts, fpe, z, bl; uint8_t ov;
     int32_t fp_start=0;
     if(!env_u32le(pa,&want_from) || !env_u32le(pa,&want_to) || !env_uleb(pa,&fs,0) || fs>A1_MAX_IMAGE || !env_uleb(pa,&z,&ov)) return 0;
@@ -1011,7 +992,7 @@ static int decode_body(PatchApply *pa){
 /* ===================================================================================== */
 /* public API: patch_apply_run(state, callback, ctx) -> DONE / ERROR                       */
 /* ===================================================================================== */
-static void A1_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
+static void RC_NOINLINE lit_tree_from_hist(A1BitTree*t,const uint32_t*hist,uint32_t*w){
     rc_lit_tree_from_hist(t,hist,w);
 }
 
@@ -1049,10 +1030,8 @@ static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return pa->
 static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
 static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa->g_jcount; }
 
-#undef A1_NOINLINE
-#undef A1_ALWAYS_INLINE
-#undef A1_ADD_OVERFLOW
-#undef A1_SUB_OVERFLOW
+/* RC_ALWAYS_INLINE / RC_NOINLINE / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW belong to the shared shim in
+ * rc_models.h and are intentionally NOT undef'd here. */
 #undef RC_RICE_UNARY_MAX
 #undef JREGION
 #undef SA_RING

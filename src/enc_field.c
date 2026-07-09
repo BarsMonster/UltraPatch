@@ -504,7 +504,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
     PreserveCorrWalk cw = { ctx, readarr, frm, true_to, buf, jhas, from_size, caps };
     const OpWalkEnt *we;
-    OP_EVENT_FOR(we, m, ops->n, FWD, step) {
+    for (size_t step = 0; step < ops->n; step++) {
+        we = &m[opwalk_apply_index(ops->n, FWD, step)];
         PreserveFieldCursor fc;
         fw_init(&fc.w, FWD, frm, from_size, fd, we->o, we->fp, we->o->diff_len);
         fc.have = 0;
