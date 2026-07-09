@@ -113,6 +113,7 @@ typedef struct { int32_t *dic; uint16_t cap; up_DRStream s; } DRE;
 typedef struct { int type; int32_t start, len, dist; } Token;
 typedef struct { Token *v; size_t n, cap; } TokenVec;
 typedef struct { int32_t dist, len; } Cand;
+typedef Buf CandArena;
 #ifndef LZ_CAND_MAX
 #define LZ_CAND_MAX 128
 #endif
@@ -121,6 +122,7 @@ typedef struct { int32_t dist, len; } Cand;
 #endif
 enum { LZ_MAX_RUN = 1024, LZ_MAX_MATCH = 2048 };
 typedef struct { int32_t pos, len; } OCand;
+typedef Buf OCandArena;
 #define OC_MAX 4
 enum { PR_SCALE = 64 };
 enum { PRICE_LIT_MAX = 255 * PR_SCALE };
@@ -270,22 +272,22 @@ void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
                          Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp);
 void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats);
-void out_candidates(const uint8_t *content, size_t n, const uint32_t *olim,
-                    const uint32_t *olim2, const uint32_t *ocap, int FWD,
+void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
+                    const OpWalkEnt *walk, const size_t *ends, int FWD,
                     const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
-                    OCand (**oc_out)[OC_MAX], uint8_t **noc_out);
+                    OCandArena *oc_out, uint8_t **noc_out);
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                     const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt);
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
-                         Cand (*cands)[LZ_CAND_MAX], uint8_t *ncand,
-                         OCand (*ocands)[OC_MAX], const uint8_t *nocand,
+                         const CandArena *cands, const uint8_t *ncand,
+                         const OCandArena *ocands, const uint8_t *nocand,
                          const PriceTab *pt);
 void merge_adjacent_spans(TokenVec *tv);
 int fit_k_tokens(const TokenVec *tv);
 int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd);
 TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
                          const uint8_t L0[256], const uint8_t L1[256],
-                         int *k_out, Cand (**cands_out)[LZ_CAND_MAX], uint8_t **ncand_out);
+                         int *k_out, CandArena *cands_out, uint8_t **ncand_out);
 uint64_t gammalen_u32(uint32_t x);
 uint32_t bit_price(uint32_t p, int bit);
 

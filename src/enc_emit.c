@@ -478,7 +478,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     from_lit_proxy_bits(frm, from_size, L0, L1);
     int kd = 0;
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
-    Cand (*cands)[LZ_CAND_MAX] = NULL; uint8_t *ncand = NULL;
+    CandArena cands = {0}; uint8_t *ncand = NULL;
     TokenVec seq = lz_candidates_c(content.d, tags.d, content.n, L0, L1, &kd, &cands, &ncand);
     /* ---- D1 shift map: fit TWO candidate maps from the op walk — the hit-count fit and the
      * bits-based fit (C6). The LZ parse is map-independent (inj values never touch content bytes),
@@ -498,29 +498,11 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
           map_n[1] = fit_shift_map_bits(fb, fv, fn, fk, nfr, map_b[1], map_v[1]);
           free(fk);
       } }
-    /* ---- D2 out-matches: per-content-position output-window limit (fixed at the consuming op:
-     * FWD window [0, tp0); grow window [tp_end, to_size)) + candidates over the to image. */
-    uint32_t *olim = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
-    uint32_t *olim2 = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
-    uint32_t *ocap = (uint32_t *)xmalloc((content.n ? content.n : 1) * sizeof(uint32_t));
-    { size_t prev_end = 0;
-      for (size_t step = 0; step < ops->n; step++) {
-          we = &walk[opwalk_apply_index(ops->n, FWD, step)];
-          int32_t tp0 = we->tp;
-          uint32_t tpe = (uint32_t)(tp0 + we->o->diff_len + we->o->extra_len);
-          uint32_t lim = FWD ? (uint32_t)tp0 : tpe;
-          /* OLD window edge: FWD [tp_end, from_size) stays pristine through this op; grow
-           * [0, min(tp0, from_size)) likewise (beyond from_size is erased/undefined flash). */
-          uint32_t lim2 = FWD ? tpe
-                              : ((uint32_t)tp0 < from_size ? (uint32_t)tp0 : from_size);
-          for (size_t c = prev_end; c < ends[step]; c++) {
-              olim[c] = lim; olim2[c] = lim2;
-              ocap[c] = (uint32_t)(ends[step] - c);          /* OLD tokens end inside their op */
-          }
-          prev_end = ends[step];
-      } }
-    OCand (*ocands)[OC_MAX] = NULL; uint8_t *nocand = NULL;
-    out_candidates(content.d, content.n, olim, olim2, ocap, FWD, tob, to_size, frm, from_size, &ocands, &nocand);
+    /* ---- D2 out-matches: each content position inherits the decode-time NEW/OLD flash
+     * windows and OLD-token cap from the op that consumes it. */
+    OCandArena ocands = {0}; uint8_t *nocand = NULL;
+    out_candidates(content.d, content.n, ops, walk, ends, FWD,
+                   tob, to_size, frm, from_size, &ocands, &nocand);
     EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
@@ -540,7 +522,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 PriceTab pt;
                 pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = price_out_en;
                 measure_prices(&seq, content.d, tags.d, frm, from_size, kd, ko, &pt);
-                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, cands, ncand, ocands, noc, &pt);
+                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, &cands, ncand, &ocands, noc, &pt);
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
@@ -582,14 +564,14 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
             }
         }
     }
-    free(cands); free(ncand);
+    buf_free(&cands); free(ncand);
     const uint32_t *sel_b = use_map >= 0 ? map_b[use_map] : NULL;
     const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
     int sel_n = use_map >= 0 ? map_n[use_map] : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
                          inj, sel_b, sel_v, sel_n, overflow_out);
     injvec_array_free(inj, ops->n);
-    free(olim); free(olim2); free(ocap); free(ocands); free(nocand);
+    buf_free(&ocands); free(nocand);
     free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
