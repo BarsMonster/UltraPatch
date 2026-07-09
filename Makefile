@@ -174,7 +174,7 @@ check-stack-internal:
 # a non-GNU toolchain's stddef.h supplies its own), (c) a fallback-built host decoder must
 # round-trip the real one-face patch byte-exactly.
 PORTABLE_FALLBACK_FLAGS := -DA1_NO_GNU_EXTENSIONS
-check-decoder-contract-internal: ultrapatch
+check-decoder-contract-internal: ultrapatch decoder-header-internal
 	@set -e; \
 	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \
 		echo "decoder headers may include only their previous shipped support header" >&2; exit 1; \
@@ -186,12 +186,13 @@ check-decoder-contract-internal: ultrapatch
 		echo "decoder header set must not declare file-scope static variables" >&2; exit 1; \
 	fi; \
 	. ./scripts/tempdir.sh; \
-	single="$$tmp/patch_apply_single.h"; \
-	python3 scripts/gen_single_header.py "$$single" $(DECODER_PUBLIC_HDRS); \
+	single="$(DECODER_SINGLE_HDR)"; \
+	singlehdr="$(notdir $(DECODER_SINGLE_HDR))"; \
+	singledir="$(dir $(DECODER_SINGLE_HDR))"; \
 	if grep -nE '^[[:space:]]*#include[[:space:]]*"' "$$single" | grep -E '"(patch_config|rc_models|patch_apply)\.h"'; then \
 		echo "generated single decoder header must not include local decoder support headers" >&2; exit 1; \
 	fi; \
-	for inc in patch_apply.h patch_apply_single.h; do \
+	for inc in patch_apply.h "$$singlehdr"; do \
 		csrc="$$tmp/$${inc%.h}_smoke.c"; obj="$$tmp/$${inc%.h}_smoke.o"; \
 		{ printf '%s\n' '#include <stdint.h>'; \
 		  printf '%s\n' "#include \"$$inc\""; \
@@ -200,9 +201,9 @@ check-decoder-contract-internal: ultrapatch
 		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
 		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 		} > "$$csrc"; \
-		if [ "$$inc" = patch_apply_single.h ]; then \
-			$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$tmp" -c "$$csrc" -o "$$obj"; \
-			$(CC) $(filter-out -Isrc,$(CFLAGS)) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -I"$$tmp" -c "$$csrc" -o "$$obj"; \
+		if [ "$$inc" = "$$singlehdr" ]; then \
+			$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$singledir" -c "$$csrc" -o "$$obj"; \
+			$(CC) $(filter-out -Isrc,$(CFLAGS)) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -I"$$singledir" -c "$$csrc" -o "$$obj"; \
 		else \
 			$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
 			$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
