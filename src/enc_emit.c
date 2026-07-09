@@ -7,46 +7,15 @@
  */
 
 #include "enc_internal.h"
-/* One field injection (delta escaped into the LZ content stream): cc = byte cursor within its op's
- * content slice, kind = EV_BL/EV_EX, fpk = from-image field address, delta = plain (no-map) wire
+/* One field injection (delta escaped into the LZ content stream): cc = absolute content byte cursor,
+ * kind = EV_BL/EV_EX, k1 = from-image field address, need = plain (no-map) wire
  * residual, k2 = shift-map lookup key (BL branch target / EX word value) derived ONCE here from the
- * pristine from-image bytes. The mapped residual derives from delta+k2 via smap_resid() without
+ * pristine from-image bytes. The mapped residual derives from need+k2 via smap_resid() without
  * re-walking those bytes. */
-typedef struct { uint32_t cc; int kind; uint32_t fpk; int32_t delta; uint32_t k2; } Inj;
-typedef struct { Inj *v; size_t n, cap; } InjVec;
-
-static void inj_push(InjVec *v, uint32_t cc, int kind, uint32_t fpk, int32_t delta, uint32_t k2) {
-    v->v = (Inj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
-    v->v[v->n++] = (Inj){cc, kind, fpk, delta, k2};
-}
-
-static void injvec_array_free(InjVec *v, size_t n) {
-    if (!v) return;
-    for (size_t i = 0; i < n; i++) free(v[i].v);
-    free(v);
-}
-
-static size_t inj_field_count(const InjVec *inj, size_t nops) {
-    size_t n = 0;
-    for (size_t i = 0; i < nops; i++) n += inj[i].n;
-    return n;
-}
-
-static void field_keys_from_inj(const InjVec *inj, size_t nops, int FWD, FieldKey *fk) {
-    size_t n = 0;
-    for (size_t oi = 0; oi < nops; oi++) {
-        size_t step = FWD ? oi : nops - 1u - oi;
-        const InjVec *iv = &inj[step];
-        for (size_t q = 0; q < iv->n; q++) {
-            size_t ii = FWD ? q : iv->n - 1u - q;
-            const Inj *ij = &iv->v[ii];
-            fk[n].kind = ij->kind;
-            fk[n].k1 = ij->fpk;
-            fk[n].need = (int32_t)(uint32_t)ij->delta;
-            fk[n].k2 = ij->k2;
-            n++;
-        }
-    }
+static void inj_push(FieldInjArena *v, uint32_t cc, int kind, uint32_t fpk,
+                     int32_t delta, uint32_t k2) {
+    v->v = (FieldInj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
+    v->v[v->n++] = (FieldInj){cc, kind, fpk, delta, k2};
 }
 
 typedef struct {
@@ -84,7 +53,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
 }
 
 /* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
- * uLEB-gap+byte + extras) AND record the field-injection cursors (Inj.cc) in the same pass, so the
+ * uLEB-gap+byte + extras) AND record the field-injection cursors in the same pass, so the
  * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
  * mirror of the decoder apply_op window skeleton. FWD/descending asymmetry is preserved exactly:
  * grow writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
@@ -94,7 +63,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
 static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
                             const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd,
-                            Buf *content, Buf *tags, InjVec *out) {
+                            Buf *content, Buf *tags, FieldInjArena *out) {
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (payload[k]) ivec_push(&lits, k);
     Buf tmp = {0};
@@ -104,8 +73,7 @@ static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
     int32_t exstart = tp0 + o->diff_len;
     if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
         for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-    EncLitCursor lc = { payload, &lits, &tmp, content, tags,
-        (uint32_t)rc_uleb_len((uint32_t)lits.n) + (FWD ? 0u : (uint32_t)o->extra_len),
+    EncLitCursor lc = { payload, &lits, &tmp, content, tags, (uint32_t)content->n,
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
     FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, payload, fp0, o->diff_len);
@@ -230,7 +198,7 @@ static int32_t smap_resid(const uint32_t *mb, const int32_t *mv, int mn,
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const uint8_t *frm, uint32_t from_size,
                      const OpPC *pc, const Buf *content, const Buf *tags,
-                     const size_t *ends, const InjVec *inj,
+                     const OpEmitRow *rows, const FieldInjArena *inj,
                      const uint32_t *mb, const int32_t *mv, int mn,
                      int *overflow) {
     Models M;
@@ -273,14 +241,14 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
         emit_geom_pc(&rc, &M, &ops->v[oi], &pc[step]);
-        size_t base = step == 0 ? 0 : ends[step - 1], op_end = ends[step];
-        for (size_t ii = 0; ii < inj[step].n; ii++) {
-            const Inj *ij = &inj[step].v[ii];
-            int32_t delta = mn ? smap_resid(mb, mv, mn, ij->kind, ij->fpk, ij->k2, ij->delta) : ij->delta;
-            content_cursor_to(&ec, base + ij->cc, NULL);
+        size_t ib = step ? rows[step - 1u].inj_end : 0u;
+        for (size_t ii = ib; ii < rows[step].inj_end; ii++) {
+            const FieldInj *ij = &inj->v[ii];
+            int32_t delta = mn ? smap_resid(mb, mv, mn, ij->kind, ij->k1, ij->k2, ij->need) : ij->need;
+            content_cursor_to(&ec, ij->cc, NULL);
             emit_delta(&M, &rc, ij->kind, delta, overflow);
         }
-        content_cursor_to(&ec, op_end, NULL);
+        content_cursor_to(&ec, rows[step].content_end, NULL);
     }
     if (ec.pos != content->n || ec.tok_i != seq->n || ec.tok_mode) die("content token cursor out of sync");
     if (rc.rice_overflow) *overflow = 1;
@@ -294,15 +262,15 @@ typedef struct {
     const OpPC *pc;
     const Buf *content;
     const Buf *tags;
-    const size_t *ends;
+    const OpEmitRow *rows;
     int FWD;
 } EmitBodyMeasure;
 
 static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
-                             const InjVec *inj, const uint32_t *mb, const int32_t *mv, int mn) {
+                             const FieldInjArena *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     int overflow = 0;
     Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
-                         m->content, m->tags, m->ends, inj, mb, mv, mn, &overflow);
+                         m->content, m->tags, m->rows, inj, mb, mv, mn, &overflow);
     size_t n = overflow ? (size_t)-1 : body.n;
     buf_free(&body);
     return n;
@@ -340,15 +308,17 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 
 /* total priced bits (header + BL/EX residual streams) of a candidate map over the field keys */
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
-                             const FieldKey *fk, size_t nfr, int32_t *dic_bl, int32_t *dic_ex) {
+                             const FieldInjArena *inj, int fwd,
+                             int32_t *dic_bl, int32_t *dic_ex) {
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     up_IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
     up_BitTree dval; bt_init(&dval);
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
-    for (size_t i = 0; i < nfr; i++) {
-        int32_t resid = smap_resid(mb, mv, mn, fk[i].kind, fk[i].k1, fk[i].k2, fk[i].need);
-        c += px_delta(fk[i].kind == EV_BL ? &bl : &ex, fk[i].kind == EV_BL ? &di_bl : &di_ex,
+    for (size_t i = 0; i < inj->n; i++) {
+        const FieldInj *fk = field_inj_key(inj, fwd, i);
+        int32_t resid = smap_resid(mb, mv, mn, fk->kind, fk->k1, fk->k2, fk->need);
+        c += px_delta(fk->kind == EV_BL ? &bl : &ex, fk->kind == EV_BL ? &di_bl : &di_ex,
                       &dval, resid, &overflow);
         if (overflow) return UINT64_MAX / 2;
     }
@@ -357,20 +327,22 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
 
 typedef uint64_t (*SMapScoreFn)(const uint32_t *mb, const int32_t *mv, int mn, void *ctx);
 
-typedef struct { const FieldKey *fk; size_t nfr; } SMapHitScore;
-typedef struct { const FieldKey *fk; size_t nfr; int32_t *dic_bl, *dic_ex; } SMapBitScore;
+typedef struct { const FieldInjArena *inj; int fwd; } SMapHitScore;
+typedef struct { const FieldInjArena *inj; int fwd; int32_t *dic_bl, *dic_ex; } SMapBitScore;
 
 static uint64_t smap_hit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
     SMapHitScore *s = (SMapHitScore *)ctx;
     size_t hits = 0;
-    for (size_t i = 0; i < s->nfr; i++)
-        hits += smap_resid(mb, mv, mn, s->fk[i].kind, s->fk[i].k1, s->fk[i].k2, s->fk[i].need) == 0;
-    return (uint64_t)(s->nfr - hits);
+    for (size_t i = 0; i < s->inj->n; i++) {
+        const FieldInj *fk = field_inj_key(s->inj, s->fwd, i);
+        hits += smap_resid(mb, mv, mn, fk->kind, fk->k1, fk->k2, fk->need) == 0;
+    }
+    return (uint64_t)(s->inj->n - hits);
 }
 
 static uint64_t smap_bit_cost(const uint32_t *mb, const int32_t *mv, int mn, void *ctx) {
     SMapBitScore *s = (SMapBitScore *)ctx;
-    return px_map_total(mb, mv, mn, s->fk, s->nfr, s->dic_bl, s->dic_ex);
+    return px_map_total(mb, mv, mn, s->inj, s->fwd, s->dic_bl, s->dic_ex);
 }
 
 static void smap_without(const uint32_t *tb, const int32_t *tv, int mn, int drop,
@@ -435,9 +407,9 @@ static int fit_shift_map_scored(const uint32_t *fb, const int32_t *fv, int fn,
 }
 
 static int fit_shift_map_hit(const uint32_t *fb, const int32_t *fv, int fn,
-                             const FieldKey *fk, size_t nfr,
+                             const FieldInjArena *inj, int fwd,
                              uint32_t *mb, int32_t *mv) {
-    SMapHitScore sc = { fk, nfr };
+    SMapHitScore sc = { inj, fwd };
     return fit_shift_map_scored(fb, fv, fn, smap_hit_cost, &sc, SMAP_MAX_LOSS, 0, 1, mb, mv);
 }
 
@@ -446,11 +418,11 @@ static int fit_shift_map_hit(const uint32_t *fb, const int32_t *fv, int fn,
  * only when its removal strictly reduces the estimate. The final exact byte gate still chooses among
  * no map, hit-count map, and this map, so proxy over-removal cannot regress a pair. */
 static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
-                              const FieldKey *fk, size_t nfr,
+                              const FieldInjArena *inj, int fwd,
                               uint32_t *mb, int32_t *mv) {
     int32_t *dic_bl = (int32_t *)xmalloc(DR_KCAP_BL * sizeof(int32_t));
     int32_t *dic_ex = (int32_t *)xmalloc(DR_KCAP_EX * sizeof(int32_t));
-    SMapBitScore sc = { fk, nfr, dic_bl, dic_ex };
+    SMapBitScore sc = { inj, fwd, dic_bl, dic_ex };
     int mn = fit_shift_map_scored(fb, fv, fn, smap_bit_cost, &sc, 0, 1, 0, mb, mv);
     free(dic_bl); free(dic_ex);
     return mn;
@@ -462,17 +434,17 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                        int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
-    size_t *ends = (size_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(size_t));
-    InjVec *inj = (InjVec *)xcalloc(ops->n ? ops->n : 1, sizeof(*inj));
+    OpEmitRow *rows = (OpEmitRow *)xmalloc((ops->n ? ops->n : 1) * sizeof(*rows));
+    FieldInjArena inj = {0};
     OpWalkEnt *walk = opwalk_build(ops, fp_start);
     /* Fused build: one decoder-order walk per op emits content/tags AND records the field-injection
-     * cursors (Inj) in the same pass -- byte layout and cursors can never disagree by construction. */
+     * cursors in the same pass -- byte layout and cursors can never disagree by construction. */
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &walk[opwalk_apply_index(ops->n, FWD, step)];
         op_emit_content(we->o, ops->payload + we->tp, FWD, frm, from_size,
-                        we->fp, we->tp, fd, &content, &tags, &inj[step]);
-        ends[step] = content.n;
+                        we->fp, we->tp, fd, &content, &tags, &inj);
+        rows[step] = (OpEmitRow){content.n, inj.n};
     }
     uint8_t L0[256], L1[256];
     from_lit_proxy_bits(frm, from_size, L0, L1);
@@ -488,22 +460,18 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     uint32_t map_b[2][SMAP_CAP]; int32_t map_v[2][SMAP_CAP];
     int map_n[2] = {0, 0};   /* 0 = hit-count fit, 1 = bits fit */
     int use_map = -1;
-    { size_t nfr = inj_field_count(inj, ops->n);
-      if (nfr) {
-          FieldKey *fk = (FieldKey *)xmalloc(nfr * sizeof(*fk));
-          field_keys_from_inj(inj, ops->n, FWD, fk);
-          uint32_t fb[SMAP_POOL_MAX]; int32_t fv[SMAP_POOL_MAX];
-          int fn = smap_build_full(ops, fp_start, from_size, to_size, fk, nfr, fb, fv);
-          map_n[0] = fit_shift_map_hit(fb, fv, fn, fk, nfr, map_b[0], map_v[0]);
-          map_n[1] = fit_shift_map_bits(fb, fv, fn, fk, nfr, map_b[1], map_v[1]);
-          free(fk);
-      } }
+    if (inj.n) {
+        uint32_t fb[SMAP_POOL_MAX]; int32_t fv[SMAP_POOL_MAX];
+        int fn = smap_build_full(ops, fp_start, from_size, to_size, &inj, FWD, fb, fv);
+        map_n[0] = fit_shift_map_hit(fb, fv, fn, &inj, FWD, map_b[0], map_v[0]);
+        map_n[1] = fit_shift_map_bits(fb, fv, fn, &inj, FWD, map_b[1], map_v[1]);
+    }
     /* ---- D2 out-matches: each content position inherits the decode-time NEW/OLD flash
      * windows and OLD-token cap from the op that consumes it. */
     OCandArena ocands = {0}; uint8_t *nocand = NULL;
-    out_candidates(content.d, content.n, ops, walk, ends, FWD,
+    out_candidates(content.d, content.n, ops, walk, rows, FWD,
                    tob, to_size, frm, from_size, &ocands, &nocand);
-    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, ends, FWD };
+    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, rows, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -511,7 +479,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
-        size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, inj, NULL, NULL, 0);
+        size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, &inj, NULL, NULL, 0);
         /* Keep the legacy mixed-mode trajectory as the incumbent (phases 0/1), then try the
          * corrected ring-only pricing state (phase 2) before re-opening out-candidates (phase 3).
          * Every candidate still has to beat the exact emitted body. */
@@ -526,7 +494,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
-                size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, nko, inj, NULL, NULL, 0);
+                size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, nko, &inj, NULL, NULL, 0);
                 if (cand_bytes < cur_bytes) {
                     size_t gain = cur_bytes - cand_bytes;
                     free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
@@ -546,7 +514,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
             for (int dir = -1; dir <= 1; dir += 2) {
                 for (int nk = *kp + dir; nk >= 0 && nk <= 15; nk += dir) {
                     size_t bb = emit_body_size(&meas, &seq, which ? kd : nk, which ? nk : ko,
-                                               inj, NULL, NULL, 0);
+                                               &inj, NULL, NULL, 0);
                     if (bb < cur_bytes) { cur_bytes = bb; *kp = nk; }
                     else break;
                 }
@@ -559,7 +527,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
             if (mn > 0) {
                 const uint32_t *mb = map_b[mi];
                 const int32_t *mv = map_v[mi];
-                size_t mbytes = emit_body_size(&meas, &seq, kd, ko, inj, mb, mv, mn);
+                size_t mbytes = emit_body_size(&meas, &seq, kd, ko, &inj, mb, mv, mn);
                 if (mbytes < cur_bytes) { cur_bytes = mbytes; use_map = mi; }
             }
         }
@@ -568,10 +536,10 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const uint32_t *sel_b = use_map >= 0 ? map_b[use_map] : NULL;
     const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
     int sel_n = use_map >= 0 ? map_n[use_map] : 0;
-    Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, ends,
-                         inj, sel_b, sel_v, sel_n, overflow_out);
-    injvec_array_free(inj, ops->n);
+    Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, rows,
+                         &inj, sel_b, sel_v, sel_n, overflow_out);
+    free(inj.v);
     buf_free(&ocands); free(nocand);
-    free(walk); free(ends); free(seq.v); buf_free(&content); buf_free(&tags);
+    free(walk); free(rows); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }

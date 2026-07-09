@@ -115,7 +115,7 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
  *    the frontier has not reached (out_read returns it verbatim). OLD regions DECAY as later ops
  *    write, so OLD candidates are clipped to finish inside the op that starts them. */
 void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
-                           const OpWalkEnt *walk, const size_t *ends, int FWD,
+                           const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
                            const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
                            OCandArena *oc_out, uint8_t **noc_out) {
     OCandArena oc = {0};
@@ -126,13 +126,13 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
         oc_index(frm, from_n, FWD, &fhead, &fprev);
         size_t step = 0;
         for (size_t i = 0; i + 4 <= n; i++) {
-            while (i >= ends[step]) step++;
+            while (i >= rows[step].content_end) step++;
             const OpWalkEnt *we = &walk[opwalk_apply_index(ops->n, FWD, step)];
             uint32_t tp0 = (uint32_t)we->tp;
             uint32_t tpe = tp0 + (uint32_t)we->o->diff_len + (uint32_t)we->o->extra_len;
             uint32_t lim = FWD ? tp0 : tpe;
             uint32_t lim2 = FWD ? tpe : (tp0 < from_n ? tp0 : (uint32_t)from_n);
-            uint32_t cap = (uint32_t)(ends[step] - i);
+            uint32_t cap = (uint32_t)(rows[step].content_end - i);
             OCand row[OC_MAX];
             uint8_t nr = 0;
             uint32_t key = hash3_key_fwd(content + i);

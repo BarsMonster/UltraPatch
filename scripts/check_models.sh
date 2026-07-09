@@ -232,6 +232,30 @@ static int check_reloc_helpers(void){
     return 0;
 }
 
+/* The flat arena is stored in decoder apply order. FWD fitting consumes it directly; grow
+ * fitting globally reverses it, reproducing the old reversal of both op rows and fields/row. */
+static int check_field_inj_order(void){
+    FieldInj fwd_v[] = {
+        {1u,EV_BL,10u,1,100u},{2u,EV_EX,11u,2,101u},
+        {4u,EV_BL,20u,3,102u},{5u,EV_EX,21u,4,103u},{6u,EV_BL,22u,5,104u}
+    };
+    FieldInj grow_v[] = {
+        {1u,EV_BL,22u,5,104u},{2u,EV_EX,21u,4,103u},{3u,EV_BL,20u,3,102u},
+        {5u,EV_EX,11u,2,101u},{6u,EV_BL,10u,1,100u}
+    };
+    OpEmitRow fwd_rows[]={{3u,2u},{7u,5u}}, grow_rows[]={{4u,3u},{7u,5u}};
+    FieldInjArena fwd={fwd_v,COUNT_OF(fwd_v),COUNT_OF(fwd_v)};
+    FieldInjArena grow={grow_v,COUNT_OF(grow_v),COUNT_OF(grow_v)};
+    static const uint32_t expect[]={10u,11u,20u,21u,22u};
+    CHECK(fwd_rows[0].inj_end==2u && fwd_rows[1].inj_end==5u);
+    CHECK(grow_rows[0].inj_end==3u && grow_rows[1].inj_end==5u);
+    for(size_t i=0;i<COUNT_OF(expect);i++){
+        CHECK(field_inj_key(&fwd,1,i)->k1==expect[i]);
+        CHECK(field_inj_key(&grow,0,i)->k1==expect[i]);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv){
     (void)argv;
     int r;
@@ -240,6 +264,7 @@ int main(int argc, char **argv){
     if((r = check_shared_models())) return r;
     if((r = check_zigzag())) return r;
     if((r = check_reloc_helpers())) return r;
+    if((r = check_field_inj_order())) return r;
     if(argc == 12345){
         PatchApply pa;
         return patch_apply_run(&pa, no_bytes, 0);

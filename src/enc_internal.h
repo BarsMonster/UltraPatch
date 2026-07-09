@@ -136,7 +136,14 @@ typedef struct {
     const FieldDeltaVec *fd; const uint8_t *diff; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
-typedef struct { int kind; uint32_t k1, k2; int32_t need; } FieldKey;
+/* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
+ * sees the historical source order by globally reversing this arena for a grow apply. */
+typedef struct { uint32_t cc; int kind; uint32_t k1; int32_t need; uint32_t k2; } FieldInj;
+typedef struct { FieldInj *v; size_t n, cap; } FieldInjArena;
+typedef struct { size_t content_end, inj_end; } OpEmitRow;
+static inline const FieldInj *field_inj_key(const FieldInjArena *a, int fwd, size_t i) {
+    return &a->v[fwd ? i : a->n - 1u - i];
+}
 enum { SMAP_MAX_LOSS = 2, SMAP_POOL_MAX = 160 };
 
 typedef struct {
@@ -236,7 +243,7 @@ int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                    const FieldKey *fk, size_t nfr, uint32_t *tb, int32_t *tv);
+                    const FieldInjArena *inj, int fwd, uint32_t *tb, int32_t *tv);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const FieldDeltaVec *fd);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
@@ -273,7 +280,7 @@ void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp);
 void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats);
 void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
-                    const OpWalkEnt *walk, const size_t *ends, int FWD,
+                    const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
                     const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
                     OCandArena *oc_out, uint8_t **noc_out);
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
