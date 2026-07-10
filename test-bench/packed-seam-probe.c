@@ -51,11 +51,12 @@ static Buf wire_blob(uint32_t from_crc, uint32_t to_crc,
 }
 
 static int verify_plan(const EncCtx *ctx, const OpVec *ops, const Buf *from, const Buf *to,
-                       const FieldDeltaVec *fd, const OpPC *pc, const PlanCaps *caps,
+                       const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+                       const OpPC *pc, const PlanCaps *caps,
                        int32_t fp_start, int desc) {
     int overflow = 0;
     Buf body = encode_body(ctx, ops, from->d, (uint32_t)from->n,
-                           to->d, (uint32_t)to->n, fd, pc, fp_start, &overflow);
+                           to->d, (uint32_t)to->n, fd, ldr, pc, fp_start, &overflow);
     CHECK(!overflow);
     Buf blob = wire_blob(crc32_buf(from->d, from->n), crc32_buf(to->d, to->n),
                          (uint32_t)from->n, (uint32_t)to->n, desc,
@@ -80,6 +81,7 @@ static int check_preserve_seam(void) {
     Buf to = { (uint8_t *)xcalloc(to_n, 1), to_n, to_n };
     to.d[kept] = 0xa5u;
     FieldDeltaVec fd = {0};
+    LdrTargetIndex ldr; ldr_target_index_build(&ldr, from.d, from_n);
     EncCtx ctx = {0}; ctx.fwd = 0;
     OpVec ops = {0};
     ops.payload = (uint8_t *)xcalloc(to_n, 1);
@@ -90,14 +92,14 @@ static int check_preserve_seam(void) {
 
     PlanCaps before;
     OpPC *pc = preserve_corrections_pc(&ctx, &ops, 0, from.d, to.d, &fd,
-                                        from_n, to_n, &before);
+                                        from_n, to_n, &ldr, &before);
     CHECK(!before.ok && before.pres_total == JSLOTS + 1u);
     CHECK(before.pres_kept == JSLOTS && before.pres_cutoff < 0);
     oppc_array_free(pc, ops.n);
 
     int32_t fp_start = fold_zero_ops(&ops);
     PlanCaps first;
-    pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd,
+    pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd, &ldr,
                                        fp_start, from_n, to_n, &first);
     CHECK(pc == NULL && same_caps(&before, &first));
     CHECK(ctx.deg_engaged && ctx.deg_converted == 1u);
@@ -105,11 +107,12 @@ static int check_preserve_seam(void) {
     fp_start += fold_zero_ops(&ops);
     CHECK(fp_start == a0);
     PlanCaps caps;
-    pc = build_pc_fixpoint(&ctx, &ops, fp_start, &from, &to, &fd, NULL, &caps);
+    pc = build_pc_fixpoint(&ctx, &ops, fp_start, &from, &to, &fd, &ldr, NULL, &caps);
     CHECK(caps.ok && caps.pres_total == JSLOTS && caps.pres_kept == JSLOTS);
-    CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, fp_start, 1) == 0);
+    CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, &ldr, pc, &caps, fp_start, 1) == 0);
 
     oppc_array_free(pc, ops.n); opvec_free(&ops);
+    ldr_target_index_free(&ldr);
     buf_free(&from); buf_free(&to);
     return 0;
 }
@@ -125,6 +128,7 @@ static int check_degrade_coordinates(int fwd) {
     for (int i = 0; i < N; i++) from.d[i] = (uint8_t)(i * 29 + (i >> 8));
     memcpy(to.d, from.d + H, H); memcpy(to.d + H, from.d, H);
     FieldDeltaVec fd = {0};
+    LdrTargetIndex ldr; ldr_target_index_build(&ldr, from.d, N);
     OpVec input = {0}; input.payload = (uint8_t *)xcalloc(N, 1);
     opvec_push(&input, zero_op(0, 0, H));
     opvec_push(&input, zero_op(H, 0, 0));
@@ -135,14 +139,14 @@ static int check_degrade_coordinates(int fwd) {
     EncCtx old_ctx = {0}, ctx = {0}; old_ctx.fwd = ctx.fwd = fwd;
     PlanCaps old_caps, first;
 
-    OpPC *pc = degrade_ops_to_journal_budget(&old_ctx, &old, &to, from.d, &fd,
+    OpPC *pc = degrade_ops_to_journal_budget(&old_ctx, &old, &to, from.d, &fd, &ldr,
                                               0, N, N, &old_caps);
     CHECK(pc == NULL && old_ctx.deg_engaged && old_caps.pres_total > JSLOTS);
     int32_t old_fp_start = fold_zero_ops(&old);
 
     int32_t fp_start = fold_zero_ops(&now);
     CHECK(fp_start == H && now.n == 2u);
-    pc = degrade_ops_to_journal_budget(&ctx, &now, &to, from.d, &fd,
+    pc = degrade_ops_to_journal_budget(&ctx, &now, &to, from.d, &fd, &ldr,
                                        fp_start, N, N, &first);
     CHECK(pc == NULL && ctx.deg_engaged && first.pres_total > JSLOTS);
     size_t degraded_n = now.n;
@@ -154,11 +158,12 @@ static int check_degrade_coordinates(int fwd) {
           ctx.deg_converted == old_ctx.deg_converted && same_ops(&now, &old, N));
 
     PlanCaps caps;
-    pc = build_pc_fixpoint(&ctx, &now, fp_start, &from, &to, &fd, NULL, &caps);
+    pc = build_pc_fixpoint(&ctx, &now, fp_start, &from, &to, &fd, &ldr, NULL, &caps);
     CHECK(caps.ok && caps.pres_total == JSLOTS && caps.pres_kept == JSLOTS);
-    CHECK(verify_plan(&ctx, &now, &from, &to, &fd, pc, &caps, fp_start, !fwd) == 0);
+    CHECK(verify_plan(&ctx, &now, &from, &to, &fd, &ldr, pc, &caps, fp_start, !fwd) == 0);
 
     oppc_array_free(pc, now.n); opvec_free(&input); opvec_free(&old); opvec_free(&now);
+    ldr_target_index_free(&ldr);
     buf_free(&from); buf_free(&to);
     return 0;
 }
@@ -203,21 +208,23 @@ static int check_correction_seam(void) {
     Buf to = { (uint8_t *)xcalloc(n, 1), n, n };
     to.d[lim] = 1;
     FieldDeltaVec fd = {0};
+    LdrTargetIndex ldr; ldr_target_index_build(&ldr, from.d, n);
     EncCtx ctx = {0}; ctx.fwd = 1;
     OpVec ops = {0}; ops.payload = (uint8_t *)xcalloc(n, 1);
     opvec_push(&ops, zero_op((int32_t)n, 0, 0));
 
     PlanCaps caps;
-    OpPC *pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd,
+    OpPC *pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd, &ldr,
                                               0, n, n, &caps);
     CHECK(pc != NULL && !caps.ok && pc[0].corr.n == 1u &&
           (uint32_t)pc[0].corr.v[0].off == lim);
-    pc = build_pc_fixpoint(&ctx, &ops, 0, &from, &to, &fd, pc, &caps);
+    pc = build_pc_fixpoint(&ctx, &ops, 0, &from, &to, &fd, &ldr, pc, &caps);
     CHECK(caps.ok && ctx.opc_splits == 1u && ops.n == 2u);
     CHECK(pc[1].corr.n == 1u && pc[1].corr.v[0].off == 0);
-    CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, 0, 0) == 0);
+    CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, &ldr, pc, &caps, 0, 0) == 0);
 
     oppc_array_free(pc, ops.n); opvec_free(&ops);
+    ldr_target_index_free(&ldr);
     buf_free(&from); buf_free(&to);
     return 0;
 }

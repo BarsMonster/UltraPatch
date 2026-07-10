@@ -63,6 +63,7 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
 static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
                             const uint8_t *frm, uint32_t from_size,
                             int32_t fp0, int32_t tp0, const FieldDeltaVec *fd,
+                            const LdrTargetIndex *ldr,
                             Buf *content, Buf *tags, FieldInjArena *out) {
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (payload[k]) ivec_push(&lits, k);
@@ -76,7 +77,7 @@ static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
     EncLitCursor lc = { payload, &lits, &tmp, content, tags, (uint32_t)content->n,
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
-    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, payload, fp0, o->diff_len);
+    FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, payload, fp0, o->diff_len);
     while (fw_next(&w)) {
         if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
             uint32_t fpk = (uint32_t)(fp0 + w.pos), k2;
@@ -426,9 +427,9 @@ static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
 }
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
-                       const uint8_t *tob, uint32_t to_size,
-                       const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
-                       int *overflow_out) {
+                const uint8_t *tob, uint32_t to_size,
+                const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+                const OpPC *pc, int32_t fp_start, int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     OpEmitRow *rows = (OpEmitRow *)xmalloc((ops->n ? ops->n : 1) * sizeof(*rows));
@@ -440,7 +441,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     for (size_t step = 0; step < ops->n; step++) {
         we = &walk[opwalk_apply_index(ops->n, FWD, step)];
         op_emit_content(we->o, ops->payload + we->tp, FWD, frm, from_size,
-                        we->fp, we->tp, fd, &content, &tags, &inj);
+                        we->fp, we->tp, fd, ldr, &content, &tags, &inj);
         rows[step] = (OpEmitRow){content.n, inj.n};
     }
     uint8_t L0[256], L1[256];

@@ -76,6 +76,13 @@ typedef struct { Op *v; size_t n, cap; uint8_t *payload; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
 typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
 typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
+/* One entry per aligned source word: distance to its nearest preceding LDR halfword (0 = none). */
+typedef struct {
+    uint16_t *back;
+    size_t nwords;
+    const uint8_t *source;
+    uint32_t source_size;
+} LdrTargetIndex;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
@@ -103,6 +110,7 @@ typedef struct {
     Buf from_df[2], to_df[2];
     FieldDeltaVec fd;
     OpVec raw[PLAN_RAW_N];
+    LdrTargetIndex ldr;
 } PlanPrep;
 typedef struct {
     int ok;
@@ -148,7 +156,8 @@ typedef struct { int type; int32_t delta; } Event;
 typedef struct {
     int fwd; int32_t dl, k;
     const uint8_t *frm; uint32_t from_size;
-    const FieldDeltaVec *fd; const uint8_t *diff; int32_t fp0;
+    const FieldDeltaVec *fd; const LdrTargetIndex *ldr;
+    const uint8_t *diff; int32_t fp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
 /* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
@@ -256,21 +265,30 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
+void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
+void ldr_target_index_free(LdrTargetIndex *idx);
+int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk);
+#ifdef LDR_INDEX_STATS
+void ldr_target_index_stats_report(void);
+#endif
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-             const FieldDeltaVec *fd, const uint8_t *diff, int32_t fp0, int32_t dl);
+             const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+             const uint8_t *diff, int32_t fp0, int32_t dl);
 int fw_next(FieldWalk *w);
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
-                           uint32_t from_size, const uint8_t *tob, uint32_t to_size);
+                           uint32_t from_size, const uint8_t *tob, uint32_t to_size,
+                           const LdrTargetIndex *ldr);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldInjArena *inj, int fwd, uint32_t *tb, int32_t *tv);
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
-                           uint32_t from_size, const FieldDeltaVec *fd);
+                           uint32_t from_size, const FieldDeltaVec *fd,
+                           const LdrTargetIndex *ldr);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to);
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              PlanCaps *caps);
+                              const LdrTargetIndex *ldr, PlanCaps *caps);
 
 void re_init(REnc *r);
 void re_init_count(REnc *r);
@@ -321,7 +339,8 @@ uint32_t bit_price(uint32_t p, int bit);
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
+                const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+                const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa);

@@ -60,6 +60,17 @@ fi
 grep -q '^PLAN_PREP_ORACLE configs=5 normalized=OK fd=OK raw=OK$' "$tmp/prep.err" || {
   echo "check_degrade: plan-preparation oracle did not report OK" >&2; exit 1; }
 
+LDRI="$tmp/ldr-index-probe"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L test-bench/ldr-index-probe.c \
+      $ENC_SEAM_SRCS -Wl,--gc-sections -o "$LDRI" 2>"$tmp/ldr-index-build.log"; then
+  echo "check_degrade: LDR-target index oracle build failed" >&2
+  sed 's/^/    /' "$tmp/ldr-index-build.log" >&2; exit 1
+fi
+if ! "$LDRI" >"$tmp/ldr-index.out" 2>"$tmp/ldr-index.err"; then
+  echo "check_degrade: LDR-target index oracle failed: $(cat "$tmp/ldr-index.err")" >&2; exit 1
+fi
+cat "$tmp/ldr-index.out"
+
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>

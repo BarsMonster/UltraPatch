@@ -23,13 +23,75 @@ static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out)
     return 1;
 }
 
-static int op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl, uint32_t from_size, uint32_t fpk) {
+void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size) {
+    memset(idx, 0, sizeof(*idx));
+    idx->nwords = ((size_t)source_size + 3u) >> 2;
+    idx->back = (uint16_t *)xcalloc(idx->nwords ? idx->nwords : 1u, sizeof(*idx->back));
+    idx->source = source;
+    idx->source_size = source_size;
+#ifdef LDR_INDEX_STATS
+    extern uint64_t ldr_index_builds, ldr_index_build_halfwords;
+    ldr_index_builds++;
+#endif
+    for (uint32_t a = 0; a + 2u <= source_size; a += 2u) {
+#ifdef LDR_INDEX_STATS
+        ldr_index_build_halfwords++;
+#endif
+        uint16_t up = rc_u16le(source + a);
+        if (!rc_thumb_ldr_lit(up)) continue;
+        uint32_t t = (uint32_t)rc_ldr_target((int32_t)a, (int32_t)(up & 0xffu));
+        if (t > source_size || source_size - t < 4u) continue;
+        uint16_t back = (uint16_t)(t - a);           /* exact domain: 2..1024 */
+        uint16_t *slot = &idx->back[t >> 2];
+        if (!*slot || back < *slot) *slot = back;    /* nearest instruction is sufficient */
+    }
+}
+
+void ldr_target_index_free(LdrTargetIndex *idx) {
+    free(idx->back);
+    memset(idx, 0, sizeof(*idx));
+}
+
+#ifdef LDR_INDEX_STATS
+uint64_t ldr_index_builds, ldr_index_build_halfwords;
+uint64_t ldr_index_queries, ldr_index_old_scan_halfwords;
+
+static int old_op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl,
+                              uint32_t from_size, uint32_t fpk) {
     if (fpk + 4u > from_size || !rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
     for (int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2) {
+        ldr_index_old_scan_halfwords++;
         uint16_t up = rc_u16le(frm + a);
         if (rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
     }
     return 0;
+}
+
+void ldr_target_index_stats_report(void) {
+    fprintf(stderr,
+            "LDR_INDEX_STATS builds=%llu build_halfwords=%llu queries=%llu old_scan_halfwords=%llu\n",
+            (unsigned long long)ldr_index_builds,
+            (unsigned long long)ldr_index_build_halfwords,
+            (unsigned long long)ldr_index_queries,
+            (unsigned long long)ldr_index_old_scan_halfwords);
+}
+#endif
+
+int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk) {
+#ifdef LDR_INDEX_STATS
+    ldr_index_queries++;
+#endif
+    int hit = 0;
+    if (fpk <= idx->source_size && idx->source_size - fpk >= 4u &&
+        rc_ldr_target_in_op(fp0, dl, fpk)) {
+        uint16_t back = idx->back[fpk >> 2];
+        hit = back && (int32_t)(fpk - back) >= fp0;
+    }
+#ifdef LDR_INDEX_STATS
+    if (hit != old_op_ldr_targets(idx->source, fp0, dl, idx->source_size, fpk))
+        die("LDR target index mismatch");
+#endif
+    return hit;
 }
 
 static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
@@ -160,7 +222,8 @@ static void preserve_corr_op(PreserveCorrWalk *cw, PreserveFieldCursor *fc, OpPC
 /* diff==NULL forces the window pure (assume-pure classification: a local BL becomes EV_BL, never
  * EV_SBL) — coerce_reloc_literals uses that to detect fields before their literals are zeroed. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldDeltaVec *fd,
-                            const uint8_t *diff, int32_t fp0, int32_t dl, int32_t k) {
+                            const LdrTargetIndex *ldr, const uint8_t *diff,
+                            int32_t fp0, int32_t dl, int32_t k) {
     uint32_t fpk;
     if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
     int pure = !diff || (diff[k] == 0 && diff[k + 1] == 0 && diff[k + 2] == 0 && diff[k + 3] == 0);
@@ -169,7 +232,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
         const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_BL);
         return (Event){ EV_BL, r ? r->delta : 0 };
     }
-    if (pure && op_ldr_targets(frm, fp0, dl, from_size, fpk)) {
+    if (pure && ldr_target_index_query(ldr, fp0, dl, fpk)) {
         const FieldDelta *r = fd_find_kind(fd, fpk, STREAM_LDR);
         return (Event){ EV_EX, r ? r->delta : 0 };
     }
@@ -182,15 +245,18 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
  * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
  * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-                    const FieldDeltaVec *fd, const uint8_t *diff, int32_t fp0, int32_t dl) {
+             const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+             const uint8_t *diff, int32_t fp0, int32_t dl) {
     w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
-    w->frm = frm; w->from_size = from_size; w->fd = fd; w->diff = diff; w->fp0 = fp0;
+    w->frm = frm; w->from_size = from_size; w->fd = fd; w->ldr = ldr;
+    w->diff = diff; w->fp0 = fp0;
 }
 int fw_next(FieldWalk *w) {
     if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
     int32_t a0 = w->fwd ? w->k : w->k - 3;
     if (a0 >= 0 && a0 + 4 <= w->dl) {
-        Event ev = classify_field(w->frm, w->from_size, w->fd, w->diff, w->fp0, w->dl, a0);
+        Event ev = classify_field(w->frm, w->from_size, w->fd, w->ldr,
+                                  w->diff, w->fp0, w->dl, a0);
         if (ev.type != EV_NONE) {
             w->is_field = 1; w->pos = a0; w->ev = ev; w->k += w->fwd ? 4 : -4;
             return 1;
@@ -218,7 +284,8 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
  * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
  * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
-                                  uint32_t from_size, const uint8_t *tob, uint32_t to_size) {
+                           uint32_t from_size, const uint8_t *tob, uint32_t to_size,
+                           const LdrTargetIndex *ldr) {
     /* Append op-derived entries after the already-finalized block-matched entries, then a single
      * fd_finalize: its stable sort keeps the appended op-derived entry after the same-key block
      * entry, and its last-wins dedup makes op-derived override block-matched (and, among op-derived
@@ -238,7 +305,7 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                     fd_put(fd, fpk, STREAM_BL,
                            (int32_t)((uint32_t)rc_bl_imm24s(fu, fl2) - (uint32_t)rc_bl_imm24s(tu, tl)));
                 }
-            } else if (op_ldr_targets(frm, we->fp, we->o->diff_len, from_size, fpk)) {
+            } else if (ldr_target_index_query(ldr, we->fp, we->o->diff_len, fpk)) {
                 fd_put(fd, fpk, STREAM_LDR,
                        (int32_t)(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
             }
@@ -356,7 +423,8 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
 }
 
 void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
-                           uint32_t from_size, const FieldDeltaVec *fd) {
+                           uint32_t from_size, const FieldDeltaVec *fd,
+                           const LdrTargetIndex *ldr) {
     int FWD = ctx->fwd;
     uint8_t *payload = ops->payload;
     int32_t fp0 = 0, tp0 = 0;
@@ -364,7 +432,7 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
         Op *o = &ops->v[oi];
         /* diff==NULL => assume-pure: a still-dirty field classifies as EV_BL/EV_EX so its
          * literals get zeroed here before they would suppress the field on the wire. */
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, NULL, fp0, o->diff_len);
+        FieldWalk w; fw_init(&w, FWD, frm, from_size, fd, ldr, NULL, fp0, o->diff_len);
         while (fw_next(&w)) {
             if (!w.is_field) continue;
             int32_t k = w.pos;
@@ -540,7 +608,7 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              PlanCaps *caps) {
+                              const LdrTargetIndex *ldr, PlanCaps *caps) {
     int FWD = ctx->fwd;
     size_t span = from_size > to_size ? from_size : to_size;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
@@ -560,7 +628,7 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
     for (size_t step = 0; step < ops->n; step++) {
         we = &m[opwalk_apply_index(ops->n, FWD, step)];
         PreserveFieldCursor fc;
-        fw_init(&fc.w, FWD, frm, from_size, fd, ops->payload + we->tp,
+        fw_init(&fc.w, FWD, frm, from_size, fd, ldr, ops->payload + we->tp,
                 we->fp, we->o->diff_len);
         fc.have = 0;
         OpPC *pc = &out[step];

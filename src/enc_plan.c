@@ -33,6 +33,7 @@ static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_
 
 static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
                                            const uint8_t *frm, const FieldDeltaVec *fd,
+                                           const LdrTargetIndex *ldr,
                                            int32_t fp_start, uint32_t from_size, uint32_t to_size,
                                            PlanCaps *caps) {
     int FWD = ctx->fwd;
@@ -40,7 +41,7 @@ static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *t
     /* Derive the preserve total and cutoff from a single preserve_corrections_pc pass over the same
      * folded opwalk+readarr geometry used by body planning. */
     OpPC *pc = preserve_corrections_pc(ctx, ops, fp_start, frm, to->d, fd,
-                                       from_size, to_size, caps);
+                                       from_size, to_size, ldr, caps);
     size_t total = caps->pres_total;
     ctx->deg_pres_needed = total;
     if (total == caps->pres_kept) return pc;
@@ -114,6 +115,7 @@ static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa) {
     memset(prep, 0, sizeof(*prep));
+    ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
     data_format_encode(from, to, pa, &prep->from_df[0], &prep->to_df[0], &prep->fd, 0);
     prep->from_df[1] = prep_buf_clone(&prep->from_df[0]);
     prep->to_df[1] = prep_buf_clone(&prep->to_df[0]);
@@ -151,6 +153,10 @@ void plan_prepare_free(PlanPrep *prep) {
     for (int i = 0; i < 2; i++) { buf_free(&prep->from_df[i]); buf_free(&prep->to_df[i]); }
     free(prep->fd.v);
     for (int i = 0; i < PLAN_RAW_N; i++) opvec_free(&prep->raw[i]);
+    ldr_target_index_free(&prep->ldr);
+#ifdef LDR_INDEX_STATS
+    ldr_target_index_stats_report();
+#endif
     memset(prep, 0, sizeof(*prep));
 }
 
@@ -170,8 +176,9 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     const Buf *from_df = &prep->from_df[masked], *to_df = &prep->to_df[masked];
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
-    if (cfg.variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
-    coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
+    if (cfg.variant >= 1)
+        merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size, &prep->ldr);
+    coerce_reloc_literals(ctx, &ops, from->d, from_size, fd, &prep->ldr);
     return ops;
 }
 
@@ -248,12 +255,13 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
  * computes exactly the untransformed plan (bit-identical wire). */
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
                                const Buf *from, const Buf *to,
-                               const FieldDeltaVec *fd, OpPC *pc, PlanCaps *caps) {
+                               const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
+                               OpPC *pc, PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     for (int pass = 0;; pass++) {
         if (!pc)
             pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d,
-                                         fd, from_size, to_size, caps);
+                                         fd, from_size, to_size, ldr, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
         if (!split_any) break;
@@ -276,12 +284,12 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     OpVec ops = build_candidate_ops(ctx, from, to, prep, cfg, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
-    OpPC *pc = degrade_ops_to_journal_budget(ctx, &ops, to, from->d, &fd,
+    OpPC *pc = degrade_ops_to_journal_budget(ctx, &ops, to, from->d, &fd, &prep->ldr,
                                              fp_start_s, from_size, to_size, &caps);
     /* A fully degraded diff with a nonzero source adjustment leaves a new pure seek.
      * Normalize only the mutated path again; the reusable PC path remains untouched. */
     if (!pc) fp_start_s += fold_zero_ops(&ops);
-    pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, pc, &caps);
+    pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, pc, &caps);
     /* degradation snapshot: load-bearing for direction-sweep pruning and DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
@@ -291,7 +299,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     if (feasible) {
         int emit_overflow = 0;
         body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                           &fd, pc, fp_start_s, &emit_overflow);
+                           &fd, &prep->ldr, pc, fp_start_s, &emit_overflow);
         if (emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
