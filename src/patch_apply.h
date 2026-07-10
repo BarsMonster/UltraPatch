@@ -76,14 +76,14 @@ typedef struct { uint32_t range, code; } up_RangeDec;
  * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
  * dict array is outside the struct so bl/ex get separate caps (distinct-value peaks: bl 180, ex 106). */
 
-/* JSLOTS is configured above (one shared define, used by encoder and decoder alike). The ENCODER
- * plans against this same budget and DEGRADES over-budget plans host-side (over-budget reads ship
- * as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly here
- * (REJ_RESOURCE). */
+/* JSLOTS is configured above. Encoder and decoder builds MUST use the same macro name/value; the
+ * encoder plans against that budget and DEGRADES over-budget plans host-side (over-budget reads
+ * ship as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly
+ * here (REJ_RESOURCE). */
 #define UP_JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
 /* LZSS window W (defined here so up_ApplyState can size the apply phase). Default value above
- * keeps the decoder within the 12 KiB SRAM cap; WINDOW_LOG is a single shared knob, so the encoder's
- * distance coding uses the exact same window by construction. */
+ * keeps the decoder within the 12 KiB SRAM cap; encoder and decoder builds MUST use the same
+ * WINDOW_LOG value so distance coding uses the exact same window. */
 /* WINDOW_LOG is configured above. */
 #define UP_RING (1u<<WINDOW_LOG)
 #define UP_MASK (UP_RING-1u)
@@ -418,19 +418,19 @@ static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 /* not-yet-overwritten source bytes come straight from flash. Each resident output page is   */
 /* committed with one full-page call. The page buffers use OUTROW * OUTROW_DEPTH bytes.       */
 /* ===================================================================================== */
-/* OUTROW is configured above (one shared define, used by encoder and decoder alike). */
+/* OUTROW is configured above; encoder and decoder builds MUST use the same value. */
 /* Page-window depth — keep the last OUTROW_DEPTH pages uncommitted. Monotonic writes touch
  * pages in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (page_number % D) is an
  * exact FIFO: the slot's previous occupant is always the page exactly D pages behind,
  * committed on eviction. The point: OLD flash content of uncommitted pages stays physically
  * readable through up_hy_src_peek's physical flash read, and the ENCODER's row_covered oracle
  * exploits exactly that window (journal-free old reads behind the frontier).
- * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH is one shared define pair, used by
- * the encoder's row_covered oracle and the decoder alike, so the uncommitted-window
- * assumption matches by construction. A hardware page-size change requires matching encoder and
- * decoder builds. A deeper ring is a monotone-safe superset; a smaller window rejects via
- * CRC32(to), never silent-wrong. */
-/* OUTROW_DEPTH is configured above (one shared define, used by encoder and decoder alike). */
+ * ENCODING-AFFECTING BUILD CONTRACT: the encoder's row_covered oracle and decoder both use
+ * OUTROW x OUTROW_DEPTH. Their builds MUST use the same macro names/values so the uncommitted-
+ * window assumption matches. A hardware page-size change requires matching encoder and decoder
+ * builds. A deeper ring is a monotone-safe superset; a smaller window rejects via CRC32(to), never
+ * silent-wrong. */
+/* OUTROW_DEPTH is configured above; encoder and decoder builds MUST use the same value. */
 #define UP_OROW_NONE UINT32_MAX
 #define UP_OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
 /* UP_OROW_SLOT / up_out_read / up_out_write use /OUTROW and %OUTROW_DEPTH; both must stay powers of two so

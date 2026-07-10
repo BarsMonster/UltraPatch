@@ -32,6 +32,8 @@ Record the complete output in the release notes. The gate must report:
 - `golden wire`: OK against the committed `test-bench/golden.sha256` (the wire
   freeze — an unexplained mismatch blocks release)
 - `model contract`: OK for shared model/default-cap invariants
+- `wire config override`: OK for one nondefault same-name/same-value override
+  across encoder plus source, generated, and Cortex-M0+ ARM decoder compile paths
 - ARM integration shape and `.text/.data/.bss`
 - ARM soft-divide count
 - `matrix round-trips`: `256/256`
@@ -52,6 +54,13 @@ Also run before release (not part of `make gate`):
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
+
+Record the release `WIRE_CONFIG_FLAGS` value. The encoder and decoder **MUST**
+use the exact same wire macro names with the exact same values; the target
+family, `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`,
+`DR_KCAP_BL`, `DR_KCAP_EX`, and any wire-model override belong in that shared
+value. `PATCH_IMAGE_BASE` is decoder-only integration configuration and must stay
+separate from the wire flags.
 
 ## Corpus Bundle
 

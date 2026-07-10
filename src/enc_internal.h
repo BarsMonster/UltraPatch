@@ -14,9 +14,9 @@
 
 #include "rc_models.h"
 
-/* The encoder uses the shared decoder knobs (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
- * directly from patch_config.h — there is exactly one define per knob, so encoder and decoder
- * cannot disagree by construction. */
+/* The encoder uses the shared wire knobs directly from patch_config.h. Explicit overrides MUST
+ * use the same macro names and values in encoder and decoder builds (WIRE_CONFIG_FLAGS in the
+ * repository Makefile); PATCH_IMAGE_BASE is decoder-only and is not part of this contract. */
 
 /* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32, so these host-only
  * readers stay out of the shipped decoder headers (rc_u32le_put IS decoder-used and remains in

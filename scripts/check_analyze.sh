@@ -19,14 +19,16 @@
 # target). Auto-skips (success) where gcc -fanalyzer is unavailable.
 set -u
 
-: "${CC:?check_analyze.sh: CC not set — run 'make check-analyze' (it supplies CC/CONTRACT_FLAGS)}"
+: "${CC:?check_analyze.sh: CC not set — run 'make check-analyze' (it supplies the build flags)}"
 : "${CONTRACT_FLAGS:?check_analyze.sh: CONTRACT_FLAGS not set — run 'make check-analyze'}"
+: "${WIRE_CONFIG_FLAGS:?check_analyze.sh: WIRE_CONFIG_FLAGS not set — run 'make check-analyze'}"
+: "${DECODER_CONFIG_FLAGS:?check_analyze.sh: DECODER_CONFIG_FLAGS not set — run 'make check-analyze'}"
 if ! "$CC" -fanalyzer -x c -c /dev/null -o /dev/null >/dev/null 2>&1; then
     echo "analyze=SKIPPED (no working '$CC -fanalyzer')"
     exit 0
 fi
 
-COMMON="$CONTRACT_FLAGS -fanalyzer -Wno-analyzer-tainted-assertion -c -o /dev/null"
+COMMON="$CONTRACT_FLAGS $WIRE_CONFIG_FLAGS -fanalyzer -Wno-analyzer-tainted-assertion -c -o /dev/null"
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 rc=0
@@ -50,8 +52,8 @@ analyze src/patch_generate.c ""
 for m in $ENC_MODULES; do
     analyze "$m" ""
 done
-analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L"
-analyze src/patch_host_backend.c "-D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN"
+analyze src/patch_host_backend.c "$DECODER_CONFIG_FLAGS -D_POSIX_C_SOURCE=200809L"
+analyze src/patch_host_backend.c "$DECODER_CONFIG_FLAGS -D_POSIX_C_SOURCE=200809L -DPATCH_APPLY_DEMO_MAIN"
 
 w="$(grep -c 'warning:' "$log" 2>/dev/null || true)"
 if [ "$rc" -ne 0 ] || [ "$w" -ne 0 ]; then

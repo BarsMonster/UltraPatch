@@ -130,8 +130,9 @@ enum {
 
 #include "seed_prob_probe.inc"
 
-/* Encoder and decoder share one define per knob (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW, OUTROW_DEPTH)
- * from patch_config.h, so a wire-knob mismatch is impossible by construction — no mirror asserts. */
+/* Encoder and decoder consume the same knob names (WINDOW_LOG, JSLOTS, OPC_CAP, OUTROW,
+ * OUTROW_DEPTH, DR_KCAP_BL, DR_KCAP_EX) from patch_config.h. Repository overrides travel through
+ * one WIRE_CONFIG_FLAGS value, so this combined probe needs no per-side mirror asserts. */
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }

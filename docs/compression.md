@@ -109,9 +109,8 @@ floor, not the product metric (see `make gate`).
 
 ```sh
 # ultrapatch at a given window (single shared knob moves encoder+decoder):
-gcc -DCORTEX_M0 -std=c99 -I. -Isrc -Ivendor/libdivsufsort -O2 -D_POSIX_C_SOURCE=200809L \
-    -DWINDOW_LOG=10 src/patch_generate.c src/enc_*.c src/patch_host_backend.c \
-    vendor/libdivsufsort/divsufsort.c -o up10
+make -B WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10'
+cp ultrapatch up10
 : > empty.bin
 for f in test-bench/images/img_*/watch.bin; do ./up10 empty.bin "$f" /tmp/b.blob; \
     stat -c%s /tmp/b.blob; done | paste -sd+ | bc

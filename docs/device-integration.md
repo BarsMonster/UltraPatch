@@ -279,6 +279,27 @@ fields. `CORTEX_M4` is reserved for a future Thumb-2 wire revision that would
 change the wire format; it is currently rejected at compile time by a second
 `#error` in `patch_config.h`.
 
+**Shared override rule (mandatory).** Encoder and decoder builds **MUST** use
+the exact same wire macro names with the exact same values. In the repository,
+put every explicit wire override in the one `WIRE_CONFIG_FLAGS` value, for
+example:
+
+```sh
+make WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10 -DJSLOTS=768u'
+```
+
+This rule covers `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`,
+`OUTROW_DEPTH`, `DR_KCAP_BL`, `DR_KCAP_EX`, the target family, and any
+wire-affecting model override. Do not create encoder/decoder aliases or pass an
+override to only one side. `src/patch_config.h` remains the single source of
+defaults.
+
+`PATCH_IMAGE_BASE` is the explicit exception: it is decoder-only device address
+integration configuration and is not a wire macro. Set it for the decoder TU,
+never mirror it into an encoder-specific profile. Repository host and ARM
+decoder harnesses keep it separately in
+`DECODER_CONFIG_FLAGS=-DPATCH_IMAGE_BASE=0u`.
+
 The decoder defaults and wire-model helpers are shared through
 `src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only source
 header application code includes. To ship one physical public header, run:
@@ -294,7 +315,8 @@ The encoder uses the same source headers, and model/golden gates enforce
 bit-exactness.
 
 The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, used by
-both the decoder and the encoder's distance coding, so the two cannot disagree.
+both the decoder and the encoder's distance coding; matching builds therefore use the
+same name and value.
 The production default is `WINDOW_LOG=10`, and `make gate` verifies it.
 
 **NVM page window (encoding-affecting).** The decoder keeps its last
@@ -302,7 +324,7 @@ The production default is `WINDOW_LOG=10`, and `make gate` verifies it.
 encoder's plans exploit the fact that the OLD flash content of uncommitted
 pages is still physically readable (journal-free reads behind the write
 frontier). `OUTROW` is also the public flash-program page size.
-`OUTROW` and `OUTROW_DEPTH` are single shared defines used by both
+`OUTROW` and `OUTROW_DEPTH` are shared defines used by both
 the encoder's `row_covered` oracle and the decoder — production default
 256 x 2 (512 B of page buffers in `.bss`) — so the window assumption matches by
 construction. A hardware page-size change therefore requires matching encoder
@@ -311,9 +333,9 @@ smaller window rejects at the `CRC32(to)` gate rather than silently accepting a
 wrong image.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
-intentional reject limits on the decoder. Each is a single shared define in
+intentional reject limits on the decoder. Each is a shared define in
 `src/patch_config.h`, so the encoder plans against the exact same cap (retune
-the one define to move both sides together)
+through `WIRE_CONFIG_FLAGS` to move both sides together)
 and degrades gracefully instead of refusing where the plan allows it: reads
 that would overflow the journal budget ship as plain extra bytes, and ops
 whose per-op corrections exceed `OPC_CAP` are split — worse compression, never

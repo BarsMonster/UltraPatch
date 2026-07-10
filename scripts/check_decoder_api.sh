@@ -68,7 +68,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$tmp/contract-single" $args >"$tmp/single.out"
     cmp "$tmp/source.out" "$tmp/single.out"
 
-    capflags="-DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
+    capflags="-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
     "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-source"
     "$CC" $common $capflags -DDECODER_SINGLE_HEADER -I"$tmp" test-bench/decoder-contract.c \
         -Wl,--gc-sections -o "$tmp/cap-single"

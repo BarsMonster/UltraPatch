@@ -38,6 +38,14 @@ By default this writes `artifacts/patch_apply_single.h`, containing
 `patch_config.h`, `rc_models.h`, and `patch_apply.h` in dependency order. The
 contract test compiles this artifact without the `src/` include path.
 
+`WIRE_CONFIG_FLAGS` is the single repository build path for wire-affecting
+overrides and defaults to `-DCORTEX_M0`. Encoder and decoder builds **MUST** use
+the exact same macro names with the exact same values for `WINDOW_LOG`,
+`JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`, `DR_KCAP_BL`, `DR_KCAP_EX`, the
+target family, and any wire-model override. `PATCH_IMAGE_BASE` is separate,
+decoder-only device integration configuration; repository decoder harnesses use
+`DECODER_CONFIG_FLAGS=-DPATCH_IMAGE_BASE=0u`.
+
 CLI:
 
 ```sh

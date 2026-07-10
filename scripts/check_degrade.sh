@@ -199,17 +199,17 @@ fail=0
 note() { echo "check_degrade: $*" >&2; }
 bad()  { echo "DEGRADE FAILURE: $*" >&2; fail=$((fail+1)); }
 
-# Derive the journal-degradation budget from the shared JSLOTS knob (one define, used by both
-# encoder and decoder) rather than hand-mirroring it.
-JBUDGET=$(sed -n 's/^#define[[:space:]]\+JSLOTS[[:space:]]\+\([0-9][0-9]*\)u\?.*/\1/p' \
-  "$(dirname "$0")/../src/patch_config.h" | head -1)
-[ -n "$JBUDGET" ] || { echo "check_degrade: JSLOTS not found in src/patch_config.h" >&2; exit 2; }
+# Derive the journal-degradation budget through the same preprocessor flags as the encoder and
+# decoder, so an explicit WIRE_CONFIG_FLAGS override reaches this probe too.
+JBUDGET=$(printf '%s\n' '#include "patch_config.h"' 'JSLOTS' | \
+  $CC_HOST $CFLAGS -E -P -x c - | sed -n 's/^\([0-9][0-9]*\)u\{0,1\}$/\1/p' | tail -1)
+[ -n "$JBUDGET" ] || { echo "check_degrade: JSLOTS did not preprocess to an integer" >&2; exit 2; }
 
 # ---- variant D=1 decoder (OUTROW_DEPTH=1): a strictly smaller uncommitted window than the
 # production D=2 build. Same source as the host backend, its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
 D1="$tmp/ultrapatch_d1_decode"
-if ! $CC_HOST $CONTRACT_FLAGS $OPT $DEC_DEMO_DEFINES -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
+if ! $CC_HOST $CFLAGS $DEC_DEMO_DEFINES -UOUTROW_DEPTH -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
       -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1

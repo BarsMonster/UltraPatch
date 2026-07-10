@@ -24,11 +24,13 @@
 #define MAX_IMAGE (64u<<20)
 #endif
 
-/* Wire-affecting knobs. Each is a SINGLE shared define used by both the decoder and the host
- * encoder (encoder TUs reach these via rc_models.h -> patch_config.h), so encoder and decoder
- * cannot disagree about the wire. Each stays overridable with a matching -D, which moves BOTH
- * sides at once. WINDOW_LOG is the LZ window log; JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the
- * encoder plans against; OUTROW x OUTROW_DEPTH is the uncommitted NVM page window. */
+/* Wire-affecting knobs. These defaults are shared by the decoder and host encoder (encoder TUs
+ * reach them via rc_models.h -> patch_config.h). An explicit override MUST use the exact SAME
+ * macro name with the exact SAME value in both builds; the repository Makefile provides the one
+ * WIRE_CONFIG_FLAGS path for that purpose. PATCH_IMAGE_BASE is deliberately absent: it is
+ * decoder/device integration configuration, not a wire macro. WINDOW_LOG is the LZ window log;
+ * JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the encoder plans against; OUTROW x
+ * OUTROW_DEPTH is the uncommitted NVM page window. */
 #ifndef WINDOW_LOG
 #define WINDOW_LOG 10
 #endif

@@ -3,11 +3,20 @@
 # SPDX-License-Identifier: MIT
 
 CC = $(CROSS_COMPILE)gcc
+ARM_CC ?= arm-none-eabi-gcc
 
 OPT ?= -O2
-# Semantic build-contract flags, single-sourced into CFLAGS below and the analyzer leg (warning/optimization policy stays leg-local).
-CONTRACT_FLAGS := -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -std=c99 -I. -Isrc -Ivendor/libdivsufsort
+# Every wire-affecting override belongs here, under the exact macro name consumed by
+# patch_config.h/rc_models.h. Encoder and decoder builds MUST use this same value.
+WIRE_CONFIG_FLAGS ?= -DCORTEX_M0
+# Decoder/device integration only: this address is not part of the patch wire. Repository
+# host/ARM harnesses intentionally model an image based at zero.
+DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u
+# Language/include contract shared by host builds and the analyzer. Warning/optimization policy
+# stays leg-local; decoder-containing commands append DECODER_CONFIG_FLAGS explicitly.
+CONTRACT_FLAGS := -std=c99 -I. -Isrc -Ivendor/libdivsufsort
 CFLAGS += $(CONTRACT_FLAGS)
+CFLAGS += $(WIRE_CONFIG_FLAGS)
 CFLAGS += -g
 CFLAGS += -Wall
 CFLAGS += -Wextra
@@ -20,6 +29,7 @@ CFLAGS += $(OPT)
 CFLAGS += -ffunction-sections
 CFLAGS += -fdata-sections
 CFLAGS += $(CFLAGS_EXTRA)
+DECODER_CFLAGS = $(CFLAGS) $(DECODER_CONFIG_FLAGS)
 LDFLAGS += -Wl,--gc-sections
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
@@ -69,7 +79,7 @@ BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
-ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -I src
+ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb $(WIRE_CONFIG_FLAGS) $(DECODER_CONFIG_FLAGS) -I src
 ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
 ARM_LINK_LAYOUT := scripts/arm_link.ld
 # The production ARM size gate intentionally measures the static-state wrapper integration
@@ -92,6 +102,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 # longer default): GATE_TIMEOUT=<secs> make <target>.
 GATE_TIMEOUT ?= 60
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
+          check-wire-config \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -101,14 +112,26 @@ $(CAPPED): %:
 	exit $$s
 
 all-internal: ultrapatch
-	$(CC) $(CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
+	$(CC) $(DECODER_CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
 	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
+WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
+                           -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
+.PHONY: check-wire-config-probe-internal
+check-wire-config-internal:
+	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(WIRE_CONFIG_PROBE_FLAGS)' \
+		check-wire-config-probe-internal
+
+check-wire-config-probe-internal: scripts/check_wire_config.sh scripts/gen_single_header.py $(DECODER_PUBLIC_HDRS)
+	@CC="$(CC)" CFLAGS="$(CFLAGS)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
+	  SINGLE_DECODER_CFLAGS="$(filter-out -Isrc,$(DECODER_CFLAGS))" \
+	  ARM_CC="$(ARM_CC)" ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" scripts/check_wire_config.sh
+
 ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU)
-	$(CC) $(CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
+	$(CC) $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
 
 check-internal: ultrapatch
 	@set -e; \
@@ -134,7 +157,7 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
-	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
@@ -153,8 +176,8 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm.dump" || true); \
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
-	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
-	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -nostdlib \
+	$(ARM_CC) $(ARM_DEC_FLAGS) -Os -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
+	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
 		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm.map" \
 		"$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm.elf"; \
 	linked_size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.elf"); \
@@ -191,8 +214,8 @@ check-stack-internal:
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	$(STACK_GENERIC_HARNESS); \
-	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
-	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
 	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
 	python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
 	echo "stack_static_integration=static PatchApply wrapper"; \
@@ -253,32 +276,32 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 		} > "$$csrc"; \
 		if [ "$$inc" = "$$singlehdr" ]; then \
-			$(CC) $(filter-out -Isrc,$(CFLAGS)) -Wconversion -DCORTEX_M0 -I"$$singledir" -c "$$csrc" -o "$$obj"; \
-			$(CC) $(filter-out -Isrc,$(CFLAGS)) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -I"$$singledir" -c "$$csrc" -o "$$obj"; \
+			$(CC) $(filter-out -Isrc,$(DECODER_CFLAGS)) -Wconversion -I"$$singledir" -c "$$csrc" -o "$$obj"; \
+			$(CC) $(filter-out -Isrc,$(DECODER_CFLAGS)) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -I"$$singledir" -c "$$csrc" -o "$$obj"; \
 		else \
-			$(CC) $(CFLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
-			$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
+			$(CC) $(DECODER_CFLAGS) -Wconversion -Isrc -c "$$csrc" -o "$$obj"; \
+			$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -Isrc -c "$$csrc" -o "$$obj"; \
 		fi; \
 	done; \
-	if $(CC) $(filter-out -DPATCH_IMAGE_BASE=0u,$(CFLAGS)) -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-base.o" >/dev/null 2>&1; then \
+	if $(CC) $(CFLAGS) -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted missing PATCH_IMAGE_BASE" >&2; exit 1; \
 	fi; \
-	if $(CC) $(CFLAGS) -UPATCH_IMAGE_BASE -DPATCH_IMAGE_BASE=1u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-base.o" >/dev/null 2>&1; then \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=1u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted unaligned PATCH_IMAGE_BASE" >&2; exit 1; \
 	fi; \
-	if $(CC) $(CFLAGS) -UPATCH_IMAGE_BASE -DPATCH_IMAGE_BASE=0xffffff00u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0xffffff00u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted PATCH_IMAGE_BASE without MAX_IMAGE address headroom" >&2; exit 1; \
 	fi; \
-	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -DCORTEX_M0 -Isrc -E "$$tmp/patch_apply_smoke.c" | \
+	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Isrc -E "$$tmp/patch_apply_smoke.c" | \
 	awk '/^# [0-9]+ "/ { inours = ($$3 ~ /"src\//) } \
 	     inours { line = $$0; gsub(/__builtin_offsetof/, "", line); \
 	              if (line ~ /__attribute__|__builtin_/) { print "GNU construct in portable decoder build: " $$0; bad=1 } } \
 	     END { exit bad ? 1 : 0 }'; \
-	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) $(DEC_DEMO_DEFINES) \
+	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) $(DEC_DEMO_DEFINES) \
 	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
-	CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
+	CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
 	echo "decoder_address_contract=OK (mandatory + aligned + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
@@ -286,11 +309,11 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 # Pointer-rich in-memory decoder/backend contract under dynamic sanitizers. Standalone so its
 # instrumented compile does not contend with the CPU-saturated corpus workers in `make gate`.
 check-decoder-sanitize-internal: ultrapatch
-	@CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" \
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
 
 check-models-internal:
-	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_models.sh
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh
 
 check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
@@ -320,7 +343,7 @@ check-edge-internal: ultrapatch
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: ultrapatch
-	@CC="$(CC)" CFLAGS="$(CFLAGS)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" OPT="$(OPT)" \
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" \
 	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
 	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
 
@@ -389,7 +412,7 @@ check-corpus-internal: ultrapatch check-ab-matrix-internal
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
 # check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
-# check-models, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
+# check-models, check-wire-config, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
 # matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, home per-pair better/worse/equal
 # split vs CORPUS_SIZE_BASELINE with zero worse pairs allowed, foreign_total vs
@@ -412,7 +435,8 @@ gate-internal: all-internal
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
-	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
+	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" WIRE_CONFIG_FLAGS="$(WIRE_CONFIG_FLAGS)" \
+	  DECODER_CONFIG_FLAGS="$(DECODER_CONFIG_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
 
 clean-internal:
 	rm -f ultrapatch $(DECODER_SINGLE_HDR)
