@@ -163,6 +163,10 @@ typedef struct {
     int out_en;
 } PriceTab;
 
+/* Immutable time-0 literal trees for one source image. Every pricing/emission simulation copies
+ * these into a fresh Models instance before adapting it; adapted state is never shared. */
+typedef struct { up_BitTree lit0, lit1; } LitSeedTrees;
+
 typedef struct {
     up_BitTree lit0[LIT0_CTX], lit1;
     up_PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
@@ -260,6 +264,7 @@ Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
 void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate);
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t);
+void lit_seed_trees_init(LitSeedTrees *s, const uint8_t *frm, size_t n);
 void ugr_init_e(up_UGRice *g, int k);
 void ugg_init_e(up_UGGamma *g);
 void ugr_encode(up_UGRice *g, REnc *r, uint32_t v);
@@ -267,14 +272,14 @@ void ugg_encode(up_UGGamma *g, REnc *r, uint32_t v);
 uint32_t ug_bit_xfer(REnc *r, uint16_t *prob, int bit, int adapt);
 uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int adapt);
 void fl_encode(up_Flag1 *f, REnc *r, int b);
-void models_init_content(Models *m, const uint8_t *frm, uint32_t from_size, int kd, int ko);
+void models_init_content(Models *m, const LitSeedTrees *seeds, int kd, int ko);
 uint32_t ugr_price(const up_UGRice *g, uint32_t v);
 uint32_t ugg_price(const up_UGGamma *g, uint32_t v);
 uint32_t bt_price_static(const up_BitTree *t, uint8_t byte);
 uint32_t bit_price_update(uint16_t *prob, int bit, int rate);
 uint64_t bt_price_update(up_BitTree *t, uint8_t byte, int rate);
 
-void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]);
+void from_lit_proxy_bits(const LitSeedTrees *seeds, uint8_t L0[256], uint8_t L1[256]);
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
                          Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp);
@@ -284,7 +289,7 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                     const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
                     OCandArena *oc_out, uint8_t **noc_out);
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
-                    const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt);
+                    const LitSeedTrees *seeds, int dk, int ko, PriceTab *pt);
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                          const CandArena *cands, const uint8_t *ncand,
                          const OCandArena *ocands, const uint8_t *nocand,

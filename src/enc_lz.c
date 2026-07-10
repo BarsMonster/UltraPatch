@@ -298,13 +298,10 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
  * 1/64-bit fixed point (PR_SCALE); round to nearest integer bit (floor 1, like a Huffman length) so
  * the proxy mixes cleanly with the integer gamma/flag/distance bit-lengths in the bootstrap parse
  * and the split_nonzero_diff_runs DP. Max seeded byte price is ~96 bits, well within uint8. */
-void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t L1[256]) {
-    up_BitTree t0, t1;
-    lit_tree_seed_e(frm, n, 0, &t0);
-    lit_tree_seed_e(frm, n, 1, &t1);
+void from_lit_proxy_bits(const LitSeedTrees *seeds, uint8_t L0[256], uint8_t L1[256]) {
     for (int b = 0; b < 256; b++) {
-        uint32_t p0 = (bt_price_static(&t0, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
-        uint32_t p1 = (bt_price_static(&t1, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        uint32_t p0 = (bt_price_static(&seeds->lit0, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
+        uint32_t p1 = (bt_price_static(&seeds->lit1, (uint8_t)b) + PR_SCALE / 2) / PR_SCALE;
         L0[b] = (uint8_t)(p0 < 1 ? 1 : (p0 > 255 ? 255 : p0));
         L1[b] = (uint8_t)(p1 < 1 ? 1 : (p1 > 255 ? 255 : p1));
     }
@@ -313,10 +310,10 @@ void from_lit_proxy_bits(const uint8_t *frm, size_t n, uint8_t L0[256], uint8_t 
 /* Simulate the real adaptive content models over a token sequence to obtain steady-state
  * probabilities and average flag prices; fill a PriceTab for the next DP pass. */
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
-                           const uint8_t *frm, size_t from_size, int dk, int ko, PriceTab *pt) {
+                    const LitSeedTrees *seeds, int dk, int ko, PriceTab *pt) {
     Models M;
     memset(&M, 0, sizeof(M));
-    models_init_content(&M, frm, (uint32_t)from_size, dk, ko);
+    models_init_content(&M, seeds, dk, ko);
     REnc r; re_init(&r);                 /* drives adaptation; emitted bytes discarded */
     /* token count (seq->n) is no longer on the wire (Feature 7A); the old raw count bits touched
      * no adaptive model, so dropping them leaves every price unchanged. */

@@ -400,8 +400,10 @@ enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to) {
     uint8_t L0[256], L1[256];
+    LitSeedTrees seeds;
     uint8_t *payload = ops->payload;
-    from_lit_proxy_bits(from->d, from->n, L0, L1);
+    lit_seed_trees_init(&seeds, from->d, from->n);
+    from_lit_proxy_bits(&seeds, L0, L1);
     OpVec out = { .payload = payload };
     int32_t tp = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {

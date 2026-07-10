@@ -196,14 +196,14 @@ static int32_t smap_resid(const uint32_t *mb, const int32_t *mv, int mn,
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
-                     const uint8_t *frm, uint32_t from_size,
+                     const LitSeedTrees *seeds,
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const OpEmitRow *rows, const FieldInjArena *inj,
                      const uint32_t *mb, const int32_t *mv, int mn,
                      int *overflow) {
     Models M;
     memset(&M, 0, sizeof(M));
-    models_init_content(&M, frm, from_size, kd, ko);   /* literal trees + token-loop models */
+    models_init_content(&M, seeds, kd, ko);   /* fresh literal trees + token-loop models */
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
     ugg_init_e(&M.pre.gdl); ugg_init_e(&M.pre.gadj);   /* borrowed NEUTRAL to code the map header below;
@@ -257,8 +257,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
 
 typedef struct {
     const OpVec *ops;
-    const uint8_t *frm;
-    uint32_t from_size;
+    const LitSeedTrees *seeds;
     const OpPC *pc;
     const Buf *content;
     const Buf *tags;
@@ -269,7 +268,7 @@ typedef struct {
 static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
                              const FieldInjArena *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     int overflow = 0;
-    Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->frm, m->from_size, m->pc,
+    Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->seeds, m->pc,
                          m->content, m->tags, m->rows, inj, mb, mv, mn, &overflow);
     size_t n = overflow ? (size_t)-1 : body.n;
     buf_free(&body);
@@ -447,7 +446,9 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         rows[step] = (OpEmitRow){content.n, inj.n};
     }
     uint8_t L0[256], L1[256];
-    from_lit_proxy_bits(frm, from_size, L0, L1);
+    LitSeedTrees seeds;
+    lit_seed_trees_init(&seeds, frm, from_size);
+    from_lit_proxy_bits(&seeds, L0, L1);
     int kd = 0;
     int ko = bitlen32(to_size ? to_size : 1); ko = ko > 2 ? ko - 2 : 0; if (ko > 15) ko = 15;
     CandArena cands = {0}; uint8_t *ncand = NULL;
@@ -471,7 +472,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     OCandArena ocands = {0}; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, ops, walk, rows, FWD,
                    tob, to_size, frm, from_size, &ocands, &nocand);
-    EmitBodyMeasure meas = { ops, frm, from_size, pc, &content, &tags, rows, FWD };
+    EmitBodyMeasure meas = { ops, &seeds, pc, &content, &tags, rows, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
@@ -489,7 +490,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
             for (int pass = 0; pass < 16; pass++) {
                 PriceTab pt;
                 pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = price_out_en;
-                measure_prices(&seq, content.d, tags.d, frm, from_size, kd, ko, &pt);
+                measure_prices(&seq, content.d, tags.d, &seeds, kd, ko, &pt);
                 TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, &cands, ncand, &ocands, noc, &pt);
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
@@ -536,7 +537,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const uint32_t *sel_b = use_map >= 0 ? map_b[use_map] : NULL;
     const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
     int sel_n = use_map >= 0 ? map_n[use_map] : 0;
-    Buf body = emit_body(&seq, kd, ko, ops, FWD, frm, from_size, pc, &content, &tags, rows,
+    Buf body = emit_body(&seq, kd, ko, ops, FWD, &seeds, pc, &content, &tags, rows,
                          &inj, sel_b, sel_v, sel_n, overflow_out);
     free(inj.v);
     buf_free(&ocands); free(nocand);
