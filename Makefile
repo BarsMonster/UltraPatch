@@ -104,9 +104,17 @@ IMAGES ?= test-bench/images
 FOREIGN ?= test-bench/foreign
 CORPUS_MANIFEST ?= test-bench/corpus.sha256
 FOREIGN_MANIFEST ?= test-bench/foreign.sha256
+CORPUS_INVENTORY ?= test-bench/release-inventory.tsv
 CORPUS_SIZE_BASELINE ?= test-bench/home-size-baseline.tsv
 CORPUS_WIRE_MANIFEST ?= test-bench/corpus-wire.sha256
+GOLDEN_MANIFEST ?= test-bench/golden.sha256
 
+# Release scope pins. The inventory names every member in order; these cardinalities make a
+# deletion or reduced release set an explicit policy change rather than a self-consistent shrink.
+BASE_RELEASE_FIXTURES ?= 2
+BASE_RELEASE_HOME_IMAGES ?= 16
+BASE_RELEASE_FOREIGN_IMAGES ?= 18
+BASE_RELEASE_GOLDEN_BLOBS ?= 8
 BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
@@ -149,7 +157,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
-          check-wire-config check-build-profile check-release-profile check-release-gate-contract \
+          check-wire-config check-build-profile check-release-profile check-release-gate-contract check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
@@ -205,7 +213,8 @@ WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=8
 # separately proves the exact compiler versions, flags, and multilib contents.
 override RELEASE_GATE_FIXED_VARS := \
 	FIXTURES IMAGES FOREIGN CORPUS_MANIFEST FOREIGN_MANIFEST \
-	CORPUS_SIZE_BASELINE CORPUS_WIRE_MANIFEST \
+	CORPUS_INVENTORY CORPUS_SIZE_BASELINE CORPUS_WIRE_MANIFEST GOLDEN_MANIFEST \
+	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
@@ -217,7 +226,7 @@ override RELEASE_GATE_FIXED_VARS := \
 	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
 	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS
 override RELEASE_GATE_UNSET_VARS := \
-	CROSS_COMPILE CFLAGS_EXTRA GOLDEN_MANIFEST CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
+	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
 	REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
 
@@ -235,6 +244,19 @@ release-gate-inputs-internal:
 
 check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh
 	@MAKE="$(MAKE)" scripts/check_release_gate_contract.sh
+
+check-release-inventory-internal: scripts/check_release_inventory.py $(CORPUS_INVENTORY) \
+                                  $(CORPUS_MANIFEST) $(FOREIGN_MANIFEST) \
+                                  $(CORPUS_SIZE_BASELINE) $(CORPUS_WIRE_MANIFEST) $(GOLDEN_MANIFEST)
+	@python3 scripts/check_release_inventory.py \
+	  --inventory "$(CORPUS_INVENTORY)" \
+	  --corpus-assets "$(CORPUS_MANIFEST)" --foreign-assets "$(FOREIGN_MANIFEST)" \
+	  --home-sizes "$(CORPUS_SIZE_BASELINE)" --wire "$(CORPUS_WIRE_MANIFEST)" \
+	  --golden "$(GOLDEN_MANIFEST)" --home-total "$(BASE_FULL_TOTAL)" \
+	  --oneface-grow "$(BASE_ONEFACE_GROW)" --oneface-revert "$(BASE_ONEFACE_REVERT)" \
+	  --fixtures "$(BASE_RELEASE_FIXTURES)" --home-images "$(BASE_RELEASE_HOME_IMAGES)" \
+	  --foreign-images "$(BASE_RELEASE_FOREIGN_IMAGES)" \
+	  --golden-blobs "$(BASE_RELEASE_GOLDEN_BLOBS)"
 
 .PHONY: check-wire-config-probe-internal
 check-wire-config-internal:
@@ -506,7 +528,8 @@ check-degrade-internal: ultrapatch
 # then atomically replaces each completed file. Update the printed Makefile aggregate/one-face
 # ratchets and commit all of them in the SAME commit.
 check-golden-internal: ultrapatch
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$(GOLDEN_MANIFEST)" \
+	  scripts/check_golden.sh check
 
 # Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
 # measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.
@@ -523,9 +546,11 @@ golden-update-internal: ultrapatch
 	  CORPUS_SIZE_DUMP="$$tmp/home-size-baseline.tsv" CORPUS_WIRE_MANIFEST="" \
 	  CORPUS_WIRE_DUMP="$$tmp/corpus-wire.sha256" BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" \
 	  ./check_corpus.sh $(JOBS) >"$$tmp/corpus.out"; \
-	test "$$(wc -l <"$$tmp/golden.sha256")" -eq 8; \
-	test "$$(wc -l <"$$tmp/home-size-baseline.tsv")" -eq 256; \
-	test "$$(wc -l <"$$tmp/corpus-wire.sha256")" -eq 290; \
+	home_pairs=$$(( $(BASE_RELEASE_HOME_IMAGES) * $(BASE_RELEASE_HOME_IMAGES) )); \
+	foreign_pairs=$$(( ($(BASE_RELEASE_FOREIGN_IMAGES) - 1) * 2 )); \
+	test "$$(wc -l <"$$tmp/golden.sha256")" -eq "$(BASE_RELEASE_GOLDEN_BLOBS)"; \
+	test "$$(wc -l <"$$tmp/home-size-baseline.tsv")" -eq "$$home_pairs"; \
+	test "$$(wc -l <"$$tmp/corpus-wire.sha256")" -eq "$$((home_pairs + foreign_pairs))"; \
 	ng="test-bench/.golden.sha256.$$$$.tmp"; \
 	ns="test-bench/.home-size-baseline.tsv.$$$$.tmp"; \
 	nw="test-bench/.corpus-wire.sha256.$$$$.tmp"; \
@@ -577,7 +602,7 @@ check-corpus-internal: ultrapatch
 .PHONY: check-corpus-matrix-internal
 check-corpus-matrix-internal: ultrapatch
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" \
-	CORPUS_WIRE_MANIFEST="$(CORPUS_WIRE_MANIFEST)" \
+	CORPUS_INVENTORY="$(CORPUS_INVENTORY)" CORPUS_WIRE_MANIFEST="$(CORPUS_WIRE_MANIFEST)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	./check_corpus.sh $(JOBS)
 
@@ -605,6 +630,10 @@ gate-internal:
 	@$(MAKE) --no-print-directory all-internal
 	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
 	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" RELEASE_PROFILE="$$release_profile" \
+	BASE_RELEASE_FIXTURES="$(BASE_RELEASE_FIXTURES)" \
+	BASE_RELEASE_HOME_IMAGES="$(BASE_RELEASE_HOME_IMAGES)" \
+	BASE_RELEASE_FOREIGN_IMAGES="$(BASE_RELEASE_FOREIGN_IMAGES)" \
+	BASE_RELEASE_GOLDEN_BLOBS="$(BASE_RELEASE_GOLDEN_BLOBS)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
 	BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \

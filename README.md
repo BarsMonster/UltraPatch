@@ -79,12 +79,14 @@ For release notes and artifact provenance, use `docs/release-checklist.md`.
 The binary corpora used by the release gate are tracked under `test-bench/`.
 `test-bench/images` and `test-bench/fixtures` provide the 16 home matrix images
 and the two one-face fixtures; `test-bench/foreign` provides the second
-Cortex-M0+ lineage. The root `Makefile` uses those paths by default; override
-them with `IMAGES=...`, `FIXTURES=...`, `FOREIGN=...`, and matching manifest
-variables when running checks elsewhere. The expected contents are pinned by
-`test-bench/corpus.sha256` and `test-bench/foreign.sha256`; the `check-assets`
-leg of `make gate` runs concurrently with the matrix, so a stale or partial
-corpus still fails the gate deterministically.
+Cortex-M0+ lineage. `test-bench/release-inventory.tsv` is the canonical ordered
+membership; the asset, per-pair size, corpus-wire, and golden manifests are
+cross-validated against it by `make check-release-inventory`. The root
+`Makefile` uses those paths by default. For a non-release measurement, override
+`IMAGES`, `FIXTURES`, and `FOREIGN`, set `CORPUS_INVENTORY=""` to discover the
+supplied directories, and provide or disable the matching manifests. The
+`check-assets` leg of `make gate` runs concurrently with the matrix, so a stale,
+partial, or mutually inconsistent corpus still fails the gate deterministically.
 `make check-build-profile` separately proves concurrent GCC, Clang, and
 alternate-flag builds cannot collide. `make gate` validates the checked release
 profile, then also runs `make check-decoder-contract` (source-header-set and

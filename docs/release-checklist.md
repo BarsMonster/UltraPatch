@@ -11,8 +11,10 @@ hardware flash validation are external integration work.
 - Clean working tree.
 - Pinned corpus assets committed under `test-bench/images`,
   `test-bench/fixtures`, and `test-bench/foreign`.
+- Canonical ordered membership committed in `test-bench/release-inventory.tsv`.
 - `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
-  release.
+  release, with the size/wire/golden baselines validated against the same
+  inventory by `make check-release-inventory`.
 - The exact default GCC, required Clang, GNU Arm GCC/binutils,
   `libc.a`/`libgcc.a` content hashes, and effective flags recorded in
   `toolchains/release-profile.json`, with packages installed as documented in
@@ -35,6 +37,7 @@ must report:
 
 - `release_profile`: the validated profile identifier from
   `toolchains/release-profile.json`
+- `release inventory`: all committed asset and wire baselines agree
 - `corpus assets`: verified through `test-bench/corpus.sha256`
 - `foreign assets`: verified through `test-bench/foreign.sha256`
 - `malformed rejects`: nonzero deterministic reject count
@@ -102,6 +105,7 @@ For traceability, release notes should include:
 - Git commit SHA.
 - `sha256sum test-bench/corpus.sha256`.
 - `sha256sum test-bench/foreign.sha256`.
+- `sha256sum test-bench/release-inventory.tsv`.
 - `sha256sum artifacts/patch_apply_single.h` when a one-file decoder header is
   published.
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.

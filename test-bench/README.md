@@ -7,6 +7,11 @@ checks. The gate uses 16 matrix images (`images/`) plus the `v0_base` and
 directions — see `../docs/foreign-firmware-study.md`); the root `Makefile` reads
 them directly by default.
 
+`release-inventory.tsv` is the canonical ordered membership for the two fixtures,
+16 home images, and 18 foreign releases. `make check-release-inventory` proves
+that all committed asset, home-size, corpus-wire, and golden manifests describe
+that same set and that their sizes agree with the Makefile release pins.
+
 `corpus.sha256` pins every home `watch.bin`/`watch.elf`; `foreign.sha256` pins
 every `foreign/<ver>/watch.bin`. Both are verified by:
 

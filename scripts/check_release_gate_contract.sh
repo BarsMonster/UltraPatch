@@ -20,6 +20,8 @@ run_make() {
   # them to every concurrent leg. They are not caller overrides of this nested probe.
   env -u BASE_FULL_TOTAL -u BASE_FOREIGN_TOTAL \
       -u BASE_ONEFACE_GROW -u BASE_ONEFACE_REVERT \
+      -u BASE_RELEASE_FIXTURES -u BASE_RELEASE_HOME_IMAGES \
+      -u BASE_RELEASE_FOREIGN_IMAGES -u BASE_RELEASE_GOLDEN_BLOBS \
       -u BASE_ARM_TEXT -u BASE_ARM_DATA -u BASE_ARM_BSS \
       -u BASE_ARM_LINKED_TEXT -u BASE_ARM_LINKED_DATA -u BASE_ARM_LINKED_BSS \
       -u BASE_ARM_SOFT_DIV -u BASE_STACK_STATIC_CEIL_O2 -u BASE_STACK_GENERIC_CEIL_O2 \
@@ -49,6 +51,8 @@ run_make release-gate-origin-probe-internal
 expect_reject fixtures FIXTURES="$tmp/fixtures" release-gate-origin-probe-internal
 expect_reject corpus_manifest CORPUS_MANIFEST="$tmp/corpus.sha256" \
   release-gate-origin-probe-internal
+expect_reject corpus_inventory CORPUS_INVENTORY="$tmp/inventory.tsv" \
+  release-gate-origin-probe-internal
 expect_reject size_baseline CORPUS_SIZE_BASELINE= release-gate-origin-probe-internal
 expect_reject compression_cap BASE_ONEFACE_GROW=999999 release-gate-origin-probe-internal
 expect_reject arm_ratchet BASE_ARM_TEXT=999999 release-gate-origin-probe-internal
@@ -77,6 +81,8 @@ printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_make"
 chmod +x "$fake_make"
 profile="release_profile=$(printf '0%.0s' {1..64})"
 if MAKE="$fake_make" HOST_TOOL=/bin/true RELEASE_PROFILE="$profile" JOBS=1 \
+    BASE_RELEASE_FIXTURES=2 BASE_RELEASE_HOME_IMAGES=16 \
+    BASE_RELEASE_FOREIGN_IMAGES=18 BASE_RELEASE_GOLDEN_BLOBS=8 \
     BASE_FULL_TOTAL=4151373 BASE_FOREIGN_TOTAL=1333327 \
     BASE_ONEFACE_GROW=573 BASE_ONEFACE_REVERT=287 \
     BASE_ARM_TEXT=6073 BASE_ARM_DATA=0 BASE_ARM_BSS=10296 \

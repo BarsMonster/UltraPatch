@@ -44,6 +44,7 @@ set -u
 JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
+INVENTORY="${CORPUS_INVENTORY-test-bench/release-inventory.tsv}"
 SIZE_BASE="${CORPUS_SIZE_BASELINE-test-bench/home-size-baseline.tsv}"
 WIRE_BASE="${CORPUS_WIRE_MANIFEST-test-bench/corpus-wire.sha256}"
 : "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set; invoke through make check-corpus}"
@@ -56,9 +57,28 @@ export UP UPD
 [ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
 [ -x "$UPD" ] || { echo "check_corpus.sh: decoder is missing or not executable: $UPD" >&2; exit 3; }
 
-# Foreign lineage, pinned release order; adjacent pairs are the update steps. Two contiguous
-# families (2.2.x/2.3.x/3.0.x, then 10.0.x/10.1.x) joined by the cross-major 3.0.3 -> 10.0.0 jump.
-FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
+# Release checks take their ordered home/foreign membership from one inventory. Bare A/B or
+# custom measurements set CORPUS_INVENTORY="" and retain the old directory-discovery behavior.
+if [ -n "$INVENTORY" ]; then
+  if [ ! -f "$INVENTORY" ]; then
+    echo "check_corpus.sh: missing release inventory: $INVENTORY" >&2
+    exit 3
+  fi
+  if ! awk 'NF && $1 !~ /^#/ { if(NF!=2 || ($1!="fixture" && $1!="home" && $1!="foreign")) bad=1 }
+            END { exit bad }' "$INVENTORY"; then
+    echo "check_corpus.sh: malformed release inventory: $INVENTORY" >&2
+    exit 3
+  fi
+  HOME_IDS=$(awk '$1=="home" { print $2 }' "$INVENTORY")
+  FOREIGN_IDS=$(awk '$1=="foreign" { print $2 }' "$INVENTORY")
+else
+  HOME_IDS=$(for path in "$IMG"/img_*; do [ -d "$path" ] && basename "$path"; done | sort)
+  FOREIGN_IDS=$(for path in "$FGN"/*; do [ -d "$path" ] && basename "$path"; done | sort -V)
+fi
+if [ -z "$HOME_IDS" ] || [ -z "$FOREIGN_IDS" ]; then
+  echo "check_corpus.sh: empty home or foreign inventory" >&2
+  exit 3
+fi
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
 #   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified>
@@ -94,7 +114,7 @@ export -f cm_work
 # other, so it stays correct if the pinned list is retuned.
 foreign_jobs() {
   prev=""; cross=""; rest=""
-  for v in $FVERS; do
+  for v in $FOREIGN_IDS; do
     if [ -n "$prev" ]; then
       pmaj=${prev%%.*}; vmaj=${v%%.*}
       if { [ "$pmaj" -le 3 ] && [ "$vmaj" -ge 10 ]; } || { [ "$pmaj" -ge 10 ] && [ "$vmaj" -le 3 ]; }; then
@@ -126,7 +146,11 @@ trap 'rm -rf "$tmp"' EXIT
 
 {
   foreign_jobs
-  for from in "$IMG"/img_*; do for to in "$IMG"/img_*; do printf 'C\t%s\t%s\n' "$from" "$to"; done; done
+  for from_id in $HOME_IDS; do
+    for to_id in $HOME_IDS; do
+      printf 'C\t%s\t%s\n' "$IMG/$from_id" "$IMG/$to_id"
+    done
+  done
 } > "$tmp/jobs.txt"
 # Expected counts come from the scheduled jobs, so a reduced subset still catches a dropped worker.
 EXP_HOME=$(grep -c '^C' "$tmp/jobs.txt")

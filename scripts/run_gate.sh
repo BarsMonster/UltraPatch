@@ -27,9 +27,9 @@ else
 fi
 ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-release-gate-contract + check-corpus..."
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-release-gate-contract + check-corpus..."
 
-LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-release-gate-contract-internal:release_gate.txt:check-release-gate-contract check-corpus-matrix-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-release-gate-contract-internal:release_gate.txt:check-release-gate-contract check-corpus-matrix-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -123,14 +123,34 @@ case "$profile" in
 esac
 [ "${#profile}" -eq 64 ] || evidence_error "invalid gate evidence: release profile hash length is ${#profile}, expected 64"
 
-require_exact assets.txt corpus_assets "verified 36 files via test-bench/corpus.sha256"
-require_exact assets.txt foreign_assets "verified 18 files via test-bench/foreign.sha256"
+release_fixtures=${BASE_RELEASE_FIXTURES:?}
+release_home_images=${BASE_RELEASE_HOME_IMAGES:?}
+release_foreign_images=${BASE_RELEASE_FOREIGN_IMAGES:?}
+release_golden_blobs=${BASE_RELEASE_GOLDEN_BLOBS:?}
+release_home_pairs=$((release_home_images * release_home_images))
+release_foreign_pairs=$(((release_foreign_images - 1) * 2))
+release_wire_pairs=$((release_home_pairs + release_foreign_pairs))
+release_corpus_assets=$((2 * (release_fixtures + release_home_images)))
+
+require_prefix inventory.txt release_inventory "OK ("
+require_exact inventory.txt release_fixture_count "$release_fixtures"
+require_exact inventory.txt release_home_images "$release_home_images"
+require_exact inventory.txt release_foreign_images "$release_foreign_images"
+require_exact inventory.txt release_home_pairs "$release_home_pairs"
+require_exact inventory.txt release_foreign_pairs "$release_foreign_pairs"
+require_exact inventory.txt release_wire_pairs "$release_wire_pairs"
+require_exact inventory.txt release_golden_blobs "$release_golden_blobs"
+require_exact inventory.txt release_home_total "${BASE_FULL_TOTAL:?}"
+require_exact inventory.txt release_oneface_grow "${BASE_ONEFACE_GROW:?}"
+require_exact inventory.txt release_oneface_revert "${BASE_ONEFACE_REVERT:?}"
+require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus.sha256"
+require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/foreign.sha256"
 require_exact malformed.txt malformed_rejects 29
 require_exact e.txt edge_cases 12
 require_exact e.txt edge_roundtrips 11
 require_exact e.txt edge_refusals 1
 require_exact e.txt edge_failures 0
-require_exact g.txt golden_wire "OK (8 blobs)"
+require_exact g.txt golden_wire "OK ($release_golden_blobs blobs)"
 require_exact dec_contract.txt decoder_contract OK
 require_prefix dec_contract.txt decoder_portable "OK ("
 require_prefix dec_contract.txt decoder_address_contract "OK ("
@@ -169,18 +189,14 @@ require_exact st.txt stack_generic_integration "caller-owned PatchApply * wrappe
 require_uint_le st.txt stack_generic_bound_bytes "${BASE_STACK_GENERIC_CEIL_O2:?}"
 require_exact st.txt stack_generic_ceiling_o2 "${BASE_STACK_GENERIC_CEIL_O2:?}"
 
-require_exact m.txt matrix_ok 256/256
-require_uint_le m.txt full_total "${BASE_FULL_TOTAL:?}"
-require_uint m.txt home_size_better; home_better=$METRIC_VALUE
+require_exact m.txt matrix_ok "$release_home_pairs/$release_home_pairs"
+require_exact m.txt full_total "${BASE_FULL_TOTAL:?}"
+require_exact m.txt home_size_better 0
 require_exact m.txt home_size_worse 0
-require_uint m.txt home_size_equal; home_equal=$METRIC_VALUE
-case "$home_better:$home_equal" in
-  *[!0-9:]*|:|*: ) evidence_error "invalid gate evidence: incomplete home size split" ;;
-  *) [ $((home_better + home_equal)) -eq 256 ] || evidence_error "invalid gate evidence: home size split sums to $((home_better + home_equal)), expected 256" ;;
-esac
-require_exact m.txt foreign_ok 34/34
-require_uint_le m.txt foreign_total "${BASE_FOREIGN_TOTAL:?}"
-require_exact m.txt wire_identity 290/290
+require_exact m.txt home_size_equal "$release_home_pairs"
+require_exact m.txt foreign_ok "$release_foreign_pairs/$release_foreign_pairs"
+require_exact m.txt foreign_total "${BASE_FOREIGN_TOTAL:?}"
+require_exact m.txt wire_identity "$release_wire_pairs/$release_wire_pairs"
 require_uint m.txt max_journal
 require_exact m.txt max_amplified 0
 require_uint_le m.txt max_maxpageerase 1
@@ -188,8 +204,8 @@ require_exact m.txt max_inversions 0
 require_exact m.txt max_unaligned 0
 require_exact m.txt max_oob_page_writes 0
 require_exact m.txt max_canary_corrupt 0
-require_uint_le c.txt oneface_grow "${BASE_ONEFACE_GROW:?}"
-require_uint_le c.txt oneface_revert "${BASE_ONEFACE_REVERT:?}"
+require_exact c.txt oneface_grow "${BASE_ONEFACE_GROW:?}"
+require_exact c.txt oneface_revert "${BASE_ONEFACE_REVERT:?}"
 
 kv() {
   sed -n "s/^$2=/$3/p" "$tmp/$1"
@@ -203,6 +219,7 @@ kvs() {
 
 echo "==================== A1 GATE ========================="
 printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
+kvs 'inventory.txt|release_inventory|release inventory        : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '

@@ -49,7 +49,12 @@ python3 "$ROOT/scripts/synth_gen.py" role "$tmp/small/a.bin" from rand 512 701
 python3 "$ROOT/scripts/synth_gen.py" role "$tmp/small/b.bin" from rand 768 907
 ln -s "$tmp/small/a.bin" "$tmp/images/img_00_base/watch.bin"
 ln -s "$tmp/small/b.bin" "$tmp/images/img_01_oneface/watch.bin"
-foreign_versions="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
+foreign_versions=$(awk '$1=="foreign" { print $2 }' \
+  "$ROOT/test-bench/release-inventory.tsv")
+[ -n "$foreign_versions" ] || {
+  echo "check_ab_matrix.sh: release inventory has no foreign images" >&2
+  exit 2
+}
 i=0
 for version in $foreign_versions; do
   mkdir -p "$tmp/foreign/$version"
@@ -60,6 +65,7 @@ done
 
 set +e
 IMAGES="$tmp/images" FOREIGN="$tmp/foreign" FIXTURES="$FIX" \
+  CORPUS_INVENTORY="" \
   CORPUS_WIRE_MANIFEST="$tmp/manifest-must-not-be-read" \
   BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" BASE_ONEFACE_GROW="" BASE_ONEFACE_REVERT="" \
   "$ROOT/scripts/ab_matrix.sh" "$ULTRAPATCH" "$CAND" "$CAND" "$JOBS" \
