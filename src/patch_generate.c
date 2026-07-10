@@ -84,6 +84,8 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
     Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1; int best_desc = 0;
+    int natural_bestv = -1;
+    unsigned char natural_opc[NPLANS] = {0};
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
      * the unnatural direction is swept ONLY when the natural winner engaged journal-budget
@@ -92,14 +94,19 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
      * direction (insertion shifts journal-overflow ascending), while home pairs never
      * degrade — so pruning halves encode time with byte-identical home output. A clean
      * natural winner that would still lose to the flip is unobserved in any corpus; if one
-     * exists, the cost is a slightly larger blob, never a bad one. */
+     * exists, the cost is a slightly larger blob, never a bad one. Within an admitted
+     * unnatural pass, rerun the natural winner plus plans that needed OPC splitting;
+     * clean natural nonwinners did not win a flip in the home/foreign matrix. */
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
         if (pass && bestv >= 0 && !best_st.deg_engaged) break;
+        if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
+            if (pass && natural_bestv >= 0 && v != natural_bestv && !natural_opc[v]) continue;
             PlanResult pr = plan_encode(&ctx, &from, &to, &prep, PLANS[v]);
+            if (!pass) natural_opc[v] = (unsigned char)(pr.st.opc_splits != 0);
             if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
