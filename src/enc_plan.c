@@ -160,6 +160,9 @@ void plan_prepare_free(PlanPrep *prep) {
 #ifdef SPAN_DEQUE_STATS
     span_deque_stats_report();
 #endif
+#ifdef OUT_ENVELOPE_STATS
+    out_envelope_stats_report();
+#endif
     memset(prep, 0, sizeof(*prep));
 }
 

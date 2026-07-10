@@ -402,6 +402,21 @@ void span_deque_stats_report(void) {
 }
 #endif
 
+#ifdef OUT_ENVELOPE_STATS
+static uint64_t out_old_attempts, out_envelope_attempts, out_old_ugg_calls, out_price_calls;
+
+void out_envelope_stats_report(void) {
+    fprintf(stderr,
+            "OUT_ENVELOPE_STATS old_attempts=%llu envelope_attempts=%llu old_ugg_calls=%llu price_calls=%llu\n",
+            (unsigned long long)out_old_attempts, (unsigned long long)out_envelope_attempts,
+            (unsigned long long)out_old_ugg_calls, (unsigned long long)out_price_calls);
+}
+#endif
+
+#ifdef OUT_ENVELOPE_PROBE
+uint64_t out_envelope_probe_last_cost;
+#endif
+
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 const CandArena *cands, const uint8_t *ncand,
                                 const OCandArena *ocands, const uint8_t *nocand,
@@ -524,6 +539,25 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     /* Measured/adaptive gs mantissa prices generally vary inside a dyadic bucket, so the
      * history/rep DP below keeps its exact predecessor scan; the bootstrap deque separation
      * must not be generalized here by treating gamma length as a bit-length-only price. */
+    uint32_t *glo_price = NULL;
+#ifndef OUT_ENVELOPE_REFERENCE
+    int32_t max_out_len = 0;
+    if (pt->out_en && ocands && nocand && ocands->n) {
+        const OCand *all = (const OCand *)ocands->d;
+        size_t all_n = ocands->n / sizeof(*all);
+        for (size_t oi = 0; oi < all_n; oi++)
+            if (all[oi].len > max_out_len) max_out_len = all[oi].len;
+        if (max_out_len >= (int32_t)RC_OUTMATCH_MIN) {
+            glo_price = (uint32_t *)xmalloc(((size_t)max_out_len + 1u) * sizeof(*glo_price));
+            for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= max_out_len; l++) {
+                glo_price[l] = ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
+#ifdef OUT_ENVELOPE_STATS
+                out_price_calls++;
+#endif
+            }
+        }
+    }
+#endif
     /* Every literal's tag0 context is now the deterministic previous content byte content[p-1]
      * (order-1 wire: matches/backrefs/out-matches update prevlit too), so this prefix table gives
      * the EXACT literal cost of any span [i,j) as span_lit[j] - span_lit[i], first literal included
@@ -626,6 +660,31 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             if (k + 1 < nc && ord_dpr[k + 1] < dp2) { ord_dpr[k] = ord_dpr[k + 1]; ord_dist[k] = ord_dist[k + 1]; }
             else ord_dpr[k] = dp2;
         }
+        /* At a fixed length every out candidate has identical price, next history, and rep.
+         * Preserve legacy row order by assigning each length only to the first candidate that
+         * reaches it; later candidates own only their extension beyond the earlier maximum. */
+#ifndef OUT_ENVELOPE_REFERENCE
+        int out_nenv = 0, out_covered = (int)RC_OUTMATCH_MIN - 1;
+        int32_t out_from[OC_MAX], out_to[OC_MAX], out_pos[OC_MAX];
+#ifdef OUT_ENVELOPE_STATS
+        uint64_t old_out_row_attempts = 0;
+#endif
+        for (int cix = 0, nout = pt->out_en && orow ? no : 0; cix < nout; cix++) {
+            int32_t top = orow[cix].len;
+#ifdef OUT_ENVELOPE_STATS
+            if (top >= (int32_t)RC_OUTMATCH_MIN)
+                old_out_row_attempts += (uint32_t)(top - (int32_t)RC_OUTMATCH_MIN + 1);
+#endif
+            if (top <= out_covered) continue;
+            int32_t begin = out_covered + 1;
+            if (begin < (int32_t)RC_OUTMATCH_MIN) begin = (int32_t)RC_OUTMATCH_MIN;
+            if (begin <= top) {
+                out_from[out_nenv] = begin; out_to[out_nenv] = top;
+                out_pos[out_nenv] = orow[cix].pos; out_nenv++;
+                out_covered = top;
+            }
+        }
+#endif
         int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
         size_t match_lim = n < i + maxrun ? n : i + maxrun;
         for (int hr = 0; hr < 4; hr++) {
@@ -654,6 +713,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
               } }
             /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
              * The rep distance is carried through unchanged (out-matches do not set last_dist). */
+#ifdef OUT_ENVELOPE_REFERENCE
             for (int cix = 0, nout = pt->out_en && orow ? no : 0; cix < nout; cix++) {
                 int32_t opos = orow[cix].pos, olm = orow[cix].len;
                 uint64_t obase = ci + out_extra[h] + pt->opos_avg;
@@ -665,6 +725,26 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                            (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
                 }
             }
+#else
+#ifdef OUT_ENVELOPE_STATS
+            out_old_attempts += old_out_row_attempts;
+            out_old_ugg_calls += old_out_row_attempts;
+#endif
+            uint64_t obase = ci + out_extra[h] + pt->opos_avg;
+            for (int oe = 0; oe < out_nenv; oe++) {
+                int32_t opos = out_pos[oe];
+                for (int32_t l = out_from[oe]; l <= out_to[oe]; l++) {
+                    size_t j = i + (size_t)l;
+                    uint64_t c = obase + glo_price[l];
+                    size_t jb = j * 4 + (size_t)hm;
+                    relax2(cost, rep, via, vh, jb, c, ri,
+                           (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
+#ifdef OUT_ENVELOPE_STATS
+                    out_envelope_attempts++;
+#endif
+                }
+            }
+#endif
             /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
              * distance == ri (the incoming rep distance) because it is not on the (dist,len) frontier,
              * yet there it costs only the reuse flag (no fresh-distance value). Recover it directly from
@@ -696,6 +776,9 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         size_t s = n * 4 + (size_t)hr;
         if (cost[s] < cbest) { cbest = cost[s]; hrbest = hr; }
     }
+#ifdef OUT_ENVELOPE_PROBE
+    out_envelope_probe_last_cost = cbest;
+#endif
     TokenVec tv = {0};
     size_t pos = n; int hr = hrbest;
     while (pos > 0) {
@@ -705,7 +788,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(via); free(vh); free(span_pair); free(dpr); free(span_lit);
+    free(cost); free(rep); free(via); free(vh); free(span_pair); free(glo_price); free(dpr); free(span_lit);
     return tv;
 }
 

@@ -83,6 +83,39 @@ if ! "$SPAN" >"$tmp/span-deque.out" 2>"$tmp/span-deque.err"; then
 fi
 cat "$tmp/span-deque.out"
 
+# Build the full priced parser with the production out-match envelope and with the preserved
+# nested-loop reference. The driver emits every terminal cost and token tuple, so byte equality
+# pins strict-tie predecessor choice as well as the optimum. It includes randomized rows/prices
+# plus empty, dominated/nonmonotone four-entry, disabled, minimum, and >LZ_MAX_MATCH cases.
+OUT_NEW="$tmp/out-envelope-new"
+OUT_OLD="$tmp/out-envelope-old"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DOUT_ENVELOPE_PROBE \
+      test-bench/out-envelope-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
+      -o "$OUT_NEW" 2>"$tmp/out-envelope-new-build.log"; then
+  echo "check_degrade: out-envelope production oracle build failed" >&2
+  sed 's/^/    /' "$tmp/out-envelope-new-build.log" >&2; exit 1
+fi
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DOUT_ENVELOPE_PROBE \
+      -DOUT_ENVELOPE_REFERENCE test-bench/out-envelope-probe.c $ENC_SEAM_SRCS \
+      -Wl,--gc-sections -o "$OUT_OLD" 2>"$tmp/out-envelope-old-build.log"; then
+  echo "check_degrade: out-envelope reference oracle build failed" >&2
+  sed 's/^/    /' "$tmp/out-envelope-old-build.log" >&2; exit 1
+fi
+if ! "$OUT_NEW" >"$tmp/out-envelope-new.out" 2>"$tmp/out-envelope-new.err"; then
+  echo "check_degrade: out-envelope production oracle failed: $(cat "$tmp/out-envelope-new.err")" >&2
+  exit 1
+fi
+if ! "$OUT_OLD" >"$tmp/out-envelope-old.out" 2>"$tmp/out-envelope-old.err"; then
+  echo "check_degrade: out-envelope reference oracle failed: $(cat "$tmp/out-envelope-old.err")" >&2
+  exit 1
+fi
+if ! cmp -s "$tmp/out-envelope-new.out" "$tmp/out-envelope-old.out"; then
+  echo "check_degrade: out-envelope production/reference parser mismatch" >&2
+  diff -u "$tmp/out-envelope-old.out" "$tmp/out-envelope-new.out" | sed -n '1,80p' >&2
+  exit 1
+fi
+tail -n 1 "$tmp/out-envelope-new.out"
+
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>
