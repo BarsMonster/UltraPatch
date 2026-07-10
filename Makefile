@@ -328,6 +328,7 @@ check-assets-internal:
 
 check-malformed-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
+	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_elf_ranges.sh
 	@FIXTURES="$(FIXTURES)" scripts/check_dispatch_crash.sh malformed
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/

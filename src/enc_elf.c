@@ -11,17 +11,13 @@
 /* Minimal ELF32 little-endian range extraction for the firmware images.                  */
 /* ------------------------------------------------------------------------------------- */
 typedef struct { uint32_t begin, end; } Range;
-typedef struct { uint32_t type, off, addr, size, entsize; Range code, data; } Sec;
+typedef struct { uint32_t type, flags, off, addr, size, entsize; Range code, data; } Sec;
 
 static void range_add(Range *r, uint32_t begin, uint32_t size) {
     uint32_t end = begin + size;
     if (end < begin) return;
     if (r->begin == UINT32_MAX || begin < r->begin) r->begin = begin;
     if (end > r->end) r->end = end;
-}
-
-static void best_range(Range *best, Range r) {
-    if (r.begin != UINT32_MAX && r.end > r.begin && r.end - r.begin > best->end - best->begin) *best = r;
 }
 
 static Range trim_data_range(Range r, Range code) {
@@ -39,28 +35,35 @@ static Range trim_data_range(Range r, Range code) {
     return r;
 }
 
-static uint32_t data_offset_in_bin(const Buf *elf, const Buf *bin, uint32_t phoff,
-                                   uint16_t phentsize, uint16_t phnum, Range data,
-                                   const char *which) {
-    if (data.end <= data.begin) return 0;
+static uint64_t load_base(const Buf *elf, uint32_t phoff, uint16_t phentsize, uint16_t phnum) {
     uint64_t base = UINT64_MAX;
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *p = elf->d + phoff + (uint32_t)i * phentsize;
         if (rc_u32le(p) == 1 && rc_u32le(p + 16) && rc_u32le(p + 12) < base) base = rc_u32le(p + 12);
     }
-    if (base == UINT64_MAX) die("ELF has no loadable data");
+    return base;
+}
+
+static int range_offset_in_bin(const Buf *elf, const Buf *bin, uint32_t phoff,
+                               uint16_t phentsize, uint16_t phnum, uint64_t base,
+                               const Sec *sec, Range r, uint32_t *out) {
+    if (r.end <= r.begin || r.begin < sec->addr ||
+        (uint64_t)r.end > (uint64_t)sec->addr + sec->size) return 0;
+    uint64_t sec_file = (uint64_t)sec->off + (r.begin - sec->addr);
     for (uint16_t i = 0; i < phnum; i++) {
         const uint8_t *p = elf->d + phoff + (uint32_t)i * phentsize;
         if (rc_u32le(p) != 1) continue;                 /* PT_LOAD */
-        uint32_t vaddr = rc_u32le(p + 8), paddr = rc_u32le(p + 12), filesz = rc_u32le(p + 16);
-        if (vaddr <= data.begin && (uint64_t)data.end <= (uint64_t)vaddr + filesz) {
-            uint64_t off = (uint64_t)paddr - base + (data.begin - vaddr);
-            if (off + (data.end - data.begin) <= bin->n) return (uint32_t)off;
-            break;
-        }
+        uint32_t poff = rc_u32le(p + 4), vaddr = rc_u32le(p + 8);
+        uint32_t paddr = rc_u32le(p + 12), filesz = rc_u32le(p + 16);
+        if ((uint64_t)paddr < base) continue;
+        uint64_t bin_seg = (uint64_t)paddr - base;
+        if ((uint64_t)poff + filesz > elf->n || bin_seg + filesz > bin->n ||
+            vaddr > r.begin || (uint64_t)r.end > (uint64_t)vaddr + filesz ||
+            (uint64_t)poff + (r.begin - vaddr) != sec_file) continue;
+        *out = (uint32_t)(bin_seg + (r.begin - vaddr));
+        return 1;
     }
-    fprintf(stderr, "patch_generate: data segment for %s outside bin load image\n", which);
-    exit(2);
+    return 0;
 }
 
 Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
@@ -81,12 +84,14 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     uint32_t phoff = rc_u32le(e.d + 28), shoff = rc_u32le(e.d + 32);
     uint16_t phentsize = rc_u16le(e.d + 42), phnum = rc_u16le(e.d + 44);
     uint16_t shentsize = rc_u16le(e.d + 46), shnum = rc_u16le(e.d + 48);
-    if (!phoff || !phnum || phentsize < 32 || (uint64_t)phoff + (uint64_t)phentsize * phnum > e.n) die("bad ELF program headers");
-    if (!shoff || !shnum || shentsize < 40 || (uint64_t)shoff + (uint64_t)shentsize * shnum > e.n) die("bad ELF sections");
+    if (phnum && (!phoff || phentsize < 32 || (uint64_t)phoff + (uint64_t)phentsize * phnum > e.n)) die("bad ELF program headers");
+    if (shnum && (!shoff || shentsize < 40 || (uint64_t)shoff + (uint64_t)shentsize * shnum > e.n)) die("bad ELF sections");
+    if (!phnum || !shnum) { buf_free(&e); return (Ranges){0, 0}; }
     Sec *sec = (Sec *)xcalloc(shnum, sizeof(*sec));
     for (uint16_t i = 0; i < shnum; i++) {
         const uint8_t *p = e.d + shoff + (uint32_t)i * shentsize;
         sec[i].type = rc_u32le(p + 4);
+        sec[i].flags = rc_u32le(p + 8);
         sec[i].addr = rc_u32le(p + 12);
         sec[i].off = rc_u32le(p + 16);
         sec[i].size = rc_u32le(p + 20);
@@ -106,15 +111,29 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
             uint8_t type = p[12] & 0x0f;
             if ((type != 1 && type != 2) || size == 0) continue;
             uint16_t dst = rc_u16le(p + 14);
-            if (dst >= shnum || value < sec[dst].addr || (uint64_t)value >= (uint64_t)sec[dst].addr + sec[dst].size) continue;
+            if (type == 2) value &= ~1u;                /* ELF32 ARM Thumb function marker */
+            if (dst >= shnum || !(sec[dst].flags & 2u) || sec[dst].type == 8 ||
+                (uint64_t)sec[dst].off + sec[dst].size > e.n || value < sec[dst].addr ||
+                (uint64_t)value + size > (uint64_t)sec[dst].addr + sec[dst].size) continue;
             range_add(type == 2 ? &sec[dst].code : &sec[dst].data, value, size);
         }
     }
     Range code = {0, 0}, data = {0, 0};
-    for (uint16_t si = 0; si < shnum; si++) best_range(&code, sec[si].code);
-    for (uint16_t si = 0; si < shnum; si++) best_range(&data, trim_data_range(sec[si].data, code));
-    uint32_t doff = data_offset_in_bin(&e, bin, phoff, phentsize, phnum, data, which);
+    uint32_t doff = 0, off;
+    uint64_t base = load_base(&e, phoff, phentsize, phnum);
+    if (base == UINT64_MAX) { free(sec); buf_free(&e); return (Ranges){0, 0}; }
+    for (uint16_t si = 0; si < shnum; si++) {
+        Range r = sec[si].code;
+        if (range_offset_in_bin(&e, bin, phoff, phentsize, phnum, base, &sec[si], r, &off) &&
+            r.end - r.begin > code.end - code.begin) code = r;
+    }
+    for (uint16_t si = 0; si < shnum; si++) {
+        Range r = trim_data_range(sec[si].data, code);
+        if (range_offset_in_bin(&e, bin, phoff, phentsize, phnum, base, &sec[si], r, &off) &&
+            r.end - r.begin > data.end - data.begin) { data = r; doff = off; }
+    }
     Ranges r = { doff, doff + (data.end - data.begin) };
+    (void)which;
     free(sec); buf_free(&e);
     return r;
 }
