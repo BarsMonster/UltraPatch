@@ -115,6 +115,18 @@ fi
 
 j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA; seam_pres=NA; seam_corr=NA
 
+TRIM="$tmp/smap-trim-probe"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSMAP_PRETRIM_ORACLE test-bench/smap-trim-probe.c \
+      $ENC_SEAM_SRCS -Wl,--gc-sections -o "$TRIM" 2>"$tmp/trim-build.log"; then
+  note "could not build the shift-map trim probe:"; sed 's/^/    /' "$tmp/trim-build.log" >&2
+  echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
+fi
+if "$TRIM" >"$tmp/trim.out" 2>"$tmp/trim.err"; then
+  cat "$tmp/trim.out"
+else
+  bad "shift-map trim probe failed: $(cat "$tmp/trim.err")"
+fi
+
 # =========================================================================================
 # (f,g) 24-BIT PACKED-POSITION SEAM — this first-party probe includes the real private plan
 # normalizers, constructs actual >16 MiB image spans without running bsdiff, emits production
