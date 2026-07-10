@@ -83,8 +83,10 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     pair_analysis_init(&pa, &from, &to, &fr, &tr);
     PlanPrep prep;
     plan_prepare(&prep, &from, &to, &pa);
-    /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
-     * ties keep the earliest entry, so added configs can never regress. A config whose plan
+    /* Op-plan sweep: every config runs the full pipeline in both apply directions; the smallest
+     * complete envelope ships and ties keep the earliest entry, so added configs can never
+     * regress. Pricing the complete envelope includes the unnatural-direction marker byte. A
+     * config whose plan
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
      * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
      * in-family firmware. Every config below won pairs in the corpus sweep (the bsdiff fuzz
@@ -96,29 +98,16 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
     Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1; int best_desc = 0;
-    int natural_bestv = -1;
-    unsigned char natural_opc[NPLANS] = {0};
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
-    /* Direction sweep, PRUNED: the natural direction (descending iff growing) is swept first;
-     * the unnatural direction is swept ONLY when the natural winner engaged journal-budget
-     * degradation or no natural plan was feasible. Measured separator (foreign study +
-     * home corpus): every pair that ever preferred the flip also degraded in the natural
-     * direction (insertion shifts journal-overflow ascending), while home pairs never
-     * degrade — so pruning halves encode time with byte-identical home output. A clean
-     * natural winner that would still lose to the flip is unobserved in any corpus; if one
-     * exists, the cost is a slightly larger blob, never a bad one. Within an admitted
-     * unnatural pass, rerun the natural winner plus plans that needed OPC splitting;
-     * clean natural nonwinners did not win a flip in the home/foreign matrix. */
+    size_t plans_evaluated = 0;
+    /* Natural direction is considered first only to make equal-size tie behavior deterministic. */
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
-        if (pass && bestv >= 0 && !best_st.deg_engaged) break;
-        if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
-            if (pass && natural_bestv >= 0 && v != natural_bestv && !natural_opc[v]) continue;
+            plans_evaluated++;
             PlanResult pr = plan_encode(&ctx, &from, &to, &prep, PLANS[v]);
-            if (!pass) natural_opc[v] = (unsigned char)(pr.st.opc_splits != 0);
             if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
@@ -135,10 +124,11 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
     if (getenv("DEGRADE_STATS"))
         fprintf(stderr,
-                "DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu budget=%u opc_cap=%u\n",
+                "DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu plans_evaluated=%zu budget=%u opc_cap=%u\n",
                 best_desc ? "bwd" : "fwd",
                 rc_dir_is_natural(from_size, to_size, best_desc),
-                best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted, best_st.opc_splits, sweep_opc_splits,
+                best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted,
+                best_st.opc_splits, sweep_opc_splits, plans_evaluated,
                 (unsigned)JSLOTS, (unsigned)OPC_CAP);
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM page emulator) and require the

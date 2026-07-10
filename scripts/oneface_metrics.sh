@@ -4,7 +4,7 @@
 
 # Real one-face product patch metric, shared by gate and A/B compression checks.
 # Usage: scripts/oneface_metrics.sh [encoder] [decoder]
-# Env: FIXTURES, ONEFACE_ROUNDTRIP=1
+# Env: FIXTURES, ONEFACE_ROUNDTRIP=1, ONEFACE_WIRE_HASHES=1
 #      BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT  one-face acceptance caps (AGENTS.md calls this
 #        rule authoritative): enforced only when set (exit nonzero on a breach), skipped for a
 #        bare measurement run when unset — the single enforcement site, mirroring the corpus-leg
@@ -33,6 +33,11 @@ fi
 grow_sz=$(wc -c < "$tmp/grow.blob")
 revert_sz=$(wc -c < "$tmp/revert.blob")
 printf 'oneface_grow=%d\noneface_revert=%d\n' "$grow_sz" "$revert_sz"
+if [ "${ONEFACE_WIRE_HASHES:-0}" != 0 ]; then
+  printf 'oneface_grow_sha256=%s\noneface_revert_sha256=%s\n' \
+    "$(sha256sum "$tmp/grow.blob" | cut -d' ' -f1)" \
+    "$(sha256sum "$tmp/revert.blob" | cut -d' ' -f1)"
+fi
 
 # Acceptance ratchets (single source): enforce the authoritative one-face caps only when the
 # env pins are set; a bare measurement run (pins unset/empty) just prints the sizes above.

@@ -11,7 +11,9 @@ rc=0
 # The corpus encoder saturates every core by itself, while several other gate legs also encode
 # nontrivial fixtures.  Leave one quarter of the machine to those concurrent legs; otherwise a
 # 32-worker corpus pool oversubscribes the 32-core reference host and approaches the 60 s cap.
-# An explicit `make gate JOBS=N` remains authoritative.  Standalone check-corpus still uses nproc.
+# Most auxiliary legs run at lower CPU priority so they use the reserved cores without preempting
+# the matrix's slow cross-major worker. The two long, mostly single-worker synthetic legs retain
+# normal priority so the matrix cannot starve them. Explicit job overrides remain authoritative.
 if [ -n "${JOBS:-}" ]; then
   corpus_jobs=$JOBS
 else
@@ -19,10 +21,11 @@ else
   corpus_jobs=$((cores * 3 / 4))
   [ "$corpus_jobs" -gt 0 ] || corpus_jobs=1
 fi
+ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-corpus..."
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-corpus..."
 
-LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-corpus-internal:m.txt:check-corpus"
+LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -33,10 +36,14 @@ for spec in $LEGS; do
   # the seconds between the pre-fork build and this loop). Without it, several legs that
   # list ultrapatch as a prerequisite could race concurrent `-o ultrapatch` links on the
   # same path while other legs exec it (ETXTBSY / half-written exec).
-  if [ "$target" = check-corpus-internal ]; then
+  if [ "$target" = check-corpus-matrix-internal ]; then
     "$MAKE_CMD" --no-print-directory -o ultrapatch JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
-  else
+  elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
     "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
+  elif [ "$target" = check-ab-matrix-internal ]; then
+    nice -n 5 "$MAKE_CMD" --no-print-directory -o ultrapatch AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
+  else
+    nice -n 10 "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
   fi
   pids="$pids $!"
 done
@@ -58,6 +65,7 @@ echo "==================== A1 GATE ========================="
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
+kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
 awk -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" 'NR==2{printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",$1,$2,$3,bt,bd,bb}' "$tmp/a.txt"

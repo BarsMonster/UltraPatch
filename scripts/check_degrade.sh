@@ -182,6 +182,8 @@ enc() {
     >/dev/null 2>"$tmp/$name.encerr"
   rc=$?
   grep '^DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
+  evals=$(sed -n 's/.*plans_evaluated=\([0-9][0-9]*\).*/\1/p' "$tmp/$name.deg")
+  [ "$evals" = 10 ] || bad "$name evaluated ${evals:-0} plans (expected 5 configs x 2 directions)"
   return $rc
 }
 
@@ -288,12 +290,14 @@ if DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watc
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")
+  opc_evals=$(sed -n 's/.*plans_evaluated=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   cp "$IMG/img_00_n3/watch.bin" "$tmp/opc.mem"
   if ./ultrapatch --decode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
   opc_n=$opc_sweep
   [ "${opc_sweep:-0}" -ge 1 ] || bad "OPC op-split never engaged in the plan sweep (opc_splits_sweep=$opc_sweep)"
+  [ "$opc_evals" = 10 ] || bad "OPC pair evaluated ${opc_evals:-0} plans (expected 10)"
   [ "$rt" = OK ] || bad "OPC pair did not round-trip ($rt)"
-  note "(b) opc split: opc_splits_sweep=$opc_sweep (masking plan variant, fixpoint) shipped_winner_splits=${opc_win:-0} roundtrip=$rt"
+  note "(b) opc split: opc_splits_sweep=$opc_sweep plans_evaluated=$opc_evals (masking plan variant, fixpoint) shipped_winner_splits=${opc_win:-0} roundtrip=$rt"
 else
   bad "OPC pair was refused (rc=$?)"
 fi

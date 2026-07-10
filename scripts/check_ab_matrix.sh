@@ -29,26 +29,21 @@ make --no-print-directory -C "$tmp/candidate" ultrapatch >/dev/null
 CAND="$tmp/candidate/ultrapatch"
 
 FIX="$ROOT/test-bench/fixtures"
-"$UP" "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$tmp/base.blob" >/dev/null
-"$CAND" "$FIX/v0_base/watch.bin" "$FIX/v1_one_face/watch.bin" "$tmp/candidate.blob" >/dev/null
-if cmp -s "$tmp/base.blob" "$tmp/candidate.blob"; then
-  echo "check_ab_matrix.sh: model variant did not change the probe wire" >&2
-  exit 1
-fi
-cp "$FIX/v0_base/watch.bin" "$tmp/candidate.mem"
-"$CAND" --decode "$tmp/candidate.mem" "$tmp/candidate.blob" >/dev/null 2>&1
-cmp -s "$tmp/candidate.mem" "$FIX/v1_one_face/watch.bin"
 
-# Two real firmware images produce four home pairs. Alternating the same images across the pinned
-# foreign release names produces all 34 foreign directions without paying for the large corpus.
-mkdir -p "$tmp/images/img_00_base" "$tmp/images/img_01_oneface" "$tmp/foreign"
-ln -s "$FIX/v0_base/watch.bin" "$tmp/images/img_00_base/watch.bin"
-ln -s "$FIX/v1_one_face/watch.bin" "$tmp/images/img_01_oneface/watch.bin"
+# Two small deterministic images produce four home pairs. Alternating the same images across
+# the pinned foreign release names produces all 34 foreign directions. This regression verifies
+# matrix structure, manifest bypass, candidate decoding, and NVM checks; the A/B driver's real
+# one-face pair separately proves the model variant changes a production-sized wire.
+mkdir -p "$tmp/images/img_00_base" "$tmp/images/img_01_oneface" "$tmp/foreign" "$tmp/small"
+python3 "$ROOT/scripts/synth_gen.py" role "$tmp/small/a.bin" from rand 512 701
+python3 "$ROOT/scripts/synth_gen.py" role "$tmp/small/b.bin" from rand 768 907
+ln -s "$tmp/small/a.bin" "$tmp/images/img_00_base/watch.bin"
+ln -s "$tmp/small/b.bin" "$tmp/images/img_01_oneface/watch.bin"
 foreign_versions="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
 i=0
 for version in $foreign_versions; do
   mkdir -p "$tmp/foreign/$version"
-  if [ $((i % 2)) -eq 0 ]; then image="$FIX/v0_base/watch.bin"; else image="$FIX/v1_one_face/watch.bin"; fi
+  if [ $((i % 2)) -eq 0 ]; then image="$tmp/small/a.bin"; else image="$tmp/small/b.bin"; fi
   ln -s "$image" "$tmp/foreign/$version/watch.bin"
   i=$((i + 1))
 done
@@ -75,6 +70,10 @@ grep -Eq '^oneface_grow_base=[0-9]+$' "$tmp/ab.out"
 grep -Eq '^oneface_grow_cand=[0-9]+$' "$tmp/ab.out"
 grep -Eq '^oneface_revert_base=[0-9]+$' "$tmp/ab.out"
 grep -Eq '^oneface_revert_cand=[0-9]+$' "$tmp/ab.out"
+if ! grep -q '^oneface_wire_changed=1$' "$tmp/ab.out"; then
+  echo "check_ab_matrix.sh: model variant did not change either one-face wire" >&2
+  exit 1
+fi
 grep -Eq '^accept_gate=(OK|REJECT)' "$tmp/ab.out"
 
 printf 'ab_wire_change=OK (home=4/4 foreign=34/34; manifest disabled; candidate decoder and NVM checks passed)\n'

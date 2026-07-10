@@ -75,18 +75,25 @@ awk 'NR==FNR { a[$1 SUBSEP $2]=$3; next }
 # verdict below owns cap enforcement (candidate-vs-baseline binary, not the fixed gate pins), so a
 # cap regression here must stay REJECT (exit 1), never oneface_metrics.sh's exit-nonzero -> our
 # structural exit 3.
-BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" \
+BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" ONEFACE_WIRE_HASHES=1 \
   "$SDIR/oneface_metrics.sh" "$ENC_A" > "$d/base_oneface.txt" \
   || { echo "ab_matrix.sh: one-face baseline encode failed" >&2; exit 3; }
-BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" ONEFACE_ROUNDTRIP=1 \
+BASE_ONEFACE_GROW= BASE_ONEFACE_REVERT= FIXTURES="$FIX" ONEFACE_ROUNDTRIP=1 ONEFACE_WIRE_HASHES=1 \
   "$SDIR/oneface_metrics.sh" "$ENC_B" "$DEC_B" > "$d/cand_oneface.txt" \
   || { echo "ab_matrix.sh: one-face candidate encode/round-trip failed" >&2; exit 3; }
 ga=$(sed -n 's/^oneface_grow=//p' "$d/base_oneface.txt")
 ra=$(sed -n 's/^oneface_revert=//p' "$d/base_oneface.txt")
 gb=$(sed -n 's/^oneface_grow=//p' "$d/cand_oneface.txt")
 rb=$(sed -n 's/^oneface_revert=//p' "$d/cand_oneface.txt")
+gha=$(sed -n 's/^oneface_grow_sha256=//p' "$d/base_oneface.txt")
+rha=$(sed -n 's/^oneface_revert_sha256=//p' "$d/base_oneface.txt")
+ghb=$(sed -n 's/^oneface_grow_sha256=//p' "$d/cand_oneface.txt")
+rhb=$(sed -n 's/^oneface_revert_sha256=//p' "$d/cand_oneface.txt")
 printf 'oneface_grow_base=%d\noneface_grow_cand=%d\noneface_revert_base=%d\noneface_revert_cand=%d\n' \
   "$ga" "$gb" "$ra" "$rb"
+wire_changed=0
+if [ "$gha" != "$ghb" ] || [ "$rha" != "$rhb" ]; then wire_changed=1; fi
+printf 'oneface_wire_changed=%d\n' "$wire_changed"
 verdict=OK
 [ -n "$GATE_G" ] && [ "$gb" -gt "$GATE_G" ] && verdict="ONEFACE_GROW_REGRESSION"
 [ -n "$GATE_R" ] && [ "$rb" -gt "$GATE_R" ] && verdict="ONEFACE_REVERT_REGRESSION"
