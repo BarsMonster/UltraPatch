@@ -58,6 +58,9 @@
 #ifndef PATCH_IMAGE_BASE
 #error "define PATCH_IMAGE_BASE as the absolute device address of the patchable image"
 #endif
+#ifndef PATCH_IMAGE_CAPACITY
+#error "define PATCH_IMAGE_CAPACITY as the page-aligned physical patch partition size"
+#endif
 extern uint8_t flash_read(uint32_t absolute_addr);
 extern void    flash_write_page(uint32_t absolute_page_addr, const uint8_t page[OUTROW]);
 
@@ -439,11 +442,17 @@ static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 _Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
 _Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
 _Static_assert(MAX_IMAGE>0u, "MAX_IMAGE must be nonzero");
+_Static_assert(PATCH_IMAGE_BASE>=0, "PATCH_IMAGE_BASE must not be negative");
+_Static_assert(PATCH_IMAGE_CAPACITY>0, "PATCH_IMAGE_CAPACITY must be positive");
 _Static_assert((PATCH_IMAGE_BASE & (OUTROW-1u))==0u,
                "PATCH_IMAGE_BASE must be aligned to OUTROW");
+_Static_assert((PATCH_IMAGE_CAPACITY & (OUTROW-1u))==0u,
+               "PATCH_IMAGE_CAPACITY must cover complete OUTROW pages");
+_Static_assert(PATCH_IMAGE_CAPACITY<=UINT32_MAX,
+               "PATCH_IMAGE_CAPACITY must fit uint32_t");
 _Static_assert(PATCH_IMAGE_BASE <= UINT32_MAX-
-               (((MAX_IMAGE-1u) & ~(OUTROW-1u))+(OUTROW-1u)),
-               "PATCH_IMAGE_BASE leaves insufficient uint32_t address space for MAX_IMAGE");
+               (PATCH_IMAGE_CAPACITY-1u),
+               "PATCH_IMAGE_BASE + PATCH_IMAGE_CAPACITY exceeds uint32_t address space");
 static void up_orow_commit_slot(PatchApply *pa, uint32_t s){
     if(pa->g_orow_base[s]!=UP_OROW_NONE && pa->g_orow_dirty[s]){
         uint32_t base=pa->g_orow_base[s];
@@ -922,6 +931,12 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     if(!up_env_u32le(pa,&want_from) || !up_env_u32le(pa,&want_to) || !up_env_uleb(pa,&fs,0) || fs>MAX_IMAGE || !up_env_uleb(pa,&z,&ov)) return 0;
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>fs) return 0; ts=fs-m; }
     else    { uint32_t d=z>>1; if(d>MAX_IMAGE||fs>MAX_IMAGE-d) return 0; ts=fs+d; }
+    pa->g_image_span = fs>ts ? fs : ts;
+    /* Capacity covers complete physical pages and is OUTROW-aligned, so span <= capacity is
+     * equivalent to page_round_up(span) <= capacity without overflow-prone rounding arithmetic.
+     * Reject before CRC32(from): an untrusted envelope must never drive a read outside the
+     * configured patch partition. MAX_IMAGE remains the shared wire/plausibility ceiling. */
+    if(pa->g_image_span>PATCH_IMAGE_CAPACITY){ pa->g_reject=REJ_RESOURCE; return 0; }
     /* Apply direction is an ENCODER CHOICE. The NATURAL direction (descending iff the image
      * grows — the historical derived rule, so a canonically-coded envelope decodes exactly
      * as before) ships as a canonical size-delta uLEB; the UNNATURAL direction is signaled
@@ -939,7 +954,6 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     if(!up_env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
-    pa->g_image_span = fs>ts ? fs : ts;
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       if(up_crc32_flash_hist(pa,fs,hist0,hist1)!=want_from) return 0;
@@ -1065,8 +1079,9 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 
 /* Seal the non-knob model/wire macros that rc_models.h + patch_config.h define and that this
  * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
- * Only the documented integration/configuration macros (PATCH_IMAGE_BASE, JSLOTS, WINDOW_LOG,
- * OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL, DR_KCAP_EX, and MAX_IMAGE) stay defined. The
+ * Only the documented integration/configuration macros (PATCH_IMAGE_BASE,
+ * PATCH_IMAGE_CAPACITY, JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
+ * DR_KCAP_EX, and MAX_IMAGE) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
  * #undefs never reach the encoder side of the mirror.
  *

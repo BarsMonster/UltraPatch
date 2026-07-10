@@ -9,9 +9,9 @@ OPT ?= -O2
 # Every wire-affecting override belongs here, under the exact macro name consumed by
 # patch_config.h/rc_models.h. Encoder and decoder builds MUST use this same value.
 WIRE_CONFIG_FLAGS ?= -DCORTEX_M0
-# Decoder/device integration only: this address is not part of the patch wire. Repository
-# host/ARM harnesses intentionally model an image based at zero.
-DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u
+# Decoder/device integration only: these partition values are not part of the patch wire.
+# Repository host/ARM harnesses intentionally model a 64 MiB image partition based at zero.
+DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u
 # Language/include contract shared by host builds and the analyzer. Warning/optimization policy
 # stays leg-local; decoder-containing commands append DECODER_CONFIG_FLAGS explicitly.
 CONTRACT_FLAGS := -std=c99 -I. -Isrc -Ivendor/libdivsufsort
@@ -69,10 +69,10 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6089
+BASE_ARM_TEXT ?= 6101
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
-BASE_ARM_LINKED_TEXT ?= 6669
+BASE_ARM_LINKED_TEXT ?= 6681
 BASE_ARM_LINKED_DATA ?= 0
 BASE_ARM_LINKED_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
@@ -286,11 +286,26 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	if $(CC) $(CFLAGS) -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted missing PATCH_IMAGE_BASE" >&2; exit 1; \
 	fi; \
-	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=1u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-base.o" >/dev/null 2>&1; then \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-capacity.o" >/dev/null 2>&1; then \
+		echo "decoder accepted missing PATCH_IMAGE_CAPACITY" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=1u -DPATCH_IMAGE_CAPACITY=256u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted unaligned PATCH_IMAGE_BASE" >&2; exit 1; \
 	fi; \
-	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0xffffff00u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
-		echo "decoder accepted PATCH_IMAGE_BASE without MAX_IMAGE address headroom" >&2; exit 1; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=0u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/zero-capacity.o" >/dev/null 2>&1; then \
+		echo "decoder accepted zero PATCH_IMAGE_CAPACITY" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=-256 -DPATCH_IMAGE_CAPACITY=256u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/negative-base.o" >/dev/null 2>&1; then \
+		echo "decoder accepted negative PATCH_IMAGE_BASE" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=-256 -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/negative-capacity.o" >/dev/null 2>&1; then \
+		echo "decoder accepted negative PATCH_IMAGE_CAPACITY" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=257u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-capacity.o" >/dev/null 2>&1; then \
+		echo "decoder accepted non-page-aligned PATCH_IMAGE_CAPACITY" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0xffffff00u -DPATCH_IMAGE_CAPACITY=512u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
+		echo "decoder accepted PATCH_IMAGE_BASE + PATCH_IMAGE_CAPACITY overflow" >&2; exit 1; \
 	fi; \
 	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Isrc -E "$$tmp/patch_apply_smoke.c" | \
 	awk '/^# [0-9]+ "/ { inours = ($$3 ~ /"src\//) } \
@@ -302,7 +317,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
 	CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
-	echo "decoder_address_contract=OK (mandatory + aligned + uint32 headroom)"; \
+	echo "decoder_address_contract=OK (mandatory base/capacity + page alignment + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
 

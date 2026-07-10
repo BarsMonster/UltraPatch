@@ -77,7 +77,27 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
         "$decoder" resource-touched "$base" "$one" "$tmp/grow.blob" >/dev/null
     done
 
+    # A nonzero absolute base plus a one-page partition exercises address translation and the
+    # oversized-envelope guard in both distributed header forms. Before the guard this crafted
+    # envelope caused one out-of-range CRC read; it must now reject with zero flash accesses.
+    capacityflags="-UPATCH_IMAGE_BASE -UPATCH_IMAGE_CAPACITY \
+        -DPATCH_IMAGE_BASE=0x08000000u -DPATCH_IMAGE_CAPACITY=256u"
+    "$CC" $common $capacityflags test-bench/decoder-contract.c \
+        -Wl,--gc-sections -o "$tmp/capacity-source"
+    "$CC" $common $capacityflags -DDECODER_SINGLE_HEADER -I"$tmp" \
+        test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/capacity-single"
+    "$tmp/capacity-source" capacity >"$tmp/capacity-source.out"
+    "$tmp/capacity-single" capacity >"$tmp/capacity-single.out"
+    cmp "$tmp/capacity-source.out" "$tmp/capacity-single.out"
+    "$tmp/capacity-source" success "$tmp/prefix.from" "$tmp/prefix.to" \
+        "$tmp/prefix.blob" >"$tmp/nonzero-source.out"
+    "$tmp/capacity-single" success "$tmp/prefix.from" "$tmp/prefix.to" \
+        "$tmp/prefix.blob" >"$tmp/nonzero-single.out"
+    cmp "$tmp/nonzero-source.out" "$tmp/nonzero-single.out"
+
     cat "$tmp/source.out"
+    cat "$tmp/capacity-source.out"
+    cat "$tmp/nonzero-source.out"
     echo "decoder_resource_contract=OK (clean + touched; source + single header)"
 fi
 

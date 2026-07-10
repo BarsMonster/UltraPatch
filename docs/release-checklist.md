@@ -59,8 +59,8 @@ Record the release `WIRE_CONFIG_FLAGS` value. The encoder and decoder **MUST**
 use the exact same wire macro names with the exact same values; the target
 family, `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`,
 `DR_KCAP_BL`, `DR_KCAP_EX`, and any wire-model override belong in that shared
-value. `PATCH_IMAGE_BASE` is decoder-only integration configuration and must stay
-separate from the wire flags.
+value. `PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are decoder-only integration
+configuration and must stay separate from the wire flags.
 
 ## Corpus Bundle
 

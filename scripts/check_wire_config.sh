@@ -46,6 +46,9 @@ cat > "$tmp/encoder_wire_config_assert.h" <<'EOF'
 #ifdef PATCH_IMAGE_BASE
 #error "PATCH_IMAGE_BASE is decoder-only and leaked into the encoder compile path"
 #endif
+#ifdef PATCH_IMAGE_CAPACITY
+#error "PATCH_IMAGE_CAPACITY is decoder-only and leaked into the encoder compile path"
+#endif
 EOF
 
 cat > "$tmp/decoder_wire_config_assert.h" <<'EOF'
@@ -53,6 +56,9 @@ cat > "$tmp/decoder_wire_config_assert.h" <<'EOF'
 #include "wire_config_assert.h"
 #if !defined(PATCH_IMAGE_BASE) || PATCH_IMAGE_BASE != 0u
 #error "repository decoder integration flags did not reach the decoder compile path"
+#endif
+#if !defined(PATCH_IMAGE_CAPACITY) || PATCH_IMAGE_CAPACITY != 67108864u
+#error "repository decoder capacity did not reach the decoder compile path"
 #endif
 EOF
 
@@ -82,6 +88,9 @@ cat > "$tmp/single_wire_config.c" <<'EOF'
 #include "wire_config_assert.h"
 #if !defined(PATCH_IMAGE_BASE) || PATCH_IMAGE_BASE != 0u
 #error "repository decoder integration flags did not reach the generated decoder path"
+#endif
+#if !defined(PATCH_IMAGE_CAPACITY) || PATCH_IMAGE_CAPACITY != 67108864u
+#error "repository decoder capacity did not reach the generated decoder path"
 #endif
 uint8_t flash_read(uint32_t addr){ (void)addr; return 0xffu; }
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }

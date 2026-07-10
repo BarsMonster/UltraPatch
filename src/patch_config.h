@@ -27,8 +27,9 @@
 /* Wire-affecting knobs. These defaults are shared by the decoder and host encoder (encoder TUs
  * reach them via rc_models.h -> patch_config.h). An explicit override MUST use the exact SAME
  * macro name with the exact SAME value in both builds; the repository Makefile provides the one
- * WIRE_CONFIG_FLAGS path for that purpose. PATCH_IMAGE_BASE is deliberately absent: it is
- * decoder/device integration configuration, not a wire macro. WINDOW_LOG is the LZ window log;
+ * WIRE_CONFIG_FLAGS path for that purpose. PATCH_IMAGE_BASE and PATCH_IMAGE_CAPACITY are
+ * deliberately absent: they are decoder/device integration configuration, not wire macros.
+ * WINDOW_LOG is the LZ window log;
  * JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the encoder plans against; OUTROW x
  * OUTROW_DEPTH is the uncommitted NVM page window. */
 #ifndef WINDOW_LOG

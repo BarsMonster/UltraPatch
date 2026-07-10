@@ -42,9 +42,10 @@ contract test compiles this artifact without the `src/` include path.
 overrides and defaults to `-DCORTEX_M0`. Encoder and decoder builds **MUST** use
 the exact same macro names with the exact same values for `WINDOW_LOG`,
 `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`, `DR_KCAP_BL`, `DR_KCAP_EX`, the
-target family, and any wire-model override. `PATCH_IMAGE_BASE` is separate,
-decoder-only device integration configuration; repository decoder harnesses use
-`DECODER_CONFIG_FLAGS=-DPATCH_IMAGE_BASE=0u`.
+target family, and any wire-model override. `PATCH_IMAGE_BASE` and
+`PATCH_IMAGE_CAPACITY` are separate, decoder-only partition configuration;
+repository decoder harnesses use
+`DECODER_CONFIG_FLAGS='-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u'`.
 
 CLI:
 
@@ -110,7 +111,9 @@ Device integration contract:
   `src/patch_apply.h` with its two support headers beside it on the include
   path, in one update module. Allocate a caller-owned `PatchApply` state object.
 - Define `PATCH_IMAGE_BASE` as the aligned absolute device address of the
-  patchable image (`0` in repository host tests).
+  patchable image (`0` in repository host tests), and define the page-aligned
+  `PATCH_IMAGE_CAPACITY` as the complete physical patch partition size from that
+  base.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write_page(uint32_t, const uint8_t[OUTROW])`. Both receive absolute
   device addresses; one page-write call erases and fully programs the page.
@@ -120,6 +123,13 @@ Device integration contract:
   envelope and verifies both CRC gates itself; there is no coroutine/fiber.
 - Do not run concurrent decodes against the same flash image; see
   `docs/device-integration.md` before wiring it into a bootloader.
+
+The decoder rejects an envelope whose page-rounded image span exceeds
+`PATCH_IMAGE_CAPACITY` before its first flash read. This is a pre-apply partition
+guard, not recovery: after the first page write, any later decoder, transport,
+power, or flash failure has no rollback path and requires a full external
+reflash. Earlier detection of such post-write failures cannot recover the image
+and is therefore not a decoder design goal.
 
 ## License
 

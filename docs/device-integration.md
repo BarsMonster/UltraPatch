@@ -8,8 +8,8 @@ choices:
 - Include the source header set rooted at `src/patch_apply.h`, with
   `src/rc_models.h` and `src/patch_config.h` beside it on the include path.
 
-Both forms compile the same decoder, require an explicit `PATCH_IMAGE_BASE`, and
-require the two flash primitives below.
+Both forms compile the same decoder, require explicit `PATCH_IMAGE_BASE` and
+`PATCH_IMAGE_CAPACITY`, and require the two flash primitives below.
 The decoder owns no global static state and uses no heap; the integrator owns
 the `PatchApply` state object so the Cortex-M0+ SRAM gate remains meaningful.
 
@@ -58,8 +58,8 @@ Arm toolchain the ratchets are:
 
 | Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
 | ------------------------------------------------ | ----:| ----:| ---:|
-| Relocatable static-wrapper object | 6089 B | 0 B | 10296 B |
-| No-startup linked image | 6669 B | 0 B | 10296 B |
+| Relocatable static-wrapper object | 6101 B | 0 B | 10296 B |
+| No-startup linked image | 6681 B | 0 B | 10296 B |
 
 The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
@@ -71,9 +71,23 @@ product firmware using a different wrapper, library, or platform code should
 size its final image in its own build.
 
 Before including the decoder, define `PATCH_IMAGE_BASE` as the absolute device
-address of the patchable image. It must be aligned to `OUTROW`, and the complete
-`MAX_IMAGE` span including its final physical page must fit in `uint32_t` address
-space; the header enforces all three conditions at compile time.
+address of the patchable image and `PATCH_IMAGE_CAPACITY` as the physical byte
+capacity starting there. Both must be aligned to `OUTROW`, capacity must be
+nonzero, and the complete `[base, base + capacity)` range must fit in `uint32_t`
+address space; the header enforces these conditions at compile time.
+
+`MAX_IMAGE` remains the encoder/decoder shared plausibility ceiling for envelope
+sizes. `PATCH_IMAGE_CAPACITY` is decoder-only deployment geometry and may be
+smaller. After parsing the two logical sizes, the decoder rejects when the
+page-rounded `max(from_size, to_size)` exceeds capacity. This happens before the
+`CRC32(from)` scan, so an oversized untrusted envelope cannot cause a flash read
+or write outside the configured partition.
+
+That guard protects only the untouched, pre-apply state. The format has no
+rollback, checkpoint, or recovery protocol. Once any page has been written, a
+later decoder, transport, power, or flash failure requires a full external
+reflash. Detecting such a failure earlier cannot restore the old image and is
+not a decoder design objective.
 
 The target must provide exactly two flash primitives:
 
@@ -294,11 +308,11 @@ wire-affecting model override. Do not create encoder/decoder aliases or pass an
 override to only one side. `src/patch_config.h` remains the single source of
 defaults.
 
-`PATCH_IMAGE_BASE` is the explicit exception: it is decoder-only device address
-integration configuration and is not a wire macro. Set it for the decoder TU,
-never mirror it into an encoder-specific profile. Repository host and ARM
-decoder harnesses keep it separately in
-`DECODER_CONFIG_FLAGS=-DPATCH_IMAGE_BASE=0u`.
+`PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are the explicit exceptions: they
+are decoder-only partition configuration and are not wire macros. Set them for
+the decoder TU, never mirror them into an encoder-specific profile. Repository
+host and ARM decoder harnesses keep them separately in
+`DECODER_CONFIG_FLAGS='-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u'`.
 
 The decoder defaults and wire-model helpers are shared through
 `src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only source

@@ -12,7 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef PATCH_IMAGE_BASE
 #define PATCH_IMAGE_BASE 0u
+#endif
+#ifndef PATCH_IMAGE_CAPACITY
+#define PATCH_IMAGE_CAPACITY 67108864u
+#endif
 
 static uint8_t *test_flash;
 static uint32_t test_flash_n;
@@ -21,6 +26,7 @@ static uint32_t test_oob_writes;
 static uint32_t test_unaligned_writes;
 static uint32_t test_corrupt_addr;
 static uint32_t test_reads;
+static uint32_t test_oob_reads;
 
 #ifdef DECODER_SINGLE_HEADER
 #include "patch_apply_single.h"
@@ -29,17 +35,26 @@ static uint32_t test_reads;
 #endif
 
 uint8_t flash_read(uint32_t addr){
+    uint32_t offset;
     test_reads++;
-    return addr < test_flash_n ? test_flash[addr] : 0xffu;
+    offset = addr - PATCH_IMAGE_BASE;
+    if(offset >= PATCH_IMAGE_CAPACITY || offset >= test_flash_n){
+        test_oob_reads++;
+        return 0xffu;
+    }
+    return test_flash[offset];
 }
 
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){
+    uint32_t offset;
     test_writes++;
     if((addr & (OUTROW-1u)) != 0u){ test_unaligned_writes++; return; }
-    if(addr > test_flash_n || test_flash_n-addr < OUTROW){ test_oob_writes++; return; }
-    memset(test_flash+addr,0xff,OUTROW);
-    memcpy(test_flash+addr,page,OUTROW);
-    if(test_corrupt_addr>=addr && test_corrupt_addr-addr<OUTROW) test_flash[test_corrupt_addr]^=1u;
+    offset = addr - PATCH_IMAGE_BASE;
+    if(offset >= PATCH_IMAGE_CAPACITY || offset > test_flash_n ||
+       test_flash_n-offset < OUTROW){ test_oob_writes++; return; }
+    memset(test_flash+offset,0xff,OUTROW);
+    memcpy(test_flash+offset,page,OUTROW);
+    if(test_corrupt_addr>=offset && test_corrupt_addr-offset<OUTROW) test_flash[test_corrupt_addr]^=1u;
 }
 
 typedef struct {
@@ -61,7 +76,9 @@ typedef struct {
     size_t consumed;
     size_t calls;
     uint32_t writes;
+    uint32_t reads;
     uint32_t oob_writes;
+    uint32_t oob_reads;
     uint32_t unaligned_writes;
 } Result;
 
@@ -116,6 +133,8 @@ static int load_flash(const Bytes *from, uint32_t span, Bytes *before){
     test_oob_writes = 0;
     test_unaligned_writes = 0;
     test_corrupt_addr = UINT32_MAX;
+    test_reads = 0;
+    test_oob_reads = 0;
     return 0;
 }
 
@@ -128,7 +147,9 @@ static Result run_blob(PatchApply *pa, const uint8_t *blob, size_t blob_n){
     r.consumed = p.i;
     r.calls = p.calls;
     r.writes = test_writes;
+    r.reads = test_reads;
     r.oob_writes = test_oob_writes;
+    r.oob_reads = test_oob_reads;
     r.unaligned_writes = test_unaligned_writes;
     return r;
 }
@@ -140,7 +161,45 @@ static uint32_t image_span(const Bytes *a, const Bytes *b){
 
 static int writes_bounded(const Result *r, uint32_t span){
     uint32_t rows = (span + OUTROW - 1u) / OUTROW;
-    return r->oob_writes == 0u && r->unaligned_writes == 0u && r->writes <= rows;
+    return r->oob_writes == 0u && r->oob_reads == 0u && r->unaligned_writes == 0u &&
+           r->writes <= rows;
+}
+
+static size_t put_uleb(uint8_t *out, uint32_t v){
+    size_t n = 0;
+    do{
+        uint8_t b = (uint8_t)(v & 0x7fu);
+        v >>= 7;
+        out[n++] = (uint8_t)(b | (v ? 0x80u : 0u));
+    }while(v);
+    return n;
+}
+
+/* A page-plus-one logical span would make the old decoder scan one byte beyond this backend
+ * before rejecting the bad source CRC. The capacity gate must stop immediately after the two
+ * size fields, before any flash read or page write. This mode is compiled with a one-page
+ * PATCH_IMAGE_CAPACITY by check_decoder_api.sh. */
+static int capacity_case(PatchApply *pa){
+    Bytes empty = {0}, before = {0};
+    uint8_t blob[32] = {0};
+    size_t n = 8u;
+    CHECK(PATCH_IMAGE_CAPACITY < MAX_IMAGE);
+    CHECK(load_flash(&empty, PATCH_IMAGE_CAPACITY, &before) == 0);
+    n += put_uleb(blob+n, PATCH_IMAGE_CAPACITY+1u);
+    n += put_uleb(blob+n, 0u); /* to_size == from_size */
+    { size_t geometry_n = n;
+      n += put_uleb(blob+n, 0u); /* ascending fp_start */
+      n += put_uleb(blob+n, 4u); /* body size */
+      n += 4u;
+      Result r = run_blob(pa, blob, n);
+      CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_RESOURCE);
+      CHECK(r.consumed == geometry_n && r.calls == geometry_n);
+      CHECK(r.reads == 0u && r.oob_reads == 0u);
+      CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u &&
+            r.unaligned_writes == 0u);
+      CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0); }
+    free(before.d);
+    return 0;
 }
 
 static int tail_preserved(const Bytes *before, uint32_t span){
@@ -273,7 +332,7 @@ static int success_case(PatchApply *pa, const Bytes *from, const Bytes *to, cons
     CHECK(r.rc == PATCH_APPLY_DONE);
     CHECK(r.reject == REJ_NONE);
     CHECK(r.consumed == blob->n && r.calls == blob->n);
-    CHECK(r.touched == 1 && r.writes > 0u);
+    CHECK(r.touched == 1 && r.reads > 0u && r.writes > 0u);
     CHECK(writes_bounded(&r, span));
     CHECK(patch_apply_from_size(pa) == (uint32_t)from->n);
     CHECK(patch_apply_to_size(pa) == (uint32_t)to->n);
@@ -400,6 +459,18 @@ int main(int argc, char **argv){
     int forward1 = 0, forward2 = 0;
     int rc = 1;
     memset(&pa, 0xa5, sizeof pa);
+    if(argc == 2 && strcmp(argv[1], "capacity") == 0){
+        rc = capacity_case(&pa);
+        if(!rc) printf("decoder_capacity_contract=OK (oob_reads=0 oob_writes=0)\n");
+        goto out;
+    }
+    if(argc == 5 && strcmp(argv[1], "success") == 0){
+        if(read_file(argv[2], &from) || read_file(argv[3], &to) ||
+           read_file(argv[4], &blob)) goto out;
+        rc = success_case(&pa, &from, &to, &blob, &forward1);
+        if(!rc) printf("decoder_nonzero_base_contract=OK (reads + writes translated; oob=0)\n");
+        goto out;
+    }
     if(src_window_case()) goto out;
     printf("decoder_src_window=OK (journal + cached replay + FWD timing)\n");
     if(ldr_window_case()) goto out;

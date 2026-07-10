@@ -59,9 +59,11 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
     } else if (to_n && memcmp(sc_flash, to, to_n) != 0) {
         err = "decoded image differs from target";
     } else if (!(sc_amplified == 0 && sc_max_erase <= 1 && sc_finv == 0 &&
-                 sc_unaligned == 0 && sc_oob_page_writes == 0 && nvm_canary_bad() == 0)) {
+                 sc_unaligned == 0 && sc_oob_page_writes == 0 && sc_oob_reads == 0 &&
+                 nvm_canary_bad() == 0)) {
         if(sc_unaligned) err = "NVM page write was unaligned";
         else if(sc_oob_page_writes) err = "NVM page write was out of bounds";
+        else if(sc_oob_reads) err = "NVM read was out of bounds";
         else if(nvm_canary_bad()) err = "NVM final-page canary was corrupted";
         else err = sc_amplified ? "NVM page erased more than once (write amplification)"
                                 : "NVM erase frontier inversion";
@@ -105,18 +107,20 @@ int decode_a1(const char *image_path, const char *patch_path){
         rc = 1; goto out;
     }
     if(!(sc_amplified==0 && sc_max_erase<=1 && sc_finv==0 && sc_unaligned==0 &&
-         sc_oob_page_writes==0 && nvm_canary_bad()==0)){
-        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u canary=%u\n",
-                sc_amplified,sc_max_erase,sc_finv,sc_unaligned,sc_oob_page_writes,nvm_canary_bad());
+         sc_oob_page_writes==0 && sc_oob_reads==0 && nvm_canary_bad()==0)){
+        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u oob_reads=%u canary=%u\n",
+                sc_amplified,sc_max_erase,sc_finv,sc_unaligned,sc_oob_page_writes,
+                sc_oob_reads,nvm_canary_bad());
         rc = 1; goto out;
     }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
     rc = replace_file(image_path, sc_flash, to_size);
     if(rc) goto out;
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
-    fprintf(stderr,"NVM: erases=%ld pages=%u pagewrites=%u programmed_bytes=%ld amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u canary=%u (span=%u pages_total=%u)\n",
+    fprintf(stderr,"NVM: erases=%ld pages=%u pagewrites=%u programmed_bytes=%ld amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u oob_reads=%u canary=%u (span=%u pages_total=%u)\n",
             sc_erases,sc_erows,sc_page_writes,sc_programs,sc_amplified,sc_max_erase,sc_finv,
-            sc_unaligned,sc_oob_page_writes,nvm_canary_bad(),span,(span+OUTROW-1u)/OUTROW);
+            sc_unaligned,sc_oob_page_writes,sc_oob_reads,nvm_canary_bad(),span,
+            (span+OUTROW-1u)/OUTROW);
     rc = 0;
 out:
     nvm_free();

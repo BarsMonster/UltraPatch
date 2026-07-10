@@ -21,7 +21,7 @@ _Static_assert(PATCH_IMAGE_BASE==0u,"repository host NVM integration uses PATCH_
 static uint8_t *sc_flash, *sc_erasecnt, *sc_tail_canary;
 static uint32_t sc_flash_n, sc_image_span, sc_tail_n;
 static uint32_t sc_erows, sc_amplified, sc_max_erase;
-static uint32_t sc_page_writes, sc_unaligned, sc_oob_page_writes;
+static uint32_t sc_page_writes, sc_unaligned, sc_oob_page_writes, sc_oob_reads;
 static long sc_erases, sc_programs, sc_finv;
 static uint32_t sc_last_erow;
 static int sc_edir, sc_ecount;
@@ -55,7 +55,7 @@ static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_
     if(sc_tail_n) memcpy(sc_tail_canary,sc_flash+span,sc_tail_n);
     sc_erases = sc_programs = sc_finv = 0;
     sc_erows = sc_amplified = sc_max_erase = 0;
-    sc_page_writes = sc_unaligned = sc_oob_page_writes = 0;
+    sc_page_writes = sc_unaligned = sc_oob_page_writes = sc_oob_reads = 0;
     sc_last_erow = 0; sc_edir = 0; sc_ecount = 0;
     return 0;
 }
@@ -65,7 +65,9 @@ static uint32_t nvm_canary_bad(void){
     return bad;
 }
 uint8_t flash_read(uint32_t a){
-    return a<sc_flash_n ? sc_flash[a] : 0xFFu;
+    if(a<sc_flash_n) return sc_flash[a];
+    sc_oob_reads++;
+    return 0xFFu;
 }
 void flash_write_page(uint32_t a, const uint8_t page[NVM_ROW]){
     if((a&(NVM_ROW-1u))!=0u){ sc_unaligned++; return; }
