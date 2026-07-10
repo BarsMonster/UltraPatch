@@ -333,12 +333,31 @@ static uint32_t s_ug_gamma(PatchApply *pa, up_UGGamma*g){
 static int s_flag(PatchApply *pa, up_Flag1*f){ int b=s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
 
 /* ===================================================================================== */
-/* CRC32 (zlib polynomial) over flash bytes                                               */
+/* CRC32 (zlib polynomial) over flash bytes. The 256-entry byte table is built at runtime */
+/* in ARENA.seed.w: scratch before literal seeding and dead apply state after final flush. */
+/* No table has static storage and the mandatory final CRC still reads physical flash.    */
 /* ===================================================================================== */
-static uint32_t crc32_flash(uint32_t n){
-    uint32_t c=0xffffffffu;
-    for(uint32_t i=0;i<n;i++){ c^=flash_read(i);
-        for(int k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (uint32_t)(-(int32_t)(c&1))); }
+static void crc32_table_init(uint32_t*t){
+    for(uint32_t i=0;i<256u;i++){
+        uint32_t c=i;
+        for(int k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (uint32_t)(-(int32_t)(c&1)));
+        t[i]=c;
+    }
+}
+static uint32_t RC_NOINLINE crc32_flash(PatchApply *pa, uint32_t n){
+    uint32_t *t=pa->ARENA.seed.w, c=0xffffffffu;
+    crc32_table_init(t);
+    for(uint32_t i=0;i<n;i++) c=(c>>8)^t[(c^(uint32_t)flash_read(i))&0xffu];
+    return c^0xffffffffu;
+}
+static uint32_t crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, uint32_t*hist1){
+    uint32_t *t=pa->ARENA.seed.w, c=0xffffffffu;
+    crc32_table_init(t);
+    for(uint32_t i=0;i<n;i++){
+        uint8_t v=flash_read(i);
+        if(i&1u) hist1[v]++; else hist0[v]++;
+        c=(c>>8)^t[(c^(uint32_t)v)&0xffu];
+    }
     return c^0xffffffffu;
 }
 
@@ -910,10 +929,9 @@ static int RC_NOINLINE decode_header(PatchApply *pa){
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
     pa->g_image_span = fs>ts ? fs : ts;
-    if(crc32_flash(fs)!=want_from) return 0;
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
-      for(uint32_t i=0;i<fs;i++){ uint8_t v=flash_read(i); if(i&1) hist1[v]++; else hist0[v]++; }
+      if(crc32_flash_hist(pa,fs,hist0,hist1)!=want_from) return 0;
       for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&pa->M_lit0[c],hist0,w);
       lit_tree_from_hist(&pa->M_lit1,hist1,w); }
     { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
@@ -997,7 +1015,7 @@ static void RC_NOINLINE lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint
 static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
     memset(pa,0,sizeof *pa);
     pa->g_pull_fn=next; pa->g_pull_ctx=ctx;
-    if(!decode_body(pa) || crc32_flash(pa->g_to_size)!=pa->g_want_to){
+    if(!decode_body(pa) || crc32_flash(pa,pa->g_to_size)!=pa->g_want_to){
         if(!pa->g_reject) pa->g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;

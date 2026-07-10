@@ -16,6 +16,7 @@ static uint8_t *test_flash;
 static uint32_t test_flash_n;
 static uint32_t test_writes;
 static uint32_t test_oob_writes;
+static uint32_t test_corrupt_addr;
 
 uint8_t flash_read(uint32_t addr);
 void flash_write(uint32_t addr, uint8_t value);
@@ -33,6 +34,7 @@ uint8_t flash_read(uint32_t addr){
 void flash_write(uint32_t addr, uint8_t value){
     test_writes++;
     if(addr >= test_flash_n){ test_oob_writes++; return; }
+    if(addr == test_corrupt_addr) value ^= 1u;
     test_flash[addr] = value;
 }
 
@@ -106,6 +108,7 @@ static int load_flash(const Bytes *from, uint32_t span, Bytes *before){
     if(span) memcpy(before->d, test_flash, span);
     test_writes = 0;
     test_oob_writes = 0;
+    test_corrupt_addr = UINT32_MAX;
     return 0;
 }
 
@@ -280,6 +283,24 @@ static int late_crc_case(PatchApply *pa, const Bytes *from, const Bytes *to, con
     return 0;
 }
 
+/* Corrupt one byte in the final FWD row, which is committed only after the range stream has been
+ * consumed. The terminal CRC must reject the physical read-back rather than intended output. */
+static int nvm_failure_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob){
+    Bytes before = {0};
+    uint32_t span = image_span(from, to);
+    CHECK(to->n > 0u);
+    CHECK(load_flash(from, span, &before) == 0);
+    test_corrupt_addr = (uint32_t)to->n - 1u;
+    Result r = run_blob(pa, blob->d, blob->n);
+    test_corrupt_addr = UINT32_MAX;
+    CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_CORRUPT);
+    CHECK(r.consumed == blob->n && r.calls == blob->n);
+    CHECK(r.touched == 1 && r.writes > 0u && writes_bounded(&r, span));
+    CHECK(memcmp(test_flash, to->d, to->n) != 0);
+    free(before.d);
+    return 0;
+}
+
 static int resource_case(PatchApply *pa, const Bytes *from, const Bytes *to,
                          const Bytes *blob, int want_touched){
     Bytes before = {0};
@@ -332,6 +353,8 @@ int main(int argc, char **argv){
     if(forward1 == forward2){ rc = fail(__LINE__, "grow/revert directions differ"); goto out; }
     if(early_crc_case(&pa, &from, &to, &blob)) goto out;
     if(late_crc_case(&pa, &from, &to, &blob)) goto out;
+    if(nvm_failure_case(&pa, &from2, &to2, &blob2)) goto out;
+    printf("decoder_nvm_readback=OK (corrupt final-row write rejected)\n");
     printf("decoder_api_contract=OK (state reuse + counted framing + early-clean/late-touched rejects)\n");
     rc = 0;
 out:
