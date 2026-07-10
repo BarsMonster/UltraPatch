@@ -932,7 +932,8 @@ static int RC_NOINLINE decode_header(PatchApply *pa){
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       if(crc32_flash_hist(pa,fs,hist0,hist1)!=want_from) return 0;
-      for(int c=0;c<LIT0_CTX;c++) lit_tree_from_hist(&pa->M_lit0[c],hist0,w);
+      lit_tree_from_hist(&pa->M_lit0[0],hist0,w);
+      for(int c=1;c<LIT0_CTX;c++) pa->M_lit0[c]=pa->M_lit0[0];
       lit_tree_from_hist(&pa->M_lit1,hist1,w); }
     { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
