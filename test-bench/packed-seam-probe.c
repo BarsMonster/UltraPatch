@@ -18,6 +18,21 @@ static Op zero_op(int32_t dl, int32_t el, int32_t adj) {
     return (Op){ dl, el, adj };
 }
 
+static int same_ops(const OpVec *a, const OpVec *b, size_t payload_n) {
+    if (a->n != b->n) return 0;
+    for (size_t i = 0; i < a->n; i++)
+        if (a->v[i].diff_len != b->v[i].diff_len ||
+            a->v[i].extra_len != b->v[i].extra_len || a->v[i].adj != b->v[i].adj)
+            return 0;
+    return !payload_n || memcmp(a->payload, b->payload, payload_n) == 0;
+}
+
+static int same_caps(const PlanCaps *a, const PlanCaps *b) {
+    return a->ok == b->ok && a->fp_end == b->fp_end &&
+           a->pres_cutoff == b->pres_cutoff && a->pres_total == b->pres_total &&
+           a->pres_kept == b->pres_kept;
+}
+
 static Buf wire_blob(uint32_t from_crc, uint32_t to_crc,
                      uint32_t from_size, uint32_t to_size, int desc,
                      int32_t fp_end, int32_t fp_start, const Buf *body) {
@@ -80,17 +95,70 @@ static int check_preserve_seam(void) {
     CHECK(before.pres_kept == JSLOTS && before.pres_cutoff < 0);
     oppc_array_free(pc, ops.n);
 
-    degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd, from_n, to_n);
+    int32_t fp_start = fold_zero_ops(&ops);
+    PlanCaps first;
+    pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd,
+                                       fp_start, from_n, to_n, &first);
+    CHECK(pc == NULL && same_caps(&before, &first));
     CHECK(ctx.deg_engaged && ctx.deg_converted == 1u);
     CHECK(ops.payload[kept] == to.d[kept]); /* degraded extras come from true `to` */
-    int32_t fp_start = fold_zero_ops(&ops);
+    fp_start += fold_zero_ops(&ops);
     CHECK(fp_start == a0);
     PlanCaps caps;
-    pc = build_pc_fixpoint(&ctx, &ops, fp_start, &from, &to, &fd, &caps);
+    pc = build_pc_fixpoint(&ctx, &ops, fp_start, &from, &to, &fd, NULL, &caps);
     CHECK(caps.ok && caps.pres_total == JSLOTS && caps.pres_kept == JSLOTS);
     CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, fp_start, 1) == 0);
 
     oppc_array_free(pc, ops.n); opvec_free(&ops);
+    buf_free(&from); buf_free(&to);
+    return 0;
+}
+
+/* Folding must preserve the absolute source walk used to choose the journal cutoff. Exercise
+ * both apply directions with leading/interior/trailing pure seeks and a real over-budget block
+ * swap. Degradation turns the final hazardous copy into extras plus a new trailing pure seek;
+ * the mutation path must fold that seek again. */
+static int check_degrade_coordinates(int fwd) {
+    enum { H = 2048, N = 2 * H };
+    Buf from = { (uint8_t *)xmalloc(N), N, N };
+    Buf to = { (uint8_t *)xmalloc(N), N, N };
+    for (int i = 0; i < N; i++) from.d[i] = (uint8_t)(i * 29 + (i >> 8));
+    memcpy(to.d, from.d + H, H); memcpy(to.d + H, from.d, H);
+    FieldDeltaVec fd = {0};
+    OpVec input = {0}; input.payload = (uint8_t *)xcalloc(N, 1);
+    opvec_push(&input, zero_op(0, 0, H));
+    opvec_push(&input, zero_op(H, 0, 0));
+    opvec_push(&input, zero_op(0, 0, -2 * H));
+    opvec_push(&input, zero_op(H, 0, 0));
+    opvec_push(&input, zero_op(0, 0, 13));
+    OpVec old = prep_ops_clone(&input, N), now = prep_ops_clone(&input, N);
+    EncCtx old_ctx = {0}, ctx = {0}; old_ctx.fwd = ctx.fwd = fwd;
+    PlanCaps old_caps, first;
+
+    OpPC *pc = degrade_ops_to_journal_budget(&old_ctx, &old, &to, from.d, &fd,
+                                              0, N, N, &old_caps);
+    CHECK(pc == NULL && old_ctx.deg_engaged && old_caps.pres_total > JSLOTS);
+    int32_t old_fp_start = fold_zero_ops(&old);
+
+    int32_t fp_start = fold_zero_ops(&now);
+    CHECK(fp_start == H && now.n == 2u);
+    pc = degrade_ops_to_journal_budget(&ctx, &now, &to, from.d, &fd,
+                                       fp_start, N, N, &first);
+    CHECK(pc == NULL && ctx.deg_engaged && first.pres_total > JSLOTS);
+    size_t degraded_n = now.n;
+    fp_start += fold_zero_ops(&now);
+    if (fwd)
+        CHECK(now.n < degraded_n); /* FWD's degraded suffix left a pure trailing seek */
+    CHECK(fp_start == old_fp_start && same_caps(&first, &old_caps));
+    CHECK(ctx.deg_pres_needed == old_ctx.deg_pres_needed &&
+          ctx.deg_converted == old_ctx.deg_converted && same_ops(&now, &old, N));
+
+    PlanCaps caps;
+    pc = build_pc_fixpoint(&ctx, &now, fp_start, &from, &to, &fd, NULL, &caps);
+    CHECK(caps.ok && caps.pres_total == JSLOTS && caps.pres_kept == JSLOTS);
+    CHECK(verify_plan(&ctx, &now, &from, &to, &fd, pc, &caps, fp_start, !fwd) == 0);
+
+    oppc_array_free(pc, now.n); opvec_free(&input); opvec_free(&old); opvec_free(&now);
     buf_free(&from); buf_free(&to);
     return 0;
 }
@@ -139,14 +207,12 @@ static int check_correction_seam(void) {
     OpVec ops = {0}; ops.payload = (uint8_t *)xcalloc(n, 1);
     opvec_push(&ops, zero_op((int32_t)n, 0, 0));
 
-    PlanCaps before;
-    OpPC *pc = preserve_corrections_pc(&ctx, &ops, 0, from.d, to.d,
-                                       &fd, n, n, &before);
-    CHECK(!before.ok && pc[0].corr.n == 1u && (uint32_t)pc[0].corr.v[0].off == lim);
-    oppc_array_free(pc, ops.n);
-
     PlanCaps caps;
-    pc = build_pc_fixpoint(&ctx, &ops, 0, &from, &to, &fd, &caps);
+    OpPC *pc = degrade_ops_to_journal_budget(&ctx, &ops, &to, from.d, &fd,
+                                              0, n, n, &caps);
+    CHECK(pc != NULL && !caps.ok && pc[0].corr.n == 1u &&
+          (uint32_t)pc[0].corr.v[0].off == lim);
+    pc = build_pc_fixpoint(&ctx, &ops, 0, &from, &to, &fd, pc, &caps);
     CHECK(caps.ok && ctx.opc_splits == 1u && ops.n == 2u);
     CHECK(pc[1].corr.n == 1u && pc[1].corr.v[0].off == 0);
     CHECK(verify_plan(&ctx, &ops, &from, &to, &fd, pc, &caps, 0, 0) == 0);
@@ -191,6 +257,8 @@ int main(void) {
     if (check_preserve_seam()) return 1;
     printf("packed_seam_preserve=OK high_unpacked=1 journal_kept=%u converted=1\n",
            (unsigned)JSLOTS);
+    if (check_degrade_coordinates(1) || check_degrade_coordinates(0)) return 1;
+    printf("planner_coordinates=OK folds=leading/interior trailing=FWD-refolded degrade=FWD/grow\n");
     if (check_correction_seam()) return 1;
     if (check_repeated_extra_split()) return 1;
     printf("packed_seam_correction=OK high_offset=%u rebased_offset=0 splits=1 extra_splits=2\n",

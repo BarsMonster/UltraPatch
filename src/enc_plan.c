@@ -31,25 +31,25 @@ static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_
            !row_covered(ctx, a, t);
 }
 
-static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
-                                          const uint8_t *frm, const FieldDeltaVec *fd,
-                                          uint32_t from_size, uint32_t to_size) {
+static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
+                                           const uint8_t *frm, const FieldDeltaVec *fd,
+                                           int32_t fp_start, uint32_t from_size, uint32_t to_size,
+                                           PlanCaps *caps) {
     int FWD = ctx->fwd;
     uint8_t *payload = ops->payload;
     /* Derive the preserve total and cutoff from a single preserve_corrections_pc pass over the same
-     * opwalk+readarr machinery (fp_start=0: degrade runs before fold_zero_ops). */
-    PlanCaps caps;
-    OpPC *pc = preserve_corrections_pc(ctx, ops, 0, frm, to->d, fd,
-                                       from_size, to_size, &caps);
-    size_t total = caps.pres_total;
+     * folded opwalk+readarr geometry used by body planning. */
+    OpPC *pc = preserve_corrections_pc(ctx, ops, fp_start, frm, to->d, fd,
+                                       from_size, to_size, caps);
+    size_t total = caps->pres_total;
     ctx->deg_pres_needed = total;
-    if (total == caps.pres_kept) { oppc_array_free(pc, ops->n); return; }
-    int32_t C = caps.pres_cutoff;
+    if (total == caps->pres_kept) return pc;
+    int32_t C = caps->pres_cutoff;
     oppc_array_free(pc, ops->n);
     /* FWD protects [0,C). Grow protects [C+1,2^24): high unrepresentable positions are
      * skipped before consuming its budget, then C is the first lower over-budget preserve. */
     OpVec out = { .payload = payload };
-    int32_t tp0 = 0, fp0 = 0;
+    int32_t tp0 = 0, fp0 = fp_start;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
         int32_t dl = o->diff_len;
@@ -89,6 +89,7 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
     }
     free(ops->v);
     *ops = out;
+    return NULL;
 }
 
 static Buf prep_buf_clone(const Buf *src) {
@@ -171,7 +172,6 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (cfg.variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
-    degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size);
     return ops;
 }
 
@@ -248,16 +248,17 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, i
  * computes exactly the untransformed plan (bit-identical wire). */
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
                                const Buf *from, const Buf *to,
-                               const FieldDeltaVec *fd, PlanCaps *caps) {
+                               const FieldDeltaVec *fd, OpPC *pc, PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    OpPC *pc = NULL;
     for (int pass = 0;; pass++) {
-        pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d,
-                                     fd, from_size, to_size, caps);
+        if (!pc)
+            pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d,
+                                         fd, from_size, to_size, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc, pass);
         if (!split_any) break;
         oppc_array_free(pc, old_n);
+        pc = NULL;
     }
     return pc;
 }
@@ -271,11 +272,16 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     PlanResult r = {0};
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     FieldDeltaVec fd = {0};
+    PlanCaps caps;
     OpVec ops = build_candidate_ops(ctx, from, to, prep, cfg, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
-    PlanCaps caps;
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &caps);
+    OpPC *pc = degrade_ops_to_journal_budget(ctx, &ops, to, from->d, &fd,
+                                             fp_start_s, from_size, to_size, &caps);
+    /* A fully degraded diff with a nonzero source adjustment leaves a new pure seek.
+     * Normalize only the mutated path again; the reusable PC path remains untouched. */
+    if (!pc) fp_start_s += fold_zero_ops(&ops);
+    pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, pc, &caps);
     /* degradation snapshot: load-bearing for direction-sweep pruning and DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
     /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
