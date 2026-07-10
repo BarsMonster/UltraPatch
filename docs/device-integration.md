@@ -121,11 +121,16 @@ Beyond that, the decoder relies on three contract properties of the pair:
    physical page. The driver must consume the complete buffer exactly as passed;
    erasing a larger hardware region requires the driver to preserve any bytes
    outside that buffer itself.
-3. **Write-failure surfacing.** `flash_write_page` returns `void`, so a hardware
-   program failure is not reported at the call site — it surfaces only at the
-   final `CRC32(to)` pass, as `REJ_CORRUPT`, indistinguishable from a corrupt
-   blob. Integrators whose flash can fail silently should verify writes inside
-   the driver.
+3. **Write-failure policy.** `flash_write_page` intentionally returns `void`;
+   there is no decoder-level `REJ_IO`. The flash driver may synchronously verify
+   and retry a page internally before returning, where hardware-specific status
+   is still actionable. Once any page has been written, however, the old image
+   cannot be reconstructed. Reporting an exhausted program failure to the
+   decoder earlier would not create a recovery path, so call-site error
+   detection is not a decoder design goal. Any unrecoverable write failure after
+   the image is touched requires a full external reflash. If a failed write
+   returns silently, the final `CRC32(to)` may detect the wrong image as
+   `REJ_CORRUPT`; that CRC is an integrity verdict, not rollback or recovery.
 
 ## Patch Envelope
 
@@ -281,11 +286,12 @@ larger-capped build fixes the cap, but only a recovered or still-intact image
 can accept the retried patch (retrying the same patch on the half-written
 image rejects cleanly at `CRC32(from)`). `REJ_CORRUPT` means a malformed,
 truncated, or wrong-image patch; with flash untouched it is safe to re-request
-the transfer and retry. A silent hardware write failure lands in the same
-`REJ_CORRUPT` bucket but with flash TOUCHED — a fully-written, wrong image
-caught at the final `CRC32(to)` gate (the last matrix row) — so a `REJ_CORRUPT`
-with flash touched warrants a driver-level write check (see the flash-primitive
-contract above), not just a re-transfer.
+the transfer and retry. A silent hardware write failure can land in the same
+`REJ_CORRUPT` bucket but with flash TOUCHED — a fully-written, wrong image caught
+at the final `CRC32(to)` gate (the last matrix row). Driver-level verification
+may identify or retry the failing page sooner, but it does not change the
+terminal policy: once flash was touched, recover by full external reflash, not
+by re-transfer or decoder retry.
 
 Do not run two decodes concurrently against one flash image. Do not start a new
 patch until the previous patch has reached `DONE` or `ERROR` and the bootloader

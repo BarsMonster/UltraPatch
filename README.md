@@ -116,7 +116,11 @@ Device integration contract:
   base.
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
   `flash_write_page(uint32_t, const uint8_t[OUTROW])`. Both receive absolute
-  device addresses; one page-write call erases and fully programs the page.
+  device addresses; one page-write call erases and fully programs the page. The
+  write primitive deliberately returns `void`: a driver may verify/retry
+  internally, but any unrecoverable failure after a write requires full
+  external reflash; the final CRC detects integrity and does not provide
+  recovery.
 - Authenticate the update, then run the WHOLE blob through
   `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
   block internally), returning `PATCH_PULL_BYTE` for a byte or `PATCH_PULL_END`
