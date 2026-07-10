@@ -6,32 +6,8 @@
  * The device artifact remains src/patch_apply.h; this file exists only so the
  * host tool links one reference-decoder copy instead of one per harness.
  */
-#include <sys/types.h>
-#include <unistd.h>
-
 #include "enc_internal.h"
 #include "nvm_emu.inc"
-
-static int host_close_file(FILE **fp, const char *path){
-    if(!*fp) return 0;
-    FILE *f = *fp;
-    *fp = NULL;
-    if(fclose(f)){ perror(path); return 2; }
-    return 0;
-}
-
-static int host_commit_image(FILE *mf, const char *image_path, const uint8_t *data,
-                             uint32_t to_size, size_t old_size){
-    if(fseek(mf,0,SEEK_SET)){ perror(image_path); return 2; }
-    if(to_size && fwrite(data,1,to_size,mf)!=(size_t)to_size){ perror(image_path); return 2; }
-    if(fflush(mf)){ perror(image_path); return 2; }
-    if((size_t)to_size<old_size){
-        int fd = fileno(mf);
-        if(fd < 0){ perror(image_path); return 2; }
-        if(ftruncate(fd,(off_t)to_size)){ perror(image_path); return 2; }
-    }
-    return 0;
-}
 
 #include "patch_apply.h"
 
@@ -96,8 +72,13 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
 
 int decode_a1(const char *image_path, const char *patch_path){
     Buf blob = {0}, image = {0};
-    FILE *mf = NULL;
     int rc = 2;
+    int alias = file_alias(image_path, patch_path);
+    if(alias < 0) goto out;
+    if(alias){
+        fprintf(stderr,"%s: image aliases patch %s\n",image_path,patch_path);
+        goto out;
+    }
     rc = read_file_buf(patch_path, &blob, 0); if(rc) goto out;
     if(blob.n<12){ fprintf(stderr,"blob too short\n"); rc = 1; goto out; }
     rc = read_file_buf(image_path, &image, 0); if(rc) goto out;
@@ -130,10 +111,7 @@ int decode_a1(const char *image_path, const char *patch_path){
         rc = 1; goto out;
     }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
-    mf=fopen(image_path,"r+b"); if(!mf){perror(image_path); rc = 2; goto out;}
-    rc = host_commit_image(mf, image_path, sc_flash, to_size, image.n);
-    if(rc) goto out;
-    rc = host_close_file(&mf, image_path);
+    rc = replace_file(image_path, sc_flash, to_size);
     if(rc) goto out;
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
     fprintf(stderr,"NVM: erases=%ld pages=%u pagewrites=%u programmed_bytes=%ld amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u canary=%u (span=%u pages_total=%u)\n",
@@ -141,7 +119,6 @@ int decode_a1(const char *image_path, const char *patch_path){
             sc_unaligned,sc_oob_page_writes,nvm_canary_bad(),span,(span+OUTROW-1u)/OUTROW);
     rc = 0;
 out:
-    if(mf) (void)host_close_file(&mf, image_path);
     nvm_free();
     buf_free(&image); buf_free(&blob);
     return rc;

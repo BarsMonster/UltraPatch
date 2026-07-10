@@ -57,6 +57,18 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 }
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
+    int alias = file_alias(patch_out, from_image);
+    if (alias < 0) exit(2);
+    if (alias) {
+        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, from_image);
+        exit(2);
+    }
+    alias = file_alias(patch_out, to_image);
+    if (alias < 0) exit(2);
+    if (alias) {
+        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, to_image);
+        exit(2);
+    }
     char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
     Buf from = slurp(from_image), to = slurp(to_image);
     uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");

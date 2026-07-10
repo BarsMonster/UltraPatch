@@ -242,6 +242,8 @@ static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
 }
 int read_file_buf(const char *path, Buf *out, uint64_t max_size);
 Buf slurp(const char *path);
+int file_alias(const char *a, const char *b);
+int replace_file(const char *path, const void *p, size_t n);
 void write_file(const char *path, const void *p, size_t n);
 uint32_t crc32_buf(const uint8_t *p, size_t n);
 int bitlen32(uint32_t v);

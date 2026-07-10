@@ -1,10 +1,19 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 /*
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, slurp/write_file, crc32, varints, vector + compare helpers.
+ * A1 host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, transactional file IO, crc32, varints, vector + compare helpers.
  * Compiled as a normal internal encoder translation unit.
  */
+
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "enc_internal.h"
 /* noreturn: lets the reader AND -fanalyzer know an allocation/parse failure terminates the
@@ -174,11 +183,93 @@ Buf slurp(const char *path) {
     return b;
 }
 
+int file_alias(const char *a, const char *b) {
+    struct stat sa, sb;
+    if (stat(a, &sa)) {
+        if (errno == ENOENT || errno == ENOTDIR) return 0;
+        perror(a);
+        return -1;
+    }
+    if (stat(b, &sb)) {
+        perror(b);
+        return -1;
+    }
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+int replace_file(const char *path, const void *p, size_t n) {
+    static const char suffix[] = ".tmp.XXXXXX";
+    struct stat st;
+    mode_t mode;
+    size_t path_n = strlen(path);
+    char *tmp;
+    int fd = -1, rc = 2;
+
+    if (path_n > SIZE_MAX - sizeof(suffix)) {
+        fprintf(stderr, "%s: path too long\n", path);
+        return 2;
+    }
+    tmp = (char *)malloc(path_n + sizeof(suffix));
+    if (!tmp) {
+        fprintf(stderr, "out of memory\n");
+        return 2;
+    }
+    memcpy(tmp, path, path_n);
+    memcpy(tmp + path_n, suffix, sizeof(suffix));
+
+    if (stat(path, &st) == 0) {
+        mode = st.st_mode & 07777u;
+    } else if (errno == ENOENT || errno == ENOTDIR) {
+        mode_t mask = umask(0);
+        (void)umask(mask);
+        mode = 0666u & ~mask;
+    } else {
+        perror(path);
+        goto out;
+    }
+    fd = mkstemp(tmp);
+    if (fd < 0) {
+        perror(path);
+        goto out;
+    }
+    {
+        const uint8_t *d = (const uint8_t *)p;
+        size_t off = 0;
+        while (off < n) {
+            ssize_t wrote = write(fd, d + off, n - off);
+            if (wrote < 0 && errno == EINTR) continue;
+            if (wrote <= 0) {
+                if (wrote == 0) errno = EIO;
+                perror(path);
+                goto out;
+            }
+            off += (size_t)wrote;
+        }
+    }
+    if (fchmod(fd, mode) || fsync(fd)) {
+        perror(path);
+        goto out;
+    }
+    if (close(fd)) {
+        fd = -1;
+        perror(path);
+        goto out;
+    }
+    fd = -1;
+    if (rename(tmp, path)) {
+        perror(path);
+        goto out;
+    }
+    rc = 0;
+out:
+    if (fd >= 0) (void)close(fd);
+    if (rc) (void)unlink(tmp);
+    free(tmp);
+    return rc;
+}
+
 void write_file(const char *path, const void *p, size_t n) {
-    FILE *f = fopen(path, "wb");
-    if (!f) { perror(path); exit(2); }
-    if (n && fwrite(p, 1, n, f) != n) die("write failed");
-    if (fclose(f)) die("close failed");
+    if (replace_file(path, p, n)) exit(2);
 }
 
 uint32_t crc32_buf(const uint8_t *p, size_t n) {
