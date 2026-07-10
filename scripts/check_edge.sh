@@ -23,9 +23,10 @@ EXPECTED_ROUNDTRIPS=11
 EXPECTED_REFUSALS=1
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ULTRAPATCH="${ULTRAPATCH:-./ultrapatch}"
 
-if [ ! -x ./ultrapatch ]; then
-  echo "edge infrastructure failure: ./ultrapatch is missing or not executable" >&2
+if [ ! -x "$ULTRAPATCH" ]; then
+  echo "edge infrastructure failure: $ULTRAPATCH is missing or not executable" >&2
   exit 2
 fi
 
@@ -41,6 +42,14 @@ mkpair() { # mkpair <name> -> creates $tmp/<name>_from/ and $tmp/<name>_to/ dirs
 
 cases=0; roundtrips=0; refusals=0; failures=0
 
+controlled_encoder_refusal() {
+  status=$1
+  err=$2
+  [ "$status" -eq 2 ] || return 1
+  [ "$(wc -l < "$err")" -eq 1 ] || return 1
+  grep -Fxq 'patch_generate: no feasible plan: every config exceeds a decoder resource cap for this pair' "$err"
+}
+
 run_case() { # run_case <name>  (dirs already populated with watch.bin)
   name=$1
   cases=$((cases + 1))
@@ -50,9 +59,15 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
     echo "edge infrastructure failure: $name fixture is incomplete" >&2
     exit 2
   fi
-  if ./ultrapatch "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
+  status=0
+  if "$ULTRAPATCH" "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
+    :
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
     cp "$from" "$tmp/$name.mem"
-    if ./ultrapatch --decode "$tmp/$name.mem" "$blob" >/dev/null 2>&1 && cmp -s "$tmp/$name.mem" "$to"; then
+    if "$ULTRAPATCH" --decode "$tmp/$name.mem" "$blob" >/dev/null 2>&1 && cmp -s "$tmp/$name.mem" "$to"; then
       roundtrips=$((roundtrips + 1))
     else
       echo "edge FAILURE: $name encoded but did not round-trip" >&2
@@ -62,10 +77,14 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
     if [ -f "$blob" ]; then
       echo "edge FAILURE: $name refused but left a blob file" >&2
       failures=$((failures + 1))
-    else
+    elif controlled_encoder_refusal "$status" "$tmp/$name.encerr"; then
       encerr_tail="$(tail -n 1 "$tmp/$name.encerr" 2>/dev/null || true)"
       echo "edge refusal: $name ($encerr_tail)" >&2
       refusals=$((refusals + 1))
+    else
+      echo "edge FAILURE: $name encoder dispatcher failure (status=$status)" >&2
+      cat "$tmp/$name.encerr" >&2
+      failures=$((failures + 1))
     fi
   fi
 }

@@ -244,12 +244,14 @@ check-assets-internal:
 
 check-malformed-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
+	@FIXTURES="$(FIXTURES)" scripts/check_dispatch_crash.sh malformed
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
 # page-boundary/>384KiB-span pairs). ultrapatch self-verifies every encoded blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
 check-edge-internal: ultrapatch
 	@scripts/check_edge.sh
+	@scripts/check_dispatch_crash.sh edge
 
 # Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
 # path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP

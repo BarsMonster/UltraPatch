@@ -11,7 +11,13 @@ one="$FIX/v1_one_face"
 
 . "$(dirname "$0")/tempdir.sh"
 
-./ultrapatch "$base/watch.bin" "$one/watch.bin" "$tmp/grow.blob" >/dev/null 2>&1
+ULTRAPATCH="${ULTRAPATCH:-./ultrapatch}"
+if [ ! -x "$ULTRAPATCH" ]; then
+  echo "malformed infrastructure failure: $ULTRAPATCH is missing or not executable" >&2
+  exit 2
+fi
+
+"$ULTRAPATCH" "$base/watch.bin" "$one/watch.bin" "$tmp/grow.blob" >/dev/null 2>&1
 
 rejects=0
 
@@ -23,17 +29,39 @@ zeros() {
   dd if=/dev/zero bs=1 count="$1" 2>/dev/null
 }
 
+controlled_decoder_rejection() {
+  status=$1
+  err=$2
+  [ "$status" -eq 1 ] || return 1
+  [ "$(wc -l < "$err")" -eq 1 ] || return 1
+  grep -Eq '^(blob too short|decode error - rejected \(reason=[12]: (corrupt/truncated patch|resource cap exceeded - firmware larger than build sizing)\)|decode error - trailing bytes after counted patch body|decode error - patch from_size=[0-9]+ does not match current image size=[0-9]+)$' "$err"
+}
+
 expect_reject_unchanged() {
   name=$1
   blob=$2
   source_bin=$3
   cp "$source_bin" "$tmp/$name.mem"
-  if ./ultrapatch --decode "$tmp/$name.mem" "$blob" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+  status=0
+  if "$ULTRAPATCH" --decode "$tmp/$name.mem" "$blob" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+    :
+  else
+    status=$?
+  fi
+  if ! cmp "$tmp/$name.mem" "$source_bin" >/dev/null; then
+    echo "malformed case modified the image: $name" >&2
+    exit 1
+  fi
+  if [ "$status" -eq 0 ]; then
     echo "malformed case accepted: $name" >&2
     cat "$tmp/$name.err" >&2
     exit 1
   fi
-  cmp "$tmp/$name.mem" "$source_bin" >/dev/null
+  if ! controlled_decoder_rejection "$status" "$tmp/$name.err"; then
+    echo "malformed case dispatcher failure: $name (status=$status)" >&2
+    cat "$tmp/$name.err" >&2
+    exit 1
+  fi
   rejects=$((rejects + 1))
 }
 
