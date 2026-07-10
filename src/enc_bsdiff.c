@@ -87,7 +87,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
                    "round even address back to 4-alignment" step exactly. */
                 uint32_t address = (uint32_t)rc_ldr_target((int32_t)ins, up & 0xff);
                 if ((size_t)address + 4 <= fsize) {
-                    int32_t v = (int32_t)rc_u32le(f + address);
+                    int32_t v = rc_i32_from_u32(rc_u32le(f + address));
                     map_push(&ldr, address, v);
                     litset_add(&lit, address);
                 }
@@ -246,13 +246,15 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
         sz += 1;
         int nz = 0;
         for (int32_t k = 0; k < sz; k++) {
-            int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
+            int32_t delta = rc_i32_from_u32((uint32_t)from_s->a[fo + k].val -
+                                            (uint32_t)to_s->a[to + k].val);
             if (delta != 0) nz++;
         }
         if (nz < 5) continue;
         for (int32_t k = 0; k < sz; k++) {
             uint32_t a = from_s->a[fo + k].addr;
-            int32_t delta = (int32_t)((uint32_t)from_s->a[fo + k].val - (uint32_t)to_s->a[to + k].val);
+            int32_t delta = rc_i32_from_u32((uint32_t)from_s->a[fo + k].val -
+                                            (uint32_t)to_s->a[to + k].val);
             fd_put(out, a, kind, delta);
             if (a + 4 <= from_mut->n) memset(from_mut->d + a, 0, 4);
             a = to_s->a[to + k].addr;

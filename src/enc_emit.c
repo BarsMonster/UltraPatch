@@ -189,7 +189,7 @@ static int32_t smap_resid(const uint32_t *mb, const int32_t *mv, int mn,
                           int kind, uint32_t k1, uint32_t k2, int32_t need) {
     int32_t pred = kind == EV_BL ? rc_smap_pred_bl(mb, mv, mn, k1, k2)
                                  : rc_smap_pred_ex(mb, mv, mn, k2);
-    return (int32_t)((uint32_t)need - (uint32_t)pred);
+    return rc_i32_from_u32((uint32_t)need - (uint32_t)pred);
 }
 
 /* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)

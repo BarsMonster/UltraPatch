@@ -303,11 +303,12 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                 if (rc_bl_pattern(tu, tl)) {
                     uint16_t fu = rc_u16le(frm + fpk), fl2 = rc_u16le(frm + fpk + 2);
                     fd_put(fd, fpk, STREAM_BL,
-                           (int32_t)((uint32_t)rc_bl_imm24s(fu, fl2) - (uint32_t)rc_bl_imm24s(tu, tl)));
+                           rc_i32_from_u32((uint32_t)rc_bl_imm24s(fu, fl2) -
+                                           (uint32_t)rc_bl_imm24s(tu, tl)));
                 }
             } else if (ldr_target_index_query(ldr, we->fp, we->o->diff_len, fpk)) {
                 fd_put(fd, fpk, STREAM_LDR,
-                       (int32_t)(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
+                       rc_i32_from_u32(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
             }
         }
     }
@@ -395,7 +396,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
             const FieldInj *fk = field_inj_key(inj, fwd, i);
             if (fk->kind == EV_EX && fk->need != INT32_MIN) {
                 ex[en].b = fk->k2;
-                ex[en].v = (int32_t)(0u - (uint32_t)fk->need);
+                ex[en].v = rc_i32_from_u32(0u - (uint32_t)fk->need);
                 en++;
             }
         }

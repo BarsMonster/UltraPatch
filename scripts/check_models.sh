@@ -203,6 +203,10 @@ static int check_zigzag(void){
     static const int32_t cases[] = {
         INT32_MIN, INT32_MIN + 1, -123456789, -1, 0, 1, 123456789, INT32_MAX
     };
+    CHECK(rc_i32_from_u32(0u) == 0);
+    CHECK(rc_i32_from_u32((uint32_t)INT32_MAX) == INT32_MAX);
+    CHECK(rc_i32_from_u32((uint32_t)INT32_MAX + 1u) == INT32_MIN);
+    CHECK(rc_i32_from_u32(UINT32_MAX) == -1);
     CHECK(rc_zz32(INT32_MIN) == UINT32_MAX);
     CHECK(rc_zz32(INT32_MAX) == UINT32_MAX - 1u);
     CHECK(rc_unzz32_value(UINT32_MAX) == INT32_MIN);
@@ -223,6 +227,16 @@ static int check_reloc_helpers(void){
         uint16_t lo = rc_u16le(out + 2);
         CHECK(rc_bl_pattern(up, lo));
         CHECK(rc_bl_imm24(up, lo) == (cases[i] & 0x00ffffffu));
+    }
+    {
+        static const struct { uint32_t bits; int32_t value; } signed_cases[] = {
+            {0u, 0}, {1u, 1}, {0x7fffffu, 8388607},
+            {0x800000u, -8388608}, {0xfffffeu, -2}, {0xffffffu, -1}
+        };
+        for(size_t i = 0; i < COUNT_OF(signed_cases); i++){
+            rc_bl_pack(signed_cases[i].bits, out);
+            CHECK(rc_bl_imm24s(rc_u16le(out), rc_u16le(out + 2)) == signed_cases[i].value);
+        }
     }
     CHECK(rc_ldr_scan_first(0, 0) == 0);
     CHECK(rc_ldr_scan_first(0, 1025u) == 2);
@@ -373,7 +387,15 @@ static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; retur
 int main(int argc, char **argv){
     (void)argv;
     int r=check_seed_prob();
+    uint8_t bl[4];
     if(r) return r;
+    CHECK(rc_i32_from_u32(0u)==0);
+    CHECK(rc_i32_from_u32(0x7fffffffu)==INT32_MAX);
+    CHECK(rc_i32_from_u32(0x80000000u)==INT32_MIN);
+    CHECK(rc_unzz32_value(UINT32_MAX)==INT32_MIN);
+    rc_bl_pack(0x800000u,bl);
+    CHECK(rc_bl_imm24s((uint16_t)(bl[0]|((uint16_t)bl[1]<<8)),
+                       (uint16_t)(bl[2]|((uint16_t)bl[3]<<8)))==-8388608);
     CHECK(rc_rice_feasible((1u<<20)-1u,0u));
     CHECK(rc_rice_feasible(1u<<20,0u));
     CHECK(!rc_rice_feasible((1u<<20)+1u,0u));

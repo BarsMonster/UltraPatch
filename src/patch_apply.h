@@ -860,8 +860,9 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
      * body (FWD: after; grow: before), and (c) the literal-cursor gap encoding (FWD: absolute forward
      * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
      * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
-    int32_t nl=(int32_t)up_read_uleb(pa,s);
-    if(nl<0||nl>dl){ pa->g_rcerr=1; return; }
+    uint32_t nl_u=up_read_uleb(pa,s);
+    if(nl_u>(uint32_t)dl){ pa->g_rcerr=1; return; }
+    int32_t nl=(int32_t)nl_u;
     uint8_t packed[4];
     int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
     memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX;

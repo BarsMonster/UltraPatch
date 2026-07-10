@@ -169,11 +169,16 @@ static inline void rc_u32le_put(uint8_t *p, uint32_t v){
     p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24);
 }
 
-/* Zigzag decode mirror (encode-side rc_zz32 lives in src/enc_internal.h). The odd arm expresses
- * every negative value as an in-range offset from INT32_MIN, so UINT32_MAX reaches INT32_MIN without
- * relying on an overflowing signed negation or an out-of-range unsigned-to-signed conversion. */
+/* Reconstruct the signed value represented by a two's-complement wire bit pattern. Both casts and
+ * the signed addition stay in range, including the 0x80000000 -> INT32_MIN boundary. */
+static inline int32_t rc_i32_from_u32(uint32_t u){
+    return u<=INT32_MAX ? (int32_t)u
+                        : INT32_MIN+(int32_t)(u-((uint32_t)INT32_MAX+1u));
+}
+/* Zigzag decode mirror (encode-side rc_zz32 lives in src/enc_internal.h). Perform the inverse in
+ * unsigned bit space, then reconstruct the resulting signed wire value without an out-of-range cast. */
 static inline int32_t rc_unzz32_value(uint32_t u){
-    return (u&1u) ? INT32_MIN+(int32_t)((UINT32_MAX-u)>>1) : (int32_t)(u>>1);
+    return rc_i32_from_u32((u>>1) ^ (0u-(u&1u)));
 }
 static inline int rc_zz_abs(uint32_t base,uint32_t z,uint32_t max,uint32_t*out){
     if(z&1u){ uint32_t m=(z>>1)+1u; if(m>base) return 0; *out=base-m; }
@@ -231,7 +236,11 @@ static inline void rc_bl_pack(uint32_t imm24, uint8_t out[4]){
     uint16_t l=(uint16_t)(0xD000u|(j1<<13)|(j2<<11)|(imm24&0x7ffu));
     out[0]=(uint8_t)u; out[1]=(uint8_t)(u>>8); out[2]=(uint8_t)l; out[3]=(uint8_t)(l>>8);
 }
-static inline int32_t rc_bl_imm24s(uint16_t up, uint16_t lo){ return (int32_t)(rc_bl_imm24(up,lo)<<8)>>8; }
+static inline int32_t rc_bl_imm24s(uint16_t up, uint16_t lo){
+    uint32_t imm=rc_bl_imm24(up,lo);
+    if(imm&0x00800000u) imm|=0xff000000u;
+    return rc_i32_from_u32(imm);
+}
 static inline uint32_t rc_bl_target(uint32_t pc, uint16_t up, uint16_t lo){
     return pc + 4u + (uint32_t)(2 * rc_bl_imm24s(up,lo));
 }
@@ -264,10 +273,11 @@ static inline int32_t rc_smap_at(const uint32_t*b, const int32_t*v, int n, uint3
     return r<0 ? 0 : v[r];
 }
 static inline int32_t rc_smap_pred_bl(const uint32_t*b, const int32_t*v, int n, uint32_t pc, uint32_t target){
-    return (int32_t)((uint32_t)rc_smap_at(b,v,n,pc) - (uint32_t)rc_smap_at(b,v,n,target)) / 2;
+    return rc_i32_from_u32((uint32_t)rc_smap_at(b,v,n,pc) -
+                           (uint32_t)rc_smap_at(b,v,n,target)) / 2;
 }
 static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, uint32_t word){
-    return (int32_t)(0u - (uint32_t)rc_smap_at(b,v,n,word));
+    return rc_i32_from_u32(0u - (uint32_t)rc_smap_at(b,v,n,word));
 }
 
 /* MTF dict-index UNARY model: UP_IDX_CTX per-position priors (min(pos,UP_IDX_CTX-1) clamp). The encoded

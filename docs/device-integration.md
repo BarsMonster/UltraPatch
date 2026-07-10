@@ -58,8 +58,8 @@ Arm toolchain the ratchets are:
 
 | Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
 | ------------------------------------------------ | ----:| ----:| ---:|
-| Relocatable static-wrapper object | 6057 B | 0 B | 10296 B |
-| No-startup linked image | 6637 B | 0 B | 10296 B |
+| Relocatable static-wrapper object | 6089 B | 0 B | 10296 B |
+| No-startup linked image | 6669 B | 0 B | 10296 B |
 
 The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
@@ -211,8 +211,8 @@ shape-specific:
 
 | Integration shape (gcc `-O2`, Cortex-M0+ `-mthumb`) | Worst-case caller stack | Gated ceiling |
 | --------------------------------------------------- | ----------------------- | ------------- |
-| Static `PatchApply` object; `rcv3_run(next, ctx)` | **400 B** | 480 B |
-| Caller-owned pointer; `rcv3_run(state, next, ctx)` | **440 B** | 480 B |
+| Static `PatchApply` object; `rcv3_run(next, ctx)` | **408 B** | 480 B |
+| Caller-owned pointer; `rcv3_run(state, next, ctx)` | **432 B** | 480 B |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because

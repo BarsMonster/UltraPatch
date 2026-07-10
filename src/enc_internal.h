@@ -34,7 +34,7 @@ static inline uint32_t rc_zz32(int32_t v){
     return v<0 ? ((0u-u)<<1)-1u : u<<1;
 }
 static inline uint32_t rc_outmatch_delta(uint32_t pos, uint32_t expected){
-    return rc_zz32((int32_t)(pos - expected));
+    return rc_zz32(rc_i32_from_u32(pos - expected));
 }
 static inline int rc_uleb_len(uint32_t v){
     int n=1;
