@@ -211,9 +211,8 @@ static int32_t fold_zero_ops(OpVec *ops) {
     return fp_start;
 }
 
-static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc, int pass) {
+static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
     int split_any = 0;
-    if (pass >= 12) return 0;
     int FWDD = ctx->fwd;
     int32_t *cut = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
     for (size_t i = 0; i < ops->n; i++) cut[i] = -1;
@@ -267,13 +266,17 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
                                const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
                                OpPC *pc, PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    for (int pass = 0;; pass++) {
+    for (;;) {
         if (!pc)
             pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d,
                                          fd, from_size, to_size, ldr, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
-        int split_any = split_overfull_corrections(ctx, ops, pc, pass);
+        int split_any = split_overfull_corrections(ctx, ops, pc);
         if (!split_any) break;
+        /* Each cut partitions one non-empty output span into two. Therefore ops->n grows
+         * strictly and can do so at most to_size times, independent of correction churn. */
+        if (ops->n <= old_n || ops->n > to_size)
+            die("correction split progress invariant");
         oppc_array_free(pc, old_n);
         pc = NULL;
     }

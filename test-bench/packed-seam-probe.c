@@ -238,14 +238,14 @@ static int check_repeated_extra_split(void) {
     OpVec ops = {0}; opvec_push(&ops, zero_op(lim, lim + 17, 7));
     OpPC *pc = (OpPC *)xcalloc(1, sizeof(*pc));
     corr_push(&pc[0].corr, 2 * lim, 1);
-    CHECK(split_overfull_corrections(&ctx, &ops, pc, 0));
+    CHECK(split_overfull_corrections(&ctx, &ops, pc));
     oppc_array_free(pc, 1);
     CHECK(ops.n == 2u && ops.v[0].diff_len == lim && ops.v[0].extra_len == 0);
     CHECK(ops.v[1].diff_len == 0 && ops.v[1].extra_len == lim + 17 && ops.v[1].adj == 7);
 
     pc = (OpPC *)xcalloc(ops.n, sizeof(*pc));
     corr_push(&pc[1].corr, lim, 1);
-    CHECK(split_overfull_corrections(&ctx, &ops, pc, 1));
+    CHECK(split_overfull_corrections(&ctx, &ops, pc));
     oppc_array_free(pc, 2);
     CHECK(ctx.opc_splits == 2u && ops.n == 3u);
     CHECK(ops.v[1].diff_len == 0 && ops.v[1].extra_len == lim && ops.v[1].adj == 0);
@@ -255,6 +255,30 @@ static int check_repeated_extra_split(void) {
     CHECK(walk[1].tp == lim && walk[1].fp == 13 + lim);
     CHECK(walk[2].tp == 2 * lim && walk[2].fp == 13 + lim);
     free(walk); opvec_free(&ops);
+    return 0;
+}
+
+/* A packed-offset tail can need more than 12 successive boundary cuts. Every cut creates
+ * one additional non-empty output span, which is the production fixpoint's finite progress
+ * measure; this probe pins that the loop is not limited by an arbitrary round count. */
+static int check_correction_split_progress(void) {
+    enum { ROUNDS = 13 };
+    const int32_t lim = (int32_t)RC_PACKED_POS_LIMIT;
+    EncCtx ctx = {0}; ctx.fwd = 1;
+    OpVec ops = {0}; opvec_push(&ops, zero_op(0, ROUNDS * lim + 17, 9));
+
+    for (int round = 0; round < ROUNDS; round++) {
+        size_t old_n = ops.n;
+        OpPC *pc = (OpPC *)xcalloc(ops.n, sizeof(*pc));
+        corr_push(&pc[ops.n - 1u].corr, lim, 1);
+        CHECK(split_overfull_corrections(&ctx, &ops, pc));
+        oppc_array_free(pc, old_n);
+        CHECK(ops.n == old_n + 1u);
+    }
+    CHECK(ctx.opc_splits == ROUNDS && ops.n == ROUNDS + 1u);
+    CHECK(ops.v[ROUNDS].diff_len == 0 && ops.v[ROUNDS].extra_len == 17 &&
+          ops.v[ROUNDS].adj == 9);
+    opvec_free(&ops);
     return 0;
 }
 
@@ -268,7 +292,8 @@ int main(void) {
     printf("planner_coordinates=OK folds=leading/interior trailing=FWD-refolded degrade=FWD/grow\n");
     if (check_correction_seam()) return 1;
     if (check_repeated_extra_split()) return 1;
-    printf("packed_seam_correction=OK high_offset=%u rebased_offset=0 splits=1 extra_splits=2\n",
+    if (check_correction_split_progress()) return 1;
+    printf("packed_seam_correction=OK high_offset=%u rebased_offset=0 splits=1 extra_splits=2 progress_splits=13\n",
            (unsigned)RC_PACKED_POS_LIMIT);
     return 0;
 }
