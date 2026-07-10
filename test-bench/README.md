@@ -25,6 +25,10 @@ Create a deterministic standalone bundle, if needed, with:
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
 
+The bundle file list comes from the verified manifests rather than a directory
+scan. It includes `release-inventory.tsv`, the asset manifests, and the
+size/wire/golden baselines needed to identify the exact release corpus.
+
 `make check-malformed` uses the pinned one-face fixture to verify deterministic
 rejection of malformed patch envelopes and truncated blobs without requiring
 extra corpus assets.

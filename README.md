@@ -118,6 +118,12 @@ Create a deterministic standalone corpus bundle, if needed, with:
 scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 ```
 
+The packer takes its file list from the verified release manifests, includes
+the inventory plus size/wire/golden baselines, validates the staged archive,
+and only then publishes the archive and checksum through same-directory
+renames. A failure before publication preserves both existing outputs; an
+interruption between the two renames is detected by the checksum mismatch.
+
 CI verifies the tracked corpus via the `check-assets` leg of the same
 `make gate` command.
 

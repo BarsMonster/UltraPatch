@@ -93,7 +93,12 @@ scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
 
 Publish both `artifacts/a1-corpus.tar.gz` and
 `artifacts/a1-corpus.tar.gz.sha256` with the release. The archive is
-deterministic for a fixed `test-bench/corpus.sha256` manifest.
+deterministic for the canonical release inventory and contains only its verified
+asset paths plus the asset, size, wire, and golden manifests. The packer verifies
+the complete staged archive before same-directory publication; the checksum
+detects an interruption between archive and checksum replacement. Run
+`make check-pack-corpus` to exercise deterministic output and injected
+generation/publication failures.
 
 ## Artifacts
 

@@ -157,7 +157,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
-          check-wire-config check-build-profile check-release-profile check-release-gate-contract check-release-inventory \
+          check-wire-config check-build-profile check-release-profile check-release-gate-contract check-release-inventory check-pack-corpus \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
@@ -257,6 +257,10 @@ check-release-inventory-internal: scripts/check_release_inventory.py $(CORPUS_IN
 	  --fixtures "$(BASE_RELEASE_FIXTURES)" --home-images "$(BASE_RELEASE_HOME_IMAGES)" \
 	  --foreign-images "$(BASE_RELEASE_FOREIGN_IMAGES)" \
 	  --golden-blobs "$(BASE_RELEASE_GOLDEN_BLOBS)"
+
+check-pack-corpus-internal: scripts/pack_corpus.sh scripts/check_pack_corpus.sh \
+                            scripts/check_release_inventory.py $(CORPUS_INVENTORY)
+	@scripts/check_pack_corpus.sh
 
 .PHONY: check-wire-config-probe-internal
 check-wire-config-internal:

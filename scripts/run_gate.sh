@@ -27,9 +27,9 @@ else
 fi
 ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-release-gate-contract + check-corpus..."
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-pack-corpus + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-release-gate-contract + check-corpus..."
 
-LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-release-gate-contract-internal:release_gate.txt:check-release-gate-contract check-corpus-matrix-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-pack-corpus-internal:package.txt:check-pack-corpus check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-release-gate-contract-internal:release_gate.txt:check-release-gate-contract check-corpus-matrix-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -143,6 +143,7 @@ require_exact inventory.txt release_golden_blobs "$release_golden_blobs"
 require_exact inventory.txt release_home_total "${BASE_FULL_TOTAL:?}"
 require_exact inventory.txt release_oneface_grow "${BASE_ONEFACE_GROW:?}"
 require_exact inventory.txt release_oneface_revert "${BASE_ONEFACE_REVERT:?}"
+require_prefix package.txt corpus_package "OK ("
 require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus.sha256"
 require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/foreign.sha256"
 require_exact malformed.txt malformed_rejects 29
@@ -220,6 +221,7 @@ kvs() {
 echo "==================== A1 GATE ========================="
 printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
 kvs 'inventory.txt|release_inventory|release inventory        : '
+kvs 'package.txt|corpus_package|corpus package          : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
