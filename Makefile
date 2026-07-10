@@ -144,16 +144,23 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 # *-internal twin: coreutils `timeout` bounds the whole subtree (it runs the child in
 # its own process group, so backgrounded gate legs die with it) and an overrun reports
 # an explicit error instead of a bare status 124. Local experiments may use
-# GATE_TIMEOUT=<secs> make <target>; the checked release default is 80 seconds.
+# GATE_TIMEOUT=<secs> make <target>. The release gate itself always uses the checked 80-second
+# cap and rejects runtime input overrides; use the individual targets for experiments.
 GATE_TIMEOUT ?= 80
+override RELEASE_GATE_TIMEOUT := 80
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
-          check-wire-config check-build-profile check-release-profile \
+          check-wire-config check-build-profile check-release-profile check-release-gate-contract \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
-          golden-update gate check-analyze clean clean-all
-.PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
+          golden-update check-analyze clean clean-all
+.PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
 $(CAPPED): %:
 	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
+	exit $$s
+
+gate:
+	@timeout $(RELEASE_GATE_TIMEOUT) $(MAKE) --no-print-directory gate-internal; s=$$?; \
+	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 all-internal: ultrapatch
@@ -189,6 +196,46 @@ decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 
 WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
                            -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
+
+# `make gate` is a release certification, not a configurable measurement. These variables may
+# still be overridden on their individual targets, A/B runs, and update tools; the gate preflight
+# rejects any runtime origin so it cannot accidentally certify a reduced corpus, relaxed ratchet,
+# substituted source/harness, alternate build directory, or disabled contract mode. Repository
+# edits remain the intentional, reviewable way to change a release input. The profile verifier
+# separately proves the exact compiler versions, flags, and multilib contents.
+override RELEASE_GATE_FIXED_VARS := \
+	FIXTURES IMAGES FOREIGN CORPUS_MANIFEST FOREIGN_MANIFEST \
+	CORPUS_SIZE_BASELINE CORPUS_WIRE_MANIFEST \
+	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
+	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
+	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
+	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT \
+	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
+	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS LDFLAGS ARM_DEC_FLAGS \
+	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
+	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS ENC_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
+	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
+	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS
+override RELEASE_GATE_UNSET_VARS := \
+	CROSS_COMPILE CFLAGS_EXTRA GOLDEN_MANIFEST CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
+	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
+	REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
+
+.PHONY: release-gate-origin-probe-internal release-gate-inputs-internal
+release-gate-origin-probe-internal:
+	@set -eu; bad=0; \
+	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "release gate rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "release gate requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+	test "$$bad" -eq 0
+
+release-gate-inputs-internal:
+	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
+	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
+	@echo "release_gate_inputs=OK (canonical repository inputs + pinned release profile)"
+
+check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh
+	@MAKE="$(MAKE)" scripts/check_release_gate_contract.sh
+
 .PHONY: check-wire-config-probe-internal
 check-wire-config-internal:
 	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(WIRE_CONFIG_PROBE_FLAGS)' \
@@ -553,12 +600,19 @@ check-corpus-matrix-internal: ultrapatch
 # run_gate.sh then invokes each forked leg with make's `-o $(HOST_TOOL)` (assume-old), so no leg
 # relinks it if a source mtime changes at sub-make startup. Same-profile concurrent top-level
 # builds may both compile, but atomic rename means readers see only a complete equivalent binary.
-gate-internal: all-internal
+gate-internal:
+	@$(MAKE) --no-print-directory release-gate-inputs-internal
+	@$(MAKE) --no-print-directory all-internal
 	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
 	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" RELEASE_PROFILE="$$release_profile" \
+	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
+	BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
 	BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
 	BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
 	BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
+	BASE_ARM_SOFT_DIV="$(BASE_ARM_SOFT_DIV)" \
+	BASE_STACK_STATIC_CEIL_O2="$(BASE_STACK_STATIC_CEIL_O2)" \
+	BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
 	JOBS="$(JOBS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
