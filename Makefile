@@ -84,7 +84,7 @@ BASE_STACK_CEIL_O2 ?= 480
 # an explicit error instead of a bare status 124. One-off override (never commit a
 # longer default): GATE_TIMEOUT=<secs> make <target>.
 GATE_TIMEOUT ?= 60
-CAPPED := all decoder-header check check-arm check-stack check-assets check-decoder-contract check-decoder-sanitize \
+CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update gate check-analyze clean
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
@@ -270,6 +270,11 @@ check-degrade-internal: ultrapatch
 check-golden-internal: ultrapatch
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" scripts/check_golden.sh check
 
+# Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
+# measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.
+check-ab-matrix-internal: ultrapatch
+	@scripts/check_ab_matrix.sh
+
 golden-update-internal: ultrapatch
 	@set -e; \
 	. ./scripts/tempdir.sh; \
@@ -310,7 +315,7 @@ golden-update-internal: ultrapatch
 # foreign_ok(=34)/foreign_total gate the foreign set (foreign_total ratchets vs
 # BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N
 # (defaults to nproc).
-check-corpus-internal: ultrapatch
+check-corpus-internal: ultrapatch check-ab-matrix-internal
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" \
 	CORPUS_WIRE_MANIFEST="$(CORPUS_WIRE_MANIFEST)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
