@@ -202,7 +202,7 @@ uint32_t bit_price(uint32_t p, int bit) {
     return intbits - fracbits;                 /* (12 - log2(pr)) * PR_SCALE */
 }
 
-/* LIT0_CTX / rc_lit0_sel / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
+/* UP_LIT0_CTX / rc_lit0_sel / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
 
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
@@ -339,7 +339,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
      * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
     pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.tok.go, rc_zz32(256));
     pt->glo = M.tok.glo;
-    for (int c = 0; c < LIT0_CTX; c++)
+    for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)bt_price_static(&M.lit0[c], (uint8_t)b);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)bt_price_static(&M.lit1, (uint8_t)b);
     pt->gs = M.tok.gs; pt->gl = M.tok.gl; pt->gd = M.tok.gd;
@@ -845,7 +845,7 @@ int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd) {
 
 static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t L1[256]) {
     memset(pt, 0, sizeof(*pt));
-    for (int c = 0; c < LIT0_CTX; c++)
+    for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)((uint32_t)L0[b] * PR_SCALE);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)((uint32_t)L1[b] * PR_SCALE);
     ugg_init_e(&pt->gs);

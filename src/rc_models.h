@@ -10,8 +10,8 @@
  * src/patch_apply.h (device decoder) and src/patch_generate.c
  * (host encoder) carry their own range-coder bit I/O and only share the model
  * struct/constants below, so the wire stays bit-exact between the two. */
-#ifndef RC_MODELS_H
-#define RC_MODELS_H
+#ifndef UP_RC_MODELS_H
+#define UP_RC_MODELS_H
 #include <stdint.h>
 #include <string.h>
 #include "patch_config.h"
@@ -71,40 +71,40 @@ static inline int rc_rice_feasible(uint32_t v,uint32_t k){
  * implementation, used by both patch_apply and patch_generate. The adaptation-shift rate is NOT
  * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (RC_LIT0_RATE,
  * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
-#define BT_PROBS 255u
-#define BT_BYTES (((BT_PROBS * 12u) + 7u) / 8u)
+#define UP_BT_PROBS 255u
+#define UP_BT_BYTES (((UP_BT_PROBS * 12u) + 7u) / 8u)
 /* idx*12 has a byte shift of 0 or 4, so every 12-bit entry fits in two bytes. */
-typedef struct { uint8_t p[BT_BYTES]; } up_BitTree;
-static inline uint16_t bt_get(const up_BitTree*t,int idx){
+typedef struct { uint8_t p[UP_BT_BYTES]; } up_BitTree;
+static inline uint16_t up_bt_get(const up_BitTree*t,int idx){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
     uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
     return (uint16_t)((v>>sh)&0xfffu);
 }
-static inline void bt_set(up_BitTree*t,int idx,uint16_t prob){
+static inline void up_bt_set(up_BitTree*t,int idx,uint16_t prob){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
     uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
     v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
     t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8);
 }
-static inline void bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)BT_PROBS;i++) bt_set(t,i,RC_PHALF); }
+static inline void up_bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)UP_BT_PROBS;i++) up_bt_set(t,i,RC_PHALF); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
- * UG_CTX = context clamp. Rice keeps a full (UG_CTX+1)^2 mantissa table because any quotient
- * row can use k columns. Gamma only reaches triangular rows 1..UG_CTX-1 plus the full clamped
- * row UG_CTX; row 0 has no mantissa bits.
+ * UP_UG_CTX = context clamp. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table because any quotient
+ * row can use k columns. Gamma only reaches triangular rows 1..UP_UG_CTX-1 plus the full clamped
+ * row UP_UG_CTX; row 0 has no mantissa bits.
  * ENCODING-AFFECTING: patch_apply and patch_generate must use the same value. */
-#define UG_CTX 6
-#define UG_C(x) ((x)<UG_CTX?(x):UG_CTX)
-#define UG_GAMMA_MANT (((UG_CTX) * ((UG_CTX) - 1)) / 2 + ((UG_CTX) + 1))
+#define UP_UG_CTX 6
+#define UP_UG_C(x) ((x)<UP_UG_CTX?(x):UP_UG_CTX)
+#define UP_UG_GAMMA_MANT (((UP_UG_CTX) * ((UP_UG_CTX) - 1)) / 2 + ((UP_UG_CTX) + 1))
 static inline int rc_ugg_mant_idx(int row,int pos){
-    return row<UG_CTX ? (row*(row-1))/2 + pos : ((UG_CTX*(UG_CTX-1))/2 + UG_C(pos));
+    return row<UP_UG_CTX ? (row*(row-1))/2 + pos : ((UP_UG_CTX*(UP_UG_CTX-1))/2 + UP_UG_C(pos));
 }
 
 /* ---- piecewise shift map (BL/EX delta prediction) ----
  * Shipped per patch: ascending u32 boundaries + int32 byte-shift values; keys below the first
  * boundary (or an absent map) predict shift 0. ENCODING-AFFECTING: the decoder rejects
- * (REJ_RESOURCE) above SMAP_CAP, and the encoder never emits more entries than this. */
-#define SMAP_CAP 48
+ * (REJ_RESOURCE) above UP_SMAP_CAP, and the encoder never emits more entries than this. */
+#define UP_SMAP_CAP 48
 
 /* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by a
  * coder-faithful greedy coordinate descent that replays the
@@ -113,8 +113,8 @@ static inline int rc_ugg_mant_idx(int row,int pos){
  * corpora, accepting a row move only when it strictly cuts home bits and never raises foreign bits.
  * Supersedes the static agglomerative-clustering map (a measured dead end: a static-entropy objective
  * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: patch_apply and
- * patch_generate share this table (bit-exact wire). LIT0_CTX must equal 1 + max entry. ---- */
-#define LIT0_CTX 5
+ * patch_generate share this table (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
+#define UP_LIT0_CTX 5
 static inline uint8_t rc_lit0_sel(uint8_t p){
     uint8_t v=(uint8_t)(
         "\001\000\000\000\000\000\000\035\252\252\252\252\125\125\125\025"
@@ -127,7 +127,7 @@ static inline uint8_t rc_lit0_sel(uint8_t p){
 
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } up_Flag1;
-static inline void fl_init(up_Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
+static inline void up_fl_init(up_Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
 /* flag-history context update, shared by decoder/encoder/DP pricing (wire-affecting mirror). */
 static inline int rc_fl_hist(int h,int b){ return ((h<<1)|b)&3; }
 
@@ -190,28 +190,28 @@ RC_ALWAYS_INLINE void rc_init_probs(uint16_t*p,int n,uint16_t seed){
     for(int i=0;i<n;i++) p[i]=seed;
 }
 /* ---- UGolomb (Rice/Gamma) model structs, single-sourced so the COMPILER enforces the
- * decoder<->encoder mirror. Rice keeps a full (UG_CTX+1)^2 mantissa table (any quotient row can use
- * k columns); Gamma keeps the compact triangular table (UG_GAMMA_MANT). Both sides use these types
+ * decoder<->encoder mirror. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table (any quotient row can use
+ * k columns); Gamma keeps the compact triangular table (UP_UG_GAMMA_MANT). Both sides use these types
  * and the shared neutral-init helpers directly (no per-side wrappers). */
-typedef struct { uint8_t k; uint16_t u[UG_CTX+1]; uint16_t m[UG_CTX+1][UG_CTX+1]; } up_UGRice;
-typedef struct { uint16_t u[UG_CTX+1]; uint16_t m[UG_GAMMA_MANT]; } up_UGGamma;
+typedef struct { uint8_t k; uint16_t u[UP_UG_CTX+1]; uint16_t m[UP_UG_CTX+1][UP_UG_CTX+1]; } up_UGRice;
+typedef struct { uint16_t u[UP_UG_CTX+1]; uint16_t m[UP_UG_GAMMA_MANT]; } up_UGGamma;
 /* noinline: these neutral-init loops are the primitives folded into rc_init_prekd/rc_init_tok below.
  * Keeping them out-of-line preserves the single shared copy the host previously got via the ugg_init_e
  * wrapper (inlining a copy per model at every apply-init site bloats host .text); on the Cortex-M0+
  * -Os decoder they were already emitted once, so the attribute costs no ARM .text. */
 static RC_NOINLINE void rc_ugr_init(up_UGRice*g,int k){
     g->k=(uint8_t)k;
-    for(int i=0;i<=UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UG_CTX;j++) g->m[i][j]=RC_PHALF; }
+    for(int i=0;i<=UP_UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UP_UG_CTX;j++) g->m[i][j]=RC_PHALF; }
 }
 static RC_NOINLINE void rc_ugg_init(up_UGGamma*g){
-    for(int i=0;i<=UG_CTX;i++) g->u[i]=RC_PHALF;
-    for(int i=0;i<UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
+    for(int i=0;i<=UP_UG_CTX;i++) g->u[i]=RC_PHALF;
+    for(int i=0;i<UP_UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
 }
 
 static inline void rc_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w){
     for(int s=0;s<256;s++) w[256+s]=hist[s];
     for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++) bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
+    for(int m=1;m<256;m++) up_bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
 }
 
 /* Thumb BL/BLX local-branch halfword pattern (F000 / D000), tested on pristine source bytes. */
@@ -270,12 +270,12 @@ static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, 
     return (int32_t)(0u - (uint32_t)rc_smap_at(b,v,n,word));
 }
 
-/* MTF dict-index UNARY model: IDX_CTX per-position priors (min(pos,IDX_CTX-1) clamp). The encoded
- * index is ~54% zero, so unary fits the concentration; IDX_CTX=5 is the corpus optimum (4/6/8/16 all
+/* MTF dict-index UNARY model: UP_IDX_CTX per-position priors (min(pos,UP_IDX_CTX-1) clamp). The encoded
+ * index is ~54% zero, so unary fits the concentration; UP_IDX_CTX=5 is the corpus optimum (4/6/8/16 all
  * code worse). Shared struct + seed; the encode/decode loops live in each side. */
-#define IDX_CTX 5
-typedef struct { uint16_t u[IDX_CTX]; } up_IdxUnary;
-static inline void idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<IDX_CTX;i++) g->u[i]=seed; }
+#define UP_IDX_CTX 5
+typedef struct { uint16_t u[UP_IDX_CTX]; } up_IdxUnary;
+static inline void up_idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<UP_IDX_CTX;i++) g->u[i]=seed; }
 
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
     if(j){ int32_t t=dic[j]; memmove(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
@@ -333,11 +333,11 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 
 /* MTF dict-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF dict makes the hit-bit==1 likely, so seed
  * the adaptive hit model high. 576 = tuned corpus optimum. (Decoder dr_init / encoder dr_init_e.) */
-#define DR_HIT_INIT 576u
+#define UP_DR_HIT_INIT 576u
 
 /* MTF dict-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
  * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
- * corpus optimum. (Shared idx_init seeds both sides.) */
+ * corpus optimum. (Shared up_idx_init seeds both sides.) */
 #define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"
@@ -390,12 +390,12 @@ typedef struct {
 } up_TokModels;
 
 /* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
-static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UG_CTX,depth); }
+static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UP_UG_CTX,depth); }
 
 /* pre-kd apply-phase init: neutral models + the structural seed_cont priors (PG2/GDL/GADJ). */
 static inline void rc_init_prekd(up_PreKdModels*m){
-    bt_init(&m->dval);
-    idx_init(&m->dibl,RC_IDX_SEED); idx_init(&m->diex,RC_IDX_SEED);
+    up_bt_init(&m->dval);
+    up_idx_init(&m->dibl,RC_IDX_SEED); up_idx_init(&m->diex,RC_IDX_SEED);
     rc_ugg_init(&m->pg); rc_ugg_init(&m->pgn);
     rc_ugg_init(&m->pg2); rc_ugg_seed_cont(&m->pg2,RC_SEED_DEPTH_PG2);
     rc_ugg_init(&m->gdl); rc_ugg_init(&m->gel); rc_ugg_init(&m->gadj);
@@ -407,7 +407,7 @@ static inline void rc_init_tok(up_TokModels*m,int kd,int ko){
     rc_ugg_init(&m->gl); rc_ugg_seed_cont(&m->gl,RC_SEED_DEPTH_GL);
     rc_ugg_init(&m->gs); rc_ugg_init(&m->glo);
     m->outb=RC_PHALF;
-    fl_init(&m->flag);
+    up_fl_init(&m->flag);
     m->rep0[0]=m->rep0[1]=RC_REP0_INIT;
 }
 

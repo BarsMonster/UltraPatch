@@ -105,22 +105,22 @@ EOF
 cat > "$tmp/model_probe.c" <<'EOF'
 #include "enc_internal.h"
 
-/* patch_apply.h seals the non-knob model macros (UG_*, RC_*, BT_*, LIT0_CTX, IDX_CTX, DR_HIT_INIT)
+/* patch_apply.h seals the non-knob model macros (UP_UG_*, RC_*, UP_BT_*, UP_LIT0_CTX, UP_IDX_CTX, UP_DR_HIT_INIT)
  * at the end of its include so they don't leak into integrator TUs. This probe still asserts on
  * their values, so snapshot them into enum constants BEFORE that seal; the macros are compile-time
  * constants, so the checks below are semantically identical against the snapshots. */
 enum {
-    PROBE_UG_CTX        = UG_CTX,
-    PROBE_UG_GAMMA_MANT = UG_GAMMA_MANT,
+    PROBE_UG_CTX        = UP_UG_CTX,
+    PROBE_UG_GAMMA_MANT = UP_UG_GAMMA_MANT,
     PROBE_RC_PROB_BITS  = RC_PROB_BITS,
     PROBE_RC_PBIT       = RC_PBIT,
     PROBE_RC_PHALF      = RC_PHALF,
     PROBE_RC_PROB_BOUND = RC_PROB_BOUND(0xffffffffu, RC_PHALF),
     PROBE_RC_RICE_MAX   = RC_RICE_UNARY_MAX,
-    PROBE_BT_PROBS      = BT_PROBS,
-    PROBE_LIT0_CTX      = LIT0_CTX,
-    PROBE_IDX_CTX       = IDX_CTX,
-    PROBE_DR_HIT_INIT   = DR_HIT_INIT
+    PROBE_BT_PROBS      = UP_BT_PROBS,
+    PROBE_LIT0_CTX      = UP_LIT0_CTX,
+    PROBE_IDX_CTX       = UP_IDX_CTX,
+    PROBE_DR_HIT_INIT   = UP_DR_HIT_INIT
 };
 
 #include "patch_apply.h"
@@ -175,13 +175,13 @@ static int check_shared_models(void){
     CHECK(PROBE_RC_PROB_BITS == 12);
     CHECK(PROBE_RC_PBIT == (1 << PROBE_RC_PROB_BITS));
     CHECK((uint32_t)PROBE_RC_PROB_BOUND == (0xffffffffu >> 12) * (uint32_t)PROBE_RC_PHALF);
-    bt_init(&bt);
-    for(int i = 0; i < (int)PROBE_BT_PROBS; i++) CHECK(bt_get(&bt, i) == PROBE_RC_PHALF);
+    up_bt_init(&bt);
+    for(int i = 0; i < (int)PROBE_BT_PROBS; i++) CHECK(up_bt_get(&bt, i) == PROBE_RC_PHALF);
     for(int p = 0; p < 256; p++) CHECK(rc_lit0_sel((uint8_t)p) < PROBE_LIT0_CTX);
-    fl_init(&fl);
+    up_fl_init(&fl);
     CHECK(fl.h == 0);
     for(int i = 0; i < 4; i++) CHECK(fl.m[i] == PROBE_RC_PHALF);
-    idx_init(&idx, 1234u);
+    up_idx_init(&idx, 1234u);
     for(int i = 0; i < PROBE_IDX_CTX; i++) CHECK(idx.u[i] == 1234u);
     rc_dr_init(&ds, dic, PROBE_DR_HIT_INIT);
     CHECK(ds.K == 1 && dic[0] == 0 && ds.hit == PROBE_DR_HIT_INIT && ds.rh == 0);

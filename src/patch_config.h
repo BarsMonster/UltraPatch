@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef PATCH_CONFIG_H
-#define PATCH_CONFIG_H
+#ifndef UP_PATCH_CONFIG_H
+#define UP_PATCH_CONFIG_H
 
 /* ---- target-family wire contract ----
  * The A1 wire is target-family-specific. CORTEX_M0 (Thumb-1/ARMv6-M, the implemented
@@ -51,4 +51,4 @@
 #define OUTROW_DEPTH 2u
 #endif
 
-#endif /* PATCH_CONFIG_H */
+#endif /* UP_PATCH_CONFIG_H */

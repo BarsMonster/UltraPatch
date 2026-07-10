@@ -15,7 +15,7 @@
 #   frames : arm-none-eabi-gcc -fstack-usage emits a .su file, one line per emitted
 #            function: "<file>:<line>:<col>:<name>\t<bytes>\t<qualifier>". The <bytes>
 #            value is the full prologue SP decrement of that function INCLUDING every
-#            pushed register and the saved LR (verified empirically: rc_decode pushes
+#            pushed register and the saved LR (verified empirically: up_rc_decode pushes
 #            {r4-r7,lr}=20B + 3 saved regs=12B + 8B locals => .su=40). So a function's saved return
 #            address is already counted inside ITS OWN frame; a plain `bl` pushes nothing
 #            (it writes LR), and the callee's push{...,lr} that spills LR is in the
@@ -65,7 +65,7 @@ TOOLCHAIN_EXTERN_RE = re.compile(
 )
 
 HDR_RE = re.compile(r"^[0-9a-fA-F]+ <([^>]+)>:")
-# a disassembled instruction line: "   92:\tf7ff ffb5 \tbl\t0 <rc_decode>"
+# a disassembled instruction line: "   92:\tf7ff ffb5 \tbl\t0 <up_rc_decode>"
 BL_RE = re.compile(r"\bbl\b\s+[0-9a-fA-F]+ <([^>]+)>")
 BLX_RE = re.compile(r"\bblx\b")
 # an objdump -r record: "00000032 R_ARM_THM_CALL   flash_read"

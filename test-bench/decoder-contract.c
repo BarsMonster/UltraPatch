@@ -153,7 +153,7 @@ static int tail_preserved(const Bytes *before, uint32_t span){
 static int ldr_oracle(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
     if(!rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
     for(int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2){
-        uint16_t up = (uint16_t)(hy_src_peek(pa, a) | ((uint16_t)hy_src_peek(pa, a + 1) << 8));
+        uint16_t up = (uint16_t)(up_hy_src_peek(pa, a) | ((uint16_t)up_hy_src_peek(pa, a + 1) << 8));
         if(rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
     }
     return 0;
@@ -164,7 +164,7 @@ static void put_u16(uint8_t *p, uint32_t at, uint16_t v){
 }
 
 /* The rolling source word is peek-only: journaled pristine bytes may be cached across an
- * overwritten physical source, but FWD LDR metadata appears only when wr_copy actually consumes
+ * overwritten physical source, but FWD LDR metadata appears only when up_wr_copy actually consumes
  * those bytes. A suppressed 2-mod-4 BL must likewise clear its skipped target without recording
  * its cached probe; replaying the four ordinary copies records the exact raw word, with no reread. */
 static int src_window_case(void){
@@ -181,7 +181,7 @@ static int src_window_case(void){
     memset(&pa, 0, sizeof pa);
     pa.g_from_size = test_flash_n; pa.g_image_span = test_flash_n; pa.g_FWD = 1;
     pa.g_psrc_even = UINT32_MAX;
-    orow_reset(&pa);
+    up_orow_reset(&pa);
     pa.g_orow_base[0] = 0;
     /* Physical bytes have been overwritten, but the ascending FWD journal preserves an LDR at
      * source 8: 0x4801 targets 16. The other two bytes make the raw-word check unambiguous. */
@@ -192,32 +192,32 @@ static int src_window_case(void){
     pa.ARENA.apply.jbuf[2] = (10u << 8) | 0x5au;
     pa.ARENA.apply.jbuf[3] = (11u << 8) | 0xc3u;
     test_reads = 0;
-    uint32_t w = hy_word4_peek(&pa, 8);
+    uint32_t w = up_hy_word4_peek(&pa, 8);
     CHECK(w == UINT32_C(0xc35a4801) && test_reads == 0u);
-    CHECK(pa.g_psrc_even == UINT32_MAX && psrc_ldr_take(&pa, 16u) == 0);
+    CHECK(pa.g_psrc_even == UINT32_MAX && up_psrc_ldr_take(&pa, 16u) == 0);
 
     memset(&s, 0, sizeof s); memset(&lc, 0, sizeof lc); memset(&cc, 0, sizeof cc);
     lc.nextpos = -1; cc.i = -1;
-    wr_copy(&pa, &s, &lc, &cc, 32, 8, 0, 0, (uint8_t)w);
-    CHECK(pa.g_psrc_even == 8u && psrc_ldr_take(&pa, 16u) == 0);
-    wr_copy(&pa, &s, &lc, &cc, 32, 9, 0, 1, (uint8_t)(w >> 8));
-    CHECK(psrc_ldr_take(&pa, 16u) == 1 && test_reads == 0u);
+    up_wr_copy(&pa, &s, &lc, &cc, 32, 8, 0, 0, (uint8_t)w);
+    CHECK(pa.g_psrc_even == 8u && up_psrc_ldr_take(&pa, 16u) == 0);
+    up_wr_copy(&pa, &s, &lc, &cc, 32, 9, 0, 1, (uint8_t)(w >> 8));
+    CHECK(up_psrc_ldr_take(&pa, 16u) == 1 && test_reads == 0u);
 
     /* A 2-mod-4 suppressed BL consumes the pending aligned target but its peek remains invisible
      * to the FWD recorder until all four cached bytes go through the ordinary-copy path. */
     memset(&pa, 0, sizeof pa);
     pa.g_from_size = test_flash_n; pa.g_image_span = test_flash_n; pa.g_FWD = 1;
     pa.g_psrc_even = UINT32_MAX;
-    orow_reset(&pa); pa.g_orow_base[0] = 0;
+    up_orow_reset(&pa); pa.g_orow_base[0] = 0;
     put_u16(test_flash, 10u, 0xf000u); put_u16(test_flash, 12u, 0xd000u);
-    test_reads = 0; w = hy_word4_peek(&pa, 10);
+    test_reads = 0; w = up_hy_word4_peek(&pa, 10);
     CHECK(test_reads == 4u);
-    psrc_ldr_put(&pa, 12u);
-    CHECK(field_at(&pa, 0, 10, w, packed, 0, 32) == 2);
-    CHECK(pa.g_psrc_even == UINT32_MAX && psrc_ldr_take(&pa, 12u) == 0);
+    up_psrc_ldr_put(&pa, 12u);
+    CHECK(up_field_at(&pa, 0, 10, w, packed, 0, 32) == 2);
+    CHECK(pa.g_psrc_even == UINT32_MAX && up_psrc_ldr_take(&pa, 12u) == 0);
     memset(&s, 0, sizeof s); memset(&lc, 0, sizeof lc); memset(&cc, 0, sizeof cc);
     lc.nextpos = -1; cc.i = -1;
-    for(int b = 0; b < 4; b++) wr_copy(&pa, &s, &lc, &cc, 32, 10 + b, 0, b, (uint8_t)(w >> (8*b)));
+    for(int b = 0; b < 4; b++) up_wr_copy(&pa, &s, &lc, &cc, 32, 10 + b, 0, b, (uint8_t)(w >> (8*b)));
     CHECK(test_reads == 4u && pa.g_psrc_even == 12u);
     return 0;
 }
@@ -244,9 +244,9 @@ static int ldr_window_case(void){
     memset(&pa, 0, sizeof pa);
     pa.g_from_size = test_flash_n; pa.g_FWD = 0; pa.g_psrc_even = UINT32_MAX;
     for(uint32_t q = 3000u; q >= 1400u; ){
-        CHECK(grow_ldr_take(&pa, 0, 4096, q) == ldr_oracle(&pa, 0, 4096, q));
+        CHECK(up_grow_ldr_take(&pa, 0, 4096, q) == ldr_oracle(&pa, 0, 4096, q));
         if(q == 2504u){
-            CHECK(field_at(&pa, 0, 2502, hy_word4_peek(&pa, 2502), packed, 0, 4096) == 2); /* clears skipped q=2500 */
+            CHECK(up_field_at(&pa, 0, 2502, up_hy_word4_peek(&pa, 2502), packed, 0, 4096) == 2); /* clears skipped q=2500 */
             q -= 8u;
         }else q -= 4u;
     }
@@ -259,7 +259,7 @@ static int ldr_window_case(void){
     pa.ARENA.apply.jbuf[0] = (1001u << 8) | 0x48u; /* grow journal is descending */
     pa.ARENA.apply.jbuf[1] = (1000u << 8) | 0xffu; /* LDR +1024 -> 2024 */
     CHECK(ldr_oracle(&pa, 0, 4096, 2024u) == 1);
-    CHECK(grow_ldr_take(&pa, 0, 4096, 2024u) == 1);
+    CHECK(up_grow_ldr_take(&pa, 0, 4096, 2024u) == 1);
     return 0;
 }
 

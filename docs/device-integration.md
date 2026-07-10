@@ -37,6 +37,16 @@ accidental duplicate decoder text in final firmware, include the decoder from a
 single update `.c` file and route other application modules through that update
 module's local API.
 
+### C identifier namespace
+
+The public decoder names are `PatchApply`, the `patch_apply_*` entry points and
+accessors, `PATCH_APPLY_*` and `REJ_*` results, the required `flash_read` /
+`flash_write_page` primitives, and the documented build/configuration macros in
+this contract. Decoder-specific private identifiers use the `up_` / `UP_`
+prefix; shared encoder/decoder wire-model helpers deliberately use the established
+`rc_` / `RC_` internal namespace. Private implementation macros are undefined at
+the end of the public header; namespaced include guards remain defined normally.
+
 The repository ARM release metrics use the static-wrapper integration built by
 `make check-arm`: one file-scope `PatchApply` object and a small
 `rcv3_run(next, ctx)` wrapper that passes that object to `patch_apply_run()`.

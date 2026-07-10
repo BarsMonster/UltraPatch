@@ -150,7 +150,7 @@ static uint64_t delta_xfer(DRE *D, up_IdxUnary *gix, up_BitTree *dval,
     if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
         c += ug_bit_xfer(r, &D->s.hit, 1, 1);
-        c += unary_xfer(r, gix->u, IDX_CTX - 1, tr.idx, 1);
+        c += unary_xfer(r, gix->u, UP_IDX_CTX - 1, tr.idx, 1);
     } else {
         c += ug_bit_xfer(r, &D->s.hit, 0, 1);
         c += bv_xfer(dval, r, delta);
@@ -205,8 +205,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, seeds, kd, ko);   /* fresh literal trees + token-loop models */
-    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, DR_HIT_INIT);
-    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, DR_HIT_INIT);
+    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT);
+    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
     ugg_init_e(&M.pre.gdl); ugg_init_e(&M.pre.gadj);   /* borrowed NEUTRAL to code the map header below;
                                   * rc_init_prekd re-inits them (with seed_cont) after the map. */
     *overflow = 0;
@@ -308,9 +308,9 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
                              const FieldInjArena *inj, int fwd,
                              int32_t *dic_bl, int32_t *dic_ex) {
-    DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, DR_HIT_INIT);
-    up_IdxUnary di_bl, di_ex; idx_init(&di_bl, RC_IDX_SEED); idx_init(&di_ex, RC_IDX_SEED);
-    up_BitTree dval; bt_init(&dval);
+    DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
+    up_IdxUnary di_bl, di_ex; up_idx_init(&di_bl, RC_IDX_SEED); up_idx_init(&di_ex, RC_IDX_SEED);
+    up_BitTree dval; up_bt_init(&dval);
     uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < inj->n; i++) {
@@ -388,7 +388,7 @@ static int fit_shift_map_scored(const uint32_t *fb, const int32_t *fv, int fn,
         }
         mn = w; cur = score(tb, tv, mn, score_ctx);
     }
-    while (mn > SMAP_CAP) {
+    while (mn > UP_SMAP_CAP) {
         int drop = 0; uint64_t best = UINT64_MAX;
         for (int i = 0; i < mn; i++) {
             smap_without(tb, tv, mn, i, b2, v2);
@@ -457,7 +457,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
      * and emit_body derives mapped residuals from the plain-delta injections at the exact emit site.
      * Both maps then compete against the no-map body under the exact byte gate at the end
      * (ship-smallest => improve-or-tie per pair by construction). */
-    uint32_t map_b[2][SMAP_CAP]; int32_t map_v[2][SMAP_CAP];
+    uint32_t map_b[2][UP_SMAP_CAP]; int32_t map_v[2][UP_SMAP_CAP];
     int map_n[2] = {0, 0};   /* 0 = hit-count fit, 1 = bits fit */
     int use_map = -1;
     if (inj.n) {

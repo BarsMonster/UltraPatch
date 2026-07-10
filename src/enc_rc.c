@@ -10,7 +10,7 @@
 /* ------------------------------------------------------------------------------------- */
 /* Binary range encoder and models.                                                        */
 /* ------------------------------------------------------------------------------------- */
-/* byte trees use the shared packed up_BitTree + bt_get/bt_set/bt_init from rc_models.h (decoder-identical) */
+/* byte trees use the shared packed up_BitTree + up_bt_get/up_bt_set/up_bt_init from rc_models.h (decoder-identical) */
 
 static void re_put(REnc *r, uint8_t b) {
     if (!r->count_only) {
@@ -88,13 +88,13 @@ static uint64_t bt_xfer(up_BitTree *t, REnc *r, uint8_t byte, int rate, int mode
     uint64_t cost = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        uint16_t p = bt_get(t, m - 1);
+        uint16_t p = up_bt_get(t, m - 1);
         if (mode == BT_XFER_ENC) {
             re_bit(r, &p, bit, rate);
-            bt_set(t, m - 1, p);
+            up_bt_set(t, m - 1, p);
         } else {
             cost += bit_price(p, bit);
-            if (mode == BT_XFER_PRICE_UPDATE) bt_set(t, m - 1, rc_adapt(p, bit, rate));
+            if (mode == BT_XFER_PRICE_UPDATE) up_bt_set(t, m - 1, rc_adapt(p, bit, rate));
         }
         m = (m << 1) | bit;
     }
@@ -147,17 +147,17 @@ uint32_t unary_xfer(REnc *r, uint16_t *u, uint32_t clampmax, uint32_t v, int ada
 static uint32_t RC_NOINLINE ugr_xfer(up_UGRice *g, REnc *r, uint32_t v) {
     if (!rc_rice_feasible(v, g->k)) { if (r) r->rice_overflow = 1; return UINT32_MAX; }
     uint32_t cl = v >> g->k;
-    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
+    uint32_t cost = unary_xfer(r, g->u, UP_UG_CTX, cl, 0);
     for (int pos = 0; pos < g->k; pos++)
-        cost += ug_bit_xfer(r, &g->m[UG_C((int)cl)][UG_C(g->k - 1 - pos)],
+        cost += ug_bit_xfer(r, &g->m[UP_UG_C((int)cl)][UP_UG_C(g->k - 1 - pos)],
                             (int)((v >> (g->k - 1 - pos)) & 1u), 0);  /* rice: LSB-anchored ctx */
     return cost;
 }
 static uint32_t ugg_xfer(up_UGGamma *g, REnc *r, uint32_t v) {
     uint32_t mm = v + 1u;
     uint32_t cl = (uint32_t)bitlen32(mm) - 1u;
-    int row = UG_C((int)cl);
-    uint32_t cost = unary_xfer(r, g->u, UG_CTX, cl, 0);
+    int row = UP_UG_C((int)cl);
+    uint32_t cost = unary_xfer(r, g->u, UP_UG_CTX, cl, 0);
     for (uint32_t pos = 0; pos < cl; pos++)
         cost += ug_bit_xfer(r, &g->m[rc_ugg_mant_idx(row, (int)pos)],
                             (int)((mm >> (cl - 1u - pos)) & 1u), 0);
@@ -167,11 +167,11 @@ static uint32_t ugg_xfer(up_UGGamma *g, REnc *r, uint32_t v) {
 void ugr_encode(up_UGRice *g, REnc *r, uint32_t v) { (void)ugr_xfer(g, r, v); }
 void ugg_encode(up_UGGamma *g, REnc *r, uint32_t v) { (void)ugg_xfer(g, r, v); }
 
-/* order-2 token flag: the up_Flag1 struct + fl_init are single-sourced in rc_models.h (decoder mirror). */
+/* order-2 token flag: the up_Flag1 struct + up_fl_init are single-sourced in rc_models.h (decoder mirror). */
 void fl_encode(up_Flag1 *f, REnc *r, int b) { re_bit(r, &f->m[f->h], b, RC_S_BIT_RATE); f->h = rc_fl_hist(f->h, b); }
 
 void models_init_content(Models *m, const LitSeedTrees *seeds, int kd, int ko) {
-    for (int c = 0; c < LIT0_CTX; c++) m->lit0[c] = seeds->lit0;
+    for (int c = 0; c < UP_LIT0_CTX; c++) m->lit0[c] = seeds->lit0;
     m->lit1 = seeds->lit1;
     rc_init_tok(&m->tok, kd, ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 (rc_models.h) */
     m->rep0h = 0;

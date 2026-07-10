@@ -127,14 +127,14 @@ static uint16_t rnd_prob(void) { return (uint16_t)(1u + rnd32() % (RC_PBIT - 1u)
 
 static void random_prices(PriceTab *pt) {
     memset(pt, 0, sizeof(*pt));
-    for (int c = 0; c < LIT0_CTX; c++)
+    for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)(rnd32() % (PRICE_LIT_MAX + 1u));
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)(rnd32() % (PRICE_LIT_MAX + 1u));
-    for (int i = 0; i <= UG_CTX; i++) {
+    for (int i = 0; i <= UP_UG_CTX; i++) {
         pt->gs.u[i] = rnd_prob(); pt->gl.u[i] = rnd_prob(); pt->gd.u[i] = rnd_prob();
-        for (int j = 0; j <= UG_CTX; j++) pt->gd.m[i][j] = rnd_prob();
+        for (int j = 0; j <= UP_UG_CTX; j++) pt->gd.m[i][j] = rnd_prob();
     }
-    for (int i = 0; i < UG_GAMMA_MANT; i++) {
+    for (int i = 0; i < UP_UG_GAMMA_MANT; i++) {
         pt->gs.m[i] = rnd_prob(); pt->gl.m[i] = rnd_prob();
     }
     pt->gd.k = (uint8_t)(rnd32() % 12u);
@@ -150,7 +150,7 @@ static int boundary_cases(void) {
     uint8_t l0[256], l1[256]; memset(l0, 1, sizeof(l0)); memset(l1, 1, sizeof(l1));
     PriceTab pt; bootstrap_prices(&pt, l0, l1);
     /* Zero literals make equal-base and equal-price endpoint ties common within each bucket. */
-    for (int c = 0; c < LIT0_CTX; c++) memset(pt.lit0[c], 0, sizeof(pt.lit0[c]));
+    for (int c = 0; c < UP_LIT0_CTX; c++) memset(pt.lit0[c], 0, sizeof(pt.lit0[c]));
     memset(pt.lit1, 0, sizeof(pt.lit1));
     for (size_t z = 0; z < sizeof(lengths) / sizeof(lengths[0]); z++) {
         size_t n = lengths[z];

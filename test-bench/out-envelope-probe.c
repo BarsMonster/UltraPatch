@@ -40,19 +40,19 @@ static void random_prices(PriceTab *pt, int out_en) {
     pt->outb_yes = rnd32() % (16u * PR_SCALE + 1u);
     pt->outb_no = rnd32() % (16u * PR_SCALE + 1u);
     pt->opos_avg = rnd32() % (32u * PR_SCALE + 1u);
-    for (int c = 0; c < LIT0_CTX; c++)
+    for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++)
             pt->lit0[c][b] = (uint16_t)(rnd32() % (PRICE_LIT_MAX + 1u));
     for (int b = 0; b < 256; b++)
         pt->lit1[b] = (uint16_t)(rnd32() % (PRICE_LIT_MAX + 1u));
-    for (int i = 0; i <= UG_CTX; i++) {
+    for (int i = 0; i <= UP_UG_CTX; i++) {
         pt->gs.u[i] = rnd_prob();
         pt->gl.u[i] = rnd_prob();
         pt->glo.u[i] = rnd_prob();
         pt->gd.u[i] = rnd_prob();
-        for (int j = 0; j <= UG_CTX; j++) pt->gd.m[i][j] = rnd_prob();
+        for (int j = 0; j <= UP_UG_CTX; j++) pt->gd.m[i][j] = rnd_prob();
     }
-    for (int i = 0; i < UG_GAMMA_MANT; i++) {
+    for (int i = 0; i < UP_UG_GAMMA_MANT; i++) {
         pt->gs.m[i] = rnd_prob();
         pt->gl.m[i] = rnd_prob();
         pt->glo.m[i] = rnd_prob();
@@ -65,17 +65,17 @@ static void random_prices(PriceTab *pt, int out_en) {
 
 static void cheap_out_prices(PriceTab *pt, int out_en) {
     memset(pt, 0, sizeof(*pt));
-    for (int c = 0; c < LIT0_CTX; c++)
+    for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = PRICE_LIT_MAX;
     for (int b = 0; b < 256; b++) pt->lit1[b] = PRICE_LIT_MAX;
-    for (int i = 0; i <= UG_CTX; i++) {
+    for (int i = 0; i <= UP_UG_CTX; i++) {
         pt->gs.u[i] = RC_PHALF;
         pt->gl.u[i] = RC_PHALF;
         pt->glo.u[i] = RC_PHALF;
         pt->gd.u[i] = RC_PHALF;
-        for (int j = 0; j <= UG_CTX; j++) pt->gd.m[i][j] = RC_PHALF;
+        for (int j = 0; j <= UP_UG_CTX; j++) pt->gd.m[i][j] = RC_PHALF;
     }
-    for (int i = 0; i < UG_GAMMA_MANT; i++) {
+    for (int i = 0; i < UP_UG_GAMMA_MANT; i++) {
         pt->gs.m[i] = RC_PHALF;
         pt->gl.m[i] = RC_PHALF;
         pt->glo.m[i] = RC_PHALF;

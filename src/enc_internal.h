@@ -177,7 +177,7 @@ typedef struct {
     uint32_t opos_avg;
     uint32_t oexp0;
     int fwd;
-    uint16_t lit0[LIT0_CTX][256];
+    uint16_t lit0[UP_LIT0_CTX][256];
     uint16_t lit1[256];
     up_UGGamma gs, gl;
     up_UGRice gd;
@@ -192,7 +192,7 @@ typedef struct {
 typedef struct { up_BitTree lit0, lit1; } LitSeedTrees;
 
 typedef struct {
-    up_BitTree lit0[LIT0_CTX], lit1;
+    up_BitTree lit0[UP_LIT0_CTX], lit1;
     up_PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
     up_TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     DRE dr_bl, dr_ex;

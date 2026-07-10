@@ -22,6 +22,25 @@ one="$FIX/v1_one_face/watch.bin"
 args="$base $one $tmp/grow.blob $one $base $tmp/revert.blob"
 
 if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
+    if ! awk '
+        /^(static[[:space:]]|[A-Z][A-Z0-9_]*[[:space:]])/ && /\(/ {
+            decl=$0
+            sub(/\(.*/, "", decl)
+            n=split(decl, word, /[[:space:]]+/)
+            name=word[n]
+            if(FILENAME ~ /patch_apply\.h$/)
+                ok=(name ~ /^up_/ || name ~ /^patch_apply_/)
+            else
+                ok=(name ~ /^up_/ || name ~ /^rc_/)
+            if(!ok){ print FILENAME ":" FNR ": unnamespaced private function " name; bad=1 }
+        }
+        END { exit bad ? 1 : 0 }
+    ' src/rc_models.h src/patch_apply.h; then
+        echo "decoder private function namespace audit failed" >&2
+        exit 1
+    fi
+    echo "decoder_private_namespace_audit=OK (static + macro-prefixed declarations)"
+
     # A 256-byte prefix reaches a second de-relocation dictionary value in the first
     # output page. With a test-only cap of one this rejects before any buffered page is
     # committed; the full update reaches the same cap only after physical writes.
@@ -35,6 +54,10 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # These are behavioral harnesses; production -O2 and -Os compilation is already enforced
     # by the portable/stack/ARM legs.  -O0 materially reduces concurrent gate compile load.
     common="$CFLAGS -O0"
+    "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision-source.o"
+    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" \
+        -c test-bench/decoder-collision.c -o "$tmp/collision-single.o"
+    echo "decoder_namespace_contract=OK (source + single header)"
     "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
     "$tmp/nvm-geometry-probe"
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-source"
