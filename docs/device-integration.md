@@ -39,10 +39,11 @@ module's local API.
 
 ### C identifier namespace
 
-The public decoder names are `PatchApply`, the `patch_apply_*` entry points and
-accessors, `PATCH_APPLY_*` and `REJ_*` results, the required `flash_read` /
-`flash_write_page` primitives, and the documented build/configuration macros in
-this contract. Decoder-specific private identifiers use the `up_` / `UP_`
+The public decoder names are `PatchApply`, `PatchApplyResult`, `PatchPull`, the
+`patch_apply_*` entry points and accessors, `PATCH_APPLY_*`, `PATCH_PULL_*`, and
+`REJ_*` results, the required `flash_read` / `flash_write_page` primitives, and
+the documented build/configuration macros in this contract. Decoder-specific
+private identifiers use the `up_` / `UP_`
 prefix; shared encoder/decoder wire-model helpers deliberately use the established
 `rc_` / `RC_` internal namespace. Private implementation macros are undefined at
 the end of the public header; namespaced include guards remain defined normally.
@@ -58,8 +59,8 @@ Arm toolchain the ratchets are:
 
 | Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
 | ------------------------------------------------ | ----:| ----:| ---:|
-| Relocatable static-wrapper object | 6101 B | 0 B | 10296 B |
-| No-startup linked image | 6681 B | 0 B | 10296 B |
+| Relocatable static-wrapper object | 6073 B | 0 B | 10296 B |
+| No-startup linked image | 6653 B | 0 B | 10296 B |
 
 The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
@@ -179,23 +180,33 @@ add one.
 
 ## Integration
 
-Supply a callback that returns the next blob byte (it may poll a UART/BLE
-buffer internally) or 0 to abort/end a truncated source, allocate a `PatchApply`, and call
+Supply a `PatchPull` callback that returns `PATCH_PULL_BYTE` with the next blob
+byte (it may poll a UART/BLE buffer internally), or `PATCH_PULL_END` to
+abort/end a truncated source. Allocate a `PatchApply`, and call
 `patch_apply_run(&state, callback, ctx)`. The whole decode runs synchronously on the
 caller's stack: no coroutine, no fiber stack, no platform context-switch code,
 no compiler-specific stack sizing.
 
 ```c
-/* return 1 and write one blob byte to *out; return 0 to abort/end a truncated source.
- * May block internally (e.g. wait on a UART ring buffer) before returning. */
+/* Return PATCH_PULL_BYTE and write one byte to *out, or PATCH_PULL_END to abort/end.
+ * May block internally (for example, wait on a UART ring) before returning. */
 int next_byte(void *ctx, uint8_t *out);
 
 PatchApply state;
-int rc = patch_apply_run(&state, next_byte, &my_ctx);   /* PATCH_APPLY_DONE / _ERROR */
+PatchApplyResult result = patch_apply_run(&state, next_byte, &my_ctx);
+if (result != PATCH_APPLY_DONE) {
+    /* Inspect patch_apply_reject() and patch_apply_flash_touched(). */
+}
 ```
 
 `src/patch_host_backend.c` (`PullCtx` / `pull_next`) is a minimal reference
-implementation of the callback.
+implementation of the callback. The callback type remains `int`-returning for
+simple driver integration, but only the exact value `PATCH_PULL_BYTE` (`1`) is
+accepted as a byte. `PATCH_PULL_END` (`0`), negative errors, and every other
+value abort the stream. `patch_apply_run` returns `PATCH_APPLY_DONE` (`0`) on
+success and `PATCH_APPLY_ERROR` (nonzero) on failure. GNU-compatible builds warn
+when this result is discarded; portable fallback builds retain the same runtime
+contract without requiring compiler attributes.
 
 **`patch_apply_run` blocks the caller for the whole decode** — two full-image
 CRC passes (`CRC32(from)` before the first write and `CRC32(to)` at the end)
@@ -207,7 +218,7 @@ around the single `patch_apply_run` call.
 ### Aborting a transfer
 
 To abandon a decode mid-blob — a lost link, a user cancel, a transport timeout —
-the byte callback returns 0. The decoder latches EOF, zero-fills any later range reads,
+the byte callback returns `PATCH_PULL_END`. The decoder latches EOF, zero-fills any later range reads,
 and terminates in BOUNDED time (an `O(to_size)` wind-down at worst, never an
 unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been modified
 when the abort lands, so recovery follows the same terminal-state matrix as any
@@ -226,7 +237,7 @@ shape-specific:
 | Integration shape (gcc `-O2`, Cortex-M0+ `-mthumb`) | Worst-case caller stack | Gated ceiling |
 | --------------------------------------------------- | ----------------------- | ------------- |
 | Static `PatchApply` object; `rcv3_run(next, ctx)` | **408 B** | 480 B |
-| Caller-owned pointer; `rcv3_run(state, next, ctx)` | **432 B** | 480 B |
+| Caller-owned pointer; `rcv3_run(state, next, ctx)` | **424 B** | 480 B |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
@@ -247,7 +258,8 @@ wrapper in its own build; neither repository bound is universal.
 1. Authenticate the update envelope and reject rollback or wrong-target updates.
 2. Allocate a `PatchApply` object, call `patch_apply_run(&state, callback, ctx)`, and use its return —
    `PATCH_APPLY_DONE` or `PATCH_APPLY_ERROR` — as the verdict. `DONE` means the
-   image was written and both `CRC32(from)` and `CRC32(to)` verified.
+   image was written and both `CRC32(from)` and `CRC32(to)` verified. `DONE` is
+   zero; every error is nonzero.
 
 Two accessors classify the terminal state: `patch_apply_reject(&state)` gives the
 reject reason, and `patch_apply_flash_touched(&state)` reports whether any flash

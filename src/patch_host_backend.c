@@ -14,14 +14,14 @@
 typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
 static int pull_next(void *c, uint8_t *out){
     PullCtx *p=(PullCtx*)c;
-    if(p->i>=p->n) return 0;
-    *out=p->d[p->i++]; return 1;
+    if(p->i>=p->n) return PATCH_PULL_END;
+    *out=p->d[p->i++]; return PATCH_PULL_BYTE;
 }
 
 typedef struct {
     PatchApply pa;
     size_t consumed;
-    int rc;
+    PatchApplyResult rc;
 } HostApply;
 
 static int host_apply_blob(const uint8_t *blob, size_t blob_n,

@@ -70,7 +70,7 @@ typedef struct {
 } Pull;
 
 typedef struct {
-    int rc;
+    PatchApplyResult rc;
     int reject;
     int touched;
     size_t consumed;
@@ -109,9 +109,18 @@ static int read_file(const char *path, Bytes *out){
 static int pull_next(void *ctx, uint8_t *out){
     Pull *p = (Pull *)ctx;
     p->calls++;
-    if(p->i == p->n) return 0;
+    if(p->i == p->n) return PATCH_PULL_END;
     *out = p->d[p->i++];
-    return 1;
+    return PATCH_PULL_BYTE;
+}
+
+typedef struct { int result; size_t calls; } PullResult;
+
+static int pull_result(void *ctx, uint8_t *out){
+    PullResult *p = (PullResult *)ctx;
+    p->calls++;
+    *out = 0xa5u;
+    return p->result;
 }
 
 static int load_flash(const Bytes *from, uint32_t span, Bytes *before){
@@ -358,6 +367,24 @@ static int early_eof_case(PatchApply *pa, const Bytes *from, const Bytes *to, co
     return 0;
 }
 
+static int pull_result_case(PatchApply *pa, const Bytes *from, const Bytes *to){
+    Bytes before = {0};
+    int invalid_results[2] = {-1, 2};
+    uint32_t span = image_span(from, to);
+    for(size_t i=0;i<sizeof invalid_results/sizeof invalid_results[0];i++){
+        PullResult pull = { invalid_results[i], 0 };
+        CHECK(load_flash(from, span, &before) == 0);
+        PatchApplyResult result = patch_apply_run(pa, pull_result, &pull);
+        CHECK(result == PATCH_APPLY_ERROR && patch_apply_reject(pa) == REJ_CORRUPT);
+        CHECK(pull.calls == 1u);
+        CHECK(patch_apply_flash_touched(pa) == 0 && test_reads == 0u && test_writes == 0u);
+        CHECK(test_oob_reads == 0u && test_oob_writes == 0u && test_unaligned_writes == 0u);
+        CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
+        free(before.d); before.d = NULL; before.n = 0;
+    }
+    return 0;
+}
+
 static int outer_framing_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob){
     Bytes before = {0};
     uint32_t span = image_span(from, to);
@@ -459,6 +486,8 @@ int main(int argc, char **argv){
     int forward1 = 0, forward2 = 0;
     int rc = 1;
     memset(&pa, 0xa5, sizeof pa);
+    CHECK(PATCH_APPLY_DONE == 0 && PATCH_APPLY_ERROR != 0);
+    CHECK(PATCH_PULL_END == 0 && PATCH_PULL_BYTE == 1);
     if(argc == 2 && strcmp(argv[1], "capacity") == 0){
         rc = capacity_case(&pa);
         if(!rc) printf("decoder_capacity_contract=OK (oob_reads=0 oob_writes=0)\n");
@@ -495,6 +524,7 @@ int main(int argc, char **argv){
     if(success_case(&pa, &from, &to, &blob, &forward1)) goto out;
     if(outer_framing_case(&pa, &from, &to, &blob)) goto out;
     if(early_eof_case(&pa, &from, &to, &blob)) goto out;
+    if(pull_result_case(&pa, &from, &to)) goto out;
     if(success_case(&pa, &from2, &to2, &blob2, &forward2)) goto out;
     if(forward1 == forward2){ rc = fail(__LINE__, "grow/revert directions differ"); goto out; }
     if(early_crc_case(&pa, &from, &to, &blob)) goto out;
@@ -503,6 +533,8 @@ int main(int argc, char **argv){
     printf("decoder_nvm_readback=OK (corrupt final-page write rejected)\n");
     printf("decoder_page_contract=OK (aligned full-page calls + trailing canary preserved)\n");
     printf("decoder_api_contract=OK (state reuse + counted framing + early-clean/late-touched rejects)\n");
+    printf("decoder_result_contract=OK (DONE=0 ERROR!=0; pull END=0 BYTE=1 exact)\n");
+    printf("decoder_pull_abort=OK (negative + non-BYTE stop before flash)\n");
     rc = 0;
 out:
     free(test_flash);

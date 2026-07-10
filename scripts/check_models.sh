@@ -140,7 +140,7 @@ void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (v
 static int no_bytes(void *ctx, uint8_t *out){
     (void)ctx;
     (void)out;
-    return 0;
+    return PATCH_PULL_END;
 }
 
 static int check_gamma_index(void){
@@ -382,7 +382,7 @@ cat > "$tmp/single_model_probe.c" <<'EOF'
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
-static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; return 0; }
+static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PULL_END; }
 
 int main(int argc, char **argv){
     (void)argv;

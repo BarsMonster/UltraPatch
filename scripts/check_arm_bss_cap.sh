@@ -7,7 +7,7 @@ set -eu
 MAKE_CMD="${MAKE:-make}"
 . "$(dirname "$0")/tempdir.sh"
 
-harness="printf '%s\\n' '#include \"patch_apply.h\"' 'static PatchApply g_patch_apply_state;' 'uint8_t arm_bss_limit_probe[12289];' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > \"\$\$tmp/patch_apply_arm.c\""
+harness="printf '%s\\n' '#include \"patch_apply.h\"' 'static PatchApply g_patch_apply_state;' 'uint8_t arm_bss_limit_probe[12289];' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > \"\$\$tmp/patch_apply_arm.c\""
 
 if "$MAKE_CMD" --no-print-directory \
     ARM_BSS_HARD_CAP=999999 BASE_ARM_BSS=999999 ARM_APPLY_HARNESS="$harness" \

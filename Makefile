@@ -69,10 +69,10 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6101
+BASE_ARM_TEXT ?= 6073
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
-BASE_ARM_LINKED_TEXT ?= 6681
+BASE_ARM_LINKED_TEXT ?= 6653
 BASE_ARM_LINKED_DATA ?= 0
 BASE_ARM_LINKED_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
@@ -85,8 +85,8 @@ ARM_LINK_LAYOUT := scripts/arm_link.ld
 # The production ARM size gate intentionally measures the static-state wrapper integration
 # used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;
 # product notes/gate output must not present this number as shape-independent.
-ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
-STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'int rcv3_run(PatchApply *state, int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic.c"
+ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
+STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic.c"
 # Independent worst-case caller-stack ceilings for the two real integration shapes, gcc -O2,
 # Cortex-M0+ (bytes). scripts/stack_bound.py derives each exact static bound from
 # -fstack-usage frames + its harness object's call graph. check-stack reports and gates both.
@@ -272,7 +272,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 		  printf '%s\n' "#include \"$$inc\""; \
 		  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
 		  printf '%s\n' 'void flash_write_page(uint32_t a, const uint8_t p[OUTROW]){ (void)a; (void)p; }'; \
-		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
+		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return PATCH_PULL_END; }'; \
 		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 		} > "$$csrc"; \
 		if [ "$$inc" = "$$singlehdr" ]; then \
@@ -283,6 +283,13 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 			$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -Isrc -c "$$csrc" -o "$$obj"; \
 		fi; \
 	done; \
+	cp "$$tmp/patch_apply_smoke.c" "$$tmp/discard_result.c"; \
+	printf '%s\n' 'void discard_result(void){ PatchApply pa; patch_apply_run(&pa, next, 0); }' >> "$$tmp/discard_result.c"; \
+	if $(CC) $(DECODER_CFLAGS) -Wconversion -Isrc -c "$$tmp/discard_result.c" -o "$$tmp/discard-result.o" >/dev/null 2>&1; then \
+		echo "decoder accepted a discarded patch_apply_run result without a diagnostic" >&2; exit 1; \
+	fi; \
+	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -Isrc \
+		-c "$$tmp/discard_result.c" -o "$$tmp/discard-result-fallback.o"; \
 	if $(CC) $(CFLAGS) -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted missing PATCH_IMAGE_BASE" >&2; exit 1; \
 	fi; \

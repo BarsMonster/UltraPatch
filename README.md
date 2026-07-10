@@ -119,8 +119,10 @@ Device integration contract:
   device addresses; one page-write call erases and fully programs the page.
 - Authenticate the update, then run the WHOLE blob through
   `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
-  block internally) and the return is the verdict. The decoder parses the
-  envelope and verifies both CRC gates itself; there is no coroutine/fiber.
+  block internally), returning `PATCH_PULL_BYTE` for a byte or `PATCH_PULL_END`
+  to stop. The `PatchApplyResult` return is the verdict (`PATCH_APPLY_DONE == 0`;
+  errors are nonzero). The decoder parses the envelope and verifies both CRC
+  gates itself; there is no coroutine/fiber.
 - Do not run concurrent decodes against the same flash image; see
   `docs/device-integration.md` before wiring it into a bootloader.
 

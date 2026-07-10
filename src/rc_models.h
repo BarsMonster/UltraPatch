@@ -30,12 +30,14 @@
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define RC_NOINLINE __attribute__((noinline))
 #define RC_NORETURN __attribute__((noreturn))
+#define RC_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
 #define RC_ADD_OVERFLOW(a,b,out) __builtin_add_overflow((a),(b),(out))
 #define RC_SUB_OVERFLOW(a,b,out) __builtin_sub_overflow((a),(b),(out))
 #else
 #define RC_ALWAYS_INLINE static inline
 #define RC_NOINLINE
 #define RC_NORETURN
+#define RC_WARN_UNUSED_RESULT
 static inline int rc_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
     if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
     *out=(int32_t)(a+b);

@@ -64,6 +64,16 @@
 extern uint8_t flash_read(uint32_t absolute_addr);
 extern void    flash_write_page(uint32_t absolute_page_addr, const uint8_t page[OUTROW]);
 
+/* Public synchronous result and byte-source contracts. Success is zero so an apply result can
+ * be returned directly from conventional C entry points. PatchPull deliberately returns int:
+ * only PATCH_PULL_BYTE supplies a byte; PATCH_PULL_END and every other value abort the stream. */
+typedef enum {
+    PATCH_APPLY_DONE = 0,
+    PATCH_APPLY_ERROR = 1
+} PatchApplyResult;
+enum { PATCH_PULL_END = 0, PATCH_PULL_BYTE = 1 };
+typedef int (*PatchPull)(void *ctx, uint8_t *out);
+
 static uint8_t up_image_flash_read(uint32_t image_offset){
     return flash_read((uint32_t)(PATCH_IMAGE_BASE + image_offset));
 }
@@ -113,7 +123,7 @@ typedef struct PatchApply {
     uint32_t g_want_to;
     int      g_FWD;
 
-    int (*g_pull_fn)(void*, uint8_t*);
+    PatchPull g_pull_fn;
     void *g_pull_ctx;
     /* HOT-FLAG PLACEMENT INVARIANT: these decode error/EOF/reject latches are touched on nearly
      * every range-coder step, so they are packed into the low alignment hole right after the two
@@ -189,13 +199,14 @@ static int up_decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_re
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
 static void up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w);
-enum { PATCH_APPLY_DONE=1, PATCH_APPLY_ERROR=2 };
 
 /* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
  * (later reads keep returning 0 without re-invoking the callback). */
 static int up_pull_raw(PatchApply *pa, uint8_t*out){
+    int pull_result;
     if(pa->g_pull_eof) return 0;
-    if(!pa->g_pull_fn(pa->g_pull_ctx,out)){ pa->g_pull_eof=1; return 0; }
+    pull_result=pa->g_pull_fn(pa->g_pull_ctx,out);
+    if(pull_result!=PATCH_PULL_BYTE){ pa->g_pull_eof=1; return 0; }
     return 1;
 }
 /* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
@@ -1032,13 +1043,14 @@ static void RC_NOINLINE up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,u
     rc_lit_tree_from_hist(t,hist,w);
 }
 
-/* Run the whole decode synchronously on the CALLER's stack. `next` returns 1 and one blob
- * byte, or 0 when the source aborts/ends early (it may block internally — e.g. poll a UART —
- * before returning; the decoder consumes bytes strictly in order). Valid patches terminate at
- * the header's compressed body length and do not require callback EOF. Returns
- * PATCH_APPLY_DONE (image written, both CRCs verified) or PATCH_APPLY_ERROR (g_reject holds
- * the reason). */
-static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *ctx){
+/* Run the whole decode synchronously on the CALLER's stack. `next` returns PATCH_PULL_BYTE and
+ * one blob byte, or PATCH_PULL_END when the source aborts/ends early (it may block internally —
+ * e.g. poll a UART — before returning; the decoder consumes bytes strictly in order). Any other
+ * callback result is also an abort, never a byte. Valid patches terminate at the header's
+ * compressed body length and do not require callback EOF. Returns PATCH_APPLY_DONE (zero; image
+ * written, both CRCs verified) or PATCH_APPLY_ERROR (nonzero; g_reject holds the reason). */
+static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, PatchPull next,
+                                                               void *ctx){
     memset(pa,0,sizeof *pa);
     pa->g_pull_fn=next; pa->g_pull_ctx=ctx;
     if(!up_decode_body(pa) || up_crc32_flash(pa,pa->g_to_size)!=pa->g_want_to){
@@ -1090,6 +1102,7 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 #undef RC_ALWAYS_INLINE
 #undef RC_NOINLINE
 #undef RC_NORETURN
+#undef RC_WARN_UNUSED_RESULT
 #undef RC_ADD_OVERFLOW
 #undef RC_SUB_OVERFLOW
 #undef RC_KTOP

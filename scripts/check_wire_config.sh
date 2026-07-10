@@ -70,7 +70,7 @@ cat > "$tmp/source_wire_config.c" <<'EOF'
 #include "patch_apply.h"
 uint8_t flash_read(uint32_t addr){ (void)addr; return 0xffu; }
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
-static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return 0; }
+static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PULL_END; }
 int main(void){ PatchApply state; return patch_apply_run(&state,next,0); }
 EOF
 # shellcheck disable=SC2086
@@ -94,7 +94,7 @@ cat > "$tmp/single_wire_config.c" <<'EOF'
 #endif
 uint8_t flash_read(uint32_t addr){ (void)addr; return 0xffu; }
 void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
-static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return 0; }
+static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PULL_END; }
 int main(void){ PatchApply state; return patch_apply_run(&state,next,0); }
 EOF
 # shellcheck disable=SC2086

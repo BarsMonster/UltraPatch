@@ -62,7 +62,8 @@ _Static_assert(BT_PROBS == 13u && BT_BYTES == 17u && UG_CTX == 19 &&
 #endif
 
 #if defined(RC_ALWAYS_INLINE) || defined(RC_NOINLINE) || \
-    defined(RC_ADD_OVERFLOW) || defined(RC_SUB_OVERFLOW)
+    defined(RC_WARN_UNUSED_RESULT) || defined(RC_ADD_OVERFLOW) || \
+    defined(RC_SUB_OVERFLOW)
 #error "decoder-private model macro leaked after inclusion"
 #endif
 
@@ -75,7 +76,7 @@ void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){
 static int app_next(void *ctx, uint8_t *out){
     (void)ctx;
     (void)out;
-    return 0;
+    return PATCH_PULL_END;
 }
 
 int decoder_collision_probe(void){
