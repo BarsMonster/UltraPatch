@@ -70,6 +70,12 @@ Also run before release (not part of `make gate`):
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
 
+The host CLI's successful output-publication contract is the native host OS
+behavior of its same-directory temporary file and `rename()`. A separate
+cross-platform transaction or filesystem durability layer is not a release
+requirement; reported I/O failures must still return nonzero and preserve an
+existing destination. This policy applies only to host files, not device flash.
+
 Record the release `WIRE_CONFIG_FLAGS` value. The encoder and decoder **MUST**
 use the exact same wire macro names with the exact same values; the target
 family, `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`,

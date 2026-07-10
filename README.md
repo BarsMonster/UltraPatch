@@ -67,6 +67,14 @@ an image, it is used for range extraction. Running `ultrapatch` without
 arguments prints usage and exits nonzero; `--help` and `-h` print the same usage
 text and exit successfully.
 
+Host encode/decode outputs are published through a temporary file in the
+destination directory followed by the native OS `rename()` operation. Reported
+write, sync, close, or rename errors fail the command and preserve an existing
+destination. The host tool intentionally relies on the platform's normal
+filesystem semantics after a successful rename; UltraPatch does not add a
+second portability or durability protocol around them. This is a host CLI
+policy and is separate from the embedded decoder's full-reflash recovery rule.
+
 Full release gate:
 
 ```sh
