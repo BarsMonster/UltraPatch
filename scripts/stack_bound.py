@@ -37,9 +37,10 @@
 #                set or the toolchain-runtime allowlist),
 #              - a dynamic/VLA stack frame (.su qualifier != "static").
 #
-# BOUND = longest root-to-leaf weighted path from the harness entry (rcv3_run wraps
-#         patch_apply_run with caller-owned PatchApply storage and is folded by the compiler),
-#         summing internal frames only. Externs are EXCLUDED and reported separately:
+# BOUND = longest root-to-leaf weighted path from the selected harness entry (the repository
+#         uses rcv3_run wrappers for both static PatchApply storage and a caller-owned
+#         PatchApply pointer), summing internal frames only. Externs are EXCLUDED and reported
+#         separately:
 #           - integrator externs  : flash_read, flash_write, and the byte callback. Their
 #                                   stack is the integrator's own cost, by contract.
 #           - toolchain externs   : __aeabi_uidiv / memmove / memset (libgcc/builtins).

@@ -170,14 +170,15 @@ reject.
 ## Stack Budget
 
 The whole decode runs on the caller's stack (no fiber since commit 44eee88), so the
-integrator must reserve stack for it on top of the interrupt/RTOS frames. This stack
-number excludes the caller-owned `PatchApply` object; place that object in static/noinit
-storage if the bootloader stack is tight. The worst-case caller-stack cost of
-`patch_apply_run()` on Cortex-M0+, measured statically:
+integrator must reserve stack for it on top of the interrupt/RTOS frames. These stack
+numbers exclude the `PatchApply` object itself; place that object in static/noinit storage
+if the bootloader stack is tight. The statically measured Cortex-M0+ bounds are wrapper
+shape-specific:
 
-| Toolchain (Cortex-M0+, `-mthumb`) | Worst-case caller stack |
-| --------------------------------- | ----------------------- |
-| **gcc -O2 (gated ceiling: 480 B)** | **384 B** |
+| Integration shape (gcc `-O2`, Cortex-M0+ `-mthumb`) | Worst-case caller stack | Gated ceiling |
+| --------------------------------------------------- | ----------------------- | ------------- |
+| Static `PatchApply` object; `rcv3_run(next, ctx)` | **400 B** | 480 B |
+| Caller-owned pointer; `rcv3_run(state, next, ctx)` | **440 B** | 480 B |
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because
@@ -186,12 +187,12 @@ fails loudly if any of those, or a dynamic/VLA frame, appears. Each `.su` frame 
 includes that function's own pushed LR and callee-saved registers, so the sum accounts for
 every on-stack return address; no per-call addend is added.
 
-The number **includes** all first-party decoder frames. It **excludes** the integrator's own
+Each number **includes** its wrapper and all first-party decoder frames. It **excludes** the integrator's own
 externs - `flash_read`, `flash_write`, and the byte callback (their stack is the integrator's
 cost) — and the small toolchain leaves (`memmove`/`memset`); budget those plus
-your worst-case interrupt-nesting frame on top. `make gate` re-baselines the gcc -O2 bound via
-`check-stack` and fails if it exceeds the pinned ceiling; the static bound above is authoritative
-for the device.
+your worst-case interrupt-nesting frame on top. `make gate` measures and gates both gcc -O2
+shapes independently via `check-stack`. Firmware with another wrapper shape must measure that
+wrapper in its own build; neither repository bound is universal.
 
 ## Call Sequence
 

@@ -71,13 +71,12 @@ ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 # used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;
 # product notes/gate output must not present this number as shape-independent.
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'int rcv3_run(int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
-# Worst-case caller-stack ceiling for patch_apply_run(), gcc -O2, Cortex-M0+ (bytes). The
-# decode runs entirely on the caller's stack (no fiber since 44eee88); scripts/stack_bound.py
-# derives the exact static bound from -fstack-usage frames + the call graph. The current
-# measured bound is printed by `make check-stack` and pinned in docs/device-integration.md
-# (single source of truth for the number); the ceiling below gives ample headroom and
-# check-stack fails above it.
-BASE_STACK_CEIL_O2 ?= 480
+STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'int rcv3_run(PatchApply *state, int (*next)(void*, uint8_t*), void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic.c"
+# Independent worst-case caller-stack ceilings for the two real integration shapes, gcc -O2,
+# Cortex-M0+ (bytes). scripts/stack_bound.py derives each exact static bound from
+# -fstack-usage frames + its harness object's call graph. check-stack reports and gates both.
+BASE_STACK_STATIC_CEIL_O2 ?= 480
+BASE_STACK_GENERIC_CEIL_O2 ?= 480
 
 # ---- hard 60 s execution cap on EVERY public target ---------------------------------
 # Owner rule: we do not throw compute just for fun — an operation that cannot finish in
@@ -149,27 +148,41 @@ check-arm-measure-internal:
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
 
-# Worst-case caller-stack bound for patch_apply_run(). Since the fiber was deleted (44eee88)
-# the whole decode runs on the CALLER's stack; docs/device-integration.md pins the budget an
-# integrator must reserve. Builds the decoder harness with -fstack-usage (gcc -O2,
-# the pessimistic level — deeper than -Os here) and runs scripts/stack_bound.py, which sums the
-# per-function .su frames (each already includes its own pushed LR/regs) along the deepest path
-# of the static call graph extracted from the disassembly. It fails loudly on recursion, an
-# indirect call that could reach internal code, or a dynamic/VLA frame — any of which would
-# invalidate the static method. The bound EXCLUDES the integrator's externs (flash_read/
-# flash_write/byte-callback) and toolchain leaves (memmove/memset/__aeabi_uidiv); the ceiling's
-# headroom absorbs those + interrupt-frame slack. Same cross-gcc as check-arm.
+# Worst-case caller-stack bounds for both supported wrapper shapes. Since the fiber was deleted
+# (44eee88), the whole decode runs on the CALLER's stack; docs/device-integration.md pins the
+# shape-specific budgets an integrator must reserve. Builds both harnesses with -fstack-usage
+# (gcc -O2, the pessimistic level — deeper than -Os here) and runs scripts/stack_bound.py, which
+# sums the per-function .su frames (each already includes its own pushed LR/regs) along the
+# deepest path of each object's static call graph. It fails loudly on recursion, an indirect call
+# that could reach internal code, or a dynamic/VLA frame — any of which would invalidate the
+# static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write/byte-callback)
+# and toolchain leaves (memmove/memset/__aeabi_uidiv); each ceiling's headroom absorbs those +
+# interrupt-frame slack. Same cross-gcc as check-arm.
 check-stack-internal:
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
+	$(STACK_GENERIC_HARNESS); \
 	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
-	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack.txt"; \
-	cat "$$tmp/stack.txt"; \
-	echo "stack_ceiling_o2=$(BASE_STACK_CEIL_O2)"; \
-	bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack.txt"); \
-	test -n "$$bound"; \
-	test "$$bound" -le "$(BASE_STACK_CEIL_O2)"
+	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
+	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
+	python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
+	echo "stack_static_integration=static PatchApply wrapper"; \
+	sed 's/^stack_/stack_static_/' "$$tmp/stack_static.txt"; \
+	echo "stack_static_ceiling_o2=$(BASE_STACK_STATIC_CEIL_O2)"; \
+	echo "stack_generic_integration=caller-owned PatchApply * wrapper"; \
+	sed 's/^stack_/stack_generic_/' "$$tmp/stack_generic.txt"; \
+	echo "stack_generic_ceiling_o2=$(BASE_STACK_GENERIC_CEIL_O2)"; \
+	static_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_static.txt"); \
+	generic_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_generic.txt"); \
+	test -n "$$static_bound"; \
+	test -n "$$generic_bound"; \
+	if [ "$$static_bound" -gt "$(BASE_STACK_STATIC_CEIL_O2)" ]; then \
+		echo "Static PatchApply wrapper stack ceiling exceeded: $$static_bound > $(BASE_STACK_STATIC_CEIL_O2)" >&2; exit 1; \
+	fi; \
+	if [ "$$generic_bound" -gt "$(BASE_STACK_GENERIC_CEIL_O2)" ]; then \
+		echo "Caller-owned PatchApply * wrapper stack ceiling exceeded: $$generic_bound > $(BASE_STACK_GENERIC_CEIL_O2)" >&2; exit 1; \
+	fi
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
 # attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
