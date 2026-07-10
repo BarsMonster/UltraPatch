@@ -133,6 +133,63 @@ static int writes_bounded(const Result *r, uint32_t span){
     return r->oob_writes == 0u && (uint64_t)r->writes <= max_writes;
 }
 
+/* Exact oracle for the grow-direction sliding LDR window. This exercises the cases that a
+ * whole-patch round-trip does not isolate: initial targets above the first query (1 KiB alias),
+ * an eight-byte catch-up across a 2-mod-4 suppressed BL, and pristine bytes served by the journal. */
+static int ldr_oracle(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
+    if(!rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
+    for(int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2){
+        uint16_t up = (uint16_t)(hy_src_peek(pa, a) | ((uint16_t)hy_src_peek(pa, a + 1) << 8));
+        if(rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
+    }
+    return 0;
+}
+
+static void put_u16(uint8_t *p, uint32_t at, uint16_t v){
+    p[at] = (uint8_t)v; p[at + 1u] = (uint8_t)(v >> 8);
+}
+
+static int ldr_window_case(void){
+    PatchApply pa;
+    uint8_t packed[4];
+    free(test_flash);
+    test_flash_n = 4096u;
+    test_flash = (uint8_t *)calloc(test_flash_n, 1u);
+    CHECK(test_flash != NULL);
+
+    /* Real hits at q=3000, plus an above-first-query target 4020 whose modulo slot aliases
+     * q=2996 and must never enter the descending ring. */
+    put_u16(test_flash, 1976u, 0x48ffu); /* +1024 -> 3000 */
+    put_u16(test_flash, 2000u, 0x48f9u); /* +1000 -> 3000 */
+    put_u16(test_flash, 2996u, 0x48ffu); /* +1024 -> 4020 (above first query) */
+    /* This target is pending when the BL at 2502 skips aligned candidate 2500. If it is not
+     * cleared, it aliases q=1476 exactly 1024 bytes later. */
+    put_u16(test_flash, 1500u, 0x48f9u); /* +1000 -> 2500 */
+    put_u16(test_flash, 2502u, 0xf000u);
+    put_u16(test_flash, 2504u, 0xd000u);
+
+    memset(&pa, 0, sizeof pa);
+    pa.g_from_size = test_flash_n; pa.g_FWD = 0; pa.g_psrc_even = UINT32_MAX;
+    for(uint32_t q = 3000u; q >= 1400u; ){
+        CHECK(grow_ldr_take(&pa, 0, 4096, q) == ldr_oracle(&pa, 0, 4096, q));
+        if(q == 2504u){
+            CHECK(field_at(&pa, 0, 2502, packed, 0, 4096) == 2); /* clears skipped q=2500 */
+            q -= 8u;
+        }else q -= 4u;
+    }
+
+    /* The sliding scan must use journal-aware pristine bytes, not overwritten flash. */
+    memset(test_flash, 0, test_flash_n);
+    memset(&pa, 0, sizeof pa);
+    pa.g_from_size = test_flash_n; pa.g_FWD = 0; pa.g_psrc_even = UINT32_MAX;
+    pa.g_jcount = 2;
+    pa.ARENA.apply.jbuf[0] = (1001u << 8) | 0x48u; /* grow journal is descending */
+    pa.ARENA.apply.jbuf[1] = (1000u << 8) | 0xffu; /* LDR +1024 -> 2024 */
+    CHECK(ldr_oracle(&pa, 0, 4096, 2024u) == 1);
+    CHECK(grow_ldr_take(&pa, 0, 4096, 2024u) == 1);
+    return 0;
+}
+
 static int success_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob,
                         int *forward){
     Bytes before = {0};
@@ -249,6 +306,8 @@ int main(int argc, char **argv){
     int forward1 = 0, forward2 = 0;
     int rc = 1;
     memset(&pa, 0xa5, sizeof pa);
+    if(ldr_window_case()) goto out;
+    printf("decoder_ldr_window=OK (alias filter + BL skip + journal)\n");
 
     if(argc == 5 && (strcmp(argv[1], "resource-clean") == 0 ||
                      strcmp(argv[1], "resource-touched") == 0)){

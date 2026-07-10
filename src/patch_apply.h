@@ -525,20 +525,18 @@ static int32_t corr_take(up_ApplyState*s, up_CorrCur*c, int32_t off){
     }
     return 0;
 }
-/* A1 ldr-derive: for FWD, each op records the future 4-aligned literal-pool targets of Thumb
- * LDR-literal halfwords already copied in this op. The target span is <=1024 B, so a 256-bit ring
- * keyed by target>>2 is enough when each slot is consumed before the current field bytes can record
- * a same-slot target 1024 B ahead. Grow reads via the journal-aware source path because lower
- * instruction-window bytes may be clobbered. */
+/* A1 ldr-derive: a 256-bit ring records future 4-aligned literal-pool targets of Thumb
+ * LDR-literal halfwords. The target span is <=1024 B, so target>>2 modulo 256 is collision-free
+ * while every consumed target stays in the current 1 KiB window. FWD records halfwords as their
+ * copy bytes are read. Grow walks the window backward: an initial <=1 KiB fill followed by only
+ * the newly admitted low halfwords at each descending query. */
 #define PSRC_TGT_MASK 255u
-static uint8_t hy_src(PatchApply *pa, int32_t fp);   /* fwd decl: journal-aware pristine source read */
+static uint8_t hy_src_peek(PatchApply *pa, int32_t fp); /* fwd decl: journal-aware pristine source read */
 /* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
- * fpk+4<=fp0+dl. Reads PRISTINE source: the FWD and grow apply directions share ONE back-scan and
- * differ ONLY in the halfword source — FWD consumes the packed target metadata recorded at read-time,
- * grow reads via hy_src() (journal-aware: instr-window bytes the output frontier already clobbered are
- * preserved copy source, so raw flash would be wrong). */
+ * fpk+4<=fp0+dl. Reads PRISTINE source: FWD consumes packed metadata recorded at copy-read time;
+ * grow incrementally fills the same ring from journal-aware source reads while descending. */
 static inline int psrc_ldr_take(PatchApply *pa, uint32_t fpk){
     uint32_t i=(fpk>>2)&PSRC_TGT_MASK;
     uint32_t bit=1u<<(i&31u);
@@ -546,19 +544,32 @@ static inline int psrc_ldr_take(PatchApply *pa, uint32_t fpk){
     pa->g_psrc_ldr[i>>5]&=~bit;
     return hit;
 }
-static inline int ldr_targets(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
-    /* the scan only ever yields 4-aligned targets (t=(a&~3)+4n+4), so a non-aligned fpk can never
-     * match -> reject it up front (also keeps the caller's EX gate a single ldr_targets() test, and
-     * skips any pristine read/record for an impossible target). */
+static inline void psrc_ldr_put(PatchApply *pa, uint32_t fpk){
+    uint32_t i=(fpk>>2)&PSRC_TGT_MASK;
+    pa->g_psrc_ldr[i>>5]|=1u<<(i&31u);
+}
+/* Descending SAME-OP LDR query. g_psrc_even is the lowest even instruction address already
+ * scanned in this op (UINT32_MAX before the first query). Moving fpk down can only admit lower
+ * instruction halfwords; high halfwords that leave the 1 KiB window cannot target fpk or below.
+ * Targets above the current query are deliberately not inserted: they will never be consumed by
+ * the descending walk and would alias a real slot exactly 1024 B below. */
+static inline int grow_ldr_take(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
     if(!rc_ldr_target_in_op(fp0,dl,fpk)) return 0;
-    for(int32_t a=rc_ldr_scan_first(fp0,fpk); a+2<=(int32_t)fpk; a+=2){
-        int32_t imm;
-        uint16_t up=(uint16_t)(hy_src(pa,a) | (hy_src(pa,a+1)<<8));
-        if(!rc_thumb_ldr_lit(up)) continue;
-        imm=(int32_t)(up&0xff);
-        if(rc_ldr_target(a,imm)==(int32_t)fpk) return 1;
+    uint32_t lo=(uint32_t)rc_ldr_scan_first(fp0,fpk);
+    uint32_t a=pa->g_psrc_even==UINT32_MAX ? fpk : pa->g_psrc_even;
+    while(a>lo){
+        a-=2u;
+        uint16_t up=(uint16_t)(hy_src_peek(pa,(int32_t)a) |
+                               ((uint16_t)hy_src_peek(pa,(int32_t)a+1)<<8));
+        if(rc_thumb_ldr_lit(up)){
+            uint32_t t=(uint32_t)rc_ldr_target((int32_t)a,(int32_t)(up&0xffu));
+            /* fpk is already an in-source SAME-OP field start, and LDR targets are 4-aligned;
+             * therefore t<=fpk also proves t+4 is in both the source and this op. */
+            if(t<=fpk) psrc_ldr_put(pa,t);
+        }
     }
-    return 0;
+    pa->g_psrc_even=a;
+    return psrc_ldr_take(pa,fpk);
 }
 /* g_litprev = the actual previous CONTENT-stream byte (order-1 tag0 literal context): updated for
  * EVERY emitted content byte here -- span literal, ring backref, out-match copy -- so the literal at
@@ -629,10 +640,7 @@ static uint8_t hy_src_peek(PatchApply *pa, int32_t fp){
 }
 static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
-    if(rc_thumb_ldr_lit(up)){
-        uint32_t i=((uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo)>>2)&PSRC_TGT_MASK;
-        pa->g_psrc_ldr[i>>5]|=1u<<(i&31u);
-    }
+    if(rc_thumb_ldr_lit(up)) psrc_ldr_put(pa,(uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo));
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches hy_src_peek's range gate). */
@@ -648,11 +656,11 @@ static void hy_src_rec(PatchApply *pa, int32_t fp, uint8_t v){
     }
 }
 /* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
- * preserves the original byte where the output frontier later overwrote source flash. Records every
- * pristine read into the packed FWD ldr metadata. */
+ * preserves the original byte where the output frontier later overwrote source flash. FWD records
+ * each copy read into its target metadata; grow owns a separate sliding scan cursor. */
 static uint8_t hy_src(PatchApply *pa, int32_t fp){
     uint8_t v=hy_src_peek(pa,fp);
-    hy_src_rec(pa,fp,v);
+    if(pa->g_FWD) hy_src_rec(pa,fp,v);
     return v;
 }
 /* journal-aware pristine 4-byte field word (little-endian) at fpk, peeked WITHOUT touching the psrc
@@ -662,10 +670,11 @@ static uint32_t hy_word4_peek(PatchApply *pa, uint32_t fpk){
     return  (uint32_t)hy_src_peek(pa,(int32_t)fpk)    | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+1)<<8)
           | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+3)<<24);
 }
-/* record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
+/* FWD: record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
  * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
  * gate would always pass — record straight into the 4 ring slots (the window cannot self-alias). */
 static void hy_word4_rec(PatchApply *pa, uint32_t fpk, uint32_t w){
+    if(!pa->g_FWD) return;
     hy_half_rec(pa,fpk,     (uint8_t)w,       (uint8_t)(w>>8));
     hy_half_rec(pa,fpk+2u,  (uint8_t)(w>>16), (uint8_t)(w>>24));
 }
@@ -690,10 +699,11 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
     /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
     uint32_t w=hy_word4_peek(pa,fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
-    int fwd_ldr_hit=(pa->g_FWD && !(fpk&3u)) ? psrc_ldr_take(pa,fpk) : 0;
+    int ldr_hit=0;
+    if(!(fpk&3u)) ldr_hit=pa->g_FWD ? psrc_ldr_take(pa,fpk) : grow_ldr_take(pa,fp0,dl,fpk);
     /* local-BL: 2-aligned, low halfword F000-pattern, high halfword D000-pattern (pristine source) */
     if(rc_bl_pattern(up,lo)){
-        if(pa->g_FWD && (fpk&2u)) (void)psrc_ldr_take(pa,fpk+2u);
+        if(fpk&2u) (void)psrc_ldr_take(pa,pa->g_FWD ? fpk+2u : fpk-2u);
         if(!pure) return 2;                                 /* suppressed-bl is implicit */
         int32_t res=pull_delta(pa,&pa->DR_BL, &pa->MDL_pre.dibl, pa->DR_DIC_BL, DR_KCAP_BL); /* residual from the single stream */
         if(pa->g_rcerr) return 0;
@@ -705,10 +715,9 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
         hy_word4_rec(pa,fpk,w);                             /* record the 4 BL bytes into the ring */
         return 1;
     }
-    /* A1: ex (ldr) DERIVED (same-op back-scan), gated by `pure` (no literal patch in the 4 bytes) —
-     * mirrors the encoder's pure(k) + op_ldr_set; positions are derived, not shipped. ldr_targets
-     * rejects any non-4-aligned fpk itself, so no alignment pre-test is needed here. */
-    if(pure && (pa->g_FWD ? fwd_ldr_hit : ldr_targets(pa, fp0, dl, fpk))){
+    /* A1: ex (ldr) DERIVED, gated by `pure` (no literal patch in the 4 bytes) — mirrors the
+     * encoder's pure(k) + op_ldr_set; positions are derived, not shipped. */
+    if(pure && ldr_hit){
         int32_t res=pull_delta(pa,&pa->DR_EX, &pa->MDL_pre.diex, pa->DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
         if(pa->g_rcerr) return 0;
         int32_t pred=rc_smap_pred_ex(pa->g_smap_b,pa->g_smap_v,(int)pa->g_smap_n,w); /* pointer words move by the value's shift */
@@ -837,7 +846,7 @@ static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
     if(nl<0||nl>dl){ pa->g_rcerr=1; return; }
     uint8_t packed[4];
     int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
-    if(fwd){ memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX; }
+    memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX;
     up_LitCur lc;
     up_CorrCur cc; corr_cur_init(&cc,s,fwd);
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
