@@ -225,11 +225,11 @@ around the single `patch_apply_run` call.
 To abandon a decode mid-blob — a lost link, a user cancel, a transport timeout —
 the byte callback returns `PATCH_PULL_END`. The decoder latches EOF, zero-fills any later range reads,
 and terminates in BOUNDED time (an `O(to_size)` wind-down at worst, never an
-unbounded hang) with `PATCH_APPLY_ERROR`. Flash may already have been modified
-when the abort lands, so recovery follows the same terminal-state matrix as any
-other mid-apply error (the Call Sequence table below). No special code path is
-needed; the truncated-blob cases in `make gate` drive exactly this wind-down and
-reject.
+unbounded hang) with `PATCH_APPLY_ERROR`. If the abort occurs before the first
+page write, the original image remains intact and a later apply may start from
+that original image. If the abort occurs after the first page write, the image
+must be fully reflashed externally. The patch cannot be resumed. The
+truncated-blob cases in `make gate` drive this bounded reject path.
 
 ## Stack Budget
 
@@ -269,24 +269,25 @@ wrapper in its own build; neither repository bound is universal.
 Two accessors classify the terminal state: `patch_apply_reject(&state)` gives the
 reject reason, and `patch_apply_flash_touched(&state)` reports whether any flash
 write happened during the run (like `patch_apply_reject`, it compiles out when
-unused). The terminal-state matrix:
+unused). The required-action matrix:
 
-| Terminal state | Flash content | Recovery |
-| -------------- | ------------- | -------- |
+| Terminal state | Flash content | Required action |
+| -------------- | ------------- | --------------- |
 | `DONE` | new image fully written, both CRCs verified | boot the new image |
-| `ERROR`, flash untouched (`patch_apply_flash_touched(&state) == 0`) | old image intact, still bootable | fix the cause, retry with a corrected patch |
-| `ERROR`, flash touched (`patch_apply_flash_touched(&state) != 0`) | partially overwritten — image destroyed | bootloader recovery (e.g. full reflash) |
-| `ERROR` at the final `CRC32(to)` gate | fully written, wrong image | bootloader recovery (e.g. full reflash) |
+| `ERROR`, flash untouched (`patch_apply_flash_touched(&state) == 0`) | old image intact, still bootable | correct the cause; a later apply may start from the intact original image |
+| `ERROR`, flash touched (`patch_apply_flash_touched(&state) != 0`) | partially overwritten; old image destroyed | full external reflash |
+| `ERROR` at the final `CRC32(to)` gate | fully written, wrong image | full external reflash |
 
 `REJ_RESOURCE` (a decoder resource cap was exceeded) can raise mid-apply, so
-it is NOT simply "rebuild with larger caps and retry": check
-`patch_apply_flash_touched(&state)` first. If flash was touched, the device image is
-already partially overwritten and must be recovered before any retry — a
-larger-capped build fixes the cap, but only a recovered or still-intact image
-can accept the retried patch (retrying the same patch on the half-written
-image rejects cleanly at `CRC32(from)`). `REJ_CORRUPT` means a malformed,
-truncated, or wrong-image patch; with flash untouched it is safe to re-request
-the transfer and retry. A silent hardware write failure can land in the same
+check `patch_apply_flash_touched(&state)` before taking any next action. If flash
+is untouched, a corrected build or authenticated transfer may start later from
+the intact original image. If flash was touched, perform a full external
+reflash first. Never run the patch again against the partially overwritten
+image. A later `CRC32(from)` mismatch would merely reject that wrong starting
+image; it is not an interruption detector or a recovery mechanism.
+
+`REJ_CORRUPT` means a malformed, truncated, or wrong-image patch; a silent
+hardware write failure can land in the same
 `REJ_CORRUPT` bucket but with flash TOUCHED — a fully-written, wrong image caught
 at the final `CRC32(to)` gate (the last matrix row). Driver-level verification
 may identify or retry the failing page sooner, but it does not change the
@@ -294,8 +295,7 @@ terminal policy: once flash was touched, recover by full external reflash, not
 by re-transfer or decoder retry.
 
 Do not run two decodes concurrently against one flash image. Do not start a new
-patch until the previous patch has reached `DONE` or `ERROR` and the bootloader
-has chosen a recovery path.
+patch after a touched error; externally reflash the complete image first.
 
 ## Build-Time Contract
 
@@ -381,22 +381,21 @@ make gate
 Do not use deployment-only CFLAGS to pass the SRAM gate. The default build must
 remain representative of the shipping decoder.
 
-## Flash And Recovery Policy
+## Flash And Reflash Policy
 
-A1 does not provide power-fail rollback or resume, and never will — this is a
-permanent non-goal (decision recorded 2026-07-02), not a missing feature. Resume
-is impossible by construction: the decode state is volatile. The never-evict
-journal (the preserved source bytes the output frontier has already overwritten
-in flash), the adaptive entropy-model state, and the output page cache all live
-only in RAM and cannot be reconstructed mid-stream after power loss — the
-source image below the write frontier is already destroyed. Do not attempt to
-retrofit checkpointing.
+A1 provides no power-fail rollback or resume. It deliberately has no persistent
+in-progress marker, checkpoint, journal replay, or boot-time interruption
+detection protocol. The decode state is volatile: preserved source bytes,
+adaptive entropy models, and output page buffers live only in RAM, while the
+source image below the write frontier has already been destroyed. Do not add a
+resume or marker scheme to the decoder.
 
-If power is lost during apply, the host or bootloader must detect the
-interrupted state and recover by full reflash or another product-defined
-recovery path. A retry of the same patch on the interrupted image rejects
-cleanly at the `CRC32(from)` gate with no further flash writes, which is the
-supported detection mechanism.
+Any transport loss, decoder error, reset, or power loss after the first page
+write requires a full external reflash. If power is lost while an apply may have
+been writing, treat the image as touched and fully reflash it; do not retry or
+resume the patch. `CRC32(from)` and `CRC32(to)` validate the image seen during a
+normal decoder invocation. They are not persistent interruption detectors and
+do not provide recovery.
 
 The host backend in `src/patch_host_backend.c` is a verification harness and NVM
 emulator. It is useful as a reference for driving the push API and collecting
