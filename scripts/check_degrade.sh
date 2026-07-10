@@ -71,6 +71,18 @@ if ! "$LDRI" >"$tmp/ldr-index.out" 2>"$tmp/ldr-index.err"; then
 fi
 cat "$tmp/ldr-index.out"
 
+SPAN="$tmp/span-deque-probe"
+SPAN_SRCS=${ENC_SEAM_SRCS//src\/enc_lz.c/}
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L test-bench/span-deque-probe.c \
+      $SPAN_SRCS -Wl,--gc-sections -o "$SPAN" 2>"$tmp/span-deque-build.log"; then
+  echo "check_degrade: span-deque oracle build failed" >&2
+  sed 's/^/    /' "$tmp/span-deque-build.log" >&2; exit 1
+fi
+if ! "$SPAN" >"$tmp/span-deque.out" 2>"$tmp/span-deque.err"; then
+  echo "check_degrade: span-deque oracle failed: $(cat "$tmp/span-deque.err")" >&2; exit 1
+fi
+cat "$tmp/span-deque.out"
+
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>

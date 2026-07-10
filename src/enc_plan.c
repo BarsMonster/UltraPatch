@@ -157,6 +157,9 @@ void plan_prepare_free(PlanPrep *prep) {
 #ifdef LDR_INDEX_STATS
     ldr_target_index_stats_report();
 #endif
+#ifdef SPAN_DEQUE_STATS
+    span_deque_stats_report();
+#endif
     memset(prep, 0, sizeof(*prep));
 }
 

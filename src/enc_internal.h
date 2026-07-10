@@ -328,6 +328,9 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                          const CandArena *cands, const uint8_t *ncand,
                          const OCandArena *ocands, const uint8_t *nocand,
                          const PriceTab *pt);
+#ifdef SPAN_DEQUE_STATS
+void span_deque_stats_report(void);
+#endif
 void merge_adjacent_spans(TokenVec *tv);
 int fit_k_tokens(const TokenVec *tv);
 int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd);
