@@ -12,11 +12,20 @@
 /* ------------------------------------------------------------------------------------- */
 /* byte trees use the shared packed up_BitTree + bt_get/bt_set/bt_init from rc_models.h (decoder-identical) */
 
+static void re_put(REnc *r, uint8_t b) {
+    if (!r->count_only) {
+        buf_put(&r->out, b);
+    } else {
+        r->out.n++;
+        r->count_zero_run = b ? 0 : r->count_zero_run + 1u;
+    }
+}
+
 static void re_shift_low(REnc *r) {
     if (r->low < 0xff000000ull || r->low > 0xffffffffull) {
         uint8_t c = r->cache;
         for (;;) {
-            buf_put(&r->out, (uint8_t)(c + (uint8_t)(r->low >> 32)));
+            re_put(r, (uint8_t)(c + (uint8_t)(r->low >> 32)));
             c = 0xff;
             r->csz--;
             if (r->csz == 0) break;
@@ -28,6 +37,7 @@ static void re_shift_low(REnc *r) {
 }
 
 void re_init(REnc *r) { memset(r, 0, sizeof(*r)); r->range = 0xffffffffu; r->csz = 1; }
+void re_init_count(REnc *r) { re_init(r); r->count_only = 1; }
 
 /* RC_S_BIT_RATE (Golomb / order-2 flag / MTF rep+hit adaptation rate) and RC_REP0_INIT (rep0 prior)
  * are single-sourced in rc_models.h, shared verbatim with the decoder. */
@@ -53,7 +63,15 @@ Buf re_flush_opt(REnc *r) {
     if (r->low & mask) r->low = (r->low + (1ull << t)) & ~mask;
     size_t base = r->out.n;
     for (int i = 0; i < 5; i++) re_shift_low(r);
-    while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
+    if (r->count_only) {
+        /* The material sink trims only zero bytes emitted by the five flush shifts. A zero run may
+         * begin in the pre-flush body, so cap its count at the bytes appended after `base`. */
+        size_t flush_n = r->out.n - base;
+        size_t trim = r->count_zero_run < flush_n ? r->count_zero_run : flush_n;
+        r->out.n -= trim;
+    } else {
+        while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
+    }
     Buf b = r->out;
     r->out = (Buf){0};
     return b;

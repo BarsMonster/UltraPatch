@@ -349,6 +349,11 @@ EOF
     -Wl,--gc-sections -o "$tmp/rice_fit_probe"
 "$tmp/rice_fit_probe"
 
+"$CC" $CFLAGS test-bench/range-sink-contract.c src/enc_util.c src/enc_rc.c \
+    -Wl,--gc-sections -o "$tmp/range_sink_contract"
+"$tmp/range_sink_contract"
+echo "range_sink_contract=OK (carry chain + randomized material/count equivalence)"
+
 # Exercise the same helper as end-users receive it: generate a private fresh single header, then
 # compile and run the identical oracle suite without any encoder headers in the translation unit.
 python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
