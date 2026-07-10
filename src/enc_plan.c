@@ -91,19 +91,87 @@ static void degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to
     *ops = out;
 }
 
+static Buf prep_buf_clone(const Buf *src) {
+    Buf out = {(uint8_t *)xmalloc(src->n), src->n, src->n};
+    if (src->n) memcpy(out.d, src->d, src->n);
+    return out;
+}
+
+static FieldDeltaVec prep_fd_clone(const FieldDeltaVec *src) {
+    FieldDeltaVec out = {(FieldDelta *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n};
+    if (src->n) memcpy(out.v, src->v, src->n * sizeof(*src->v));
+    return out;
+}
+
+static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
+    OpVec out = {(Op *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n,
+                 (uint8_t *)xmalloc(payload_n)};
+    if (src->n) memcpy(out.v, src->v, src->n * sizeof(*src->v));
+    if (payload_n) memcpy(out.payload, src->payload, payload_n);
+    return out;
+}
+
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa) {
+    memset(prep, 0, sizeof(*prep));
+    data_format_encode(from, to, pa, &prep->from_df[0], &prep->to_df[0], &prep->fd, 0);
+    prep->from_df[1] = prep_buf_clone(&prep->from_df[0]);
+    prep->to_df[1] = prep_buf_clone(&prep->to_df[0]);
+    mask_bl_imms(from->d, prep->from_df[1].d, from->n);
+    mask_bl_imms(to->d, prep->to_df[1].d, to->n);
+    prep->raw[PLAN_RAW_UNMASK_11] = bsdiff_ops(&prep->from_df[0], &prep->to_df[0], 11);
+    prep->raw[PLAN_RAW_MASK_11] = bsdiff_ops(&prep->from_df[1], &prep->to_df[1], 11);
+    prep->raw[PLAN_RAW_UNMASK_6] = bsdiff_ops(&prep->from_df[0], &prep->to_df[0], 6);
+    prep->raw[PLAN_RAW_UNMASK_20] = bsdiff_ops(&prep->from_df[0], &prep->to_df[0], 20);
+#ifdef PLAN_PREP_ORACLE
+    static const PlanCfg cfg[] = {{0,11}, {1,11}, {2,11}, {1,6}, {1,20}};
+    static const int key[] = {PLAN_RAW_UNMASK_11, PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11,
+                              PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20};
+    for (size_t i = 0; i < sizeof(cfg) / sizeof(cfg[0]); i++) {
+        Buf of = {0}, ot = {0}; FieldDeltaVec fd = {0};
+        int masked = cfg[i].variant >= 2;
+        data_format_encode(from, to, pa, &of, &ot, &fd, masked);
+        OpVec raw = bsdiff_ops(&of, &ot, cfg[i].fuzz);
+        if (of.n != prep->from_df[masked].n || ot.n != prep->to_df[masked].n ||
+            (of.n && memcmp(of.d, prep->from_df[masked].d, of.n)) ||
+            (ot.n && memcmp(ot.d, prep->to_df[masked].d, ot.n)) ||
+            fd.n != prep->fd.n ||
+            (fd.n && memcmp(fd.v, prep->fd.v, fd.n * sizeof(*fd.v))) ||
+            raw.n != prep->raw[key[i]].n ||
+            (raw.n && memcmp(raw.v, prep->raw[key[i]].v, raw.n * sizeof(*raw.v))) ||
+            (to->n && memcmp(raw.payload, prep->raw[key[i]].payload, to->n)))
+            die("plan preparation oracle mismatch");
+        buf_free(&of); buf_free(&ot); free(fd.v); opvec_free(&raw);
+    }
+    fprintf(stderr, "PLAN_PREP_ORACLE configs=5 normalized=OK fd=OK raw=OK\n");
+#endif
+}
+
+void plan_prepare_free(PlanPrep *prep) {
+    for (int i = 0; i < 2; i++) { buf_free(&prep->from_df[i]); buf_free(&prep->to_df[i]); }
+    free(prep->fd.v);
+    for (int i = 0; i < PLAN_RAW_N; i++) opvec_free(&prep->raw[i]);
+    memset(prep, 0, sizeof(*prep));
+}
+
+static int prep_raw_key(PlanCfg cfg) {
+    if (cfg.variant >= 2) { if (cfg.fuzz != 11) die("uncached masked plan"); return PLAN_RAW_MASK_11; }
+    if (cfg.fuzz == 11) return PLAN_RAW_UNMASK_11;
+    if (cfg.fuzz == 6) return PLAN_RAW_UNMASK_6;
+    if (cfg.fuzz == 20) return PLAN_RAW_UNMASK_20;
+    die("uncached plan");
+}
+
 static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
-                                 const PairAnalysis *pa, PlanCfg cfg, FieldDeltaVec *fd) {
-    int variant = cfg.variant;
-    Buf from_df = {0}, to_df = {0};
-    data_format_encode(from, to, pa, &from_df, &to_df, fd,
-                       variant >= 2 ? 1 : 0);
-    OpVec ops = bsdiff_ops(&from_df, &to_df, cfg.fuzz);
+                                 const PlanPrep *prep, PlanCfg cfg, FieldDeltaVec *fd) {
+    int masked = cfg.variant >= 2;
+    *fd = prep_fd_clone(&prep->fd);
+    OpVec ops = prep_ops_clone(&prep->raw[prep_raw_key(cfg)], to->n);
+    const Buf *from_df = &prep->from_df[masked], *to_df = &prep->to_df[masked];
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    split_nonzero_diff_runs(ctx, &ops, &from_df, &to_df);
-    if (variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
+    split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
+    if (cfg.variant >= 1) merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd);
     degrade_ops_to_journal_budget(ctx, &ops, to, from->d, fd, from_size, to_size);
-    buf_free(&from_df); buf_free(&to_df);
     return ops;
 }
 
@@ -198,11 +266,12 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
-PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa, PlanCfg cfg) {
+PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
+                       const PlanPrep *prep, PlanCfg cfg) {
     PlanResult r = {0};
     ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
     FieldDeltaVec fd = {0};
-    OpVec ops = build_candidate_ops(ctx, from, to, pa, cfg, &fd);
+    OpVec ops = build_candidate_ops(ctx, from, to, prep, cfg, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
     PlanCaps caps;

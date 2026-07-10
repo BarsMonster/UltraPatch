@@ -97,6 +97,13 @@ typedef struct {
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
 typedef struct { int variant, fuzz; } PlanCfg;
+enum { PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11, PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20, PLAN_RAW_N };
+/* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
+typedef struct {
+    Buf from_df[2], to_df[2];
+    FieldDeltaVec fd;
+    OpVec raw[PLAN_RAW_N];
+} PlanPrep;
 typedef struct {
     int ok;
     int32_t fp_end, pres_cutoff;
@@ -317,7 +324,10 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 const FieldDeltaVec *fd, const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
-PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to, const PairAnalysis *pa, PlanCfg cfg);
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa);
+void plan_prepare_free(PlanPrep *prep);
+PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
+                       const PlanPrep *prep, PlanCfg cfg);
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
 int decode_a1(const char *image_path, const char *patch_path);

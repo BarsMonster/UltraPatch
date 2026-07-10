@@ -69,6 +69,8 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
     if (optional_sidecar_present(telf)) tr = elf_ranges(telf, &to, "to");
     PairAnalysis pa;
     pair_analysis_init(&pa, &from, &to, &fr, &tr);
+    PlanPrep prep;
+    plan_prepare(&prep, &from, &to, &pa);
     /* Op-plan sweep: every config runs the full pipeline; the smallest exact body ships and
      * ties keep the earliest entry, so added configs can never regress. A config whose plan
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
@@ -97,7 +99,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         if (pass && bestv >= 0 && !best_st.deg_engaged) break;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < NPLANS; v++) {
-            PlanResult pr = plan_encode(&ctx, &from, &to, &pa, PLANS[v]);
+            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, PLANS[v]);
             if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
@@ -108,6 +110,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
             } else buf_free(&cand);
         }
     }
+    plan_prepare_free(&prep);
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
     /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
      * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */

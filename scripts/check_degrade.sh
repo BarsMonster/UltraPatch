@@ -47,6 +47,19 @@ IMG="${IMAGES:-test-bench/images}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
 . "$(dirname "$0")/tempdir.sh"
 
+PREP="$tmp/plan-prep-oracle"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DPLAN_PREP_ORACLE src/patch_generate.c \
+      src/enc_plan.c $ENC_SEAM_SRCS -Wl,--gc-sections -o "$PREP" 2>"$tmp/prep-build.log"; then
+  echo "check_degrade: plan-preparation oracle build failed" >&2
+  sed 's/^/    /' "$tmp/prep-build.log" >&2; exit 1
+fi
+if ! "$PREP" test-bench/fixtures/v0_base/watch.bin test-bench/fixtures/v1_one_face/watch.bin \
+      "$tmp/prep.blob" >"$tmp/prep.out" 2>"$tmp/prep.err"; then
+  echo "check_degrade: plan-preparation oracle failed: $(cat "$tmp/prep.err")" >&2; exit 1
+fi
+grep -q '^PLAN_PREP_ORACLE configs=5 normalized=OK fd=OK raw=OK$' "$tmp/prep.err" || {
+  echo "check_degrade: plan-preparation oracle did not report OK" >&2; exit 1; }
+
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>
