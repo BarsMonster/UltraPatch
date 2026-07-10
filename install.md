@@ -39,6 +39,8 @@ make gate
 ```
 
 `make check-arm` cross-builds the Cortex-M0+ decoder object and prints and
-gates the authoritative ARM `text`/`data`/`bss` sizes against the Makefile
-pins (the raw command needs `-DCORTEX_M0` or `rc_models.h` #errors out); it
-also runs as one leg of `make gate`.
+gates both its relocatable and no-startup linked ARM `text`/`data`/`bss` sizes
+against the Makefile pins. The link uses an explicit FLASH/RAM layout, minimal
+platform stubs, and only the runtime-library members pulled by the decoder; it
+does not include CRT/startup or board code. The raw compile needs `-DCORTEX_M0`
+or `rc_models.h` #errors out. This check also runs as one leg of `make gate`.

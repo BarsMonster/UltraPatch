@@ -36,13 +36,28 @@ accidental duplicate decoder text in final firmware, include the decoder from a
 single update `.c` file and route other application modules through that update
 module's local API.
 
-The repository ARM `.text/.data/.bss` release metric is the static-wrapper
-integration built by `make check-arm`: one file-scope `PatchApply` object and a
-small `rcv3_run(next, ctx)` wrapper that passes that object to
-`patch_apply_run()`. The generic caller-owned call shape shown below is the
-public API contract, but it is not the shape used for the pinned ARM size
-ratchet; product firmware using a different wrapper should size that wrapper in
-its own build.
+The repository ARM release metrics use the static-wrapper integration built by
+`make check-arm`: one file-scope `PatchApply` object and a small
+`rcv3_run(next, ctx)` wrapper that passes that object to `patch_apply_run()`.
+The relocatable-object metric remains the direct decoder compiler output. A
+second no-startup link places that same object in an explicit Cortex-M0+ FLASH/RAM
+layout, resolves the two platform symbols with minimal stubs, and links only the
+`libc`/`libgcc` members that the decoder actually references. On the pinned GNU
+Arm toolchain the ratchets are:
+
+| Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
+| ------------------------------------------------ | ----:| ----:| ---:|
+| Relocatable static-wrapper object | 6141 B | 0 B | 10296 B |
+| No-startup linked image | 6721 B | 0 B | 10296 B |
+
+The linked text includes the minimal six-byte `flash_read`/`flash_write` stubs
+and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
+vector tables, CRT initialization, syscalls, board support, and real flash
+driver/callback code. Both state measurements enforce the immutable 12288-byte
+`.bss` product cap. The generic caller-owned call shape shown below is the public
+API contract, but it is not the shape used for these pinned ARM ratchets;
+product firmware using a different wrapper, library, or platform code should
+size its final image in its own build.
 
 The target must provide exactly two flash primitives:
 

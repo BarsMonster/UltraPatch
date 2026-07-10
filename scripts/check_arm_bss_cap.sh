@@ -25,4 +25,27 @@ if ARM_BSS_HARD_CAP= BASE_ARM_BSS=999999 ARM_APPLY_HARNESS="$harness" \
 fi
 grep -q '^ARM \.bss hard cap exceeded: [0-9][0-9]* > 12288$' "$tmp/environment.out"
 
-echo "arm_bss_hard_cap_overrides=REJECTED"
+linked_stubs="$tmp/arm_link_bss_probe.c"
+printf '%s\n' '#include <stdint.h>' \
+    'uint8_t arm_link_bss_limit_probe[12289];' \
+    'uint8_t flash_read(uint32_t addr) { (void)addr; return 0; }' \
+    'void flash_write(uint32_t addr, uint8_t value) { (void)addr; (void)value; }' \
+    >"$linked_stubs"
+
+if "$MAKE_CMD" --no-print-directory \
+    ARM_BSS_HARD_CAP=999999 BASE_ARM_LINKED_BSS=999999 ARM_LINK_STUBS="$linked_stubs" \
+    check-arm-measure-internal >"$tmp/linked-command-line.out" 2>&1; then
+  echo "command-line override disabled the ARM linked .bss hard cap" >&2
+  exit 1
+fi
+grep -q '^ARM linked \.bss hard cap exceeded: [0-9][0-9]* > 12288$' "$tmp/linked-command-line.out"
+
+if ARM_BSS_HARD_CAP= BASE_ARM_LINKED_BSS=999999 ARM_LINK_STUBS="$linked_stubs" \
+    "$MAKE_CMD" -e --no-print-directory check-arm-measure-internal \
+    >"$tmp/linked-environment.out" 2>&1; then
+  echo "environment override disabled the ARM linked .bss hard cap" >&2
+  exit 1
+fi
+grep -q '^ARM linked \.bss hard cap exceeded: [0-9][0-9]* > 12288$' "$tmp/linked-environment.out"
+
+echo "arm_bss_hard_cap_overrides=REJECTED (object + linked)"

@@ -62,11 +62,16 @@ BASE_ONEFACE_REVERT ?= 287
 BASE_ARM_TEXT ?= 6141
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
+BASE_ARM_LINKED_TEXT ?= 6721
+BASE_ARM_LINKED_DATA ?= 0
+BASE_ARM_LINKED_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
+ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
+ARM_LINK_LAYOUT := scripts/arm_link.ld
 # The production ARM size gate intentionally measures the static-state wrapper integration
 # used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;
 # product notes/gate output must not present this number as shape-independent.
@@ -125,7 +130,7 @@ check-arm-internal: check-arm-measure-internal
 	@MAKE="$(MAKE)" scripts/check_arm_bss_cap.sh
 
 .PHONY: check-arm-measure-internal
-check-arm-measure-internal:
+check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
@@ -134,19 +139,42 @@ check-arm-measure-internal:
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
-	if [ "$$3" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
-		echo "ARM .bss hard cap exceeded: $$3 > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
+	obj_text=$$1; obj_data=$$2; obj_bss=$$3; \
+	if [ "$$obj_bss" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
+		echo "ARM .bss hard cap exceeded: $$obj_bss > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
 	fi; \
-	test "$$1" -le "$(BASE_ARM_TEXT)"; \
-	test "$$2" -le "$(BASE_ARM_DATA)"; \
-	test "$$3" -le "$(BASE_ARM_BSS)"; \
+	test "$$obj_text" -le "$(BASE_ARM_TEXT)"; \
+	test "$$obj_data" -le "$(BASE_ARM_DATA)"; \
+	test "$$obj_bss" -le "$(BASE_ARM_BSS)"; \
 	arm-none-eabi-objdump -d "$$tmp/patch_apply_arm.o" > "$$tmp/patch_apply_arm.dump"; \
 	if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm.dump"; then \
 		echo "hardware divide instruction found"; exit 1; \
 	fi; \
 	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm.dump" || true); \
 	echo "soft_div_calls=$$soft"; \
-	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"
+	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
+	arm-none-eabi-gcc $(ARM_DEC_FLAGS) -Os -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
+	arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -nostdlib \
+		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm.map" \
+		"$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm.elf"; \
+	linked_size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.elf"); \
+	printf '%s\n' "$$linked_size_out"; \
+	echo "arm_linked_integration=no-startup static PatchApply wrapper + minimal flash stubs"; \
+	set -- $$(printf '%s\n' "$$linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	linked_text=$$1; linked_data=$$2; linked_bss=$$3; \
+	echo "arm_linked_text=$$linked_text"; \
+	echo "arm_linked_data=$$linked_data"; \
+	echo "arm_linked_bss=$$linked_bss"; \
+	if [ "$$linked_bss" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
+		echo "ARM linked .bss hard cap exceeded: $$linked_bss > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
+	fi; \
+	test "$$linked_text" -le "$(BASE_ARM_LINKED_TEXT)"; \
+	test "$$linked_data" -le "$(BASE_ARM_LINKED_DATA)"; \
+	test "$$linked_bss" -le "$(BASE_ARM_LINKED_BSS)"; \
+	helpers=$$(arm-none-eabi-nm --defined-only "$$tmp/patch_apply_arm.elf" | \
+		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
+		sort | paste -sd, -); \
+	echo "arm_linked_runtime_helpers=$$helpers"
 
 # Worst-case caller-stack bounds for both supported wrapper shapes. Since the fiber was deleted
 # (44eee88), the whole decode runs on the CALLER's stack; docs/device-integration.md pins the
@@ -366,7 +394,9 @@ check-corpus-internal: ultrapatch check-ab-matrix-internal
 # it). The sub-makes still stat sources for their own rules; only the prebuilt binary is pinned.
 gate-internal: all-internal
 	@MAKE="$(MAKE)" BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
-	BASE_ARM_BSS="$(BASE_ARM_BSS)" JOBS="$(JOBS)" scripts/run_gate.sh
+	BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
+	BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
+	JOBS="$(JOBS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
