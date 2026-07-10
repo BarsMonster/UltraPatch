@@ -17,6 +17,7 @@ static uint32_t test_flash_n;
 static uint32_t test_writes;
 static uint32_t test_oob_writes;
 static uint32_t test_corrupt_addr;
+static uint32_t test_reads;
 
 uint8_t flash_read(uint32_t addr);
 void flash_write(uint32_t addr, uint8_t value);
@@ -28,6 +29,7 @@ void flash_write(uint32_t addr, uint8_t value);
 #endif
 
 uint8_t flash_read(uint32_t addr){
+    test_reads++;
     return addr < test_flash_n ? test_flash[addr] : 0xffu;
 }
 
@@ -152,6 +154,65 @@ static void put_u16(uint8_t *p, uint32_t at, uint16_t v){
     p[at] = (uint8_t)v; p[at + 1u] = (uint8_t)(v >> 8);
 }
 
+/* The rolling source word is peek-only: journaled pristine bytes may be cached across an
+ * overwritten physical source, but FWD LDR metadata appears only when wr_copy actually consumes
+ * those bytes. A suppressed 2-mod-4 BL must likewise clear its skipped target without recording
+ * its cached probe; replaying the four ordinary copies records the exact raw word, with no reread. */
+static int src_window_case(void){
+    PatchApply pa;
+    up_ApplyState s;
+    up_LitCur lc;
+    up_CorrCur cc;
+    uint8_t packed[4];
+    free(test_flash);
+    test_flash_n = 64u;
+    test_flash = (uint8_t *)calloc(test_flash_n, 1u);
+    CHECK(test_flash != NULL);
+
+    memset(&pa, 0, sizeof pa);
+    pa.g_from_size = test_flash_n; pa.g_image_span = test_flash_n; pa.g_FWD = 1;
+    pa.g_psrc_even = UINT32_MAX;
+    orow_reset(&pa);
+    pa.g_orow_base[0] = 0;
+    /* Physical bytes have been overwritten, but the ascending FWD journal preserves an LDR at
+     * source 8: 0x4801 targets 16. The other two bytes make the raw-word check unambiguous. */
+    memset(test_flash + 8u, 0xa5, 4u);
+    pa.g_jcount = 4;
+    pa.ARENA.apply.jbuf[0] = (8u << 8) | 0x01u;
+    pa.ARENA.apply.jbuf[1] = (9u << 8) | 0x48u;
+    pa.ARENA.apply.jbuf[2] = (10u << 8) | 0x5au;
+    pa.ARENA.apply.jbuf[3] = (11u << 8) | 0xc3u;
+    test_reads = 0;
+    uint32_t w = hy_word4_peek(&pa, 8);
+    CHECK(w == UINT32_C(0xc35a4801) && test_reads == 0u);
+    CHECK(pa.g_psrc_even == UINT32_MAX && psrc_ldr_take(&pa, 16u) == 0);
+
+    memset(&s, 0, sizeof s); memset(&lc, 0, sizeof lc); memset(&cc, 0, sizeof cc);
+    lc.nextpos = -1; cc.i = -1;
+    wr_copy(&pa, &s, &lc, &cc, 32, 8, 0, 0, (uint8_t)w);
+    CHECK(pa.g_psrc_even == 8u && psrc_ldr_take(&pa, 16u) == 0);
+    wr_copy(&pa, &s, &lc, &cc, 32, 9, 0, 1, (uint8_t)(w >> 8));
+    CHECK(psrc_ldr_take(&pa, 16u) == 1 && test_reads == 0u);
+
+    /* A 2-mod-4 suppressed BL consumes the pending aligned target but its peek remains invisible
+     * to the FWD recorder until all four cached bytes go through the ordinary-copy path. */
+    memset(&pa, 0, sizeof pa);
+    pa.g_from_size = test_flash_n; pa.g_image_span = test_flash_n; pa.g_FWD = 1;
+    pa.g_psrc_even = UINT32_MAX;
+    orow_reset(&pa); pa.g_orow_base[0] = 0;
+    put_u16(test_flash, 10u, 0xf000u); put_u16(test_flash, 12u, 0xd000u);
+    test_reads = 0; w = hy_word4_peek(&pa, 10);
+    CHECK(test_reads == 4u);
+    psrc_ldr_put(&pa, 12u);
+    CHECK(field_at(&pa, 0, 10, w, packed, 0, 32) == 2);
+    CHECK(pa.g_psrc_even == UINT32_MAX && psrc_ldr_take(&pa, 12u) == 0);
+    memset(&s, 0, sizeof s); memset(&lc, 0, sizeof lc); memset(&cc, 0, sizeof cc);
+    lc.nextpos = -1; cc.i = -1;
+    for(int b = 0; b < 4; b++) wr_copy(&pa, &s, &lc, &cc, 32, 10 + b, 0, b, (uint8_t)(w >> (8*b)));
+    CHECK(test_reads == 4u && pa.g_psrc_even == 12u);
+    return 0;
+}
+
 static int ldr_window_case(void){
     PatchApply pa;
     uint8_t packed[4];
@@ -176,7 +237,7 @@ static int ldr_window_case(void){
     for(uint32_t q = 3000u; q >= 1400u; ){
         CHECK(grow_ldr_take(&pa, 0, 4096, q) == ldr_oracle(&pa, 0, 4096, q));
         if(q == 2504u){
-            CHECK(field_at(&pa, 0, 2502, packed, 0, 4096) == 2); /* clears skipped q=2500 */
+            CHECK(field_at(&pa, 0, 2502, hy_word4_peek(&pa, 2502), packed, 0, 4096) == 2); /* clears skipped q=2500 */
             q -= 8u;
         }else q -= 4u;
     }
@@ -327,6 +388,8 @@ int main(int argc, char **argv){
     int forward1 = 0, forward2 = 0;
     int rc = 1;
     memset(&pa, 0xa5, sizeof pa);
+    if(src_window_case()) goto out;
+    printf("decoder_src_window=OK (journal + cached replay + FWD timing)\n");
     if(ldr_window_case()) goto out;
     printf("decoder_ldr_window=OK (alias filter + BL skip + journal)\n");
 

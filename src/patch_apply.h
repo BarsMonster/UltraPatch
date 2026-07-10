@@ -674,20 +674,12 @@ static void hy_src_rec(PatchApply *pa, int32_t fp, uint8_t v){
         }
     }
 }
-/* journal-aware RAW source byte at fp (no bake). Returns the PRISTINE from-byte: the journal
- * preserves the original byte where the output frontier later overwrote source flash. FWD records
- * each copy read into its target metadata; grow owns a separate sliding scan cursor. */
-static uint8_t hy_src(PatchApply *pa, int32_t fp){
-    uint8_t v=hy_src_peek(pa,fp);
-    if(pa->g_FWD) hy_src_rec(pa,fp,v);
-    return v;
-}
-/* journal-aware pristine 4-byte field word (little-endian) at fpk, peeked WITHOUT touching the psrc
- * ring (suppressed-bl / no-field must record nothing). On a real BL/EX hit the caller replays this
- * word into the ring via hy_word4_rec (ascending byte order). */
-static uint32_t hy_word4_peek(PatchApply *pa, uint32_t fpk){
-    return  (uint32_t)hy_src_peek(pa,(int32_t)fpk)    | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+1)<<8)
-          | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+2)<<16) | ((uint32_t)hy_src_peek(pa,(int32_t)fpk+3)<<24);
+/* journal-aware pristine 4-byte source word (little-endian), peeked WITHOUT touching the psrc
+ * ring. apply_op slides this word across ordinary copies so field detection and the following
+ * copy consume the same pristine bytes. */
+static uint32_t hy_word4_peek(PatchApply *pa, int32_t fp){
+    return  (uint32_t)hy_src_peek(pa,fp)    | ((uint32_t)hy_src_peek(pa,fp+1)<<8)
+          | ((uint32_t)hy_src_peek(pa,fp+2)<<16) | ((uint32_t)hy_src_peek(pa,fp+3)<<24);
 }
 /* FWD: record a known-in-range 4-byte field window [fpk,fpk+4) into the ring (ascending, LE). The caller's
  * entry guard pins fpk>=0 && fpk+4<=from_size, so every byte is in range and the per-byte hy_src_rec
@@ -700,14 +692,14 @@ static void hy_word4_rec(PatchApply *pa, uint32_t fpk, uint32_t w){
 /* de-reloc field at op-local field-start ks. Returns: 0=no field; 1=bl/ex (packed4 filled,
  * a value consumed from the generator); 2=suppressed-bl (write the 4 bytes as NORMAL copies).
  *
- * The field window [fpk,fpk+4) is fully in-range (the entry guard pins fpk+4<=from_size). The 4
- * pristine field bytes are PEEKED ONCE into w up front; both the BL pattern test and the BL/EX pack
- * reuse w (no re-read), and the ring record on a real BL/EX hit replays w directly (hy_word4_rec)
- * rather than reading the source again. Field kinds are mutually exclusive and tried in encoder
- * order: local-BL first (Thumb F000/D000 pattern, 2-aligned), else a same-op LDR-literal target.
+ * The field window [fpk,fpk+4) is fully in-range (the entry guard pins fpk+4<=from_size). apply_op
+ * supplies the 4 pristine field bytes from its peek-only rolling word; both the BL pattern test and
+ * the BL/EX pack reuse w, and a real hit replays w directly into the ring (hy_word4_rec). Field kinds
+ * are mutually exclusive and tried in encoder order: local-BL first (Thumb F000/D000 pattern,
+ * 2-aligned), else a same-op LDR-literal target.
  * Both consume a stream delta ONLY on a real BL/EX hit (suppressed-BL and "no field" never touch the
  * stream, and record nothing into the ring). */
-static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], int pure, int32_t dl){
+static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint32_t w, uint8_t packed[4], int pure, int32_t dl){
     /* fpk = fp0 + ks, range-checked in pure 32-bit. ks >= 0 (op-local field offset) and image sizes are
      * < 2^31 (hard design invariant), so fpk < 0 iff fp0 < -ks (no overflow: -ks is a valid int32 for
      * ks >= 0), and once fpk >= 0 the unsigned sum fp0+ks cannot wrap (0 <= fp0+ks < 2^32). */
@@ -715,8 +707,6 @@ static int field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint8_t packed[4], 
     uint32_t fpk=(uint32_t)fp0+(uint32_t)ks;
     if(fpk>pa->g_from_size || pa->g_from_size-fpk<4u) return 0;    /* fpk+4 > from_size (no +4 overflow) */
     if(fpk&1u) return 0;                                  /* BL is 2-aligned; LDR targets are 4-aligned */
-    /* ONE pristine read of the 4 field bytes (no ring record yet — suppressed-bl must record nothing) */
-    uint32_t w=hy_word4_peek(pa,fpk);
     uint16_t up=(uint16_t)w, lo=(uint16_t)(w>>16);
     int ldr_hit=0;
     if(!(fpk&3u)) ldr_hit=pa->g_FWD ? psrc_ldr_take(pa,fpk) : grow_ldr_take(pa,fp0,dl,fpk);
@@ -782,12 +772,14 @@ static void wr_extras(PatchApply *pa, up_ApplyState*s, up_CorrCur*cc, int fwd, i
         out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + corr_take(s,cc,dl+e)));
     }
 }
-/* copy-mode byte at K: take the literal patch if the cursor sits on K, else pristine source */
-static void wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur*cc, int32_t tp0, int32_t fp0, int32_t nl, int32_t K){
+/* copy-mode byte at K: take the literal patch if the cursor sits on K, else the caller's cached
+ * pristine source byte. FWD records it only now, at the actual copy-read point. */
+static void wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur*cc, int32_t tp0, int32_t fp, int32_t nl, int32_t K, uint8_t src){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; litcur_step(pa,s,lc,nl); }
     if(pa->g_rcerr) return;
-    out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + hy_src(pa,fp0+K) + corr_take(s,cc,K)));
+    if(pa->g_FWD) hy_src_rec(pa,fp,src);
+    out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + src + corr_take(s,cc,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
  * detection + streaming write via out_write (asc FWD / desc grow). No override buffer. */
@@ -871,20 +863,31 @@ static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
     if(!fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
     litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
+    uint32_t srcw=0; int32_t srcw_at=-4;                 /* low op-local offset cached in srcw */
     while(k>=0 && k<dl && !pa->g_rcerr){
         int32_t a0=fwd?k:(k-3);                          /* low anchor of the 4-byte field window */
         if(a0>=0 && a0+4<=dl){
+            if(a0==srcw_at+step){
+                if(fwd) srcw=(srcw>>8)|((uint32_t)hy_src_peek(pa,fp0+a0+3)<<24);
+                else srcw=(srcw<<8)|(uint32_t)hy_src_peek(pa,fp0+a0);
+            } else srcw=hy_word4_peek(pa,fp0+a0);
+            srcw_at=a0;
             int pure=(lc.nextpos<0 || lc.nextpos<a0 || lc.nextpos>=a0+4);   /* no literal patch in [a0,a0+3] */
-            int fa=field_at(pa, fp0, a0, packed, pure, dl);
+            int fa=field_at(pa, fp0, a0, srcw, packed, pure, dl);
             if(fa){
                 for(int b=fwd?0:3; b>=0 && b<4; b+=step){
-                    if(fa==2) wr_copy(pa,s, &lc, &cc, tp0, fp0, nl, a0+b);
+                    if(fa==2) wr_copy(pa,s, &lc, &cc, tp0, fp0+a0+b, nl, a0+b, (uint8_t)(srcw>>(8*b)));
                     else out_write(pa,(uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+corr_take(s,&cc,a0+b)));
                 }
                 k+=4*step; continue;
             }
+            wr_copy(pa,s, &lc, &cc, tp0, fp0+k, nl, k, (uint8_t)(fwd?srcw:srcw>>24));
+        } else {
+            int32_t d=k-srcw_at;
+            uint8_t src=(uint32_t)d<4u ? (uint8_t)(srcw>>(8*d)) : hy_src_peek(pa,fp0+k);
+            wr_copy(pa,s, &lc, &cc, tp0, fp0+k, nl, k, src);
         }
-        wr_copy(pa,s, &lc, &cc, tp0, fp0, nl, k); k+=step;
+        k+=step;
     }
     if(fwd) wr_extras(pa,s, &cc, fwd, tp0, dl, el);
 }
