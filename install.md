@@ -42,5 +42,7 @@ make gate
 gates both its relocatable and no-startup linked ARM `text`/`data`/`bss` sizes
 against the Makefile pins. The link uses an explicit FLASH/RAM layout, minimal
 platform stubs, and only the runtime-library members pulled by the decoder; it
-does not include CRT/startup or board code. The raw compile needs `-DCORTEX_M0`
-or `rc_models.h` #errors out. This check also runs as one leg of `make gate`.
+does not include CRT/startup or board code. A decoder compile needs both
+`-DCORTEX_M0` and an aligned `PATCH_IMAGE_BASE`; repository host/ARM harnesses
+explicitly use `-DPATCH_IMAGE_BASE=0u`. Missing, misaligned, or uint32-overflowing
+image bases are compile-time errors. This check also runs as one leg of `make gate`.

@@ -28,7 +28,7 @@
  * encoder (encoder TUs reach these via rc_models.h -> patch_config.h), so encoder and decoder
  * cannot disagree about the wire. Each stays overridable with a matching -D, which moves BOTH
  * sides at once. WINDOW_LOG is the LZ window log; JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the
- * encoder plans against; OUTROW x OUTROW_DEPTH is the uncommitted NVM row window. */
+ * encoder plans against; OUTROW x OUTROW_DEPTH is the uncommitted NVM page window. */
 #ifndef WINDOW_LOG
 #define WINDOW_LOG 10
 #endif

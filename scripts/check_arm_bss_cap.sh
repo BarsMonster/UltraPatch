@@ -27,9 +27,10 @@ grep -q '^ARM \.bss hard cap exceeded: [0-9][0-9]* > 12288$' "$tmp/environment.o
 
 linked_stubs="$tmp/arm_link_bss_probe.c"
 printf '%s\n' '#include <stdint.h>' \
+    '#include "patch_config.h"' \
     'uint8_t arm_link_bss_limit_probe[12289];' \
     'uint8_t flash_read(uint32_t addr) { (void)addr; return 0; }' \
-    'void flash_write(uint32_t addr, uint8_t value) { (void)addr; (void)value; }' \
+    'void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]) { (void)addr; (void)page; }' \
     >"$linked_stubs"
 
 if "$MAKE_CMD" --no-print-directory \

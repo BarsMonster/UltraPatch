@@ -38,7 +38,8 @@ Record the complete output in the release notes. The gate must report:
 - corpus `full_total`
 - foreign `full_total`
 - real one-face grow/revert patch sizes
-- NVM row amplification, max erases-per-row, frontier inversions
+- NVM page amplification, max erases-per-page, frontier inversions, unaligned or
+  out-of-range page calls, and final-page canary corruption
 - journal peak slots
 - final `RESULT: ALL GATES PASS`
 

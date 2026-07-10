@@ -122,7 +122,7 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
                 best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted, best_st.opc_splits, sweep_opc_splits,
                 (unsigned)JSLOTS, (unsigned)OPC_CAP);
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
-     * REFERENCE decoder (the real patch_apply.h + an NVM row emulator) and require the
+     * REFERENCE decoder (the real patch_apply.h + an NVM page emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it
      * cannot prove applies. */
     { const char *scerr = selfcheck(best_blob.d, best_blob.n, from.d, from.n, to.d, to.n);

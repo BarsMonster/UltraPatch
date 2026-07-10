@@ -134,7 +134,7 @@ enum {
  * from patch_config.h, so a wire-knob mismatch is impossible by construction — no mirror asserts. */
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
-void flash_write(uint32_t addr, uint8_t val){ (void)addr; (void)val; }
+void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
 
 static int no_bytes(void *ctx, uint8_t *out){
     (void)ctx;
@@ -366,7 +366,7 @@ cat > "$tmp/single_model_probe.c" <<'EOF'
 #include "seed_prob_probe.inc"
 
 uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
-void flash_write(uint32_t addr, uint8_t val){ (void)addr; (void)val; }
+void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
 static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; return 0; }
 
 int main(int argc, char **argv){

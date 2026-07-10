@@ -7,7 +7,7 @@
 # Since the coroutine fiber was deleted (commit 44eee88) patch_apply_run() runs the
 # ENTIRE decode synchronously on the CALLER's stack. The decoder has no recursion and
 # no indirect calls except the integrator's byte callback (blx through g_pull_fn) and
-# the two flash primitives (flash_read/flash_write, direct bl to extern symbols), so an
+# the two flash primitives (flash_read/flash_write_page, direct bl to extern symbols), so an
 # exact static worst-case stack depth is derivable from per-function frame sizes plus the
 # call graph.
 #
@@ -41,7 +41,7 @@
 #         uses rcv3_run wrappers for both static PatchApply storage and a caller-owned
 #         PatchApply pointer), summing internal frames only. Externs are EXCLUDED and reported
 #         separately:
-#           - integrator externs  : flash_read, flash_write, and the byte callback. Their
+#           - integrator externs  : flash_read, flash_write_page, and the byte callback. Their
 #                                   stack is the integrator's own cost, by contract.
 #           - toolchain externs   : __aeabi_uidiv / memmove / memset (libgcc/builtins).
 #                                   Leaves, small bounded non-recursive frames; not in the
@@ -56,7 +56,7 @@ import re
 import subprocess
 import sys
 
-INTEGRATOR_EXTERNS = {"flash_read", "flash_write"}
+INTEGRATOR_EXTERNS = {"flash_read", "flash_write_page"}
 # Compiler-runtime helpers the codegen may emit (libgcc / freestanding builtins). Leaves,
 # not defined in the TU. Matched by exact name or these prefixes.
 TOOLCHAIN_EXTERN_RE = re.compile(
@@ -296,7 +296,7 @@ def main():
     print("stack_bound_callback_sites=%d" % callback_sites)
     print("stack_bound_integrator_externs=%s" % ",".join(sorted(integ_ext)))
     print("stack_bound_toolchain_externs=%s" % ",".join(sorted(tool_ext)))
-    print("stack_bound_excludes=integrator(flash_read,flash_write,byte-callback)+toolchain-leaves")
+    print("stack_bound_excludes=integrator(flash_read,flash_write_page,byte-callback)+toolchain-leaves")
     print("stack_bound_includes=all-first-party-frames-incl-saved-LR/regs")
     print("# worst-case path (frame bytes per function; sum == bound):")
     run = 0

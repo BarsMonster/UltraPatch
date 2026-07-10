@@ -23,7 +23,7 @@ args="$base $one $tmp/grow.blob $one $base $tmp/revert.blob"
 
 if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # A 256-byte prefix reaches a second de-relocation dictionary value in the first
-    # output row.  With a test-only cap of one this rejects before any buffered row is
+    # output page. With a test-only cap of one this rejects before any buffered page is
     # committed; the full update reaches the same cap only after physical writes.
     dd if="$base" of="$tmp/prefix.from" bs=256 count=1 status=none
     dd if="$one" of="$tmp/prefix.to" bs=256 count=1 status=none
@@ -35,6 +35,8 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # These are behavioral harnesses; production -O2 and -Os compilation is already enforced
     # by the portable/stack/ARM legs.  -O0 materially reduces concurrent gate compile load.
     common="$CFLAGS -O0"
+    "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
+    "$tmp/nvm-geometry-probe"
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-source"
     "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" test-bench/decoder-contract.c \
         -Wl,--gc-sections -o "$tmp/contract-single"

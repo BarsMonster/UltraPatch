@@ -101,8 +101,11 @@ Device integration contract:
 - Include either generated `artifacts/patch_apply_single.h`, or
   `src/patch_apply.h` with its two support headers beside it on the include
   path, in one update module. Allocate a caller-owned `PatchApply` state object.
+- Define `PATCH_IMAGE_BASE` as the aligned absolute device address of the
+  patchable image (`0` in repository host tests).
 - Provide exactly two flash primitives: `flash_read(uint32_t)` and
-  `flash_write(uint32_t, uint8_t)`.
+  `flash_write_page(uint32_t, const uint8_t[OUTROW])`. Both receive absolute
+  device addresses; one page-write call erases and fully programs the page.
 - Authenticate the update, then run the WHOLE blob through
   `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
   block internally) and the return is the verdict. The decoder parses the

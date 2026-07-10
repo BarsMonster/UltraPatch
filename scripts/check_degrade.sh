@@ -253,7 +253,7 @@ fi
 
 # =========================================================================================
 # (a) JOURNAL-BUDGET DEGRADATION — block swap: block A (first half) moves to the top and is
-# read H=2048 B behind the write frontier (well past the 512 B row window), so its reads want
+# read H=2048 B behind the write frontier (well past the 512 B page window), so its reads want
 # H preserves — well past the budget. The encoder protects the first JBUDGET and converts the rest
 # to plain extras. Assert deg_journal=1 AND journal peak == the budget on the degraded blob.
 # =========================================================================================
@@ -334,7 +334,7 @@ if enc rowwin; then
   [ "${r2%% *}" = OK ] || bad "row-window blob did not round-trip on the production D=2 decoder ($r2)"
   [ "${r2#* }" = 0 ] || bad "row-window blob used the journal (peak ${r2#* }); expected pure window reliance (0)"
   [ "${r1%% *}" = REJECT ] || bad "row-window blob did NOT reject on the D=1 decoder (got $r1) — window contract broken"
-  note "(d) row window: D2=${r2%% *} (journal ${r2#* }) D1=${r1%% *} (CRC(to) reject) blob=$(wc -c <"$tmp/rowwin.blob")B"
+  note "(d) page window: D2=${r2%% *} (journal ${r2#* }) D1=${r1%% *} (CRC(to) reject) blob=$(wc -c <"$tmp/rowwin.blob")B"
 else
   bad "row-window pair was refused (rc=$?)"
 fi

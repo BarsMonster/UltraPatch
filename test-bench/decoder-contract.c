@@ -12,15 +12,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define PATCH_IMAGE_BASE 0u
+
 static uint8_t *test_flash;
 static uint32_t test_flash_n;
 static uint32_t test_writes;
 static uint32_t test_oob_writes;
+static uint32_t test_unaligned_writes;
 static uint32_t test_corrupt_addr;
 static uint32_t test_reads;
-
-uint8_t flash_read(uint32_t addr);
-void flash_write(uint32_t addr, uint8_t value);
 
 #ifdef DECODER_SINGLE_HEADER
 #include "patch_apply_single.h"
@@ -33,11 +33,13 @@ uint8_t flash_read(uint32_t addr){
     return addr < test_flash_n ? test_flash[addr] : 0xffu;
 }
 
-void flash_write(uint32_t addr, uint8_t value){
+void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){
     test_writes++;
-    if(addr >= test_flash_n){ test_oob_writes++; return; }
-    if(addr == test_corrupt_addr) value ^= 1u;
-    test_flash[addr] = value;
+    if((addr & (OUTROW-1u)) != 0u){ test_unaligned_writes++; return; }
+    if(addr > test_flash_n || test_flash_n-addr < OUTROW){ test_oob_writes++; return; }
+    memset(test_flash+addr,0xff,OUTROW);
+    memcpy(test_flash+addr,page,OUTROW);
+    if(test_corrupt_addr>=addr && test_corrupt_addr-addr<OUTROW) test_flash[test_corrupt_addr]^=1u;
 }
 
 typedef struct {
@@ -60,6 +62,7 @@ typedef struct {
     size_t calls;
     uint32_t writes;
     uint32_t oob_writes;
+    uint32_t unaligned_writes;
 } Result;
 
 #define CHECK(x) do { if(!(x)) return fail(__LINE__, #x); } while(0)
@@ -96,20 +99,22 @@ static int pull_next(void *ctx, uint8_t *out){
 
 static int load_flash(const Bytes *from, uint32_t span, Bytes *before){
     uint32_t r = 0x91e10da5u;
+    uint32_t physical = span ? (span+OUTROW-1u)&~(OUTROW-1u) : 0u;
     free(test_flash);
-    test_flash = (uint8_t *)malloc(span ? span : 1u);
-    before->d = (uint8_t *)malloc(span ? span : 1u);
-    before->n = span;
+    test_flash = (uint8_t *)malloc(physical ? physical : 1u);
+    before->d = (uint8_t *)malloc(physical ? physical : 1u);
+    before->n = physical;
     if(!test_flash || !before->d) return 1;
-    test_flash_n = span;
+    test_flash_n = physical;
     if(from->n) memcpy(test_flash, from->d, from->n);
-    for(uint32_t i = (uint32_t)from->n; i < span; i++){
+    for(uint32_t i = (uint32_t)from->n; i < physical; i++){
         r = r * 1664525u + 1013904223u;
         test_flash[i] = (uint8_t)(r >> 24);
     }
-    if(span) memcpy(before->d, test_flash, span);
+    if(physical) memcpy(before->d, test_flash, physical);
     test_writes = 0;
     test_oob_writes = 0;
+    test_unaligned_writes = 0;
     test_corrupt_addr = UINT32_MAX;
     return 0;
 }
@@ -124,6 +129,7 @@ static Result run_blob(PatchApply *pa, const uint8_t *blob, size_t blob_n){
     r.calls = p.calls;
     r.writes = test_writes;
     r.oob_writes = test_oob_writes;
+    r.unaligned_writes = test_unaligned_writes;
     return r;
 }
 
@@ -134,8 +140,11 @@ static uint32_t image_span(const Bytes *a, const Bytes *b){
 
 static int writes_bounded(const Result *r, uint32_t span){
     uint32_t rows = (span + OUTROW - 1u) / OUTROW;
-    uint64_t max_writes = (uint64_t)rows * ((uint64_t)OUTROW + 1u);
-    return r->oob_writes == 0u && (uint64_t)r->writes <= max_writes;
+    return r->oob_writes == 0u && r->unaligned_writes == 0u && r->writes <= rows;
+}
+
+static int tail_preserved(const Bytes *before, uint32_t span){
+    return span==before->n || memcmp(test_flash+span,before->d+span,before->n-span)==0;
 }
 
 /* Exact oracle for the grow-direction sliding LDR window. This exercises the cases that a
@@ -270,6 +279,7 @@ static int success_case(PatchApply *pa, const Bytes *from, const Bytes *to, cons
     CHECK(patch_apply_to_size(pa) == (uint32_t)to->n);
     CHECK(patch_apply_image_span(pa) == span);
     CHECK(to->n == 0 || memcmp(test_flash, to->d, to->n) == 0);
+    CHECK(tail_preserved(&before,span));
     *forward = patch_apply_forward(pa);
     free(before.d);
     return 0;
@@ -283,8 +293,8 @@ static int early_eof_case(PatchApply *pa, const Bytes *from, const Bytes *to, co
     Result r = run_blob(pa, blob->d, n);
     CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_CORRUPT);
     CHECK(r.consumed == n && r.calls == n + 1u);
-    CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u);
-    CHECK(span == 0u || memcmp(test_flash, before.d, span) == 0);
+    CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u && r.unaligned_writes == 0u);
+    CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
     free(before.d);
     return 0;
 }
@@ -302,6 +312,7 @@ static int outer_framing_case(PatchApply *pa, const Bytes *from, const Bytes *to
     CHECK(r.consumed == blob->n && r.calls == blob->n);
     CHECK(r.touched == 1 && writes_bounded(&r, span));
     CHECK(to->n == 0 || memcmp(test_flash, to->d, to->n) == 0);
+    CHECK(tail_preserved(&before,span));
     free(framed);
     free(before.d);
     return 0;
@@ -318,8 +329,8 @@ static int early_crc_case(PatchApply *pa, const Bytes *from, const Bytes *to, co
     Result r = run_blob(pa, bad, blob->n);
     CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_CORRUPT);
     CHECK(r.consumed >= 12u && r.consumed < blob->n && r.calls == r.consumed);
-    CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u);
-    CHECK(span == 0u || memcmp(test_flash, before.d, span) == 0);
+    CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u && r.unaligned_writes == 0u);
+    CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
     free(bad);
     free(before.d);
     return 0;
@@ -339,12 +350,13 @@ static int late_crc_case(PatchApply *pa, const Bytes *from, const Bytes *to, con
     CHECK(r.touched == 1 && r.writes > 0u);
     CHECK(writes_bounded(&r, span));
     CHECK(to->n == 0 || memcmp(test_flash, to->d, to->n) == 0);
+    CHECK(tail_preserved(&before,span));
     free(bad);
     free(before.d);
     return 0;
 }
 
-/* Corrupt one byte in the final FWD row, which is committed only after the range stream has been
+/* Corrupt one byte in the final FWD page, which is committed only after the range stream has been
  * consumed. The terminal CRC must reject the physical read-back rather than intended output. */
 static int nvm_failure_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob){
     Bytes before = {0};
@@ -376,7 +388,7 @@ static int resource_case(PatchApply *pa, const Bytes *from, const Bytes *to,
         CHECK(r.writes > 0u);
     }else{
         CHECK(r.writes == 0u);
-        CHECK(span == 0u || memcmp(test_flash, before.d, span) == 0);
+        CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
     }
     free(before.d);
     return 0;
@@ -417,7 +429,8 @@ int main(int argc, char **argv){
     if(early_crc_case(&pa, &from, &to, &blob)) goto out;
     if(late_crc_case(&pa, &from, &to, &blob)) goto out;
     if(nvm_failure_case(&pa, &from2, &to2, &blob2)) goto out;
-    printf("decoder_nvm_readback=OK (corrupt final-row write rejected)\n");
+    printf("decoder_nvm_readback=OK (corrupt final-page write rejected)\n");
+    printf("decoder_page_contract=OK (aligned full-page calls + trailing canary preserved)\n");
     printf("decoder_api_contract=OK (state reuse + counted framing + early-clean/late-touched rejects)\n");
     rc = 0;
 out:

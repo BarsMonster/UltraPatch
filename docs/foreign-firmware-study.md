@@ -186,7 +186,7 @@ time-first). Net effect on `make gate`: ~23 s -> ~29 s wall on the 32-core
 reference machine, comfortably under the 60 s budget, for ~154 CPU-s of added
 work. Reported metrics: `foreign round-trips` (must be 34/34) and
 `foreign full_total`, which ratchets against `BASE_FOREIGN_TOTAL` exactly like
-`BASE_FULL_TOTAL`. NVM write-safety maxima (amplified / erases-per-row /
+`BASE_FULL_TOTAL`. NVM write-safety maxima (amplified / erases-per-page /
 frontier inversions) cover the foreign pairs too — all clean, journal peak 768
 (the degradation budget), which is the gate's overall journal-peak driver.
 

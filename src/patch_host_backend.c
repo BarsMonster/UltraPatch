@@ -82,9 +82,13 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
         err = "header size mismatch";
     } else if (to_n && memcmp(sc_flash, to, to_n) != 0) {
         err = "decoded image differs from target";
-    } else if (!(sc_amplified == 0 && sc_max_erase <= 1 && sc_finv == 0)) {
-        err = sc_amplified ? "NVM row erased more than once (write amplification)"
-                           : "NVM erase frontier inversion";
+    } else if (!(sc_amplified == 0 && sc_max_erase <= 1 && sc_finv == 0 &&
+                 sc_unaligned == 0 && sc_oob_page_writes == 0 && nvm_canary_bad() == 0)) {
+        if(sc_unaligned) err = "NVM page write was unaligned";
+        else if(sc_oob_page_writes) err = "NVM page write was out of bounds";
+        else if(nvm_canary_bad()) err = "NVM final-page canary was corrupted";
+        else err = sc_amplified ? "NVM page erased more than once (write amplification)"
+                                : "NVM erase frontier inversion";
     }
     nvm_free();
     return err;
@@ -119,9 +123,10 @@ int decode_a1(const char *image_path, const char *patch_path){
                 patch_apply_from_size(&ha.pa), image.n);
         rc = 1; goto out;
     }
-    if(!(sc_amplified==0 && sc_max_erase<=1 && sc_finv==0)){
-        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxrowerase=%u inversions=%ld\n",
-                sc_amplified,sc_max_erase,sc_finv);
+    if(!(sc_amplified==0 && sc_max_erase<=1 && sc_finv==0 && sc_unaligned==0 &&
+         sc_oob_page_writes==0 && nvm_canary_bad()==0)){
+        fprintf(stderr,"NVM safety gate FAILED: amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u canary=%u\n",
+                sc_amplified,sc_max_erase,sc_finv,sc_unaligned,sc_oob_page_writes,nvm_canary_bad());
         rc = 1; goto out;
     }
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
@@ -131,8 +136,9 @@ int decode_a1(const char *image_path, const char *patch_path){
     rc = host_close_file(&mf, image_path);
     if(rc) goto out;
     fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
-    fprintf(stderr,"NVM: erases=%ld rows=%u programs=%ld amplified=%u maxrowerase=%u inversions=%ld (span=%u rows_total=%u, ideal=span/256)\n",
-            sc_erases,sc_erows,sc_programs,sc_amplified,sc_max_erase,sc_finv,span,(span+255)/256);
+    fprintf(stderr,"NVM: erases=%ld pages=%u pagewrites=%u programmed_bytes=%ld amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u canary=%u (span=%u pages_total=%u)\n",
+            sc_erases,sc_erows,sc_page_writes,sc_programs,sc_amplified,sc_max_erase,sc_finv,
+            sc_unaligned,sc_oob_page_writes,nvm_canary_bad(),span,(span+OUTROW-1u)/OUTROW);
     rc = 0;
 out:
     if(mf) (void)host_close_file(&mf, image_path);

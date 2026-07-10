@@ -19,7 +19,7 @@
  * frontier within one op sits at the constant offset fp0-tp0, so the conversion range is
  * contiguous per op and each affected op splits into at most two wire ops. Every remaining
  * overwritten read still goes through the journal — the invariant that keeps the wire
- * independent of the deployment's NVM row size. Correctness of the transformed plan is
+ * independent of the deployment's NVM page size. Correctness of the transformed plan is
  * still proven per blob by the reference-decoder self-verification. */
 static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_t k,
                              uint32_t from_size, uint32_t to_size, int32_t cutoff) {
@@ -59,7 +59,7 @@ static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *t
         int split_any = 0;
         while (behind && k < dl) {
             /* hazard = behind-frontier read of an UNPROTECTED overwritten position that the
-             * row window does NOT cover. Coverage is periodic within each output row, so
+             * page window does NOT cover. Coverage is periodic within each output page, so
              * hazard runs fragment; every maximal run becomes exact extra bytes (source
              * skipped via adj), splitting the op into copy/extra alternations. */
             int hz = degrade_hazard_at(ctx, fp0, tp0, k, from_size, to_size, C);

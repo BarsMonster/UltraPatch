@@ -8,7 +8,8 @@ choices:
 - Include the source header set rooted at `src/patch_apply.h`, with
   `src/rc_models.h` and `src/patch_config.h` beside it on the include path.
 
-Both forms compile the same decoder and require the two flash primitives below.
+Both forms compile the same decoder, require an explicit `PATCH_IMAGE_BASE`, and
+require the two flash primitives below.
 The decoder owns no global static state and uses no heap; the integrator owns
 the `PatchApply` state object so the Cortex-M0+ SRAM gate remains meaningful.
 
@@ -26,7 +27,7 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 Include the decoder from one update translation unit and allocate one
 caller-owned `PatchApply` object for the run. With the source-header-set form,
 application code includes only `patch_apply.h`; the support headers are included
-by it. Entropy models, the journal arena, and the output row cache live inside
+by it. Entropy models, the journal arena, and the output page cache live inside
 the `PatchApply` object. There is no coroutine, no fiber, no private decode
 stack, and no heap allocation -- the decode runs on the caller's stack plus the
 caller-owned state object.
@@ -47,10 +48,10 @@ Arm toolchain the ratchets are:
 
 | Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
 | ------------------------------------------------ | ----:| ----:| ---:|
-| Relocatable static-wrapper object | 6141 B | 0 B | 10296 B |
-| No-startup linked image | 6721 B | 0 B | 10296 B |
+| Relocatable static-wrapper object | 6057 B | 0 B | 10296 B |
+| No-startup linked image | 6637 B | 0 B | 10296 B |
 
-The linked text includes the minimal six-byte `flash_read`/`flash_write` stubs
+The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
 vector tables, CRT initialization, syscalls, board support, and real flash
 driver/callback code. Both state measurements enforce the immutable 12288-byte
@@ -59,35 +60,43 @@ API contract, but it is not the shape used for these pinned ARM ratchets;
 product firmware using a different wrapper, library, or platform code should
 size its final image in its own build.
 
+Before including the decoder, define `PATCH_IMAGE_BASE` as the absolute device
+address of the patchable image. It must be aligned to `OUTROW`, and the complete
+`MAX_IMAGE` span including its final physical page must fit in `uint32_t` address
+space; the header enforces all three conditions at compile time.
+
 The target must provide exactly two flash primitives:
 
 ```c
-uint8_t flash_read(uint32_t addr);
-void    flash_write(uint32_t addr, uint8_t value);
+uint8_t flash_read(uint32_t absolute_addr);
+void    flash_write_page(uint32_t absolute_page_addr,
+                         const uint8_t page[OUTROW]);
 ```
 
-`flash_read` must return the current byte at the image address. `flash_write`
-must implement the platform flash programming behavior (program the byte,
-erasing its row first when a 0-to-1 transition requires it). The decoder writes
-rows monotonically through its resident row buffer, so each row is erased and
-programmed at most once for valid A1 patches.
+Both addresses are absolute device addresses, not image-relative offsets.
+`flash_read` must return the current byte at that address. One
+`flash_write_page` call must synchronously erase and fully program exactly one
+aligned `OUTROW` page from the complete supplied buffer. No byte-write decoder
+API exists. The decoder writes pages monotonically through its resident page
+buffers, so each page is erased and programmed at most once for valid A1
+patches.
 
 Beyond that, the decoder relies on three contract properties of the pair:
 
-1. **Read-back coherence.** `flash_read` must observe every prior `flash_write`
-   immediately. The decoder reads its own writes back — on the committed-row
-   path of `out_read` (a row already flushed out of the RAM buffer is re-read
+1. **Read-back coherence.** `flash_read` must observe every prior
+   `flash_write_page`
+   immediately. The decoder reads its own writes back — on the committed-page
+   path of `out_read` (a page already flushed out of the RAM buffer is re-read
    through `flash_read`) and during the final `CRC32(to)` pass over the whole
    image. A driver with a page-write buffer must flush before returning from
-   `flash_write`, or the read-back sees stale bytes and the patch fails at
+   `flash_write_page`, or the read-back sees stale bytes and the patch fails at
    `CRC32(to)`.
-2. **Erase-trigger handling.** `flash_write` must treat programming `0xFF` over
-   a non-`0xFF` byte as a potential erase trigger. Before programming a row
-   (`orow_commit_slot`) the decoder deliberately pokes `0xFF` over the first
-   non-`0xFF` byte to force the row erase, then programs the final bytes as pure
-   1->0 transitions. A driver that special-cases `0xFF`-programming as a no-op
-   never erases, so every real update then fails at `CRC32(to)`.
-3. **Write-failure surfacing.** `flash_write` returns `void`, so a hardware
+2. **Complete-page preservation.** The decoder preloads all `OUTROW` bytes before
+   modifying a page, including bytes beyond the logical image end in the final
+   physical page. The driver must consume the complete buffer exactly as passed;
+   erasing a larger hardware region requires the driver to preserve any bytes
+   outside that buffer itself.
+3. **Write-failure surfacing.** `flash_write_page` returns `void`, so a hardware
    program failure is not reported at the call site — it surfaces only at the
    final `CRC32(to)` pass, as `REJ_CORRUPT`, indistinguishable from a corrupt
    blob. Integrators whose flash can fail silently should verify writes inside
@@ -203,7 +212,7 @@ includes that function's own pushed LR and callee-saved registers, so the sum ac
 every on-stack return address; no per-call addend is added.
 
 Each number **includes** its wrapper and all first-party decoder frames. It **excludes** the integrator's own
-externs - `flash_read`, `flash_write`, and the byte callback (their stack is the integrator's
+externs - `flash_read`, `flash_write_page`, and the byte callback (their stack is the integrator's
 cost) — and the small toolchain leaves (`memmove`/`memset`); budget those plus
 your worst-case interrupt-nesting frame on top. `make gate` measures and gates both gcc -O2
 shapes independently via `check-stack`. Firmware with another wrapper shape must measure that
@@ -278,18 +287,18 @@ The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, us
 both the decoder and the encoder's distance coding, so the two cannot disagree.
 The production default is `WINDOW_LOG=10`, and `make gate` verifies it.
 
-**NVM row window (encoding-affecting).** The decoder keeps its last
-`OUTROW_DEPTH` output rows (of `OUTROW` bytes) uncommitted in RAM, and the
+**NVM page window (encoding-affecting).** The decoder keeps its last
+`OUTROW_DEPTH` output pages (of `OUTROW` bytes) uncommitted in RAM, and the
 encoder's plans exploit the fact that the OLD flash content of uncommitted
-rows is still physically readable (journal-free reads behind the write
-frontier). `OUTROW` and `OUTROW_DEPTH` are single shared defines used by both
+pages is still physically readable (journal-free reads behind the write
+frontier). `OUTROW` is also the public flash-program page size.
+`OUTROW` and `OUTROW_DEPTH` are single shared defines used by both
 the encoder's `row_covered` oracle and the decoder — production default
-256 x 2 (512 B of row buffers in `.bss`) — so the window assumption matches by
-construction. (The apply stays monotone-safe underneath: a decoder built with a
-superset window — larger aligned rows and/or a deeper ring, e.g. a 1024-byte-row
-part — would still decode old blobs, because old bytes survive strictly longer
-than assumed; a smaller window rejects at the `CRC32(to)` gate — safe, never
-silent-wrong.)
+256 x 2 (512 B of page buffers in `.bss`) — so the window assumption matches by
+construction. A hardware page-size change therefore requires matching encoder
+and decoder builds. A deeper page ring remains a monotone-safe superset; a
+smaller window rejects at the `CRC32(to)` gate rather than silently accepting a
+wrong image.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
 intentional reject limits on the decoder. Each is a single shared define in
@@ -314,7 +323,7 @@ A1 does not provide power-fail rollback or resume, and never will — this is a
 permanent non-goal (decision recorded 2026-07-02), not a missing feature. Resume
 is impossible by construction: the decode state is volatile. The never-evict
 journal (the preserved source bytes the output frontier has already overwritten
-in flash), the adaptive entropy-model state, and the output row cache all live
+in flash), the adaptive entropy-model state, and the output page cache all live
 only in RAM and cannot be reconstructed mid-stream after power loss — the
 source image below the write frontier is already destroyed. Do not attempt to
 retrofit checkpointing.

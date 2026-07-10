@@ -110,7 +110,7 @@ static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
             int32_t a = we->fp + k;
             if (0 <= a && (uint32_t)a < from_size) {
                 int32_t t = we->tp + k;
-                /* a read behind the frontier that the row window covers reads OLD flash
+                /* a read behind the frontier that the page window covers reads OLD flash
                  * directly — it must not force a journal entry. */
                 if ((FWD ? a < t : a > t) && row_covered(ctx, a, t)) continue;
                 if (FWD) { if (readarr[a] < t) readarr[a] = t; }

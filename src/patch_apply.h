@@ -30,7 +30,7 @@
  * never shipped, only the per-field delta VALUES, pulled inline from the single stream (adaptive
  * MTF dict + order-1/zero-context repeat bit). A copy that reads a from-byte already overwritten by
  * the output frontier reads it from the never-evict journal, driven by the preserve events [P]. Output is
- * staged in a monotonic 256 B row write-back cache so each NVM row is erased+programmed exactly
+ * staged in a monotonic 256 B page write-back cache so each NVM page is erased+programmed exactly
  * once (no write amplification).
  *
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
@@ -51,11 +51,19 @@
 
 /* ===================================================================================== */
 /* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */
-/* harness flash is a file/buffer; on the device these are the real flash page primitives. */
-/* The decoder keeps 0 image bytes in RAM.                                                 */
+/* harness flash is a buffer; on the device these are the real flash page primitives. Both */
+/* receive absolute device addresses. One page write erases and programs the complete page. */
+/* The decoder keeps 0 logical image bytes in RAM.                                          */
 /* ===================================================================================== */
-extern uint8_t flash_read(uint32_t addr);
-extern void    flash_write(uint32_t addr, uint8_t val);
+#ifndef PATCH_IMAGE_BASE
+#error "define PATCH_IMAGE_BASE as the absolute device address of the patchable image"
+#endif
+extern uint8_t flash_read(uint32_t absolute_addr);
+extern void    flash_write_page(uint32_t absolute_page_addr, const uint8_t page[OUTROW]);
+
+static uint8_t image_flash_read(uint32_t image_offset){
+    return flash_read((uint32_t)(PATCH_IMAGE_BASE + image_offset));
+}
 
 /* Decoder state is owned by the integrator and passed to patch_apply_run(). The header keeps no
  * file-scope storage: embedded users may place this object in .bss, noinit, a bootloader-owned
@@ -258,7 +266,7 @@ static int s_raw(PatchApply *pa){ return rc_decode(pa,pa->RC.range>>1); }
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail. g_rcerr is the ONE decode error latch — RC-level and apply-level failures all set it
  * (clean reject, never crash / never silent-wrong); g_reject still carries the reason. */
-/* terminal-state flag: set at the single flash_write site (orow_commit_slot's dirty branch);
+/* terminal-state flag: set at the single flash_write_page site (orow_commit_slot's dirty branch);
  * on ERROR it tells the integrator whether the old image is still intact. */
 #define RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)s_raw(pa); return v; }
@@ -347,14 +355,14 @@ static void crc32_table_init(uint32_t*t){
 static uint32_t RC_NOINLINE crc32_flash(PatchApply *pa, uint32_t n){
     uint32_t *t=pa->ARENA.seed.w, c=0xffffffffu;
     crc32_table_init(t);
-    for(uint32_t i=0;i<n;i++) c=(c>>8)^t[(c^(uint32_t)flash_read(i))&0xffu];
+    for(uint32_t i=0;i<n;i++) c=(c>>8)^t[(c^(uint32_t)image_flash_read(i))&0xffu];
     return c^0xffffffffu;
 }
 static uint32_t crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, uint32_t*hist1){
     uint32_t *t=pa->ARENA.seed.w, c=0xffffffffu;
     crc32_table_init(t);
     for(uint32_t i=0;i<n;i++){
-        uint8_t v=flash_read(i);
+        uint8_t v=image_flash_read(i);
         if(i&1u) hist1[v]++; else hist0[v]++;
         c=(c>>8)^t[(c^(uint32_t)v)&0xffu];
     }
@@ -404,43 +412,43 @@ static int jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
  * truncation-toward-zero on both sides (bit-exact vs patch_generate). ---- */
 
 /* ===================================================================================== */
-/* HYBRID: monotonic output ROW write-back cache (real flash = row-erase 256 B).            */
-/* Output writes are monotonic & contiguous (asc shrink / desc grow); SOURCE reads stay raw  */
-/* (the never-evict journal covers read-after-overwrite). One resident output row buffer: a   */
-/* write to a NEW row first commits the previous row (one erase+program == 1 write/row, so    */
-/* nvm_rows_amplified=0); reads of the dirty buffered row are served from RAM. Source reads of */
-/* not-yet-overwritten flash go straight to physical flash (free). 256 B SRAM.                */
+/* HYBRID: monotonic output PAGE write-back cache (real flash = page erase/program).        */
+/* Output writes are monotonic & contiguous (asc shrink / desc grow); SOURCE reads stay raw. */
+/* The journal covers read-after-overwrite; reads of dirty buffered pages come from RAM, and */
+/* not-yet-overwritten source bytes come straight from flash. Each resident output page is   */
+/* committed with one full-page call. The page buffers use OUTROW * OUTROW_DEPTH bytes.       */
 /* ===================================================================================== */
 /* OUTROW is configured above (one shared define, used by encoder and decoder alike). */
-/* Row-window depth — keep the last OUTROW_DEPTH rows uncommitted. Monotonic writes touch
- * rows in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (row_number % D) is an
- * exact FIFO: the slot's previous occupant is always the row exactly D rows behind,
- * committed on eviction. The point: OLD flash content of uncommitted rows stays physically
- * readable through hy_src_peek's plain flash_read, and the ENCODER's row_covered oracle
+/* Page-window depth — keep the last OUTROW_DEPTH pages uncommitted. Monotonic writes touch
+ * pages in strictly monotonic order, so a DIRECT-MAPPED ring keyed by (page_number % D) is an
+ * exact FIFO: the slot's previous occupant is always the page exactly D pages behind,
+ * committed on eviction. The point: OLD flash content of uncommitted pages stays physically
+ * readable through hy_src_peek's physical flash read, and the ENCODER's row_covered oracle
  * exploits exactly that window (journal-free old reads behind the frontier).
  * ENCODING-AFFECTING BUILD CONTRACT: OUTROW x OUTROW_DEPTH is one shared define pair, used by
  * the encoder's row_covered oracle and the decoder alike, so the uncommitted-window
- * assumption matches by construction. (The apply is still monotone-safe: a decoder built with a
- * superset window — larger aligned rows and/or a deeper ring — would decode old blobs correctly,
- * since old bytes survive strictly longer than assumed; a smaller window rejects via CRC32(to),
- * never silent-wrong.) */
+ * assumption matches by construction. A hardware page-size change requires matching encoder and
+ * decoder builds. A deeper ring is a monotone-safe superset; a smaller window rejects via
+ * CRC32(to), never silent-wrong. */
 /* OUTROW_DEPTH is configured above (one shared define, used by encoder and decoder alike). */
 #define OROW_NONE UINT32_MAX
 #define OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
 /* OROW_SLOT / out_read / out_write use /OUTROW and %OUTROW_DEPTH; both must stay powers of two so
  * they lower to shift/mask — a non-pow2 -D retune would pull libgcc divide helpers into the
- * Cortex-M0+ build (the gate tracks divide policy) and break the encoder's pow2-aligned-row contract. */
+ * Cortex-M0+ build (the gate tracks divide policy) and break the encoder's pow2-page contract. */
 _Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
 _Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
+_Static_assert(MAX_IMAGE>0u, "MAX_IMAGE must be nonzero");
+_Static_assert((PATCH_IMAGE_BASE & (OUTROW-1u))==0u,
+               "PATCH_IMAGE_BASE must be aligned to OUTROW");
+_Static_assert(PATCH_IMAGE_BASE <= UINT32_MAX-
+               (((MAX_IMAGE-1u) & ~(OUTROW-1u))+(OUTROW-1u)),
+               "PATCH_IMAGE_BASE leaves insufficient uint32_t address space for MAX_IMAGE");
 static void orow_commit_slot(PatchApply *pa, uint32_t s){
     if(pa->g_orow_base[s]!=OROW_NONE && pa->g_orow_dirty[s]){
-        uint32_t base=pa->g_orow_base[s], end=base+OUTROW; if(end>pa->g_image_span) end=pa->g_image_span;
+        uint32_t base=pa->g_orow_base[s];
         pa->g_flash_touched=1;
-        /* force the (at most one) row erase up front, then program from the RAM buffer so every
-         * byte is a pure 1->0 program (no further erase). All bytes of the row were produced by the
-         * monotonic output, so the buffer holds the exact final content. */
-        for(uint32_t a=base;a<end;a++){ if(flash_read(a)!=0xFFu){ flash_write(a,0xFFu); break; } }
-        for(uint32_t a=base;a<end;a++) flash_write(a, pa->g_orow_buf[s][a-base]);
+        flash_write_page((uint32_t)(PATCH_IMAGE_BASE+base),pa->g_orow_buf[s]);
     }
     pa->g_orow_dirty[s]=0; pa->g_orow_base[s]=OROW_NONE;
 }
@@ -458,25 +466,24 @@ static void orow_commit_all(PatchApply *pa){
     }
 }
 static void orow_reset(PatchApply *pa){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){ pa->g_orow_base[s]=OROW_NONE; pa->g_orow_dirty[s]=0; } }
-/* read one byte of ALREADY-PRODUCED output at absolute position a: an uncommitted row from
+/* read one byte of ALREADY-PRODUCED output at absolute position a: an uncommitted page from
  * its RAM slot, anything else from flash. Valid streams only reference written positions; a
  * corrupt position yields stale flash bytes, which the CRC32(to) gate rejects. */
 static uint8_t out_read(PatchApply *pa, uint32_t a){
     if(a>=pa->g_image_span) return 0;
     { uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
       if(pa->g_orow_base[s]==base) return pa->g_orow_buf[s][a-base]; }
-    return flash_read(a);
+    return image_flash_read(a);
 }
-/* OUTPUT write: buffer in the row's slot, committing the slot's previous occupant (the row
- * exactly OUTROW_DEPTH rows behind) on a row change. */
+/* OUTPUT write: buffer in the page's slot, committing the slot's previous occupant (the page
+ * exactly OUTROW_DEPTH pages behind) on a page change. */
 static void out_write(PatchApply *pa, uint32_t a, uint8_t v){
     if(a>=pa->g_image_span) return;
     uint32_t base=(a/OUTROW)*OUTROW, s=OROW_SLOT(base);
     if(base!=pa->g_orow_base[s]){
         orow_commit_slot(pa,s);
-        { uint32_t end=base+OUTROW;
-          if(end>pa->g_image_span) end=pa->g_image_span;
-          for(uint32_t x=base;x<end;x++) pa->g_orow_buf[s][x-base]=flash_read(x); } /* preload (source not yet erased) */
+        for(uint32_t x=0;x<OUTROW;x++)
+            pa->g_orow_buf[s][x]=image_flash_read(base+x); /* preload the complete physical page */
         pa->g_orow_base[s]=base;   /* orow_commit_slot() above already cleared the dirty flag */
     }
     { uint32_t off=a-base;
@@ -654,7 +661,7 @@ static uint32_t read_uleb(PatchApply *pa, up_ApplyState*s){
         if(!(b&0x80)) return acc; }
 }
 static uint8_t hy_src_peek(PatchApply *pa, int32_t fp){
-    if(fp>=0 && (uint32_t)fp<pa->g_from_size){ uint8_t jb; return jr_get(pa,(uint32_t)fp,&jb)?jb:flash_read((uint32_t)fp); }
+    if(fp>=0 && (uint32_t)fp<pa->g_from_size){ uint8_t jb; return jr_get(pa,(uint32_t)fp,&jb)?jb:image_flash_read((uint32_t)fp); }
     return 0;
 }
 static void hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
@@ -837,7 +844,7 @@ static void RC_NOINLINE apply_op(PatchApply *pa, up_ApplyState*s){
                 if(pos>=pa->g_from_size){ pa->g_rcerr=1; return; }
                 if(pos>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
                 uint32_t at=(uint32_t)pa->g_jcount+(pa->g_FWD?i:n-1u-i);
-                pa->ARENA.apply.jbuf[at]=(pos<<8)|flash_read(pos);
+                pa->ARENA.apply.jbuf[at]=(pos<<8)|image_flash_read(pos);
             }
         }
         if(pa->g_rcerr) return;
@@ -996,7 +1003,7 @@ static int decode_body(PatchApply *pa){
        * landing check is needed. fp is unchecked in both directions — CRC32(to) validates the image. */
       if(!pa->g_rcerr && s->tok_mode!=0) pa->g_rcerr=1;   /* a mid-token content underrun leaves tok_mode!=0 */
       if(pa->g_rcerr) return 0;
-      orow_commit_all(pa);                 /* flush the remaining uncommitted rows */
+      orow_commit_all(pa);                 /* flush the remaining uncommitted pages */
     }
     /* body complete: the caller verifies CRC32(to) (g_want_to) over the final image before
      * declaring DONE. Bytes after the counted body belong to outer framing. */
@@ -1031,7 +1038,7 @@ static int patch_apply_run(PatchApply *pa, int (*next)(void*, uint8_t*), void *c
  * integrator does not call it (no ARM .text cost). */
 static inline int patch_apply_reject(const PatchApply *pa){ return pa->g_reject; }
 
-/* After PATCH_APPLY_ERROR, whether any flash_write happened this run: 0 = old image intact
+/* After PATCH_APPLY_ERROR, whether any flash_write_page happened this run: 0 = old image intact
  * (still bootable, safe to retry after fixing the cause), 1 = image partially overwritten
  * (bootloader recovery required). Same unused-static-inline compile-out as patch_apply_reject. */
 static inline int patch_apply_flash_touched(const PatchApply *pa){ return pa->g_flash_touched; }
@@ -1057,8 +1064,9 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 
 /* Seal the non-knob model/wire macros that rc_models.h + patch_config.h define and that this
  * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
- * Only the documented -D override knobs (JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
- * DR_KCAP_EX, MAX_IMAGE and the RC_*_DEFAULT constants they derive from) stay defined. The
+ * Only the documented integration/configuration macros (PATCH_IMAGE_BASE, JSLOTS, WINDOW_LOG,
+ * OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL, DR_KCAP_EX, MAX_IMAGE and the RC_*_DEFAULT constants
+ * they derive from) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
  * #undefs never reach the encoder side of the mirror.
  *

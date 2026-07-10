@@ -6,7 +6,7 @@ CC = $(CROSS_COMPILE)gcc
 
 OPT ?= -O2
 # Semantic build-contract flags, single-sourced into CFLAGS below and the analyzer leg (warning/optimization policy stays leg-local).
-CONTRACT_FLAGS := -DCORTEX_M0 -std=c99 -I. -Isrc -Ivendor/libdivsufsort
+CONTRACT_FLAGS := -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -std=c99 -I. -Isrc -Ivendor/libdivsufsort
 CFLAGS += $(CONTRACT_FLAGS)
 CFLAGS += -g
 CFLAGS += -Wall
@@ -59,17 +59,17 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6141
+BASE_ARM_TEXT ?= 6057
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
-BASE_ARM_LINKED_TEXT ?= 6721
+BASE_ARM_LINKED_TEXT ?= 6637
 BASE_ARM_LINKED_DATA ?= 0
 BASE_ARM_LINKED_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
-ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
+ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -I src
 ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
 ARM_LINK_LAYOUT := scripts/arm_link.ld
 # The production ARM size gate intentionally measures the static-state wrapper integration
@@ -183,7 +183,7 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 # sums the per-function .su frames (each already includes its own pushed LR/regs) along the
 # deepest path of each object's static call graph. It fails loudly on recursion, an indirect call
 # that could reach internal code, or a dynamic/VLA frame — any of which would invalidate the
-# static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write/byte-callback)
+# static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write_page/byte-callback)
 # and toolchain leaves (memmove/memset/__aeabi_uidiv); each ceiling's headroom absorbs those +
 # interrupt-frame slack. Same cross-gcc as check-arm.
 check-stack-internal:
@@ -248,7 +248,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 		{ printf '%s\n' '#include <stdint.h>'; \
 		  printf '%s\n' "#include \"$$inc\""; \
 		  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
-		  printf '%s\n' 'void flash_write(uint32_t a, uint8_t v){ (void)a; (void)v; }'; \
+		  printf '%s\n' 'void flash_write_page(uint32_t a, const uint8_t p[OUTROW]){ (void)a; (void)p; }'; \
 		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return 0; }'; \
 		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 		} > "$$csrc"; \
@@ -260,6 +260,15 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 			$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -DCORTEX_M0 -Isrc -c "$$csrc" -o "$$obj"; \
 		fi; \
 	done; \
+	if $(CC) $(filter-out -DPATCH_IMAGE_BASE=0u,$(CFLAGS)) -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/missing-base.o" >/dev/null 2>&1; then \
+		echo "decoder accepted missing PATCH_IMAGE_BASE" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -UPATCH_IMAGE_BASE -DPATCH_IMAGE_BASE=1u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/unaligned-base.o" >/dev/null 2>&1; then \
+		echo "decoder accepted unaligned PATCH_IMAGE_BASE" >&2; exit 1; \
+	fi; \
+	if $(CC) $(CFLAGS) -UPATCH_IMAGE_BASE -DPATCH_IMAGE_BASE=0xffffff00u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
+		echo "decoder accepted PATCH_IMAGE_BASE without MAX_IMAGE address headroom" >&2; exit 1; \
+	fi; \
 	$(CC) $(CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -DCORTEX_M0 -Isrc -E "$$tmp/patch_apply_smoke.c" | \
 	awk '/^# [0-9]+ "/ { inours = ($$3 ~ /"src\//) } \
 	     inours { line = $$0; gsub(/__builtin_offsetof/, "", line); \
@@ -270,6 +279,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
 	CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
+	echo "decoder_address_contract=OK (mandatory + aligned + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
 

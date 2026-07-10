@@ -57,7 +57,8 @@ export UP UPD
 FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 10.0.1 10.0.2 10.0.3 10.1.1 10.1.2 10.1.3"
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
-#   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified> <maxrowerase> <inversions> <sha256>"
+#   "<tag> <from_id> <to_id> <blobsize> <roundtrip_ok?> <journal_used> <amplified>
+#    <maxpageerase> <inversions> <unaligned> <oob> <canary> <sha256>"
 # tag is C (home matrix) or F (foreign) so the aggregator can total each set separately while
 # taking NVM write-safety maxima across BOTH. (A single short printf is < PIPE_BUF, so parallel
 # workers' lines never interleave.)
@@ -78,8 +79,8 @@ cm_work() {
   "$UPD" --decode "$d/mem.bin" "$d/p.blob" >/dev/null 2>"$d/log"
   if cmp -s "$d/mem.bin" "$to/watch.bin"; then ok=1; else ok=0; fi
   j=$(sed -n 's/.*journal_used=\([0-9][0-9]*\).*/\1/p' "$d/log")
-  v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxrowerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*/\1 \2 \3/p' "$d/log")
-  printf '%s %s %s %s %s %s %s %s\n' "$tag" "${from##*/}" "${to##*/}" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA}" "$hash"
+  v=$(sed -n 's/.*amplified=\([0-9][0-9]*\).*maxpageerase=\([0-9][0-9]*\).*inversions=\([-0-9][0-9]*\).*unaligned=\([0-9][0-9]*\).*oob=\([0-9][0-9]*\).*canary=\([0-9][0-9]*\).*/\1 \2 \3 \4 \5 \6/p' "$d/log")
+  printf '%s %s %s %s %s %s %s %s\n' "$tag" "${from##*/}" "${to##*/}" "$sz" "$ok" "${j:-NA}" "${v:-NA NA NA NA NA NA}" "$hash"
   rm -rf "$d"
 }
 export -f cm_work
@@ -132,17 +133,18 @@ xargs -P "$JOBS" -L1 bash -c 'cm_work "$0" "$1" "$2"' < "$tmp/jobs.txt" > "$tmp/
 # Sort because worker completion order is intentionally nondeterministic.
 [ -n "$DUMP" ] && awk '$1=="C"{print $2"\t"$3"\t"$4}' "$tmp/pairs.txt" | sort > "$DUMP"
 # Optional all-pair wire dump.  Sorting makes a parallel run byte-reproducible.
-[ -n "$WIRE_DUMP" ] && awk '$1=="C"||$1=="F"{print $1"\t"$2"\t"$3"\t"$10}' "$tmp/pairs.txt" | sort > "$WIRE_DUMP"
+[ -n "$WIRE_DUMP" ] && awk '$1=="C"||$1=="F"{print $1"\t"$2"\t"$3"\t"$13}' "$tmp/pairs.txt" | sort > "$WIRE_DUMP"
 
 agg=$(
-  awk '{ tag=$1; sz=$4; ok=$5; j=$6; amp=$7; row=$8; inv=$9;
+  awk '{ tag=$1; sz=$4; ok=$5; j=$6; amp=$7; page=$8; inv=$9; ua=$10; oob=$11; canary=$12;
          if(j=="NA"||amp=="NA"){bad++; next}
          if(tag=="C"){cfull+=sz; cok+=ok; cn++}
          else if(tag=="F"){ffull+=sz; fok+=ok; fn++}
-         if(j>mj)mj=j; if(amp>ma)ma=amp; if(row>mr)mr=row; if(inv>mi)mi=inv }
-       END{ printf "%d %d %d %d %d %d %d %d %d %d %d\n", cok,cfull,cn, fok,ffull,fn, mj,ma,mr,mi, bad+0 }' "$tmp/pairs.txt"
+         if(j>mj)mj=j; if(amp>ma)ma=amp; if(page>mp)mp=page; if(inv>mi)mi=inv;
+         if(ua>mu)mu=ua; if(oob>mo)mo=oob; if(canary>mc)mc=canary }
+       END{ printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", cok,cfull,cn, fok,ffull,fn, mj,ma,mp,mi,mu,mo,mc,bad+0 }' "$tmp/pairs.txt"
 )
-read cok cfull cn fok ffull fn mj ma mr mi bad <<EOF
+read cok cfull cn fok ffull fn mj ma mp mi mu mo mc bad <<EOF
 $agg
 EOF
 # Home per-pair split vs the baseline TSV — skipped (NA) when no baseline is provided.
@@ -198,7 +200,7 @@ if [ -n "$WIRE_BASE" ]; then
         if(key in seen) dup++
         seen[key]=1
         if(!(key in want)){missing++; next}
-        if($10==want[key]) same++
+        if($13==want[key]) same++
         else mismatch++
       }
       END {
@@ -222,14 +224,15 @@ if [ "$cn" -ne "$EXP_HOME" ] || [ "$fn" -ne "$EXP_FGN" ] || [ "$bad" -ne 0 ] \
   exit 3
 fi
 
-printf 'matrix_ok=%d/%d\nfull_total=%d\nhome_size_better=%s\nhome_size_worse=%s\nhome_size_equal=%s\nforeign_ok=%d/%d\nforeign_total=%d\nwire_identity=%s/%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxrowerase=%d\nmax_inversions=%d\n' \
-  "$cok" "$EXP_HOME" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$EXP_FGN" "$ffull" "$wmatch" "$((EXP_HOME + EXP_FGN))" "$mj" "$ma" "$mr" "$mi"
+printf 'matrix_ok=%d/%d\nfull_total=%d\nhome_size_better=%s\nhome_size_worse=%s\nhome_size_equal=%s\nforeign_ok=%d/%d\nforeign_total=%d\nwire_identity=%s/%d\nmax_journal=%d\nmax_amplified=%d\nmax_maxpageerase=%d\nmax_inversions=%d\nmax_unaligned=%d\nmax_oob_page_writes=%d\nmax_canary_corrupt=%d\n' \
+  "$cok" "$EXP_HOME" "$cfull" "$hbetter" "$hworse" "$hequal" "$fok" "$EXP_FGN" "$ffull" "$wmatch" "$((EXP_HOME + EXP_FGN))" "$mj" "$ma" "$mp" "$mi" "$mu" "$mo" "$mc"
 
 # ---- gate assertions (single source; the Makefile corpus leg just runs this script) ----
 # Correctness / write-safety (unconditional; only a broken candidate, never a regression, trips it):
 if [ "$cok" -ne "$EXP_HOME" ] || [ "$fok" -ne "$EXP_FGN" ] \
-   || [ "$wmismatch" -ne 0 ] || [ "$ma" -ne 0 ] || [ "$mr" -gt 1 ] || [ "$mi" -ne 0 ]; then
-  echo "check_corpus.sh: correctness/wire/write-safety gate (matrix=$cok/$EXP_HOME foreign=$fok/$EXP_FGN wire_mismatch=$wmismatch amplified=$ma maxrowerase=$mr inversions=$mi)" >&2
+   || [ "$wmismatch" -ne 0 ] || [ "$ma" -ne 0 ] || [ "$mp" -gt 1 ] || [ "$mi" -ne 0 ] \
+   || [ "$mu" -ne 0 ] || [ "$mo" -ne 0 ] || [ "$mc" -ne 0 ]; then
+  echo "check_corpus.sh: correctness/wire/write-safety gate (matrix=$cok/$EXP_HOME foreign=$fok/$EXP_FGN wire_mismatch=$wmismatch amplified=$ma maxpageerase=$mp inversions=$mi unaligned=$mu oob=$mo canary=$mc)" >&2
   exit 4
 fi
 # The split must account for every home pair (only meaningful when a baseline was supplied).
