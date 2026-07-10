@@ -184,7 +184,7 @@ second leg. The single slowest job in the whole gate is the foreign cross-major
 pair (`3.0.3 <-> 10.0.0`, effectively unrelated programs, ~13 s, 150-175 KB
 blob); it is emitted FIRST so it overlaps every other pair (longest-processing-
 time-first). Net effect on `make gate`: ~23 s -> ~29 s wall on the 32-core
-reference machine, comfortably under the 60 s budget, for ~154 CPU-s of added
+reference machine, comfortably under the 80 s budget, for ~154 CPU-s of added
 work. Reported metrics: `foreign round-trips` (must be 34/34) and
 `foreign full_total`, which ratchets against `BASE_FOREIGN_TOTAL` exactly like
 `BASE_FULL_TOTAL`. NVM write-safety maxima (amplified / erases-per-page /

@@ -1,0 +1,105 @@
+{
+  "container": "ubuntu:26.04@sha256:c6c0067e0e45b7a826eaebb193cef957be28045380963a9b1eeb2a5d3c70a1b9",
+  "profile": {
+    "arm": {
+      "cc": {
+        "command": [
+          "arm-none-eabi-gcc"
+        ],
+        "version": "arm-none-eabi-gcc (15:14.2.rel1-1) 14.2.1 20241119"
+      },
+      "flags": [
+        "-mcpu=cortex-m0plus",
+        "-mthumb",
+        "-DCORTEX_M0",
+        "-DPATCH_IMAGE_BASE=0u",
+        "-DPATCH_IMAGE_CAPACITY=67108864u",
+        "-I",
+        "src"
+      ],
+      "libraries": {
+        "libc.a": {
+          "sha256": "b92c487310d079649544729a914cdf04aa848010be6817598f5b07ce06eaec53"
+        },
+        "libgcc.a": {
+          "sha256": "3e1d9f3ff8a48c65294eab937720c03f9ee2d36d4071569895c87512a221dae8"
+        }
+      },
+      "nm": {
+        "command": [
+          "arm-none-eabi-nm"
+        ],
+        "version": "GNU nm (2.45.50.20251209-1ubuntu1+23build1) 2.45.50.20251209"
+      },
+      "objdump": {
+        "command": [
+          "arm-none-eabi-objdump"
+        ],
+        "version": "GNU objdump (2.45.50.20251209-1ubuntu1+23build1) 2.45.50.20251209"
+      },
+      "optimization": {
+        "object": [
+          "-Os"
+        ],
+        "stack": [
+          "-O2"
+        ]
+      },
+      "size": {
+        "command": [
+          "arm-none-eabi-size"
+        ],
+        "version": "GNU size (2.45.50.20251209-1ubuntu1+23build1) 2.45.50.20251209"
+      }
+    },
+    "clang": {
+      "command": [
+        "clang"
+      ],
+      "version": "Ubuntu clang version 21.1.8 (6ubuntu1)"
+    },
+    "host": {
+      "compiler": {
+        "command": [
+          "gcc"
+        ],
+        "version": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0"
+      },
+      "flags": {
+        "cflags": [
+          "-std=c99",
+          "-I.",
+          "-Isrc",
+          "-Ivendor/libdivsufsort",
+          "-DCORTEX_M0",
+          "-g",
+          "-Wall",
+          "-Wextra",
+          "-Wdouble-promotion",
+          "-Wfloat-equal",
+          "-Wformat=2",
+          "-Wshadow",
+          "-Werror",
+          "-O2",
+          "-ffunction-sections",
+          "-fdata-sections",
+          "-DPATCH_IMAGE_BASE=0u",
+          "-DPATCH_IMAGE_CAPACITY=67108864u",
+          "-D_POSIX_C_SOURCE=200809L"
+        ],
+        "decoder_config": [
+          "-DPATCH_IMAGE_BASE=0u",
+          "-DPATCH_IMAGE_CAPACITY=67108864u"
+        ],
+        "ldflags": [
+          "-Wl,--gc-sections"
+        ],
+        "wire_config": [
+          "-DCORTEX_M0"
+        ]
+      }
+    },
+    "schema": 1
+  },
+  "schema": 1
+}

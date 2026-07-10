@@ -10,14 +10,18 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-UP="$ROOT/ultrapatch"
 JOBS="${AB_MATRIX_TEST_JOBS:-8}"
+: "${ULTRAPATCH:?check_ab_matrix.sh: ULTRAPATCH not set; invoke through make check-ab-matrix}"
 
-[ -x "$UP" ] || { echo "check_ab_matrix.sh: missing $UP; invoke via 'make check-ab-matrix'" >&2; exit 1; }
+[ -x "$ULTRAPATCH" ] || {
+  echo "check_ab_matrix.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
+  exit 2
+}
 
 . "$ROOT/scripts/tempdir.sh"
-mkdir -p "$tmp/candidate"
+mkdir -p "$tmp/candidate/scripts"
 cp "$ROOT/Makefile" "$tmp/candidate/"
+cp "$ROOT/scripts/build_profile.py" "$tmp/candidate/scripts/"
 cp -R "$ROOT/src" "$ROOT/vendor" "$tmp/candidate/"
 
 # RC_S_BIT_RATE is shared by the encoder and decoder. Changing it creates a valid, intentionally
@@ -25,8 +29,14 @@ cp -R "$ROOT/src" "$ROOT/vendor" "$tmp/candidate/"
 sed -i 's/^#define RC_S_BIT_RATE 4$/#define RC_S_BIT_RATE 5/' \
   "$tmp/candidate/src/rc_models.h"
 grep -q '^#define RC_S_BIT_RATE 5$' "$tmp/candidate/src/rc_models.h"
-make --no-print-directory -C "$tmp/candidate" ultrapatch >/dev/null
-CAND="$tmp/candidate/ultrapatch"
+candidate_build="$tmp/candidate-build"
+make --no-print-directory -C "$tmp/candidate" BUILD_DIR="$candidate_build" ultrapatch >/dev/null
+CAND=$(make --no-print-directory -s -C "$tmp/candidate" \
+  BUILD_DIR="$candidate_build" host-tool-path)
+[ -x "$CAND" ] || {
+  echo "check_ab_matrix.sh: candidate host tool is missing or not executable: $CAND" >&2
+  exit 2
+}
 
 FIX="$ROOT/test-bench/fixtures"
 
@@ -52,7 +62,7 @@ set +e
 IMAGES="$tmp/images" FOREIGN="$tmp/foreign" FIXTURES="$FIX" \
   CORPUS_WIRE_MANIFEST="$tmp/manifest-must-not-be-read" \
   BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" BASE_ONEFACE_GROW="" BASE_ONEFACE_REVERT="" \
-  "$ROOT/scripts/ab_matrix.sh" "$UP" "$CAND" "$CAND" "$JOBS" \
+  "$ROOT/scripts/ab_matrix.sh" "$ULTRAPATCH" "$CAND" "$CAND" "$JOBS" \
   >"$tmp/ab.out" 2>"$tmp/ab.err"
 rc=$?
 set -e

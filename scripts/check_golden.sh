@@ -10,8 +10,14 @@
 #
 # On an INTENDED wire change, regenerate the manifest in the same commit:  make golden-update
 #
-# Usage: check_golden.sh [check|update]   (needs ./ultrapatch already built)
+# Usage: make check-golden (or set ULTRAPATCH to an executable and run this script directly)
 set -eu
+
+: "${ULTRAPATCH:?check_golden.sh: ULTRAPATCH not set; invoke through make check-golden}"
+[ -x "$ULTRAPATCH" ] || {
+  echo "check_golden.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
+  exit 2
+}
 
 MODE="${1:-check}"
 FIX="${FIXTURES:-test-bench/fixtures}"
@@ -33,7 +39,7 @@ python3 "$(dirname "$0")/synth_gen.py" pins "$SFIX"
 # then the two synthetic degradation pins (appended -> they sort last; existing lines untouched).
 while read -r name from to; do
   [ -n "$name" ] || continue
-  ./ultrapatch "$from/watch.bin" "$to/watch.bin" "$tmp/$name.blob" >/dev/null
+  "$ULTRAPATCH" "$from/watch.bin" "$to/watch.bin" "$tmp/$name.blob" >/dev/null
 done <<EOF
 oneface_grow $FIX/v0_base $FIX/v1_one_face
 oneface_revert $FIX/v1_one_face $FIX/v0_base

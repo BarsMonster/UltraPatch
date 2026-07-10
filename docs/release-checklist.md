@@ -13,18 +13,28 @@ hardware flash validation are external integration work.
   `test-bench/fixtures`, and `test-bench/foreign`.
 - `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
   release.
-- ARM GCC/binutils available as documented in `install.md`.
+- The exact default GCC, required Clang, GNU Arm GCC/binutils,
+  `libc.a`/`libgcc.a` content hashes, and effective flags recorded in
+  `toolchains/release-profile.json`, with packages installed as documented in
+  `install.md`.
 
 ## Gate
 
 Run:
 
 ```sh
+make check-build-profile
 make gate
 ```
 
-Record the complete output in the release notes. The gate must report:
+`make check-build-profile` is the build-isolation regression: it must prove that
+colliding compiler/configuration builds select and execute their own host tools.
+The gate independently validates the release descriptor before forking its
+verification legs. Record the complete output in the release notes. The gate
+must report:
 
+- `release_profile`: the validated profile identifier from
+  `toolchains/release-profile.json`
 - `corpus assets`: verified through `test-bench/corpus.sha256`
 - `foreign assets`: verified through `test-bench/foreign.sha256`
 - `malformed rejects`: nonzero deterministic reject count
@@ -47,9 +57,11 @@ Record the complete output in the release notes. The gate must report:
 
 Also run before release (not part of `make gate`):
 
-- A clang leg (`make CC=clang -B all && make check check-malformed check-golden`)
-  — CI runs this on every push; the golden check proves the clang-built encoder
-  emits byte-identical blobs.
+- A clang leg
+  (`make CC=clang -B all && make CC=clang check check-malformed check-golden`)
+  — CI runs this on every push; keeping `CC=clang` on both commands selects the
+  same profile-scoped host binary, and the golden check proves that encoder emits
+  the frozen wire blobs.
 - `make decoder-header` if publishing a one-file device decoder artifact.
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
@@ -79,8 +91,9 @@ deterministic for a fixed `test-bench/corpus.sha256` manifest.
 The release source artifact is the Git commit. The device decoder artifact is
 either the generated single header from `make decoder-header` or the decoder
 source header set rooted at `src/patch_apply.h`. The host tool is the unified
-`ultrapatch` CLI built from `src/patch_generate.c`, the `src/enc_*.c` subsystem
-modules, `src/patch_host_backend.c`, and the vendored
+`ultrapatch` CLI at the path printed by `make host-tool-path`; normal builds place
+it at `.build/<profile-id>/ultrapatch`. It is built from `src/patch_generate.c`,
+the `src/enc_*.c` subsystem modules, `src/patch_host_backend.c`, and the vendored
 `vendor/libdivsufsort/` sources; encode is its default mode, while `--decode`
 is the host reference/debug mode.
 
@@ -92,8 +105,11 @@ For traceability, release notes should include:
 - `sha256sum artifacts/patch_apply_single.h` when a one-file decoder header is
   published.
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
+- `sha256sum toolchains/release-profile.json`.
+- The `release_profile` line from `make gate`.
 - `make gate` output.
-- Toolchain package/version used for `check-arm`.
+- Exact tool identities, runtime archive hashes, and effective flags validated
+  against `toolchains/release-profile.json` by `make gate`.
 - License statement: project MIT except vendored libdivsufsort, which retains
   its upstream notice; `src/enc_bsdiff.c` includes an attribution note for
   the detools Python implementation that informed the ARM Cortex-M scanner

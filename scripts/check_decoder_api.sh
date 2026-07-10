@@ -10,14 +10,19 @@ set -eu
 
 : "${CC:?check_decoder_api.sh: CC not set — invoke through make check-decoder-contract}"
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
+: "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
+[ -x "$ULTRAPATCH" ] || {
+    echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
+    exit 2
+}
 
 FIX="${FIXTURES:-test-bench/fixtures}"
 base="$FIX/v0_base/watch.bin"
 one="$FIX/v1_one_face/watch.bin"
 . "$(dirname "$0")/tempdir.sh"
 
-./ultrapatch "$base" "$one" "$tmp/grow.blob" >/dev/null
-./ultrapatch "$one" "$base" "$tmp/revert.blob" >/dev/null
+"$ULTRAPATCH" "$base" "$one" "$tmp/grow.blob" >/dev/null
+"$ULTRAPATCH" "$one" "$base" "$tmp/revert.blob" >/dev/null
 
 args="$base $one $tmp/grow.blob $one $base $tmp/revert.blob"
 
@@ -46,7 +51,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # committed; the full update reaches the same cap only after physical writes.
     dd if="$base" of="$tmp/prefix.from" bs=256 count=1 status=none
     dd if="$one" of="$tmp/prefix.to" bs=256 count=1 status=none
-    ./ultrapatch "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
+    "$ULTRAPATCH" "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
 
     python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
         src/patch_config.h src/rc_models.h src/patch_apply.h

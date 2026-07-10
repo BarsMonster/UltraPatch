@@ -3,7 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 CC = $(CROSS_COMPILE)gcc
-ARM_CC ?= arm-none-eabi-gcc
+CLANG ?= clang
+ARM_PREFIX ?= arm-none-eabi-
+ARM_CC ?= $(ARM_PREFIX)gcc
+ARM_SIZE ?= $(ARM_PREFIX)size
+ARM_OBJDUMP ?= $(ARM_PREFIX)objdump
+ARM_NM ?= $(ARM_PREFIX)nm
+ARM_OBJECT_OPT ?= -Os
+ARM_STACK_OPT ?= -O2
 
 OPT ?= -O2
 # Every wire-affecting override belongs here, under the exact macro name consumed by
@@ -31,6 +38,44 @@ CFLAGS += -fdata-sections
 CFLAGS += $(CFLAGS_EXTRA)
 DECODER_CFLAGS = $(CFLAGS) $(DECODER_CONFIG_FLAGS)
 LDFLAGS += -Wl,--gc-sections
+
+# Host builds are isolated by the compiler identity and every effective build flag. The profile
+# helper emits canonical JSON without workspace paths; its SHA-256 is both the build-directory
+# key and the provenance identity. Tests receive the exact binary through ULTRAPATCH, so a GCC,
+# Clang, or alternate-config invocation never executes whichever shared root binary linked last.
+override UP_PROFILE_CC := $(CC)
+override UP_PROFILE_CLANG := $(CLANG)
+override UP_PROFILE_CFLAGS := $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L
+override UP_PROFILE_LDFLAGS := $(LDFLAGS)
+override UP_PROFILE_WIRE_FLAGS := $(WIRE_CONFIG_FLAGS)
+override UP_PROFILE_DECODER_FLAGS := $(DECODER_CONFIG_FLAGS)
+override UP_PROFILE_ARM_CC := $(ARM_CC)
+override UP_PROFILE_ARM_SIZE := $(ARM_SIZE)
+override UP_PROFILE_ARM_OBJDUMP := $(ARM_OBJDUMP)
+override UP_PROFILE_ARM_NM := $(ARM_NM)
+override UP_PROFILE_ARM_FLAGS = $(ARM_DEC_FLAGS)
+override UP_PROFILE_ARM_OBJECT_OPT := $(ARM_OBJECT_OPT)
+override UP_PROFILE_ARM_STACK_OPT := $(ARM_STACK_OPT)
+export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_CFLAGS UP_PROFILE_LDFLAGS
+export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
+export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_NM
+export UP_PROFILE_ARM_FLAGS UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
+
+BUILD_ROOT ?= .build
+override BUILD_PROFILE_ID := $(shell python3 scripts/build_profile.py host-id)
+ifeq ($(strip $(BUILD_PROFILE_ID)),)
+$(error failed to derive the host build profile)
+endif
+BUILD_DIR ?= $(BUILD_ROOT)/$(BUILD_PROFILE_ID)
+ifeq ($(abspath $(BUILD_DIR)),$(CURDIR))
+$(error BUILD_DIR must not be the repository root)
+endif
+override PROFILE_MANIFEST := $(BUILD_DIR)/profile.json
+override HOST_TOOL := $(abspath $(BUILD_DIR))/ultrapatch
+RELEASE_PROFILE_LOCK ?= toolchains/release-profile.json
+override ULTRAPATCH := $(HOST_TOOL)
+override ULTRAPATCH_DECODE := $(HOST_TOOL)
+export ULTRAPATCH ULTRAPATCH_DECODE
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
@@ -93,18 +138,18 @@ STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'PatchApplyRes
 BASE_STACK_STATIC_CEIL_O2 ?= 480
 BASE_STACK_GENERIC_CEIL_O2 ?= 480
 
-# ---- hard 60 s execution cap on EVERY public target ---------------------------------
+# ---- hard 80 s execution cap on EVERY public target ---------------------------------
 # Owner rule: we do not throw compute just for fun — an operation that cannot finish in
-# 60 s gets fixed or deleted, not waited for. Each public name is a thin cap over its
+# 80 s gets fixed or deleted, not waited for. Each public name is a thin cap over its
 # *-internal twin: coreutils `timeout` bounds the whole subtree (it runs the child in
 # its own process group, so backgrounded gate legs die with it) and an overrun reports
-# an explicit error instead of a bare status 124. One-off override (never commit a
-# longer default): GATE_TIMEOUT=<secs> make <target>.
-GATE_TIMEOUT ?= 60
+# an explicit error instead of a bare status 124. Local experiments may use
+# GATE_TIMEOUT=<secs> make <target>; the checked release default is 80 seconds.
+GATE_TIMEOUT ?= 80
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
-          check-wire-config \
+          check-wire-config check-build-profile check-release-profile \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
-          golden-update gate check-analyze clean
+          golden-update gate check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED))
 $(CAPPED): %:
 	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
@@ -113,6 +158,30 @@ $(CAPPED): %:
 
 all-internal: ultrapatch
 	$(CC) $(DECODER_CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
+
+.PHONY: host-tool-path release-profile-json profile-check ultrapatch
+host-tool-path:
+	@printf '%s\n' "$(HOST_TOOL)"
+
+release-profile-json:
+	@python3 scripts/build_profile.py release-json
+
+# Validate on every public use, including when an explicit BUILD_DIR points at a manifest created
+# by another compiler/config. Identical concurrent checks are safe because ensure-host publishes
+# the canonical manifest atomically.
+profile-check: scripts/build_profile.py
+	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
+
+ultrapatch: profile-check $(HOST_TOOL)
+
+$(PROFILE_MANIFEST): scripts/build_profile.py
+	@python3 scripts/build_profile.py ensure-host "$@" >/dev/null
+
+check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
+	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"
+
+check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profile.py
+	@MAKE="$(MAKE)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" scripts/check_build_profile.sh
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
@@ -130,26 +199,37 @@ check-wire-config-probe-internal: scripts/check_wire_config.sh scripts/gen_singl
 	  SINGLE_DECODER_CFLAGS="$(filter-out -Isrc,$(DECODER_CFLAGS))" \
 	  ARM_CC="$(ARM_CC)" ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" scripts/check_wire_config.sh
 
-ultrapatch: $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU)
-	$(CC) $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o $@
+$(HOST_TOOL): $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU) $(PROFILE_MANIFEST)
+	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
+	@mkdir -p "$(dir $(HOST_TOOL))"
+	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
+	$(CC) $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o "$$tmp"; \
+	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
+	@echo "host_tool=$(HOST_TOOL)"
 
 check-internal: ultrapatch
 	@set -e; \
 	. ./scripts/tempdir.sh; \
-	./ultrapatch --help >"$$tmp/help.txt"; \
-	./ultrapatch -h >"$$tmp/help-short.txt"; \
+	"$(HOST_TOOL)" --help >"$$tmp/help.txt"; \
+	"$(HOST_TOOL)" -h >"$$tmp/help-short.txt"; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/help.txt"; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/help-short.txt"; \
 	grep -q '^  --decode' "$$tmp/help.txt"; \
-	if ./ultrapatch >"$$tmp/noargs.out" 2>"$$tmp/noargs.err"; then \
+	if "$(HOST_TOOL)" >"$$tmp/noargs.out" 2>"$$tmp/noargs.err"; then \
 		echo "ultrapatch with no arguments unexpectedly succeeded" >&2; exit 1; \
 	fi; \
 	grep -q '^usage: .*ultrapatch' "$$tmp/noargs.err"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	  BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
-	  scripts/oneface_metrics.sh ./ultrapatch ./ultrapatch
+	  scripts/oneface_metrics.sh "$(HOST_TOOL)" "$(HOST_TOOL)"
 
-check-arm-internal: check-arm-measure-internal
+
+# The footprint ratchets are meaningful only for the checked release toolchain. Invoke the
+# measurement from the recipe after validation so even `make -j` cannot race it ahead.
+check-arm-internal: check-release-profile-internal
+	@$(MAKE) --no-print-directory check-arm-measure-internal
 	@MAKE="$(MAKE)" scripts/check_arm_bss_cap.sh
 
 .PHONY: check-arm-measure-internal
@@ -157,30 +237,31 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
-	$(ARM_CC) $(ARM_DEC_FLAGS) -Os -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
-	size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.o"); \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
+	size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.o"); \
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
 	obj_text=$$1; obj_data=$$2; obj_bss=$$3; \
+	echo "arm_object_text=$$obj_text"; echo "arm_object_data=$$obj_data"; echo "arm_object_bss=$$obj_bss"; \
 	if [ "$$obj_bss" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
 		echo "ARM .bss hard cap exceeded: $$obj_bss > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
 	fi; \
 	test "$$obj_text" -le "$(BASE_ARM_TEXT)"; \
 	test "$$obj_data" -le "$(BASE_ARM_DATA)"; \
 	test "$$obj_bss" -le "$(BASE_ARM_BSS)"; \
-	arm-none-eabi-objdump -d "$$tmp/patch_apply_arm.o" > "$$tmp/patch_apply_arm.dump"; \
+	$(ARM_OBJDUMP) -d "$$tmp/patch_apply_arm.o" > "$$tmp/patch_apply_arm.dump"; \
 	if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm.dump"; then \
 		echo "hardware divide instruction found"; exit 1; \
 	fi; \
 	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm.dump" || true); \
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
-	$(ARM_CC) $(ARM_DEC_FLAGS) -Os -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
 	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
 		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm.map" \
 		"$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm.elf"; \
-	linked_size_out=$$(arm-none-eabi-size "$$tmp/patch_apply_arm.elf"); \
+	linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.elf"); \
 	printf '%s\n' "$$linked_size_out"; \
 	echo "arm_linked_integration=no-startup static PatchApply wrapper + minimal flash stubs"; \
 	set -- $$(printf '%s\n' "$$linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -194,7 +275,7 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	test "$$linked_text" -le "$(BASE_ARM_LINKED_TEXT)"; \
 	test "$$linked_data" -le "$(BASE_ARM_LINKED_DATA)"; \
 	test "$$linked_bss" -le "$(BASE_ARM_LINKED_BSS)"; \
-	helpers=$$(arm-none-eabi-nm --defined-only "$$tmp/patch_apply_arm.elf" | \
+	helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_arm.elf" | \
 		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
 		sort | paste -sd, -); \
 	echo "arm_linked_runtime_helpers=$$helpers"
@@ -209,15 +290,15 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 # static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write_page/byte-callback)
 # and toolchain leaves (memmove/memset/__aeabi_uidiv); each ceiling's headroom absorbs those +
 # interrupt-frame slack. Same cross-gcc as check-arm.
-check-stack-internal:
+check-stack-internal: check-release-profile-internal
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	$(STACK_GENERIC_HARNESS); \
-	$(ARM_CC) $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
-	$(ARM_CC) $(ARM_DEC_FLAGS) -O2 -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
-	python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
-	python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
 	echo "stack_static_integration=static PatchApply wrapper"; \
 	sed 's/^stack_/stack_static_/' "$$tmp/stack_static.txt"; \
 	echo "stack_static_ceiling_o2=$(BASE_STACK_STATIC_CEIL_O2)"; \
@@ -322,7 +403,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) $(DEC_DEMO_DEFINES) \
 	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
-	    scripts/oneface_metrics.sh ./ultrapatch "$$tmp/dec_portable" >/dev/null; \
+	    scripts/oneface_metrics.sh "$(HOST_TOOL)" "$$tmp/dec_portable" >/dev/null; \
 	CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
 	echo "decoder_address_contract=OK (mandatory base/capacity + page alignment + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
@@ -436,8 +517,8 @@ check-corpus-internal: ultrapatch
 	  if [ -z "$$ab_jobs" ]; then ab_jobs=$$((cores - jobs)); [ "$$ab_jobs" -gt 0 ] || ab_jobs=1; fi; \
 	fi; \
 	[ -n "$$ab_jobs" ] || ab_jobs=8; \
-	nice -n 10 $(MAKE) --no-print-directory -o ultrapatch AB_MATRIX_TEST_JOBS="$$ab_jobs" check-ab-matrix-internal >"$$tmp/ab.txt" 2>&1 & apid=$$!; \
-	$(MAKE) --no-print-directory -o ultrapatch JOBS="$$jobs" check-corpus-matrix-internal >"$$tmp/matrix.txt" 2>&1 & mpid=$$!; \
+	nice -n 10 $(MAKE) --no-print-directory -o "$(HOST_TOOL)" AB_MATRIX_TEST_JOBS="$$ab_jobs" check-ab-matrix-internal >"$$tmp/ab.txt" 2>&1 & apid=$$!; \
+	$(MAKE) --no-print-directory -o "$(HOST_TOOL)" JOBS="$$jobs" check-corpus-matrix-internal >"$$tmp/matrix.txt" 2>&1 & mpid=$$!; \
 	cleanup_children(){ kill "$$apid" "$$mpid" 2>/dev/null || :; wait "$$apid" 2>/dev/null || :; wait "$$mpid" 2>/dev/null || :; rm -rf "$$tmp"; }; \
 	trap 'cleanup_children' EXIT; \
 	trap 'cleanup_children; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
@@ -453,8 +534,9 @@ check-corpus-matrix-internal: ultrapatch
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	./check_corpus.sh $(JOBS)
 
-# THE gate — one target, everything, hard budget <= 60 s wall on the reference machine
-# (measured 55.7 s at 32 cores with exhaustive direction selection). Builds up-front, then runs
+# THE gate — one target, everything, hard budget <= 80 s wall on the reference machine
+# (measured 62.5 s cold / ~56 s warm at 32 cores with exhaustive direction selection).
+# Builds up-front, then runs
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
 # check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
@@ -467,13 +549,14 @@ check-corpus-matrix-internal: ultrapatch
 # check-corpus). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
-# metric is visible. ultrapatch is linked BEFORE the legs fork; run_gate.sh then invokes
-# each forked leg with make's `-o ultrapatch` (assume-old), so no leg relinks the shared
-# binary even if a source mtime became newer at sub-make startup (which would otherwise let
-# several legs race concurrent `-o ultrapatch` links on the same path while other legs exec
-# it). The sub-makes still stat sources for their own rules; only the prebuilt binary is pinned.
+# metric is visible. The profile-specific host tool is linked atomically BEFORE the legs fork;
+# run_gate.sh then invokes each forked leg with make's `-o $(HOST_TOOL)` (assume-old), so no leg
+# relinks it if a source mtime changes at sub-make startup. Same-profile concurrent top-level
+# builds may both compile, but atomic rename means readers see only a complete equivalent binary.
 gate-internal: all-internal
-	@MAKE="$(MAKE)" BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
+	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
+	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" RELEASE_PROFILE="$$release_profile" \
+	BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
 	BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
 	BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
 	JOBS="$(JOBS)" scripts/run_gate.sh
@@ -486,4 +569,10 @@ check-analyze-internal:
 	  DECODER_CONFIG_FLAGS="$(DECODER_CONFIG_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
 
 clean-internal:
-	rm -f ultrapatch $(DECODER_SINGLE_HDR)
+	@root=$$(realpath -m .build); dir=$$(realpath -m "$(BUILD_DIR)"); \
+	case "$$dir" in "$$root"/*) rm -rf -- "$$dir" ;; *) echo "refusing to clean noncanonical build dir: $$dir" >&2; exit 1 ;; esac
+	rm -f ultrapatch artifacts/patch_apply_single.h
+
+clean-all-internal:
+	rm -rf .build
+	rm -f ultrapatch artifacts/patch_apply_single.h

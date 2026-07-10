@@ -4,16 +4,24 @@
 
 # Real one-face product patch metric, shared by gate and A/B compression checks.
 # Usage: scripts/oneface_metrics.sh [encoder] [decoder]
-# Env: FIXTURES, ONEFACE_ROUNDTRIP=1, ONEFACE_WIRE_HASHES=1
+# The encoder is required as argument 1 or ULTRAPATCH; argument 2 defaults to that encoder.
+# Env: ULTRAPATCH, FIXTURES, ONEFACE_ROUNDTRIP=1, ONEFACE_WIRE_HASHES=1
 #      BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT  one-face acceptance caps (AGENTS.md calls this
 #        rule authoritative): enforced only when set (exit nonzero on a breach), skipped for a
 #        bare measurement run when unset — the single enforcement site, mirroring the corpus-leg
 #        ratchets in check_corpus.sh.
 set -eu
 
-ENC="${1:-./ultrapatch}"
+ENC="${1:-${ULTRAPATCH:-}}"
+: "${ENC:?oneface_metrics.sh: pass an encoder or set ULTRAPATCH}"
 DEC="${2:-$ENC}"
 FIX="${FIXTURES:-test-bench/fixtures}"
+
+[ -x "$ENC" ] || { echo "oneface_metrics.sh: encoder is missing or not executable: $ENC" >&2; exit 2; }
+if [ "${ONEFACE_ROUNDTRIP:-0}" != 0 ] && [ ! -x "$DEC" ]; then
+  echo "oneface_metrics.sh: decoder is missing or not executable: $DEC" >&2
+  exit 2
+fi
 
 . "$(dirname "$0")/tempdir.sh"
 

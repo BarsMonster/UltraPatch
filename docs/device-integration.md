@@ -15,8 +15,11 @@ the `PatchApply` state object so the Cortex-M0+ SRAM gate remains meaningful.
 
 The repository also builds `ultrapatch`, a unified host CLI. Its default mode is
 encode, and its `--decode` mode is a reference/debug path that uses the same host
-backend as encoder self-verification. That host CLI is not part of the device
-decoder artifact; embedded integrations include only the decoder header set.
+backend as encoder self-verification. Repository builds place it at
+`.build/<profile-id>/ultrapatch`; `make host-tool-path` prints the exact selected
+path, and Make exports that path to its test processes. That host CLI is not part
+of the device decoder artifact; embedded integrations include only the decoder
+header set.
 
 The decoder owns the whole patch blob: envelope parsing, both CRC gates, the
 apply direction, and the image span are all derived internally from the pushed
@@ -298,6 +301,24 @@ Do not run two decodes concurrently against one flash image. Do not start a new
 patch after a touched error; externally reflash the complete image first.
 
 ## Build-Time Contract
+
+**Repository build profile.** The persistent host executable and its profile
+manifest are isolated beneath `.build/<profile-id>/`. The profile identifier
+covers the host compiler identity and every effective build flag, so changing
+one selects a different output directory instead of silently reusing a stale
+host tool. Use `make host-tool-path` when a repository-built encoder path is
+needed; do not assume `./ultrapatch` or guess a profile directory.
+
+`make check-build-profile` is a separate collision regression for this output
+isolation. Release builds additionally require the exact default GCC, required
+Clang, GNU Arm GCC/binutils, `libc.a`/`libgcc.a` content hashes, and effective
+flags recorded in `toolchains/release-profile.json`. `make gate` validates that
+descriptor before forking its verification legs and reports `release_profile`
+in its consolidated output. An accepted identity, archive, or flag update is a
+deliberate release change and must be reviewed with all footprint, wire, and
+round-trip evidence. The descriptor identifies controlled build inputs; it is
+not a claim that compiler executables or output binaries are byte-for-byte
+reproducible across hosts.
 
 **Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
 build and the decoder TU — the build fails with a clear `#error` without it (the

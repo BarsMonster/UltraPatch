@@ -38,13 +38,18 @@
 # LCG) — no committed binaries. Cases (a) and (c) request its two NAMED golden pins, so they are
 # byte-identical to the check_golden manifest entries by construction.
 #
-# Usage: make check-degrade   (supplies CC + the standalone-decoder TU list/defines; needs ./ultrapatch built)
+# Usage: make check-degrade (supplies the compiler, source lists, and ULTRAPATCH)
 set -u
 
 CC_HOST="${CC:-cc}"
 IMG="${IMAGES:-test-bench/images}"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
+: "${ULTRAPATCH:?check_degrade.sh: ULTRAPATCH not set; invoke through make check-degrade}"
+[ -x "$ULTRAPATCH" ] || {
+  echo "check_degrade.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
+  exit 2
+}
 . "$(dirname "$0")/tempdir.sh"
 
 PREP="$tmp/plan-prep-oracle"
@@ -178,7 +183,7 @@ dpin() {
 # enc <name> -> writes $tmp/<name>.blob, captures DEGRADE line in $tmp/<name>.deg; returns encoder rc
 enc() {
   name=$1
-  DEGRADE_STATS=1 ./ultrapatch "$tmp/${name}_from/watch.bin" "$tmp/${name}_to/watch.bin" "$tmp/$name.blob" \
+  DEGRADE_STATS=1 "$ULTRAPATCH" "$tmp/${name}_from/watch.bin" "$tmp/${name}_to/watch.bin" "$tmp/$name.blob" \
     >/dev/null 2>"$tmp/$name.encerr"
   rc=$?
   grep '^DEGRADE' "$tmp/$name.encerr" > "$tmp/$name.deg" 2>/dev/null || :
@@ -263,7 +268,7 @@ dpin jdeg synth_journal_degrade            # == golden pin (swap 2048 88); fixtu
 if enc jdeg; then
   dj=$(sed -n 's/.*deg_journal=\([0-9]\).*/\1/p' "$tmp/jdeg.deg")
   pn=$(sed -n 's/.*pres_needed=\([0-9]*\).*/\1/p' "$tmp/jdeg.deg")
-  r0=$(dec ./ultrapatch jdeg)
+  r0=$(dec "$ULTRAPATCH" jdeg)
   j_peak=${r0#* }
   [ "$dj" = 1 ] || bad "journal degradation did not engage (deg_journal=$dj, pres_needed=$pn)"
   [ "${r0%% *}" = OK ] || bad "journal-degraded blob did not round-trip ($r0)"
@@ -286,13 +291,13 @@ fi
 # runs (opc_splits_sweep). Assert the split machinery engaged and that the blob round-trips. The
 # corpus round-trip gate only checks round-trips (never asserts the split) and no WINNING plan
 # here ships a split (a cleaner variant wins) — this gate is what actually pins the op-split path.
-if DEGRADE_STATS=1 ./ultrapatch "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watch.bin" "$tmp/opc.blob" \
+if DEGRADE_STATS=1 "$ULTRAPATCH" "$IMG/img_00_n3/watch.bin" "$IMG/img_15_n83/watch.bin" "$tmp/opc.blob" \
      >/dev/null 2>"$tmp/opc.encerr"; then
   opc_sweep=$(sed -n 's/.*opc_splits_sweep=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   opc_win=$(sed -n 's/.* opc_splits=\([0-9][0-9]*\) .*/\1/p' "$tmp/opc.encerr")
   opc_evals=$(sed -n 's/.*plans_evaluated=\([0-9][0-9]*\).*/\1/p' "$tmp/opc.encerr")
   cp "$IMG/img_00_n3/watch.bin" "$tmp/opc.mem"
-  if ./ultrapatch --decode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
+  if "$ULTRAPATCH" --decode "$tmp/opc.mem" "$tmp/opc.blob" >/dev/null 2>&1 && cmp -s "$tmp/opc.mem" "$IMG/img_15_n83/watch.bin"; then rt=OK; else rt=FAIL; fi
   opc_n=$opc_sweep
   [ "${opc_sweep:-0}" -ge 1 ] || bad "OPC op-split never engaged in the plan sweep (opc_splits_sweep=$opc_sweep)"
   [ "$opc_evals" = 10 ] || bad "OPC pair evaluated ${opc_evals:-0} plans (expected 10)"
@@ -313,7 +318,7 @@ if enc dir; then
   # Header uleb #1 is the size-delta; the shared wire helper reports the overlong marker.
   ov=$(python3 "$(dirname "$0")/wire_envelope.py" detect "$tmp/dir.blob" 1)
   natflag=$(sed -n 's/.*natural=\([0-9]\).*/\1/p' "$tmp/dir.deg")
-  r=$(dec ./ultrapatch dir)
+  r=$(dec "$ULTRAPATCH" dir)
   dir_flip=$ov
   [ "$ov" = OVERLONG ] || bad "direction pair did not emit the overlong size-delta uLEB ($ov)"
   [ "$natflag" = 0 ] || bad "encoder reports natural=$natflag for the flipped pair (expected 0)"
@@ -332,7 +337,7 @@ fi
 # =========================================================================================
 dpair rowwin rshift 8192 555 128 6000 32
 if enc rowwin; then
-  r2=$(dec ./ultrapatch rowwin)
+  r2=$(dec "$ULTRAPATCH" rowwin)
   r1=$(dec "$D1" rowwin)
   rw="D2:${r2%% *}_D1:${r1%% *}"
   [ "${r2%% *}" = OK ] || bad "row-window blob did not round-trip on the production D=2 decoder ($r2)"
@@ -352,7 +357,7 @@ fi
 # =========================================================================================
 dpair bigspan highswap 393216 4096 88
 if enc bigspan; then
-  r=$(dec ./ultrapatch bigspan)
+  r=$(dec "$ULTRAPATCH" bigspan)
   bigspan="${r%% *}_j${r#* }"
   [ "${r%% *}" = OK ] || bad "big-span blob did not round-trip ($r)"
   note "(e) big span: roundtrip=${r%% *} journal_peak=${r#* }/$JBUDGET blob=$(wc -c <"$tmp/bigspan.blob")B"

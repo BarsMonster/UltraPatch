@@ -6,7 +6,7 @@
 set -eu
 
 FIX="${FIXTURES:-test-bench/fixtures}"
-ULTRAPATCH="${ULTRAPATCH:-./ultrapatch}"
+: "${ULTRAPATCH:?check_transactional.sh: ULTRAPATCH not set; invoke through make check-malformed}"
 CC="${CC:-gcc}"
 CFLAGS="${CFLAGS:--std=c99 -Wall -Wextra -Werror}"
 base="$FIX/v0_base/watch.bin"

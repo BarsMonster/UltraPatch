@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +67,20 @@ def main() -> int:
     else:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        fd, temp_name = tempfile.mkstemp(
+            dir=out.parent, prefix=f".{out.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as temp:
+                temp.write(text)
+                temp.flush()
+                os.fsync(temp.fileno())
+            os.replace(temp_name, out)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
     return 0
 
 

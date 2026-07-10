@@ -1,5 +1,5 @@
 # Shared temporary directory setup for shell gates. Sets $tmp and cleans it up on
-# normal exit AND on the 60 s-cap kill path. The Makefile cap SIGTERMs the whole
+# normal exit AND on the public-target time-cap kill path. The Makefile cap SIGTERMs the whole
 # process group on overrun; dash does NOT run an EXIT trap for an untrapped fatal
 # signal, so a bare `trap ... EXIT` leaks $tmp in the /bin/sh gate legs. On TERM/INT
 # we clean up, restore the default disposition, and re-raise the same signal so the

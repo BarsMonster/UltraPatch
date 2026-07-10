@@ -11,19 +11,30 @@ on:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container:
+      # Official Ubuntu 26.04 amd64 image. Updating this digest and the
+      # release-profile manifest is an explicit toolchain change.
+      image: ubuntu:26.04@sha256:c6c0067e0e45b7a826eaebb193cef957be28045380963a9b1eeb2a5d3c70a1b9
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates \
+            git \
             gcc \
             gcc-arm-none-eabi \
             binutils-arm-none-eabi \
+            libnewlib-arm-none-eabi \
             make \
-            python3
+            python3 \
+            clang
+
+      - uses: actions/checkout@v4
+
+      - name: Verify build-profile isolation
+        run: make check-build-profile
 
       - name: Run release gate
         run: make gate
@@ -31,10 +42,9 @@ jobs:
       - name: Static analyzer
         run: make check-analyze
 
-      # Second-compiler leg: clang must build warning-free and its encoder must produce
-      # byte-identical blobs (golden manifest) — proves the wire is compiler-independent.
+      # Second-compiler leg: clang must build warning-free and its encoder must match
+      # the frozen golden wire. This is not an executable-binary reproducibility claim.
       - name: Clang build + host checks
         run: |
-          sudo apt-get install -y --no-install-recommends clang
           make CC=clang -B all
-          make check check-malformed check-golden
+          make CC=clang check check-malformed check-golden

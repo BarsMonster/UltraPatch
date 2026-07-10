@@ -5,12 +5,16 @@
 set -u
 
 MAKE_CMD="${MAKE:-make}"
+: "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
+: "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
+[ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
 . "$(dirname "$0")/tempdir.sh"
 rc=0
 
 # The corpus encoder saturates every core by itself, while several other gate legs also encode
 # nontrivial fixtures.  Leave one quarter of the machine to those concurrent legs; otherwise a
-# 32-worker corpus pool oversubscribes the 32-core reference host and approaches the 60 s cap.
+# 32-worker corpus pool oversubscribes the 32-core reference host and needlessly reduces the
+# headroom under the 80 s cap.
 # Most auxiliary legs run at lower CPU priority so they use the reserved cores without preempting
 # the matrix's slow cross-major worker. The two long, mostly single-worker synthetic legs retain
 # normal priority so the matrix cannot starve them. Explicit job overrides remain authoritative.
@@ -30,20 +34,19 @@ LEGS="check-assets-internal:assets.txt:check-assets check-internal:c.txt:check c
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
-  # gate-internal already linked ./ultrapatch before this fork. Pass `-o ultrapatch`
-  # (assume-old) so each forked leg treats the prebuilt binary as up-to-date and never
+  # gate-internal already linked the exact profile-specific host tool before this fork. Pass it
+  # with `-o` (assume-old) so each forked leg treats the prebuilt binary as up-to-date and never
   # relinks it, even if a source mtime is newer at sub-make startup (an edit landing in
-  # the seconds between the pre-fork build and this loop). Without it, several legs that
-  # list ultrapatch as a prerequisite could race concurrent `-o ultrapatch` links on the
-  # same path while other legs exec it (ETXTBSY / half-written exec).
+  # the seconds between the pre-fork build and this loop). The binary itself is atomically
+  # published, but pinning it here also keeps every leg on the exact pre-fork executable.
   if [ "$target" = check-corpus-matrix-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o ultrapatch JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-ab-matrix-internal ]; then
-    nice -n 5 "$MAKE_CMD" --no-print-directory -o ultrapatch AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
+    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
   else
-    nice -n 10 "$MAKE_CMD" --no-print-directory -o ultrapatch "$target" >"$tmp/$file" 2>&1 &
+    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" "$target" >"$tmp/$file" 2>&1 &
   fi
   pids="$pids $!"
 done
@@ -62,13 +65,15 @@ kvs() {
 }
 
 echo "==================== A1 GATE ========================="
+printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
-awk -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" 'NR==2{printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",$1,$2,$3,bt,bd,bb}' "$tmp/a.txt"
+awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" \
+  '/^arm_object_text=/{t=$2}/^arm_object_data=/{d=$2}/^arm_object_bss=/{b=$2}END{if(t!="")printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|arm_linked_integration|ARM linked integration  : '
 awk -F= -v bt="${BASE_ARM_LINKED_TEXT:?}" -v bd="${BASE_ARM_LINKED_DATA:?}" -v bb="${BASE_ARM_LINKED_BSS:?}" '/^arm_linked_text=/{t=$2}/^arm_linked_data=/{d=$2}/^arm_linked_bss=/{b=$2}END{if(t!="")printf "ARM linked text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : '

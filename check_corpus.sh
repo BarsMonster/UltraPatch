@@ -5,7 +5,7 @@
 
 # Fast parallel corpus-matrix + foreign-lineage metrics for the A1 gate.
 #
-# Run from the repository root; needs ./ultrapatch already built. Prints the gate
+# Run from the repository root through Make, or set ULTRAPATCH explicitly. Prints the gate
 # metric lines so the Makefile (or a measurement run) can parse them.
 #
 # Two independent pair sets share ONE parallel pool so the whole leg costs one wall-clock, not
@@ -27,8 +27,8 @@
 # only when the BASE_FULL_TOTAL / BASE_FOREIGN_TOTAL pins are set — the home per-pair and total-size
 # ratchets. Those pins stay unset for a bare measurement run on a deliberately regressing candidate.
 #
-# Encoder/decoder overrides (default ./ultrapatch for both, so the gate path is unchanged):
-#   ULTRAPATCH          encoder binary (accepts <from> <to> <patch>).
+# Encoder/decoder paths:
+#   ULTRAPATCH          required encoder binary (accepts <from> <to> <patch>).
 #   ULTRAPATCH_DECODE   decoder binary (accepts --decode <image> <patch>); defaults to $ULTRAPATCH.
 # Home per-pair size handling (both default off / to the pinned baseline for the gate):
 #   CORPUS_SIZE_BASELINE   TSV to split home pairs against; set to "" to skip the split entirely
@@ -46,11 +46,15 @@ IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
 SIZE_BASE="${CORPUS_SIZE_BASELINE-test-bench/home-size-baseline.tsv}"
 WIRE_BASE="${CORPUS_WIRE_MANIFEST-test-bench/corpus-wire.sha256}"
-UP="${ULTRAPATCH:-./ultrapatch}"
+: "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set; invoke through make check-corpus}"
+UP="$ULTRAPATCH"
 UPD="${ULTRAPATCH_DECODE:-$UP}"
 DUMP="${CORPUS_SIZE_DUMP:-}"
 WIRE_DUMP="${CORPUS_WIRE_DUMP:-}"
 export UP UPD
+
+[ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
+[ -x "$UPD" ] || { echo "check_corpus.sh: decoder is missing or not executable: $UPD" >&2; exit 3; }
 
 # Foreign lineage, pinned release order; adjacent pairs are the update steps. Two contiguous
 # families (2.2.x/2.3.x/3.0.x, then 10.0.x/10.1.x) joined by the cross-major 3.0.3 -> 10.0.0 jump.
@@ -65,7 +69,7 @@ FVERS="2.2.0 2.2.1 2.2.2 2.2.3 2.2.4 2.3.0 2.3.1 3.0.0 3.0.1 3.0.2 3.0.3 10.0.0 
 cm_work() {
   tag=$1; from=$2; to=$3
   d=$(mktemp -d)
-  # Clean this worker's dir on the 60 s-cap kill path too: a mid-matrix SIGTERM would
+  # Clean this worker's dir on the public-target time-cap kill path too: a mid-matrix SIGTERM would
   # otherwise leak up to JOBS of these mktemp dirs. On TERM/INT clean up, restore the
   # default disposition, and re-raise so the worker dies by the signal.
   trap 'rm -rf "$d"' EXIT

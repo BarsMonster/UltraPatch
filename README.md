@@ -50,15 +50,18 @@ repository decoder harnesses use
 CLI:
 
 ```sh
-./ultrapatch [--encode] <from_image> <to_image> <patch>
-./ultrapatch --decode <image> <patch>
-./ultrapatch --help
+tool=$(make -s host-tool-path)
+"$tool" [--encode] <from_image> <to_image> <patch>
+"$tool" --decode <image> <patch>
+"$tool" --help
 ```
 
 `ultrapatch` is intentionally a unified host tool: `--encode` is the default
 mode, and `--decode` applies a patch through the same reference decoder backend
 used for encoder self-verification. The device integration contract remains
-header-only and does not require the host CLI. The encoder takes image file
+header-only and does not require the host CLI. Repository builds isolate the
+tool under `.build/<profile-id>/`; `make host-tool-path` selects the compiler and
+flags requested on that Make invocation. The encoder takes image file
 paths, not image directories; if a same-basename `.elf` sidecar exists next to
 an image, it is used for range extraction. Running `ultrapatch` without
 arguments prints usage and exits nonzero; `--help` and `-h` print the same usage
@@ -67,6 +70,7 @@ text and exit successfully.
 Full release gate:
 
 ```sh
+make check-build-profile
 make gate
 ```
 
@@ -81,7 +85,9 @@ variables when running checks elsewhere. The expected contents are pinned by
 `test-bench/corpus.sha256` and `test-bench/foreign.sha256`; the `check-assets`
 leg of `make gate` runs concurrently with the matrix, so a stale or partial
 corpus still fails the gate deterministically.
-`make gate` also runs `make check-decoder-contract` (source-header-set and
+`make check-build-profile` separately proves concurrent GCC, Clang, and
+alternate-flag builds cannot collide. `make gate` validates the checked release
+profile, then also runs `make check-decoder-contract` (source-header-set and
 generated-single-header/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
@@ -89,7 +95,7 @@ application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
 random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
 representative blobs — any wire drift fails the gate), `make check-degrade`,
 the ARM size/divide/stack gates, the full 256-pair home corpus matrix, and the
-34 foreign pair-directions — all legs run concurrently, ~34 s wall on the
+34 foreign pair-directions — all legs run concurrently, ~63 s cold / ~56 s warm on the
 reference machine.
 qemu-based decode validation was removed permanently (owner decision,
 2026-07-03): too slow for its marginal value — a one-time 260-pair qemu-arm

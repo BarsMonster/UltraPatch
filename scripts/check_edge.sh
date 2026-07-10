@@ -15,7 +15,7 @@
 #
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
-# Usage: check_edge.sh   (needs ./ultrapatch already built)
+# Usage: make check-edge (or set ULTRAPATCH to an executable and run this script directly)
 set -euo pipefail
 
 EXPECTED_CASES=12
@@ -23,7 +23,7 @@ EXPECTED_ROUNDTRIPS=11
 EXPECTED_REFUSALS=1
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ULTRAPATCH="${ULTRAPATCH:-./ultrapatch}"
+: "${ULTRAPATCH:?check_edge.sh: ULTRAPATCH not set; invoke through make check-edge}"
 
 if [ ! -x "$ULTRAPATCH" ]; then
   echo "edge infrastructure failure: $ULTRAPATCH is missing or not executable" >&2
@@ -111,8 +111,8 @@ mkpair fills; gen "$tmp/fills_from/watch.bin" 8192 const 0xFF; gen "$tmp/fills_t
 run_case fills
 
 # --- constant fill, 0x00 -> 0xFF: regression-locks the exact-equivalent LZ chain pruning
-# (this shape was ~18 s before the fix, ~2 s after; a quadratic regression would blow the
-# gate's 60 s execution cap) ---
+# (this shape was ~18 s before the fix, ~2 s after; a quadratic regression would threaten the
+# gate's 80 s execution cap) ---
 mkpair fills_grow; gen "$tmp/fills_grow_from/watch.bin" 8192 const 0x00; gen "$tmp/fills_grow_to/watch.bin" 8192 const 0xFF
 run_case fills_grow
 

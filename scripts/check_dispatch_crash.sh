@@ -27,9 +27,10 @@ fi
 
 . "$script_dir/tempdir.sh"
 
-real_ultrapatch="$PWD/ultrapatch"
+: "${ULTRAPATCH:?check_dispatch_crash.sh: ULTRAPATCH not set; invoke through make}"
+real_ultrapatch="$ULTRAPATCH"
 if [ ! -x "$real_ultrapatch" ]; then
-  echo "dispatch regression infrastructure failure: $real_ultrapatch is missing or not executable" >&2
+  echo "dispatch regression infrastructure failure: ULTRAPATCH is missing or not executable: $real_ultrapatch" >&2
   exit 2
 fi
 

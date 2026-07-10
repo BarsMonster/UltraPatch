@@ -11,7 +11,7 @@ one="$FIX/v1_one_face"
 
 . "$(dirname "$0")/tempdir.sh"
 
-ULTRAPATCH="${ULTRAPATCH:-./ultrapatch}"
+: "${ULTRAPATCH:?check_malformed.sh: ULTRAPATCH not set; invoke through make check-malformed}"
 if [ ! -x "$ULTRAPATCH" ]; then
   echo "malformed infrastructure failure: $ULTRAPATCH is missing or not executable" >&2
   exit 2
