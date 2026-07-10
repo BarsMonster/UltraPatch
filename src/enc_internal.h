@@ -263,6 +263,9 @@ void pair_analysis_free(PairAnalysis *pa);
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
                         Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
+#ifdef SUFFIX_LCP_STATS
+void suffix_lcp_stats_report(void);
+#endif
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);

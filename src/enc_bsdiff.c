@@ -295,27 +295,149 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
 /* ------------------------------------------------------------------------------------- */
 /* bsdiff op generation.                                                                  */
 /* ------------------------------------------------------------------------------------- */
-static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *to, int32_t to_size) {
+enum { SUFFIX_LCP_SEED, SUFFIX_LCP_MID, SUFFIX_LCP_LEAF };
+
+#ifdef SUFFIX_LCP_STATS
+static uint64_t suffix_searches, suffix_compared_bytes;
+static uint64_t suffix_seed_bytes, suffix_mid_bytes, suffix_leaf_bytes;
+
+static inline void suffix_count_byte(int phase) {
+    suffix_compared_bytes++;
+    if (phase == SUFFIX_LCP_SEED) suffix_seed_bytes++;
+    else if (phase == SUFFIX_LCP_MID) suffix_mid_bytes++;
+    else suffix_leaf_bytes++;
+}
+
+void suffix_lcp_stats_report(void) {
+#ifdef SUFFIX_LCP_REFERENCE
+    const char *mode = "reference";
+#else
+    const char *mode = "lcp";
+#endif
+    fprintf(stderr,
+            "SUFFIX_LCP_STATS mode=%s searches=%llu compared_bytes=%llu seed_bytes=%llu mid_bytes=%llu leaf_bytes=%llu\n",
+            mode, (unsigned long long)suffix_searches,
+            (unsigned long long)suffix_compared_bytes, (unsigned long long)suffix_seed_bytes,
+            (unsigned long long)suffix_mid_bytes, (unsigned long long)suffix_leaf_bytes);
+}
+#else
+static inline void suffix_count_byte(int phase) { (void)phase; }
+#endif
+
+static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *to,
+                        int32_t to_size, int phase) {
     int32_t n = from_size < to_size ? from_size : to_size;
     int32_t i;
-    for (i = 0; i < n; i++) if (from[i] != to[i]) break;
+    for (i = 0; i < n; i++) {
+        suffix_count_byte(phase);
+        if (from[i] != to[i]) break;
+    }
     return i;
+}
+
+#ifdef SUFFIX_LCP_REFERENCE
+static int suffix_cmp_reference(const uint8_t *from, int32_t from_size,
+                                const uint8_t *to, int32_t to_size) {
+    int32_t n = from_size < to_size ? from_size : to_size;
+#ifdef SUFFIX_LCP_STATS
+    for (int32_t i = 0; i < n; i++) {
+        suffix_count_byte(SUFFIX_LCP_MID);
+        if (from[i] != to[i]) return (from[i] > to[i]) - (from[i] < to[i]);
+    }
+    return 0;
+#else
+    return memcmp(from, to, (size_t)n);
+#endif
+}
+
+static int32_t suffix_search_reference(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                                       const uint8_t *to, int32_t to_size,
+                                       int32_t begin, int32_t end, int32_t *pos) {
+    if (end - begin < 2) {
+        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size,
+                             SUFFIX_LCP_LEAF);
+        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size,
+                             SUFFIX_LCP_LEAF);
+        if (x > y) { *pos = sa[begin]; return x; }
+        *pos = sa[end]; return y;
+    }
+    int32_t x = begin + (end - begin) / 2;
+    int cmp = suffix_cmp_reference(from + sa[x], from_size - sa[x], to, to_size);
+    if (cmp < 0)
+        return suffix_search_reference(sa, from, from_size, to, to_size, x, end, pos);
+    return suffix_search_reference(sa, from, from_size, to, to_size, begin, x, pos);
 }
 
 static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
                              const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
                              int32_t *pos) {
+#ifdef SUFFIX_LCP_STATS
+    suffix_searches++;
+#endif
+    return suffix_search_reference(sa, from, from_size, to, to_size, begin, end, pos);
+}
+#else
+/* Compare a middle suffix with the query after `skip` bytes already proved equal by both
+ * enclosing suffix-array boundaries. Return the exact LCP as well as the old comparator sign.
+ * Exhausting EITHER operand is deliberately equality: suffix/query prefix exhaustion therefore
+ * keeps taking the begin/left branch exactly like memcmp(min(suffix_len, query_len)). */
+static int suffix_cmp_lcp(const uint8_t *from, int32_t from_size,
+                          const uint8_t *to, int32_t to_size, int32_t skip,
+                          int32_t *lcp) {
+    int32_t n = from_size < to_size ? from_size : to_size;
+    int32_t i = skip;
+    while (i < n) {
+        suffix_count_byte(SUFFIX_LCP_MID);
+        if (from[i] != to[i]) {
+            *lcp = i;
+            return (from[i] > to[i]) - (from[i] < to[i]);
+        }
+        i++;
+    }
+    *lcp = i;
+    return 0;
+}
+
+static int32_t suffix_search_lcp(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                                 const uint8_t *to, int32_t to_size,
+                                 int32_t begin, int32_t end,
+                                 int32_t begin_lcp, int32_t end_lcp, int32_t *pos) {
     if (end - begin < 2) {
-        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
-        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size);
-        if (x > y) { *pos = sa[begin]; return x; }
-        *pos = sa[end]; return y;
+        if (begin_lcp > end_lcp) { *pos = sa[begin]; return begin_lcp; }
+        *pos = sa[end]; return end_lcp;
     }
     int32_t x = begin + (end - begin) / 2;
-    int cmp = memcmp(from + sa[x], to, (size_t)((from_size - sa[x]) < to_size ? (from_size - sa[x]) : to_size));
-    if (cmp < 0) return suffix_search(sa, from, from_size, to, to_size, x, end, pos);
-    return suffix_search(sa, from, from_size, to, to_size, begin, x, pos);
+    int32_t skip = begin_lcp < end_lcp ? begin_lcp : end_lcp, x_lcp;
+    int cmp = suffix_cmp_lcp(from + sa[x], from_size - sa[x], to, to_size, skip, &x_lcp);
+    if (cmp < 0)
+        return suffix_search_lcp(sa, from, from_size, to, to_size,
+                                 x, end, x_lcp, end_lcp, pos);
+    return suffix_search_lcp(sa, from, from_size, to, to_size,
+                             begin, x, begin_lcp, x_lcp, pos);
 }
+
+static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                             const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
+                             int32_t *pos) {
+#ifdef SUFFIX_LCP_STATS
+    suffix_searches++;
+#endif
+    int32_t begin_lcp = matchlen(from + sa[begin], from_size - sa[begin], to, to_size,
+                                 SUFFIX_LCP_SEED);
+    int32_t end_lcp = matchlen(from + sa[end], from_size - sa[end], to, to_size,
+                               SUFFIX_LCP_SEED);
+    return suffix_search_lcp(sa, from, from_size, to, to_size,
+                             begin, end, begin_lcp, end_lcp, pos);
+}
+#endif
+
+#ifdef SUFFIX_LCP_PROBE
+int32_t suffix_lcp_probe_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                                const uint8_t *to, int32_t to_size,
+                                int32_t begin, int32_t end, int32_t *pos) {
+    return suffix_search(sa, from, from_size, to, to_size, begin, end, pos);
+}
+#endif
 
 static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
                            const uint8_t *from, int32_t from_size,

@@ -163,6 +163,9 @@ void plan_prepare_free(PlanPrep *prep) {
 #ifdef OUT_ENVELOPE_STATS
     out_envelope_stats_report();
 #endif
+#ifdef SUFFIX_LCP_STATS
+    suffix_lcp_stats_report();
+#endif
     memset(prep, 0, sizeof(*prep));
 }
 

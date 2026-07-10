@@ -116,6 +116,39 @@ if ! cmp -s "$tmp/out-envelope-new.out" "$tmp/out-envelope-old.out"; then
 fi
 tail -n 1 "$tmp/out-envelope-new.out"
 
+# Exact bsdiff suffix-search oracle. Both binaries validate every result against an independent
+# copy of the legacy recursive min-length memcmp, then byte-compare all query results and complete
+# bsdiff op/payload dumps. Adversaries pin prefix exhaustion as equality/left, adjacent-boundary
+# ties choosing `end`, empty operands, repetitive/long-prefix inputs, and mismatch at the LCP skip.
+SUFFIX_NEW="$tmp/suffix-lcp-new"
+SUFFIX_OLD="$tmp/suffix-lcp-old"
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSUFFIX_LCP_PROBE \
+      test-bench/suffix-lcp-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
+      -o "$SUFFIX_NEW" 2>"$tmp/suffix-lcp-new-build.log"; then
+  echo "check_degrade: suffix-LCP production oracle build failed" >&2
+  sed 's/^/    /' "$tmp/suffix-lcp-new-build.log" >&2; exit 1
+fi
+if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSUFFIX_LCP_PROBE \
+      -DSUFFIX_LCP_REFERENCE test-bench/suffix-lcp-probe.c $ENC_SEAM_SRCS \
+      -Wl,--gc-sections -o "$SUFFIX_OLD" 2>"$tmp/suffix-lcp-old-build.log"; then
+  echo "check_degrade: suffix-LCP reference oracle build failed" >&2
+  sed 's/^/    /' "$tmp/suffix-lcp-old-build.log" >&2; exit 1
+fi
+if ! "$SUFFIX_NEW" >"$tmp/suffix-lcp-new.out" 2>"$tmp/suffix-lcp-new.err"; then
+  echo "check_degrade: suffix-LCP production oracle failed: $(cat "$tmp/suffix-lcp-new.err")" >&2
+  exit 1
+fi
+if ! "$SUFFIX_OLD" >"$tmp/suffix-lcp-old.out" 2>"$tmp/suffix-lcp-old.err"; then
+  echo "check_degrade: suffix-LCP reference oracle failed: $(cat "$tmp/suffix-lcp-old.err")" >&2
+  exit 1
+fi
+if ! cmp -s "$tmp/suffix-lcp-new.out" "$tmp/suffix-lcp-old.out"; then
+  echo "check_degrade: suffix-LCP production/reference mismatch" >&2
+  diff -u "$tmp/suffix-lcp-old.out" "$tmp/suffix-lcp-new.out" | sed -n '1,80p' >&2
+  exit 1
+fi
+tail -n 1 "$tmp/suffix-lcp-new.out"
+
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>
