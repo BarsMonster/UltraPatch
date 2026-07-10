@@ -63,6 +63,9 @@ BASE_ARM_TEXT ?= 6141
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
+# Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
+# environment overrides must never be able to raise or disable this limit.
+override ARM_BSS_HARD_CAP := 12288
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -DCORTEX_M0 -I src
 # The production ARM size gate intentionally measures the static-state wrapper integration
 # used by rcv3_run below. A generic caller-owned PatchApply * wrapper may compile differently;
@@ -119,7 +122,11 @@ check-internal: ultrapatch
 	  BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
 	  scripts/oneface_metrics.sh ./ultrapatch ./ultrapatch
 
-check-arm-internal:
+check-arm-internal: check-arm-measure-internal
+	@MAKE="$(MAKE)" scripts/check_arm_bss_cap.sh
+
+.PHONY: check-arm-measure-internal
+check-arm-measure-internal:
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
@@ -128,6 +135,9 @@ check-arm-internal:
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	if [ "$$3" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
+		echo "ARM .bss hard cap exceeded: $$3 > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
+	fi; \
 	test "$$1" -le "$(BASE_ARM_TEXT)"; \
 	test "$$2" -le "$(BASE_ARM_DATA)"; \
 	test "$$3" -le "$(BASE_ARM_BSS)"; \
