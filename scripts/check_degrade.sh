@@ -62,7 +62,7 @@ if ! "$PREP" test-bench/fixtures/v0_base/watch.bin test-bench/fixtures/v1_one_fa
       "$tmp/prep.blob" >"$tmp/prep.out" 2>"$tmp/prep.err"; then
   echo "check_degrade: plan-preparation oracle failed: $(cat "$tmp/prep.err")" >&2; exit 1
 fi
-grep -q '^PLAN_PREP_ORACLE configs=5 normalized=OK fd=OK raw=OK$' "$tmp/prep.err" || {
+grep -q '^PLAN_PREP_ORACLE configs=5 registry=OK normalized=2 indexes=2 raw_keys=4 indexed=OK fd=OK$' "$tmp/prep.err" || {
   echo "check_degrade: plan-preparation oracle did not report OK" >&2; exit 1; }
 
 SPLIT="$tmp/split-run-probe"

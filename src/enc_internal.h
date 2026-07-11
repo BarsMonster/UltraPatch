@@ -104,11 +104,26 @@ typedef struct {
     int    deg_engaged;
     size_t deg_pres_needed, deg_converted, opc_splits;
 } EncStats;
-typedef struct { int variant, fuzz; } PlanCfg;
 enum { PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11, PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20, PLAN_RAW_N };
+enum { PLAN_DF_UNMASK, PLAN_DF_MASK, PLAN_DF_N };
+enum { PLAN_SPEC_N = 5 };
+/* The ordered plan registry is the sole definition of sweep order and cached preparation.
+ * df selects the normalized input pair; raw_key names the reusable bsdiff result. */
+typedef struct {
+    uint8_t variant, fuzz, df, raw_key;
+} PlanSpec;
+extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
+/* A suffix array belongs to one immutable normalized source and may price any number of targets/
+ * fuzz thresholds. The host owns this lifecycle; no indexed state reaches the decoder. */
+typedef struct {
+    const uint8_t *from;
+    int32_t from_size;
+    int32_t *sa;
+    uint8_t empty_source;
+} BsdiffIndex;
 /* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
 typedef struct {
-    Buf from_df[2], to_df[2];
+    Buf from_df[PLAN_DF_N], to_df[PLAN_DF_N];
     FieldDeltaVec fd;
     OpVec raw[PLAN_RAW_N];
     LdrTargetIndex ldr;
@@ -265,6 +280,9 @@ void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
 void pair_analysis_free(PairAnalysis *pa);
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
                         Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
+void bsdiff_index_build(BsdiffIndex *index, const Buf *from);
+void bsdiff_index_free(BsdiffIndex *index);
+OpVec bsdiff_ops_indexed(const BsdiffIndex *index, const Buf *to, int fuzz);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 #ifdef SUFFIX_LCP_STATS
 void suffix_lcp_stats_report(void);
@@ -363,7 +381,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa);
 void plan_prepare_free(PlanPrep *prep);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
-                       const PlanPrep *prep, PlanCfg cfg);
+                       const PlanPrep *prep, const PlanSpec *spec);
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
 int decode_a1(const char *image_path, const char *patch_path);

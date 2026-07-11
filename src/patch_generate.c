@@ -88,15 +88,11 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
      * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
      * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
      * in-family firmware. */
-    static const PlanCfg PLANS[] = {
-        {0, 11}, {1, 11}, {2, 11}, {1, 6}, {1, 20},
-    };
-    enum { NPLANS = (int)(sizeof(PLANS) / sizeof(PLANS[0])) };
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
     Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1; int best_desc = 0;
     int natural_bestv = -1;
-    unsigned char natural_opc[NPLANS] = {0};
+    unsigned char natural_opc[PLAN_SPEC_N] = {0};
     size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
     size_t plans_evaluated = 0;
     /* The opposite direction is a resource-pressure fallback: admit it only when no natural
@@ -109,10 +105,10 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
         if (pass && bestv >= 0 && !best_st.deg_engaged) break;
         if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
-        for (int v = 0; v < NPLANS; v++) {
+        for (int v = 0; v < PLAN_SPEC_N; v++) {
             if (pass && natural_bestv >= 0 && v != natural_bestv && !natural_opc[v]) continue;
             plans_evaluated++;
-            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, PLANS[v]);
+            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &PLAN_SPECS[v]);
             if (!pass) natural_opc[v] = (unsigned char)(pr.st.opc_splits != 0);
             if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
