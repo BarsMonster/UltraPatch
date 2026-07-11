@@ -38,6 +38,7 @@ CFLAGS += -fdata-sections
 CFLAGS += $(CFLAGS_EXTRA)
 DECODER_CFLAGS = $(CFLAGS) $(DECODER_CONFIG_FLAGS)
 LDFLAGS += -Wl,--gc-sections
+HOST_BACKEND_DEFINES := -D_POSIX_C_SOURCE=200809L
 
 # Host builds are isolated by the compiler identity and every effective build flag. The profile
 # helper emits canonical JSON without workspace paths; its SHA-256 is both the build-directory
@@ -45,7 +46,9 @@ LDFLAGS += -Wl,--gc-sections
 # Clang, or alternate-config invocation never executes whichever shared root binary linked last.
 override UP_PROFILE_CC := $(CC)
 override UP_PROFILE_CLANG := $(CLANG)
-override UP_PROFILE_CFLAGS := $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L
+override UP_PROFILE_ENCODER_CFLAGS := $(CFLAGS)
+override UP_PROFILE_BACKEND_CFLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
+override UP_PROFILE_LINK_CFLAGS := $(CFLAGS)
 override UP_PROFILE_LDFLAGS := $(LDFLAGS)
 override UP_PROFILE_WIRE_FLAGS := $(WIRE_CONFIG_FLAGS)
 override UP_PROFILE_DECODER_FLAGS := $(DECODER_CONFIG_FLAGS)
@@ -56,7 +59,8 @@ override UP_PROFILE_ARM_NM := $(ARM_NM)
 override UP_PROFILE_ARM_FLAGS = $(ARM_DEC_FLAGS)
 override UP_PROFILE_ARM_OBJECT_OPT := $(ARM_OBJECT_OPT)
 override UP_PROFILE_ARM_STACK_OPT := $(ARM_STACK_OPT)
-export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_CFLAGS UP_PROFILE_LDFLAGS
+export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
+export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
 export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
 export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_NM
 export UP_PROFILE_ARM_FLAGS UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
@@ -72,6 +76,8 @@ $(error BUILD_DIR must not be the repository root)
 endif
 override PROFILE_MANIFEST := $(BUILD_DIR)/profile.json
 override HOST_TOOL := $(abspath $(BUILD_DIR))/ultrapatch
+override HOST_OBJ_DIR := $(abspath $(BUILD_DIR))/obj
+override HOST_BUILD_RECIPE := $(abspath $(BUILD_DIR))/host-build.recipe.json
 RELEASE_PROFILE_LOCK ?= toolchains/release-profile.json
 override ULTRAPATCH := $(HOST_TOOL)
 override ULTRAPATCH_DECODE := $(HOST_TOOL)
@@ -93,11 +99,34 @@ GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/enc_internal.h
 # selfcheck, CLI decode, and standalone decoder builds.
 HOST_BACKEND_SRC := src/patch_host_backend.c
 ENC_SEAM_SRCS := $(filter-out src/enc_plan.c,$(ENC_MODULE_SRCS)) $(HOST_BACKEND_SRC) $(DIVSUF)
-ENC_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
 # Standalone host-decoder TU pair + demo defines, shared once by dec_portable, check_degrade's D=1, and all-internal.
 DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
 DEC_DEMO_DEFINES := -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L
-TOOL_SRCS := $(ENC_SRCS)
+TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
+
+# The CLI is built per translation unit under its compiler/flag profile. Encoder and vendored
+# sources use the encoder flags; only the TU that embeds patch_apply.h receives the decoder
+# integration flags. The recipe tag deliberately participates in the build signature so a recipe
+# semantic change can invalidate an otherwise unchanged compiler profile.
+HOST_BUILD_RECIPE_TAG ?= per-tu-v1
+override HOST_ENCODER_SRCS := $(filter-out $(HOST_BACKEND_SRC),$(TOOL_SRCS))
+override HOST_ENCODER_OBJS := $(addprefix $(HOST_OBJ_DIR)/,$(HOST_ENCODER_SRCS:.c=.o))
+override HOST_BACKEND_OBJS := $(addprefix $(HOST_OBJ_DIR)/,$(HOST_BACKEND_SRC:.c=.o))
+override HOST_TOOL_OBJECTS := $(HOST_ENCODER_OBJS) $(HOST_BACKEND_OBJS)
+override HOST_TOOL_DEPFILES := $(HOST_TOOL_OBJECTS:.o=.d)
+
+override UP_BUILD_CC := $(CC)
+override UP_BUILD_ENCODER_SOURCES := $(HOST_ENCODER_SRCS)
+override UP_BUILD_BACKEND_SOURCES := $(HOST_BACKEND_SRC)
+override UP_BUILD_OBJECTS := $(patsubst $(HOST_OBJ_DIR)/%,obj/%,$(HOST_TOOL_OBJECTS))
+override UP_BUILD_ENCODER_FLAGS := $(CFLAGS)
+override UP_BUILD_BACKEND_FLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
+override UP_BUILD_LINK_FLAGS := $(CFLAGS)
+override UP_BUILD_LDFLAGS := $(LDFLAGS)
+override UP_BUILD_RECIPE_TAG := $(HOST_BUILD_RECIPE_TAG)
+export UP_BUILD_CC UP_BUILD_ENCODER_SOURCES UP_BUILD_BACKEND_SOURCES UP_BUILD_OBJECTS
+export UP_BUILD_ENCODER_FLAGS UP_BUILD_BACKEND_FLAGS UP_BUILD_LINK_FLAGS UP_BUILD_LDFLAGS
+export UP_BUILD_RECIPE_TAG
 
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
@@ -222,7 +251,8 @@ override RELEASE_GATE_FIXED_VARS := \
 	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS LDFLAGS ARM_DEC_FLAGS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
-	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS ENC_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
+	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
+	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
 	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
 	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS
 override RELEASE_GATE_UNSET_VARS := \
@@ -272,13 +302,42 @@ check-wire-config-probe-internal: scripts/check_wire_config.sh scripts/gen_singl
 	  SINGLE_DECODER_CFLAGS="$(filter-out -Isrc,$(DECODER_CFLAGS))" \
 	  ARM_CC="$(ARM_CC)" ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" scripts/check_wire_config.sh
 
-$(HOST_TOOL): $(TOOL_SRCS) $(GEN_HDR) $(APPLY_HDR) $(NVM_EMU) $(PROFILE_MANIFEST)
+.PHONY: FORCE
+FORCE:
+
+$(HOST_BUILD_RECIPE): FORCE Makefile scripts/write_build_recipe.py $(PROFILE_MANIFEST) | profile-check
+	@python3 scripts/write_build_recipe.py "$@"
+
+$(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
+                                     $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
+	@mkdir -p "$(dir $@)"
+	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
+	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
+	$(CC) $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES) -MMD -MP -MF "$$dep" -MT "$@" \
+		-c "$<" -o "$$obj"; \
+	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
+
+$(HOST_OBJ_DIR)/%.o: %.c Makefile $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
+	@mkdir -p "$(dir $@)"
+	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
+	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
+	$(CC) $(CFLAGS) -MMD -MP -MF "$$dep" -MT "$@" \
+		-c "$<" -o "$$obj"; \
+	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
+
+-include $(HOST_TOOL_DEPFILES)
+
+$(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
 	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
 	@mkdir -p "$(dir $(HOST_TOOL))"
 	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
 	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
 	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	$(CC) $(DECODER_CFLAGS) -D_POSIX_C_SOURCE=200809L $(TOOL_SRCS) $(LDFLAGS) -o "$$tmp"; \
+	$(CC) $(CFLAGS) $(HOST_TOOL_OBJECTS) $(LDFLAGS) -o "$$tmp"; \
 	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
 	@echo "host_tool=$(HOST_TOOL)"
 

@@ -66,7 +66,7 @@
         "version": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0"
       },
       "flags": {
-        "cflags": [
+        "backend_cflags": [
           "-std=c99",
           "-I.",
           "-Isrc",
@@ -91,15 +91,51 @@
           "-DPATCH_IMAGE_BASE=0u",
           "-DPATCH_IMAGE_CAPACITY=67108864u"
         ],
+        "encoder_cflags": [
+          "-std=c99",
+          "-I.",
+          "-Isrc",
+          "-Ivendor/libdivsufsort",
+          "-DCORTEX_M0",
+          "-g",
+          "-Wall",
+          "-Wextra",
+          "-Wdouble-promotion",
+          "-Wfloat-equal",
+          "-Wformat=2",
+          "-Wshadow",
+          "-Werror",
+          "-O2",
+          "-ffunction-sections",
+          "-fdata-sections"
+        ],
         "ldflags": [
           "-Wl,--gc-sections"
+        ],
+        "link_driver_flags": [
+          "-std=c99",
+          "-I.",
+          "-Isrc",
+          "-Ivendor/libdivsufsort",
+          "-DCORTEX_M0",
+          "-g",
+          "-Wall",
+          "-Wextra",
+          "-Wdouble-promotion",
+          "-Wfloat-equal",
+          "-Wformat=2",
+          "-Wshadow",
+          "-Werror",
+          "-O2",
+          "-ffunction-sections",
+          "-fdata-sections"
         ],
         "wire_config": [
           "-DCORTEX_M0"
         ]
       }
     },
-    "schema": 1
+    "schema": 2
   },
-  "schema": 1
+  "schema": 2
 }

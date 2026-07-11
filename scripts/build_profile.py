@@ -19,7 +19,7 @@ import tempfile
 from typing import Any
 
 
-SCHEMA = 1
+SCHEMA = 2
 IMMUTABLE_OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 ABSOLUTE_PATH_RE = re.compile(r"(?:^|[\s=,:;(])/(?!/)[^\s,;)]*")
 
@@ -102,7 +102,9 @@ def host_payload() -> dict[str, Any]:
     return {
         "compiler": tool_identity("UP_PROFILE_CC"),
         "flags": {
-            "cflags": env_words("UP_PROFILE_CFLAGS"),
+            "encoder_cflags": env_words("UP_PROFILE_ENCODER_CFLAGS"),
+            "backend_cflags": env_words("UP_PROFILE_BACKEND_CFLAGS"),
+            "link_driver_flags": env_words("UP_PROFILE_LINK_CFLAGS"),
             "decoder_config": env_words("UP_PROFILE_DECODER_FLAGS"),
             "ldflags": env_words("UP_PROFILE_LDFLAGS"),
             "wire_config": env_words("UP_PROFILE_WIRE_FLAGS"),
@@ -238,7 +240,7 @@ def load_lock(path: Path) -> dict[str, Any]:
         raise ProfileError("release profile lock must be a JSON object")
     if set(value) != {"schema", "container", "profile"} or value["schema"] != SCHEMA:
         raise ProfileError(
-            "release profile lock must contain exactly schema=1, container, and profile"
+            f"release profile lock must contain exactly schema={SCHEMA}, container, and profile"
         )
     container = value["container"]
     if not isinstance(container, str) or not IMMUTABLE_OCI_RE.fullmatch(container):

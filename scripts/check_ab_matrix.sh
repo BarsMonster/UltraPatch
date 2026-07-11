@@ -22,6 +22,7 @@ JOBS="${AB_MATRIX_TEST_JOBS:-8}"
 mkdir -p "$tmp/candidate/scripts"
 cp "$ROOT/Makefile" "$tmp/candidate/"
 cp "$ROOT/scripts/build_profile.py" "$tmp/candidate/scripts/"
+cp "$ROOT/scripts/write_build_recipe.py" "$tmp/candidate/scripts/"
 cp -R "$ROOT/src" "$ROOT/vendor" "$tmp/candidate/"
 
 # RC_S_BIT_RATE is shared by the encoder and decoder. Changing it creates a valid, intentionally
