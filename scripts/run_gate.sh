@@ -147,10 +147,18 @@ require_prefix package.txt corpus_package "OK ("
 require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus.sha256"
 require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/foreign.sha256"
 require_exact malformed.txt malformed_rejects 29
-require_exact e.txt edge_cases 12
-require_exact e.txt edge_roundtrips 11
+require_exact e.txt edge_cases 16
+require_exact e.txt edge_roundtrips 15
 require_exact e.txt edge_refusals 1
 require_exact e.txt edge_failures 0
+require_uint e.txt edge_alt_diff_16k_encode_cpu_ms
+require_uint e.txt edge_alt_diff_32k_encode_cpu_ms
+require_uint_le e.txt edge_alt_diff_64k_encode_cpu_ms 4999
+require_uint_le e.txt edge_alt_diff_256k_encode_cpu_ms 19999
+require_uint e.txt edge_alt_diff_16k_encode_wall_ms
+require_uint e.txt edge_alt_diff_32k_encode_wall_ms
+require_uint e.txt edge_alt_diff_64k_encode_wall_ms
+require_uint e.txt edge_alt_diff_256k_encode_wall_ms
 require_exact g.txt golden_wire "OK ($release_golden_blobs blobs)"
 require_exact dec_contract.txt decoder_contract OK
 require_prefix dec_contract.txt decoder_portable "OK ("
@@ -168,6 +176,7 @@ for key in degrade_journal_peak degrade_opc_splits degrade_direction degrade_row
 done
 require_exact dg.txt degrade_packed_preserve OK
 require_exact dg.txt degrade_packed_correction OK
+require_exact dg.txt split_run_budget OK
 require_exact dg.txt degrade_cases 7
 require_exact dg.txt degrade_fail 0
 
@@ -224,6 +233,8 @@ kvs 'inventory.txt|release_inventory|release inventory        : '
 kvs 'package.txt|corpus_package|corpus package          : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
+awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
+awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 kvs 'release_gate.txt|release_gate_contract|release gate contract   : '

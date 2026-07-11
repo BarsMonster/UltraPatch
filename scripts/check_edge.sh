@@ -18,8 +18,8 @@
 # Usage: make check-edge (or set ULTRAPATCH to an executable and run this script directly)
 set -euo pipefail
 
-EXPECTED_CASES=12
-EXPECTED_ROUNDTRIPS=11
+EXPECTED_CASES=16
+EXPECTED_ROUNDTRIPS=15
 EXPECTED_REFUSALS=1
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,8 +50,10 @@ controlled_encoder_refusal() {
   grep -Fxq 'patch_generate: no feasible plan: every config exceeds a decoder resource cap for this pair' "$err"
 }
 
-run_case() { # run_case <name>  (dirs already populated with watch.bin)
+run_case() { # run_case <name> [cpu-limit-ms] [wall-deadline-seconds]  (dirs contain watch.bin)
   name=$1
+  cpu_limit_ms=${2:-0}
+  wall_deadline=${3:-0}
   cases=$((cases + 1))
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
@@ -60,10 +62,33 @@ run_case() { # run_case <name>  (dirs already populated with watch.bin)
     exit 2
   fi
   status=0
-  if "$ULTRAPATCH" "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
-    :
+  if [ "$wall_deadline" -gt 0 ]; then
+    start_ns=$(date +%s%N)
+    TIMEFORMAT=%U
+    if { time timeout "${wall_deadline}s" "$ULTRAPATCH" "$from" "$to" "$blob" \
+         >/dev/null 2>"$tmp/$name.encerr"; } 2>"$tmp/$name.cpu"; then
+      :
+    else
+      status=$?
+    fi
   else
-    status=$?
+    if "$ULTRAPATCH" "$from" "$to" "$blob" >/dev/null 2>"$tmp/$name.encerr"; then
+      :
+    else
+      status=$?
+    fi
+  fi
+  if [ "$wall_deadline" -gt 0 ]; then
+    end_ns=$(date +%s%N)
+    wall_ms=$(( (end_ns - start_ns) / 1000000 ))
+    cpu_ms=$(awk '{ printf "%u", $1 * 1000 }' "$tmp/$name.cpu")
+    printf 'edge_%s_encode_cpu_ms=%u\n' "$name" "$cpu_ms"
+    printf 'edge_%s_encode_wall_ms=%u\n' "$name" "$wall_ms"
+    if [ "$status" -eq 0 ] && [ "$cpu_limit_ms" -gt 0 ] &&
+       [ "$cpu_ms" -ge "$cpu_limit_ms" ]; then
+      echo "edge FAILURE: $name used ${cpu_ms}ms CPU (limit <${cpu_limit_ms}ms)" >&2
+      failures=$((failures + 1))
+    fi
   fi
   if [ "$status" -eq 0 ]; then
     cp "$from" "$tmp/$name.mem"
@@ -123,6 +148,26 @@ run_case rand_mut
 
 mkpair rand_unrel; gen "$tmp/rand_unrel_from/watch.bin" 49152 rand 44; gen "$tmp/rand_unrel_to/watch.bin" 49152 rand 55
 run_case rand_unrel
+
+# --- alternating one-byte deltas: bounds split_nonzero_diff_runs' triangular recurrence ---
+# The source is deterministic random data and every even target byte differs by one, yielding
+# valid, self-verifying firmware pairs rather than an isolated microbenchmark. The 64/256 KiB
+# deadlines pin the production targets; the smaller cases make scaling regressions visible.
+mkpair alt_diff_16k; gen "$tmp/alt_diff_16k_from/watch.bin" 16384 rand 901
+gen "$tmp/alt_diff_16k_to/watch.bin" 0 alternate "$tmp/alt_diff_16k_from/watch.bin"
+run_case alt_diff_16k 0 20
+
+mkpair alt_diff_32k; gen "$tmp/alt_diff_32k_from/watch.bin" 32768 rand 901
+gen "$tmp/alt_diff_32k_to/watch.bin" 0 alternate "$tmp/alt_diff_32k_from/watch.bin"
+run_case alt_diff_32k 0 20
+
+mkpair alt_diff_64k; gen "$tmp/alt_diff_64k_from/watch.bin" 65536 rand 901
+gen "$tmp/alt_diff_64k_to/watch.bin" 0 alternate "$tmp/alt_diff_64k_from/watch.bin"
+run_case alt_diff_64k 5000 20
+
+mkpair alt_diff_256k; gen "$tmp/alt_diff_256k_from/watch.bin" 262144 rand 901
+gen "$tmp/alt_diff_256k_to/watch.bin" 0 alternate "$tmp/alt_diff_256k_from/watch.bin"
+run_case alt_diff_256k 20000 40
 
 # --- non-ARM structured data (text) ---
 mkpair text; gen "$tmp/text_from/watch.bin" 40000 text

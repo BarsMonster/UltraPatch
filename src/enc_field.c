@@ -499,8 +499,21 @@ static uint64_t split_diff_bits(const SplitScratch *sc, const Run *runs,
  * exact raw geometry code lengths. */
 enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
-void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
-                             const Buf *from, const Buf *to) {
+/* Bound the quadratic inner recurrence across one candidate plan. Instrumenting the ordinary
+ * release corpus plus the preexisting one-face, edge, degradation, and golden workloads found a
+ * high-water mark of 7,489,853 candidate transitions in one plan call. (The adversarial timing
+ * fixtures added with this bound are intentionally outside that acceptance workload.) Four times
+ * the high-water is 29,959,412; rounding up gives this 2^25 budget (above the 2^20 minimum).
+ * T(8191)=33,550,336 fits while T(8192)=33,558,528 does not, pinning the boundary arithmetic. */
+#define SPLIT_TRANSITION_BUDGET UINT64_C(33554432)
+_Static_assert(UINT64_C(8191) * 8192u / 2u <= SPLIT_TRANSITION_BUDGET,
+               "split transition budget lower boundary");
+_Static_assert(UINT64_C(8192) * 8193u / 2u > SPLIT_TRANSITION_BUDGET,
+               "split transition budget upper boundary");
+
+static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
+                                           const Buf *from, const Buf *to,
+                                           uint64_t transitions_left) {
     uint8_t L0[256], L1[256];
     LitSeedTrees seeds;
     uint8_t *payload = ops->payload;
@@ -525,6 +538,17 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
             tp += o->diff_len + o->extra_len;
             continue;
         }
+        /* nr cannot exceed the ceiling of half the int32 diff length on alternating input, so this
+         * uint64_t product is bounded. An over-budget op remains byte-for-byte in the plan;
+         * later small ops may still spend the unchanged remainder. */
+        uint64_t transitions = (uint64_t)nr * (nr + 1u) / 2u;
+        if (transitions > transitions_left) {
+            opvec_push(&out, *o);
+            free(runs);
+            tp += o->diff_len + o->extra_len;
+            continue;
+        }
+        transitions_left -= transitions;
         /* The historical DP re-priced every (segment start, split run) pair with a fresh
          * op_proxy_bits walk over the diff bytes -- O(nr^2 * diff_len) time and an O(nr^2)
          * state table, quadratic-cubic on scattered-diff inputs (the stress_journal_scatter
@@ -605,6 +629,19 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
     free(ops->v);
     *ops = out;
 }
+
+void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
+                             const Buf *from, const Buf *to) {
+    split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
+}
+
+#ifdef SPLIT_WORK_PROBE
+void split_nonzero_diff_runs_probe(const EncCtx *ctx, OpVec *ops,
+                                   const Buf *from, const Buf *to,
+                                   uint64_t transitions) {
+    split_nonzero_diff_runs_budget(ctx, ops, from, to, transitions);
+}
+#endif
 
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,

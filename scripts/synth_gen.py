@@ -9,7 +9,8 @@
 #
 # Subcommands (path args first so the shell wrappers stay one-liners):
 #   img  <path> <size> <mode> [args...]     size-based single image (check_edge)
-#       rand <seed> | const <byte> | text | mutate <src> <seed> <permille> | insert <src> <n> <seed>
+#       rand <seed> | const <byte> | text | mutate <src> <seed> <permille> |
+#       alternate <src> | insert <src> <n> <seed>
 #   role <path> <from|to> <mode> [args...]  role-derived single image (check_degrade); a pair is
 #                                           reproducible from its parameters alone
 #       rand <n> <seed> | swap <H> <seed> | rshift <n> <seed> <a> <b> <k> | highswap <lo> <M> <seed>
@@ -40,6 +41,11 @@ def img(size, mode, a):  # size-based (check_edge): fixed-size images and deriva
         for i in range(len(src)):
             if (next(r) * 4) % 1000 < permille:
                 src[i] ^= next(r) or 1
+        return bytes(src[:size]) if size else bytes(src)
+    if mode == "alternate":
+        src = bytearray(open(a[0], "rb").read())
+        for i in range(0, len(src), 2):
+            src[i] ^= 1
         return bytes(src[:size]) if size else bytes(src)
     if mode == "insert":
         src = open(a[0], "rb").read()
