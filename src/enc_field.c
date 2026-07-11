@@ -29,14 +29,7 @@ void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t
     idx->back = (uint16_t *)xcalloc(idx->nwords ? idx->nwords : 1u, sizeof(*idx->back));
     idx->source = source;
     idx->source_size = source_size;
-#ifdef LDR_INDEX_STATS
-    extern uint64_t ldr_index_builds, ldr_index_build_halfwords;
-    ldr_index_builds++;
-#endif
     for (uint32_t a = 0; a + 2u <= source_size; a += 2u) {
-#ifdef LDR_INDEX_STATS
-        ldr_index_build_halfwords++;
-#endif
         uint16_t up = rc_u16le(source + a);
         if (!rc_thumb_ldr_lit(up)) continue;
         uint32_t t = (uint32_t)rc_ldr_target((int32_t)a, (int32_t)(up & 0xffu));
@@ -52,45 +45,13 @@ void ldr_target_index_free(LdrTargetIndex *idx) {
     memset(idx, 0, sizeof(*idx));
 }
 
-#ifdef LDR_INDEX_STATS
-uint64_t ldr_index_builds, ldr_index_build_halfwords;
-uint64_t ldr_index_queries, ldr_index_old_scan_halfwords;
-
-static int old_op_ldr_targets(const uint8_t *frm, int32_t fp0, int32_t dl,
-                              uint32_t from_size, uint32_t fpk) {
-    if (fpk + 4u > from_size || !rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
-    for (int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2) {
-        ldr_index_old_scan_halfwords++;
-        uint16_t up = rc_u16le(frm + a);
-        if (rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
-    }
-    return 0;
-}
-
-void ldr_target_index_stats_report(void) {
-    fprintf(stderr,
-            "LDR_INDEX_STATS builds=%llu build_halfwords=%llu queries=%llu old_scan_halfwords=%llu\n",
-            (unsigned long long)ldr_index_builds,
-            (unsigned long long)ldr_index_build_halfwords,
-            (unsigned long long)ldr_index_queries,
-            (unsigned long long)ldr_index_old_scan_halfwords);
-}
-#endif
-
 int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk) {
-#ifdef LDR_INDEX_STATS
-    ldr_index_queries++;
-#endif
     int hit = 0;
     if (fpk <= idx->source_size && idx->source_size - fpk >= 4u &&
         rc_ldr_target_in_op(fp0, dl, fpk)) {
         uint16_t back = idx->back[fpk >> 2];
         hit = back && (int32_t)(fpk - back) >= fp0;
     }
-#ifdef LDR_INDEX_STATS
-    if (hit != old_op_ldr_targets(idx->source, fp0, dl, idx->source_size, fpk))
-        die("LDR target index mismatch");
-#endif
     return hit;
 }
 

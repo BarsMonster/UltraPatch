@@ -284,17 +284,11 @@ void bsdiff_index_build(BsdiffIndex *index, const Buf *from);
 void bsdiff_index_free(BsdiffIndex *index);
 OpVec bsdiff_ops_indexed(const BsdiffIndex *index, const Buf *to, int fuzz);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
-#ifdef SUFFIX_LCP_STATS
-void suffix_lcp_stats_report(void);
-#endif
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
 void ldr_target_index_free(LdrTargetIndex *idx);
 int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk);
-#ifdef LDR_INDEX_STATS
-void ldr_target_index_stats_report(void);
-#endif
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
              const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
              const uint8_t *diff, int32_t fp0, int32_t dl);
@@ -357,12 +351,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                          const CandArena *cands, const uint8_t *ncand,
                          const OCandArena *ocands, const uint8_t *nocand,
                          const PriceTab *pt);
-#ifdef SPAN_DEQUE_STATS
-void span_deque_stats_report(void);
-#endif
-#ifdef OUT_ENVELOPE_STATS
-void out_envelope_stats_report(void);
-#endif
 void merge_adjacent_spans(TokenVec *tv);
 int fit_k_tokens(const TokenVec *tv);
 int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd);

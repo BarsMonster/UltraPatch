@@ -297,41 +297,12 @@ void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
 /* ------------------------------------------------------------------------------------- */
 /* bsdiff op generation.                                                                  */
 /* ------------------------------------------------------------------------------------- */
-enum { SUFFIX_LCP_SEED, SUFFIX_LCP_MID, SUFFIX_LCP_LEAF };
-
-#ifdef SUFFIX_LCP_STATS
-static uint64_t suffix_searches, suffix_compared_bytes;
-static uint64_t suffix_seed_bytes, suffix_mid_bytes, suffix_leaf_bytes;
-
-static inline void suffix_count_byte(int phase) {
-    suffix_compared_bytes++;
-    if (phase == SUFFIX_LCP_SEED) suffix_seed_bytes++;
-    else if (phase == SUFFIX_LCP_MID) suffix_mid_bytes++;
-    else suffix_leaf_bytes++;
-}
-
-void suffix_lcp_stats_report(void) {
-#ifdef SUFFIX_LCP_REFERENCE
-    const char *mode = "reference";
-#else
-    const char *mode = "lcp";
-#endif
-    fprintf(stderr,
-            "SUFFIX_LCP_STATS mode=%s searches=%llu compared_bytes=%llu seed_bytes=%llu mid_bytes=%llu leaf_bytes=%llu\n",
-            mode, (unsigned long long)suffix_searches,
-            (unsigned long long)suffix_compared_bytes, (unsigned long long)suffix_seed_bytes,
-            (unsigned long long)suffix_mid_bytes, (unsigned long long)suffix_leaf_bytes);
-}
-#else
-static inline void suffix_count_byte(int phase) { (void)phase; }
-#endif
 
 static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *to,
-                        int32_t to_size, int phase) {
+                        int32_t to_size) {
     int32_t n = from_size < to_size ? from_size : to_size;
     int32_t i;
     for (i = 0; i < n; i++) {
-        suffix_count_byte(phase);
         if (from[i] != to[i]) break;
     }
     return i;
@@ -341,25 +312,15 @@ static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *t
 static int suffix_cmp_reference(const uint8_t *from, int32_t from_size,
                                 const uint8_t *to, int32_t to_size) {
     int32_t n = from_size < to_size ? from_size : to_size;
-#ifdef SUFFIX_LCP_STATS
-    for (int32_t i = 0; i < n; i++) {
-        suffix_count_byte(SUFFIX_LCP_MID);
-        if (from[i] != to[i]) return (from[i] > to[i]) - (from[i] < to[i]);
-    }
-    return 0;
-#else
     return memcmp(from, to, (size_t)n);
-#endif
 }
 
 static int32_t suffix_search_reference(const int32_t *sa, const uint8_t *from, int32_t from_size,
                                        const uint8_t *to, int32_t to_size,
                                        int32_t begin, int32_t end, int32_t *pos) {
     if (end - begin < 2) {
-        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size,
-                             SUFFIX_LCP_LEAF);
-        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size,
-                             SUFFIX_LCP_LEAF);
+        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
+        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size);
         if (x > y) { *pos = sa[begin]; return x; }
         *pos = sa[end]; return y;
     }
@@ -373,9 +334,6 @@ static int32_t suffix_search_reference(const int32_t *sa, const uint8_t *from, i
 static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
                              const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
                              int32_t *pos) {
-#ifdef SUFFIX_LCP_STATS
-    suffix_searches++;
-#endif
     return suffix_search_reference(sa, from, from_size, to, to_size, begin, end, pos);
 }
 #else
@@ -389,7 +347,6 @@ static int suffix_cmp_lcp(const uint8_t *from, int32_t from_size,
     int32_t n = from_size < to_size ? from_size : to_size;
     int32_t i = skip;
     while (i < n) {
-        suffix_count_byte(SUFFIX_LCP_MID);
         if (from[i] != to[i]) {
             *lcp = i;
             return (from[i] > to[i]) - (from[i] < to[i]);
@@ -421,13 +378,8 @@ static int32_t suffix_search_lcp(const int32_t *sa, const uint8_t *from, int32_t
 static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
                              const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
                              int32_t *pos) {
-#ifdef SUFFIX_LCP_STATS
-    suffix_searches++;
-#endif
-    int32_t begin_lcp = matchlen(from + sa[begin], from_size - sa[begin], to, to_size,
-                                 SUFFIX_LCP_SEED);
-    int32_t end_lcp = matchlen(from + sa[end], from_size - sa[end], to, to_size,
-                               SUFFIX_LCP_SEED);
+    int32_t begin_lcp = matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
+    int32_t end_lcp = matchlen(from + sa[end], from_size - sa[end], to, to_size);
     return suffix_search_lcp(sa, from, from_size, to, to_size,
                              begin, end, begin_lcp, end_lcp, pos);
 }

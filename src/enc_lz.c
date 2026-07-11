@@ -388,31 +388,6 @@ typedef struct {
     uint32_t price;
 } SpanMinQ;
 
-#ifdef SPAN_DEQUE_STATS
-static uint64_t span_boot_calls, span_old_evals, span_direct_evals;
-static uint64_t span_dq_pushes, span_dq_pop_front, span_dq_pop_back, span_dq_queries;
-
-void span_deque_stats_report(void) {
-    fprintf(stderr,
-            "SPAN_DEQUE_STATS calls=%llu old_evals=%llu direct_evals=%llu pushes=%llu pop_front=%llu pop_back=%llu queries=%llu\n",
-            (unsigned long long)span_boot_calls, (unsigned long long)span_old_evals,
-            (unsigned long long)span_direct_evals, (unsigned long long)span_dq_pushes,
-            (unsigned long long)span_dq_pop_front, (unsigned long long)span_dq_pop_back,
-            (unsigned long long)span_dq_queries);
-}
-#endif
-
-#ifdef OUT_ENVELOPE_STATS
-static uint64_t out_old_attempts, out_envelope_attempts, out_old_ugg_calls, out_price_calls;
-
-void out_envelope_stats_report(void) {
-    fprintf(stderr,
-            "OUT_ENVELOPE_STATS old_attempts=%llu envelope_attempts=%llu old_ugg_calls=%llu price_calls=%llu\n",
-            (unsigned long long)out_old_attempts, (unsigned long long)out_envelope_attempts,
-            (unsigned long long)out_old_ugg_calls, (unsigned long long)out_price_calls);
-}
-#endif
-
 #ifdef OUT_ENVELOPE_PROBE
 uint64_t out_envelope_probe_last_cost;
 #endif
@@ -458,12 +433,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             pool_n += cap;
             lo = hi + 1u;
         }
-#ifdef SPAN_DEQUE_STATS
-        span_boot_calls++;
-        for (size_t j = 0; j <= n; j++)
-            if (j == n || ncand[j] || (nocand && nocand[j]))
-                span_old_evals += j > 8u ? (j < maxrun ? j : maxrun) - 8u : 0u;
-#endif
         cost[n] = 0;
         for (size_t ri = n; ri-- > 0;) {
             crow -= ncand[ri];
@@ -472,9 +441,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             size_t lim = n < ri + maxrun ? n : ri + maxrun;
             size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
             for (size_t j = ri + 1; j <= dense_end; j++) {
-#ifdef SPAN_DEQUE_STATS
-                span_old_evals++; span_direct_evals++;
-#endif
                 uint64_t c = PR_SCALE + (uint64_t)slen[j - ri] + (span_lit[j] - span_lit[ri]) + cost[j];
                 if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
             }
@@ -483,9 +449,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                 size_t upper = ri + q->hi < n ? ri + q->hi : n;
                 while (q->count && sq_pos[q->off + q->head] > upper) {
                     q->head = (q->head + 1u) % q->cap; q->count--;
-#ifdef SPAN_DEQUE_STATS
-                    span_dq_pop_front++;
-#endif
                 }
                 size_t j = ri + q->lo;
                 if (j <= n && (j == n || ncand[j] || (nocand && nocand[j])) && cost[j] < INF) {
@@ -498,23 +461,14 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                         size_t bj = sq_pos[q->off + bi];
                         if (cost[bj] + span_lit[bj] < base) break;
                         q->count--;
-#ifdef SPAN_DEQUE_STATS
-                        span_dq_pop_back++;
-#endif
                     }
                     size_t at = (q->head + q->count) % q->cap;
                     sq_pos[q->off + at] = j; q->count++;
-#ifdef SPAN_DEQUE_STATS
-                    span_dq_pushes++;
-#endif
                 }
                 if (!q->count) continue;
                 j = sq_pos[q->off + q->head];
                 uint64_t c = PR_SCALE + (uint64_t)q->price +
                              (span_lit[j] - span_lit[ri]) + cost[j];
-#ifdef SPAN_DEQUE_STATS
-                span_dq_queries++;
-#endif
                 if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
             }
             for (int ci = 0; ci < ncand[ri]; ci++) {
@@ -551,9 +505,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             glo_price = (uint32_t *)xmalloc(((size_t)max_out_len + 1u) * sizeof(*glo_price));
             for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= max_out_len; l++) {
                 glo_price[l] = ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
-#ifdef OUT_ENVELOPE_STATS
-                out_price_calls++;
-#endif
             }
         }
     }
@@ -666,15 +617,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
 #ifndef OUT_ENVELOPE_REFERENCE
         int out_nenv = 0, out_covered = (int)RC_OUTMATCH_MIN - 1;
         int32_t out_from[OC_MAX], out_to[OC_MAX], out_pos[OC_MAX];
-#ifdef OUT_ENVELOPE_STATS
-        uint64_t old_out_row_attempts = 0;
-#endif
         for (int cix = 0, nout = pt->out_en && orow ? no : 0; cix < nout; cix++) {
             int32_t top = orow[cix].len;
-#ifdef OUT_ENVELOPE_STATS
-            if (top >= (int32_t)RC_OUTMATCH_MIN)
-                old_out_row_attempts += (uint32_t)(top - (int32_t)RC_OUTMATCH_MIN + 1);
-#endif
             if (top <= out_covered) continue;
             int32_t begin = out_covered + 1;
             if (begin < (int32_t)RC_OUTMATCH_MIN) begin = (int32_t)RC_OUTMATCH_MIN;
@@ -726,10 +670,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                 }
             }
 #else
-#ifdef OUT_ENVELOPE_STATS
-            out_old_attempts += old_out_row_attempts;
-            out_old_ugg_calls += old_out_row_attempts;
-#endif
             uint64_t obase = ci + out_extra[h] + pt->opos_avg;
             for (int oe = 0; oe < out_nenv; oe++) {
                 int32_t opos = out_pos[oe];
@@ -739,9 +679,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                     size_t jb = j * 4 + (size_t)hm;
                     relax2(cost, rep, via, vh, jb, c, ri,
                            (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
-#ifdef OUT_ENVELOPE_STATS
-                    out_envelope_attempts++;
-#endif
                 }
             }
 #endif

@@ -222,18 +222,6 @@ void plan_prepare_free(PlanPrep *prep) {
     free(prep->fd.v);
     for (int i = 0; i < PLAN_RAW_N; i++) opvec_free(&prep->raw[i]);
     ldr_target_index_free(&prep->ldr);
-#ifdef LDR_INDEX_STATS
-    ldr_target_index_stats_report();
-#endif
-#ifdef SPAN_DEQUE_STATS
-    span_deque_stats_report();
-#endif
-#ifdef OUT_ENVELOPE_STATS
-    out_envelope_stats_report();
-#endif
-#ifdef SUFFIX_LCP_STATS
-    suffix_lcp_stats_report();
-#endif
     memset(prep, 0, sizeof(*prep));
 }
 
