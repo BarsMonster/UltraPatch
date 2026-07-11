@@ -5,8 +5,47 @@
 
 set -euo pipefail
 
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# Direct callers need the same coherent four-file generation as `make gate`.  Keep this shared
+# descriptor open for the whole body; nested gate/package readers may take another shared lock.
+exec 8<>"$ROOT/test-bench/.wire-baseline-update.lock"
+flock --shared 8
+python3 "$ROOT/scripts/publish_wire_baselines.py" assert-clean \
+  --root "$ROOT/test-bench" >/dev/null
+
 out="${1:-artifacts/a1-corpus.tar.gz}"
 sum_out="$out.sha256"
+
+# The lock inode must stay persistent for flock to serialize every participant.  Replacing it
+# through an output path (including a hardlink outside test-bench) creates a split-brain lock;
+# transaction/temporary names likewise belong exclusively to the baseline publisher.
+reject_reserved_output() {
+  candidate=$1
+  candidate_abs=$(realpath -m -- "$candidate")
+  makefile_abs=$(realpath -m -- "$ROOT/Makefile")
+  if [ "$candidate_abs" = "$makefile_abs" ] || \
+     { [ -e "$candidate" ] && [ "$candidate" -ef "$ROOT/Makefile" ]; }; then
+    echo "pack_corpus.sh: output aliases canonical Makefile: $candidate" >&2
+    exit 1
+  fi
+  case "$candidate_abs" in
+    */.wire-baseline-update.*|*/.wire-baseline-update.*/*)
+      echo "pack_corpus.sh: output uses reserved wire-baseline state: $candidate" >&2
+      exit 1
+      ;;
+  esac
+  if [ -e "$candidate" ] && \
+     find "$ROOT/test-bench" -xdev \
+       \( -path "$ROOT/test-bench/.wire-baseline-update.*" -o \
+          -path "$ROOT/test-bench/.wire-baseline-update.*/*" \) \
+       -samefile "$candidate" -print -quit | grep -q .; then
+    echo "pack_corpus.sh: output aliases reserved wire-baseline state: $candidate" >&2
+    exit 1
+  fi
+}
+reject_reserved_output "$out"
+reject_reserved_output "$sum_out"
+
 . "$(dirname "$0")/tempdir.sh"
 
 "${MAKE:-make}" --no-print-directory check-release-inventory-internal >/dev/null
@@ -28,7 +67,9 @@ while IFS= read -r path; do
   [ -f "$path" ] || { echo "pack_corpus.sh: missing package input: $path" >&2; exit 1; }
   path_abs=$(realpath -m -- "$path")
   if [ "$path_abs" = "$(realpath -m -- "$out")" ] || \
-     [ "$path_abs" = "$(realpath -m -- "$sum_out")" ]; then
+     [ "$path_abs" = "$(realpath -m -- "$sum_out")" ] || \
+     { [ -e "$out" ] && [ "$path" -ef "$out" ]; } || \
+     { [ -e "$sum_out" ] && [ "$path" -ef "$sum_out" ]; }; then
     echo "pack_corpus.sh: output aliases package input: $path" >&2
     exit 1
   fi

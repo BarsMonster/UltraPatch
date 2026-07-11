@@ -186,18 +186,24 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 # cap and rejects runtime input overrides; use the individual targets for experiments.
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
+WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
 CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
           check-wire-config check-build-profile check-release-profile check-release-gate-contract check-release-inventory check-pack-corpus \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
 $(CAPPED): %:
+	@if [ "$*" = golden-update ] && [ "$(origin MAKE)" != default ]; then \
+	  echo "golden update rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
 	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 gate:
-	@timeout $(RELEASE_GATE_TIMEOUT) $(MAKE) --no-print-directory gate-internal; s=$$?; \
+	@if [ "$(origin MAKE)" != default ]; then \
+	  echo "release gate rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
+	@timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
+	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
@@ -237,8 +243,9 @@ WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
                            -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
 
 # `make gate` is a release certification, not a configurable measurement. These variables may
-# still be overridden on their individual targets, A/B runs, and update tools; the gate preflight
-# rejects any runtime origin so it cannot accidentally certify a reduced corpus, relaxed ratchet,
+# still be overridden on their individual measurement targets and A/B runs; the release gate and
+# canonical updater reject any runtime origin so they cannot accidentally certify/publish a
+# reduced corpus, relaxed ratchet,
 # substituted source/harness, alternate build directory, or disabled contract mode. Repository
 # edits remain the intentional, reviewable way to change a release input. The profile verifier
 # separately proves the exact compiler versions, flags, and multilib contents.
@@ -249,7 +256,7 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
-	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT \
+	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
 	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS LDFLAGS ARM_DEC_FLAGS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
@@ -269,10 +276,31 @@ release-gate-origin-probe-internal:
 	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "release gate requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
 	test "$$bad" -eq 0
 
-release-gate-inputs-internal:
+release-gate-inputs-internal: scripts/publish_wire_baselines.py
 	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
+	@python3 scripts/publish_wire_baselines.py assert-clean --root test-bench
 	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
 	@echo "release_gate_inputs=OK (canonical repository inputs + pinned release profile)"
+
+.PHONY: golden-update-origin-probe-internal golden-update-inputs-internal \
+        golden-update-validate-canonical-internal
+golden-update-origin-probe-internal:
+	@set -eu; bad=0; \
+	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "golden update rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "golden update requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+	test "$$bad" -eq 0
+
+golden-update-validate-canonical-internal:
+	@$(MAKE) --no-print-directory check-release-inventory-internal
+	@$(MAKE) --no-print-directory check-assets-internal
+	@echo "golden_update_canonical_inputs=OK (inventory + corpus/foreign asset hashes)"
+
+golden-update-inputs-internal:
+	@$(MAKE) --no-print-directory golden-update-origin-probe-internal
+	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
+	@flock --shared "$(WIRE_BASELINE_LOCK)" \
+	  $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null
+	@echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
 
 check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh
 	@MAKE="$(MAKE)" scripts/check_release_gate_contract.sh
@@ -598,22 +626,43 @@ check-degrade-internal: ultrapatch
 # Golden-wire regression: sha256 of eight representative blobs pinned in test-bench/golden.sha256.
 # Catches size-neutral wire drift and enforces the wire freeze. On an INTENDED wire change run
 # `make golden-update`: it stages the eight-blob golden manifest, all 290 corpus hashes, and the
-# 256 home per-pair sizes, validates the full round-trip/write-safety matrix before replacement,
-# then atomically replaces each completed file. Update the printed Makefile aggregate/one-face
-# ratchets and commit all of them in the SAME commit.
-check-golden-internal: ultrapatch
+# 256 home per-pair sizes, validates the full round-trip/write-safety matrix and no-regression
+# policy, then transactionally publishes the manifests and their four Makefile ratchets as one
+# recoverable generation. Commit all resulting changes in the SAME commit.
+check-golden-internal: ultrapatch scripts/check_wire_baseline_update.py \
+                       scripts/publish_wire_baselines.py
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$(GOLDEN_MANIFEST)" \
 	  scripts/check_golden.sh check
+	@python3 scripts/check_wire_baseline_update.py --host-tool "$(HOST_TOOL)" \
+	  --release-profile-lock "$(RELEASE_PROFILE_LOCK)"
 
 # Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
 # measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.
 check-ab-matrix-internal: ultrapatch
 	@scripts/check_ab_matrix.sh
 
-golden-update-internal: ultrapatch
+golden-update-internal: scripts/publish_wire_baselines.py
+	@python3 scripts/publish_wire_baselines.py recover --root test-bench
+	@$(MAKE) --no-print-directory golden-update-after-recovery-internal
+
+.PHONY: golden-update-after-recovery-internal
+golden-update-after-recovery-internal:
+	@$(MAKE) --no-print-directory golden-update-inputs-internal
+	@$(MAKE) --no-print-directory golden-update-measure-internal
+
+.PHONY: golden-update-measure-internal
+golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py
 	@set -e; \
 	. ./scripts/tempdir.sh; \
-	cp test-bench/golden.sha256 "$$tmp/golden.sha256"; \
+	release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
+	release_profile=$${release_profile#release_profile=}; \
+	host_tool_hash=$$(sha256sum "$(HOST_TOOL)"); host_tool_hash=$${host_tool_hash%% *}; \
+	exec 9<>"$(WIRE_BASELINE_LOCK)"; flock --shared 9; \
+	preimage_golden=$$(sha256sum test-bench/golden.sha256); preimage_golden=$${preimage_golden%% *}; \
+	preimage_home=$$(sha256sum test-bench/home-size-baseline.tsv); preimage_home=$${preimage_home%% *}; \
+	preimage_wire=$$(sha256sum test-bench/corpus-wire.sha256); preimage_wire=$${preimage_wire%% *}; \
+	preimage_make=$$(sha256sum Makefile); preimage_make=$${preimage_make%% *}; \
+	cp test-bench/golden.sha256 "$$tmp/golden.sha256"; flock --unlock 9; exec 9>&-; \
 	FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$$tmp/golden.sha256" \
 	  scripts/check_golden.sh update >"$$tmp/golden.out"; \
 	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="" \
@@ -625,22 +674,32 @@ golden-update-internal: ultrapatch
 	test "$$(wc -l <"$$tmp/golden.sha256")" -eq "$(BASE_RELEASE_GOLDEN_BLOBS)"; \
 	test "$$(wc -l <"$$tmp/home-size-baseline.tsv")" -eq "$$home_pairs"; \
 	test "$$(wc -l <"$$tmp/corpus-wire.sha256")" -eq "$$((home_pairs + foreign_pairs))"; \
-	ng="test-bench/.golden.sha256.$$$$.tmp"; \
-	ns="test-bench/.home-size-baseline.tsv.$$$$.tmp"; \
-	nw="test-bench/.corpus-wire.sha256.$$$$.tmp"; \
-	cleanup_update(){ rm -f "$$ng" "$$ns" "$$nw"; rm -rf "$$tmp"; }; \
-	trap 'cleanup_update' EXIT; \
-	trap 'cleanup_update; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
-	trap 'cleanup_update; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	cp "$$tmp/golden.sha256" "$$ng"; cp "$$tmp/home-size-baseline.tsv" "$$ns"; \
-	cp "$$tmp/corpus-wire.sha256" "$$nw"; \
-	mv "$$ng" test-bench/golden.sha256; mv "$$ns" test-bench/home-size-baseline.tsv; \
-	mv "$$nw" test-bench/corpus-wire.sha256; \
-	ng=; ns=; nw=; \
+	test "$$(sha256sum "$(HOST_TOOL)" | awk '{print $$1}')" = "$$host_tool_hash"; \
+	test "$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)")" = \
+	  "release_profile=$$release_profile"; \
+	cp "$$tmp/corpus.out" "$$tmp/metrics.out"; \
+	echo "measurement_release_profile=$$release_profile" >>"$$tmp/metrics.out"; \
+	echo "measurement_host_tool_sha256=$$host_tool_hash" >>"$$tmp/metrics.out"; \
+	echo "measurement_preimage_golden_sha256=$$preimage_golden" >>"$$tmp/metrics.out"; \
+	echo "measurement_preimage_home_sha256=$$preimage_home" >>"$$tmp/metrics.out"; \
+	echo "measurement_preimage_wire_sha256=$$preimage_wire" >>"$$tmp/metrics.out"; \
+	echo "measurement_preimage_makefile_sha256=$$preimage_make" >>"$$tmp/metrics.out"; \
+	exec 9<>"$(WIRE_BASELINE_LOCK)"; flock --shared 9; \
+	$(MAKE) --no-print-directory golden-update-validate-canonical-internal \
+	  >"$$tmp/post-measure-inputs.out"; \
+	flock --unlock 9; exec 9>&-; \
+	python3 scripts/publish_wire_baselines.py publish --root test-bench \
+	  --inventory "$(CORPUS_INVENTORY)" --candidate-golden "$$tmp/golden.sha256" \
+	  --candidate-home-sizes "$$tmp/home-size-baseline.tsv" \
+	  --candidate-wire "$$tmp/corpus-wire.sha256" --metrics "$$tmp/metrics.out" \
+	  --host-tool "$(HOST_TOOL)" --release-profile-lock "$(RELEASE_PROFILE_LOCK)" \
+	  --home-limit "$(BASE_FULL_TOTAL)" --foreign-limit "$(BASE_FOREIGN_TOTAL)" \
+	  --oneface-grow-limit "$(BASE_ONEFACE_GROW)" \
+	  --oneface-revert-limit "$(BASE_ONEFACE_REVERT)"; \
 	cat "$$tmp/golden.out"; cat "$$tmp/corpus.out"; \
 	awk '$$3=="oneface_grow.blob"{print "oneface_grow=" $$2} \
 	     $$3=="oneface_revert.blob"{print "oneface_revert=" $$2}' test-bench/golden.sha256; \
-	echo "wire manifests and home per-pair sizes updated; update Makefile BASE_* ratchets to the printed metrics"
+	echo "wire manifests and Makefile BASE_* ratchets published as one recoverable generation"
 
 # The 256 home (from,to) pairs PLUS 34 foreign pair-directions (a second, unrelated Cortex-M0+
 # lineage — CircuitPython feather_m0_express; see docs/foreign-firmware-study.md) are independent,

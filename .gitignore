@@ -12,6 +12,12 @@
 # Native and firmware build products.
 /.build/
 /ultrapatch
+/test-bench/.wire-baseline-update.lock
+/test-bench/.wire-baseline-update.transaction/
+/test-bench/.wire-baseline-update.prepare.*/
+/test-bench/.wire-baseline-update.done.*/
+/.wire-baseline-update.recover.*
+/test-bench/.wire-baseline-update.recover.*
 *.o
 *.a
 *.so

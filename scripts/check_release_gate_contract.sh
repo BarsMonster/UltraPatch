@@ -43,8 +43,32 @@ expect_reject() {
   fi
 }
 
+expect_update_reject() {
+  local label=$1
+  shift
+  if run_make "$@" >"$tmp/update-$label.out" 2>&1; then
+    echo "golden update accepted runtime override: $label" >&2
+    exit 1
+  fi
+  if ! grep -Eq '^golden update (rejects runtime override|requires unset mode): ' \
+      "$tmp/update-$label.out"; then
+    echo "golden update rejected $label without its contract diagnostic" >&2
+    cat "$tmp/update-$label.out" >&2
+    exit 1
+  fi
+}
+
 cd "$ROOT"
 run_make release-gate-origin-probe-internal
+run_make golden-update-origin-probe-internal
+run_make release-gate-inputs-internal >"$tmp/release-inputs.out"
+grep -Fxq 'wire_baseline_reader=clean' "$tmp/release-inputs.out"
+run_make golden-update-validate-canonical-internal >"$tmp/update-inputs.out"
+grep -q '^release_inventory=OK ' "$tmp/update-inputs.out"
+grep -q '^corpus_assets=verified ' "$tmp/update-inputs.out"
+grep -q '^foreign_assets=verified ' "$tmp/update-inputs.out"
+grep -Fxq 'golden_update_canonical_inputs=OK (inventory + corpus/foreign asset hashes)' \
+  "$tmp/update-inputs.out"
 
 # One representative for each independently meaningful release input class. The probe is
 # parse/build-free, so this catches regressions without multiplying full gate runs.
@@ -69,6 +93,30 @@ expect_reject decoder_mode DECODER_API_REGULAR=0 release-gate-origin-probe-inter
 expect_reject golden_manifest GOLDEN_MANIFEST="$tmp/golden.sha256" \
   release-gate-origin-probe-internal
 expect_reject gate_timeout GATE_TIMEOUT=81 release-gate-origin-probe-internal
+
+# Canonical wire publication has the same protected release identity.  It may vary only JOBS,
+# which changes scheduling but neither measured bytes nor policy.
+expect_update_reject fixtures FIXTURES="$tmp/fixtures" golden-update-origin-probe-internal
+expect_update_reject size_pin BASE_FULL_TOTAL=999999 golden-update-origin-probe-internal
+expect_update_reject wire_config WIRE_CONFIG_FLAGS=-DCORTEX_M0 \
+  golden-update-origin-probe-internal
+expect_update_reject bypass_dump CORPUS_WIRE_DUMP="$tmp/wire.tsv" \
+  golden-update-origin-probe-internal
+expect_update_reject timeout GATE_TIMEOUT=81 golden-update-origin-probe-internal
+run_make JOBS=1 golden-update-origin-probe-internal
+
+# The outer public gate takes the canonical shared lock before starting an inner Make, so the
+# inner invocation reparses a coherent Makefile/manifests generation.  MAKE=true prevents GNU
+# make's -n recursive-command exception from launching the real nested gate during inspection;
+# a real runtime MAKE substitution is separately rejected below.
+run_make -n MAKE=true gate >"$tmp/gate-lock.out"
+grep -Fq 'flock --shared "test-bench/.wire-baseline-update.lock"' "$tmp/gate-lock.out"
+grep -Fq 'true --no-print-directory gate-internal' "$tmp/gate-lock.out"
+if run_make MAKE=true gate >"$tmp/gate-make.out" 2>&1; then
+  echo "release gate accepted runtime MAKE substitution" >&2
+  exit 1
+fi
+grep -Fq 'release gate rejects runtime override: MAKE' "$tmp/gate-make.out"
 
 # Confirm that the restriction is gate-local: a direct, non-certifying target still accepts
 # custom fixture and build-root inputs used by measurements and profile isolation tests.
@@ -98,4 +146,4 @@ if grep -q '^RESULT[[:space:]]*: ALL GATES PASS$' "$tmp/evidence.out"; then
   exit 1
 fi
 
-echo "release_gate_contract=OK (runtime overrides rejected; complete evidence required)"
+echo "release_gate_contract=OK (gate/update overrides rejected; complete evidence required)"
