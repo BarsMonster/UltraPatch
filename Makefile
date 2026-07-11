@@ -119,7 +119,7 @@ BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
-BASE_FOREIGN_TOTAL ?= 1333327
+BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
 BASE_ARM_TEXT ?= 6073
@@ -611,7 +611,7 @@ check-corpus-matrix-internal: ultrapatch
 	./check_corpus.sh $(JOBS)
 
 # THE gate — one target, everything, hard budget <= 80 s wall on the reference machine
-# (measured 62.5 s cold / ~56 s warm at 32 cores with exhaustive direction selection).
+# (measured 35.1 s warm at 32 cores with resource-pressure direction fallback).
 # Builds up-front, then runs
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),

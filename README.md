@@ -105,8 +105,7 @@ application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
 random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
 representative blobs — any wire drift fails the gate), `make check-degrade`,
 the ARM size/divide/stack gates, the full 256-pair home corpus matrix, and the
-34 foreign pair-directions — all legs run concurrently, ~63 s cold / ~56 s warm on the
-reference machine.
+34 foreign pair-directions — all legs run concurrently, ~35 s warm on the reference machine.
 qemu-based decode validation was removed permanently (owner decision,
 2026-07-03): too slow for its marginal value — a one-time 260-pair qemu-arm
 study found zero host-vs-ARM divergence, and the ARM cross-build gate still
