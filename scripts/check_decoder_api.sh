@@ -11,6 +11,7 @@ set -eu
 : "${CC:?check_decoder_api.sh: CC not set — invoke through make check-decoder-contract}"
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
 : "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
+NM=${NM:-nm}
 [ -x "$ULTRAPATCH" ] || {
     echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
     exit 2
@@ -59,6 +60,120 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # These are behavioral harnesses; production -O2 and -Os compilation is already enforced
     # by the portable/stack/ARM legs.  -O0 materially reduces concurrent gate compile load.
     common="$CFLAGS -O0"
+
+    # Compile the decoder exactly as an integrator can: the only PatchApply object is an
+    # automatic local in decoder_compiled_contract_apply().  Auditing the resulting objects
+    # closes the gap left by the lexical no-global/no-allocation checks above: macros and
+    # attributes can hide storage or allocator calls from a source grep.
+    "$CC" $common -c test-bench/decoder-compiled-contract.c \
+        -o "$tmp/compiled-contract-source.o"
+    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" \
+        -c test-bench/decoder-compiled-contract.c \
+        -o "$tmp/compiled-contract-single.o"
+
+    audit_decoder_object(){
+        obj=$1
+        form=$2
+
+        if ! LC_ALL=C "$NM" -a -P "$obj" > "$tmp/nm-$form-all" ||
+           ! LC_ALL=C "$NM" -g --defined-only -P "$obj" > "$tmp/nm-$form-exports" ||
+           ! LC_ALL=C "$NM" -u -P "$obj" > "$tmp/nm-$form-undefined"; then
+            echo "could not inspect $form decoder object with NM=$NM" >&2
+            exit 1
+        fi
+
+        # GNU/POSIX nm's B/C/D/G/S classes (lowercase for local symbols) are the
+        # semantic writable-storage classes. TLS objects use B or D according to
+        # whether their initial value is zero; weak/unique globals are caught by the
+        # exported-symbol audit below. Read-only data is intentionally permitted.
+        writable=$(awk '$2 ~ /^[BbCcDdGgSs]$/ { print $1 " " $2 }' \
+            "$tmp/nm-$form-all")
+        if [ -n "$writable" ]; then
+            echo "$form decoder object defines writable/BSS/common/TLS storage:" >&2
+            printf '%s\n' "$writable" >&2
+            exit 1
+        fi
+
+        exports=$(awk '{ print $1 " " $2 }' "$tmp/nm-$form-exports")
+        if [ "$exports" != "decoder_compiled_contract_apply T" ]; then
+            echo "$form decoder object has unexpected externally visible symbols:" >&2
+            printf '%s\n' "$exports" >&2
+            exit 1
+        fi
+
+        undefined=$(awk '{ print $1 }' "$tmp/nm-$form-undefined" | LC_ALL=C sort -u)
+        allocators=$(printf '%s\n' "$undefined" | awk '
+            /^(malloc|calloc|realloc|reallocarray|free|cfree|aligned_alloc|posix_memalign|memalign|valloc|pvalloc)$/')
+        if [ -n "$allocators" ]; then
+            echo "$form decoder object refers to dynamic allocation:" >&2
+            printf '%s\n' "$allocators" >&2
+            exit 1
+        fi
+        unexpected=$(printf '%s\n' "$undefined" | awk '
+            !/^(flash_read|flash_write_page|memcpy|memmove|memset|__stack_chk_fail|__stack_chk_fail_local)$/')
+        if [ -n "$unexpected" ]; then
+            echo "$form decoder object has unexpected undefined symbols:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+        fi
+    }
+    audit_decoder_object "$tmp/compiled-contract-source.o" source-header
+    audit_decoder_object "$tmp/compiled-contract-single.o" single-header
+
+    # Snapshot preprocessor state with the decoder's system prerequisites already loaded,
+    # then include each packaging form. No existing consumer macro may be removed or changed.
+    # The only additions are this exact public configuration/include-guard allowlist; every
+    # decoder-private implementation macro must therefore be sealed by patch_apply.h.
+    {
+        printf '%s\n' '#include <stddef.h>'
+        printf '%s\n' '#include <stdint.h>'
+        printf '%s\n' '#include <string.h>'
+    } > "$tmp/macro-before.c"
+    {
+        printf '%s\n' DR_KCAP_BL DR_KCAP_EX JSLOTS MAX_IMAGE OPC_CAP OUTROW OUTROW_DEPTH
+        printf '%s\n' UP_PATCH_APPLY_H UP_PATCH_CONFIG_H UP_RC_MODELS_H WINDOW_LOG
+    } | LC_ALL=C sort > "$tmp/public-macro-allowlist"
+
+    "$CC" $common -dM -E "$tmp/macro-before.c" | LC_ALL=C sort > "$tmp/macros-source-before"
+    "$CC" $common -dM -E test-bench/decoder-compiled-contract.c | \
+        LC_ALL=C sort > "$tmp/macros-source-after"
+    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" -dM -E "$tmp/macro-before.c" | \
+        LC_ALL=C sort > "$tmp/macros-single-before"
+    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" -dM -E \
+        test-bench/decoder-compiled-contract.c | LC_ALL=C sort > "$tmp/macros-single-after"
+
+    for form in source single; do
+        comm -23 "$tmp/macros-$form-before" "$tmp/macros-$form-after" \
+            > "$tmp/macros-$form-removed"
+        if [ -s "$tmp/macros-$form-removed" ]; then
+            echo "$form decoder header removed or changed consumer macros:" >&2
+            cat "$tmp/macros-$form-removed" >&2
+            exit 1
+        fi
+        comm -13 "$tmp/macros-$form-before" "$tmp/macros-$form-after" \
+            > "$tmp/macros-$form-added"
+        awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
+            "$tmp/macros-$form-before" | LC_ALL=C sort -u > "$tmp/macros-$form-before-names"
+        comm -23 "$tmp/public-macro-allowlist" "$tmp/macros-$form-before-names" \
+            > "$tmp/macros-$form-expected-names"
+        awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
+            "$tmp/macros-$form-added" | LC_ALL=C sort -u > "$tmp/macros-$form-added-names"
+        if ! cmp -s "$tmp/macros-$form-expected-names" "$tmp/macros-$form-added-names"; then
+            echo "$form decoder header macro delta is outside the public allowlist" >&2
+            echo "expected added macro names:" >&2
+            cat "$tmp/macros-$form-expected-names" >&2
+            echo "actual added macros:" >&2
+            cat "$tmp/macros-$form-added" >&2
+            exit 1
+        fi
+    done
+    if ! cmp -s "$tmp/macros-source-added" "$tmp/macros-single-added"; then
+        echo "source and single-header decoder macro deltas differ" >&2
+        diff -u "$tmp/macros-source-added" "$tmp/macros-single-added" >&2 || :
+        exit 1
+    fi
+    echo "decoder_compiled_contract=OK (O0 source + single: automatic state, symbols + macros)"
+
     "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision-source.o"
     "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" \
         -c test-bench/decoder-collision.c -o "$tmp/collision-single.o"

@@ -4,6 +4,7 @@
 
 CC = $(CROSS_COMPILE)gcc
 CLANG ?= clang
+NM ?= nm
 ARM_PREFIX ?= arm-none-eabi-
 ARM_CC ?= $(ARM_PREFIX)gcc
 ARM_SIZE ?= $(ARM_PREFIX)size
@@ -536,7 +537,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh "$(HOST_TOOL)" "$$tmp/dec_portable" >/dev/null; \
-	CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
+	CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
 	echo "decoder_address_contract=OK (mandatory base/capacity + page alignment + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
@@ -544,7 +545,7 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 # Pointer-rich in-memory decoder/backend contract under dynamic sanitizers. Standalone so its
 # instrumented compile does not contend with the CPU-saturated corpus workers in `make gate`.
 check-decoder-sanitize-internal: ultrapatch
-	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" \
+	@CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
 
 check-models-internal:
