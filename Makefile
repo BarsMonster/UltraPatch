@@ -232,7 +232,8 @@ decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
 	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
 
-WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
+WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
+                           -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
                            -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
 
 # `make gate` is a release certification, not a configurable measurement. These variables may
@@ -294,14 +295,23 @@ check-pack-corpus-internal: scripts/pack_corpus.sh scripts/check_pack_corpus.sh 
 	@scripts/check_pack_corpus.sh
 
 .PHONY: check-wire-config-probe-internal
-check-wire-config-internal:
+check-wire-config-internal: ultrapatch
 	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(WIRE_CONFIG_PROBE_FLAGS)' \
+		DEFAULT_ULTRAPATCH='$(HOST_TOOL)' \
 		check-wire-config-probe-internal
 
-check-wire-config-probe-internal: scripts/check_wire_config.sh scripts/gen_single_header.py $(DECODER_PUBLIC_HDRS)
+check-wire-config-probe-internal: ultrapatch scripts/check_wire_config.sh scripts/gen_single_header.py \
+                                scripts/synth_gen.py test-bench/decoder-contract.c $(DECODER_PUBLIC_HDRS) \
+                                $(DEC_STANDALONE_SRCS) $(NVM_EMU) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
 	  SINGLE_DECODER_CFLAGS="$(filter-out -Isrc,$(DECODER_CFLAGS))" \
-	  ARM_CC="$(ARM_CC)" ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" scripts/check_wire_config.sh
+	  DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
+	  ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
+	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" \
+	  ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" ARM_BSS_HARD_CAP="$(ARM_BSS_HARD_CAP)" \
+	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_LAYOUT="$(ARM_LINK_LAYOUT)" \
+	  DEFAULT_ULTRAPATCH="$(DEFAULT_ULTRAPATCH)" ULTRAPATCH="$(HOST_TOOL)" \
+	  FIXTURES="$(FIXTURES)" scripts/check_wire_config.sh
 
 .PHONY: FORCE
 FORCE:

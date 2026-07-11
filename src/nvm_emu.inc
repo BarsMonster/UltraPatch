@@ -9,12 +9,12 @@
  * write-safety counters live here, outside the production header. #included by
  * patch_host_backend.c BEFORE patch_apply.h, so CLI decode and encoder selfcheck
  * share one reference-decoder copy in the host tool.
- * Each page call erases and fully programs one aligned 256 B page. Counters reproduce
+ * Each page call erases and fully programs one aligned decoder-configured page. Counters reproduce
  * the product write-safety gate (each page erased at most once, monotonic erase frontier)
  * and pin aligned/in-range calls plus preservation of the last page's bytes beyond the
  * logical image span. Requires <stdint.h>, <stdlib.h>, <string.h> from the includer. */
 #ifndef NVM_ROW
-#define NVM_ROW 256u
+#define NVM_ROW OUTROW
 #endif
 _Static_assert(NVM_ROW==OUTROW,"host NVM page must match decoder OUTROW");
 _Static_assert(PATCH_IMAGE_BASE==0u,"repository host NVM integration uses PATCH_IMAGE_BASE=0");
