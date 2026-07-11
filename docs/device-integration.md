@@ -35,10 +35,38 @@ the `PatchApply` object. There is no coroutine, no fiber, no private decode
 stack, and no heap allocation -- the decode runs on the caller's stack plus the
 caller-owned state object.
 
-The decoder implementation has internal header-only linkage by default. To avoid
-accidental duplicate decoder text in final firmware, include the decoder from a
-single update `.c` file and route other application modules through that update
-module's local API.
+The decoder implementation has internal header-only linkage by default. A plain
+include therefore belongs in one update `.c` file; route other application
+modules through that module's local API if this legacy form is sufficient.
+
+For direct use from multiple translation units, the same header also provides a
+declaration/implementation split. The implementation TU defines exactly one mode
+before its include:
+
+```c
+#define ULTRAPATCH_IMPLEMENTATION
+#include "patch_apply.h" /* or the generated single header */
+```
+
+Every caller TU selects declarations only:
+
+```c
+#define ULTRAPATCH_DECLARATIONS_ONLY
+#include "patch_apply.h" /* or the generated single header */
+
+PatchApplyResult receive_patch(PatchApply *state, PatchPull next, void *ctx) {
+    return patch_apply_run(state, next, ctx);
+}
+```
+
+`ULTRAPATCH_DECLARATIONS_ONLY` exposes the concrete caller-owned state, public
+types, the `patch_apply_run` prototype, and the inline accessors without emitting
+private decoder/model functions. `ULTRAPATCH_IMPLEMENTATION` emits one externally
+linked `patch_apply_run`; all decoder helpers retain private linkage. The two
+macros are mutually exclusive, including on a repeated include, and defining the
+implementation in two TUs produces a duplicate-symbol link failure. Use the same
+wire and device configuration macros in every participating TU. The default plain
+include remains fully supported and unchanged.
 
 ### C identifier namespace
 
@@ -64,6 +92,13 @@ Arm toolchain the ratchets are:
 | ------------------------------------------------ | ----:| ----:| ---:|
 | Relocatable static-wrapper object | 6073 B | 0 B | 10296 B |
 | No-startup linked image | 6653 B | 0 B | 10296 B |
+
+The opt-in external-linkage form is measured against exactly one copy of that
+static decoder, not against a two-static-TU build. On the same toolchain, one
+implementation object plus one declarations-only static-state wrapper totals
+6281/0/10296 bytes before link (+208 text, unchanged state) and
+6861/0/10296 bytes in the no-startup link (+208 text). These are reported
+integration measurements, not replacements for the default-form ratchets.
 
 The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
@@ -246,6 +281,12 @@ shape-specific:
 | --------------------------------------------------- | ----------------------- | ------------- |
 | Static `PatchApply` object; `rcv3_run(next, ctx)` | **408 B** | 480 B |
 | Caller-owned pointer; `rcv3_run(state, next, ctx)` | **424 B** | 480 B |
+
+The external-linkage equivalents are also measured against one default static
+decoder: **432 B** for the declarations-only static-state wrapper (+24 B), and
+**432 B** for the declarations-only caller-owned pointer wrapper (+8 B). They
+remain within the documented 480-byte integration headroom; the default static
+and generic forms above remain the pinned stack ratchets.
 
 Method: `scripts/stack_bound.py` sums the deepest path through the static call graph, using
 `arm-none-eabi-gcc -fstack-usage` frame sizes and `objdump` `bl` edges. It is exact because

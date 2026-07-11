@@ -38,6 +38,7 @@
 #define RC_NOINLINE
 #define RC_NORETURN
 #define RC_WARN_UNUSED_RESULT
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline int rc_add_overflow_i32(int32_t a,int32_t b,int32_t*out){
     if((b>0 && a>INT32_MAX-b) || (b<0 && a<INT32_MIN-b)) return 1;
     *out=(int32_t)(a+b);
@@ -48,6 +49,7 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
     *out=(int32_t)(a-b);
     return 0;
 }
+#endif
 #define RC_ADD_OVERFLOW(a,b,out) rc_add_overflow_i32((a),(b),(out))
 #define RC_SUB_OVERFLOW(a,b,out) rc_sub_overflow_i32((a),(b),(out))
 #endif
@@ -63,9 +65,11 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
  * encoder on the same bound: a larger quotient would make an otherwise valid generated patch
  * fail as a malformed run-on at apply time. */
 #define RC_RICE_UNARY_MAX (1u<<20)
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline int rc_rice_feasible(uint32_t v,uint32_t k){
     return k<32u && (v>>k)<=RC_RICE_UNARY_MAX;
 }
+#endif
 
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
@@ -77,6 +81,7 @@ static inline int rc_rice_feasible(uint32_t v,uint32_t k){
 #define UP_BT_BYTES (((UP_BT_PROBS * 12u) + 7u) / 8u)
 /* idx*12 has a byte shift of 0 or 4, so every 12-bit entry fits in two bytes. */
 typedef struct { uint8_t p[UP_BT_BYTES]; } up_BitTree;
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline uint16_t up_bt_get(const up_BitTree*t,int idx){
     uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
     uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
@@ -89,6 +94,7 @@ static inline void up_bt_set(up_BitTree*t,int idx,uint16_t prob){
     t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8);
 }
 static inline void up_bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)UP_BT_PROBS;i++) up_bt_set(t,i,RC_PHALF); }
+#endif
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UP_UG_CTX = context clamp. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table because any quotient
@@ -98,9 +104,11 @@ static inline void up_bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int
 #define UP_UG_CTX 6
 #define UP_UG_C(x) ((x)<UP_UG_CTX?(x):UP_UG_CTX)
 #define UP_UG_GAMMA_MANT (((UP_UG_CTX) * ((UP_UG_CTX) - 1)) / 2 + ((UP_UG_CTX) + 1))
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline int rc_ugg_mant_idx(int row,int pos){
     return row<UP_UG_CTX ? (row*(row-1))/2 + pos : ((UP_UG_CTX*(UP_UG_CTX-1))/2 + UP_UG_C(pos));
 }
+#endif
 
 /* ---- piecewise shift map (BL/EX delta prediction) ----
  * Shipped per patch: ascending u32 boundaries + int32 byte-shift values; keys below the first
@@ -117,6 +125,7 @@ static inline int rc_ugg_mant_idx(int row,int pos){
  * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: patch_apply and
  * patch_generate share this table (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
 #define UP_LIT0_CTX 5
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline uint8_t rc_lit0_sel(uint8_t p){
     uint8_t v=(uint8_t)(
         "\001\000\000\000\000\000\000\035\252\252\252\252\125\125\125\025"
@@ -126,9 +135,11 @@ static inline uint8_t rc_lit0_sel(uint8_t p){
     )[p>>2];
     return p==247u ? 4u : (uint8_t)((v >> ((p&3u)*2u)) & 3u);
 }
+#endif
 
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
 typedef struct { uint16_t m[4]; int h; } up_Flag1;
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline void up_fl_init(up_Flag1*f){ for(int i=0;i<4;i++) f->m[i]=RC_PHALF; f->h=0; }
 /* flag-history context update, shared by decoder/encoder/DP pricing (wire-affecting mirror). */
 static inline int rc_fl_hist(int h,int b){ return ((h<<1)|b)&3; }
@@ -196,6 +207,7 @@ static inline void rc_seed_cont_u(uint16_t*u,int maxidx,int depth){
 RC_ALWAYS_INLINE void rc_init_probs(uint16_t*p,int n,uint16_t seed){
     for(int i=0;i<n;i++) p[i]=seed;
 }
+#endif
 /* ---- UGolomb (Rice/Gamma) model structs, single-sourced so the COMPILER enforces the
  * decoder<->encoder mirror. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table (any quotient row can use
  * k columns); Gamma keeps the compact triangular table (UP_UG_GAMMA_MANT). Both sides use these types
@@ -206,6 +218,7 @@ typedef struct { uint16_t u[UP_UG_CTX+1]; uint16_t m[UP_UG_GAMMA_MANT]; } up_UGG
  * Keeping them out-of-line preserves the single shared copy the host previously got via the ugg_init_e
  * wrapper (inlining a copy per model at every apply-init site bloats host .text); on the Cortex-M0+
  * -Os decoder they were already emitted once, so the attribute costs no ARM .text. */
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static RC_NOINLINE void rc_ugr_init(up_UGRice*g,int k){
     g->k=(uint8_t)k;
     for(int i=0;i<=UP_UG_CTX;i++){ g->u[i]=RC_PHALF; for(int j=0;j<=UP_UG_CTX;j++) g->m[i][j]=RC_PHALF; }
@@ -281,12 +294,14 @@ static inline int32_t rc_smap_pred_bl(const uint32_t*b, const int32_t*v, int n, 
 static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, uint32_t word){
     return rc_i32_from_u32(0u - (uint32_t)rc_smap_at(b,v,n,word));
 }
+#endif
 
 /* MTF dict-index UNARY model: UP_IDX_CTX per-position priors (min(pos,UP_IDX_CTX-1) clamp). The encoded
  * index is ~54% zero, so unary fits the concentration; UP_IDX_CTX=5 is the corpus optimum (4/6/8/16 all
  * code worse). Shared struct + seed; the encode/decode loops live in each side. */
 #define UP_IDX_CTX 5
 typedef struct { uint16_t u[UP_IDX_CTX]; } up_IdxUnary;
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline void up_idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<UP_IDX_CTX;i++) g->u[i]=seed; }
 
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
@@ -299,6 +314,7 @@ static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,int32_t v){
 RC_ALWAYS_INLINE uint8_t rc_dr_rep_ctx(uint8_t rh,int32_t last){
     return (uint8_t)(rh | (last==0 ? 2 : 0));
 }
+#endif
 /* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
  * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. The dict array lives OUTSIDE the struct
  * so bl/ex get separate caps; single-sourced here so decoder + encoder share the neutral init. */
@@ -306,11 +322,13 @@ typedef struct {
     uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } up_DRStream;
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
     d->K=1; dic[0]=0;
     rc_init_probs(d->rep,4,RC_PHALF);
     d->rh=0; d->hit=hitseed;
 }
+#endif
 
 /* =====================================================================================
  * Shared wire constants — single-sourced so the COMPILER (not a "must match" comment)
@@ -368,12 +386,14 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
 #define RC_OUTMATCH_MIN 4u
 
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static inline uint32_t rc_outmatch_pos(uint32_t expected, int32_t delta){
     return expected + (uint32_t)delta;
 }
 static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t len){
     return fwd ? pos + len : pos - len;
 }
+#endif
 
 /* Header raw k-field width: the distance rice parameter kd and (when out-matches are enabled) the
  * out-position rice parameter ko each ship as a fixed RC_KFIELD_BITS-bit raw field. */
@@ -401,6 +421,7 @@ typedef struct {
     uint16_t  rep0[2];                        /* rep0 (reuse-last-distance) prior */
 } up_TokModels;
 
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 /* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
 static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UP_UG_CTX,depth); }
 
@@ -422,6 +443,7 @@ static inline void rc_init_tok(up_TokModels*m,int kd,int ko){
     up_fl_init(&m->flag);
     m->rep0[0]=m->rep0[1]=RC_REP0_INIT;
 }
+#endif
 
 /* RC_ALWAYS_INLINE / RC_NOINLINE / RC_NORETURN / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW are the shared
  * portability shim. They persist out of this header for the encoder TUs (which include rc_models.h

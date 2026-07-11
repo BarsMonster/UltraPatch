@@ -215,6 +215,7 @@ static int tail_preserved(const Bytes *before, uint32_t span){
     return span==before->n || memcmp(test_flash+span,before->d+span,before->n-span)==0;
 }
 
+#if !defined(DECODER_DECLARATIONS_CONTRACT)
 /* Exact oracle for the grow-direction sliding LDR window. This exercises the cases that a
  * whole-patch round-trip does not isolate: initial targets above the first query (1 KiB alias),
  * an eight-byte catch-up across a 2-mod-4 suppressed BL, and pristine bytes served by the journal. */
@@ -330,6 +331,7 @@ static int ldr_window_case(void){
     CHECK(up_grow_ldr_take(&pa, 0, 4096, 2024u) == 1);
     return 0;
 }
+#endif
 
 static int success_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob,
                         int *forward){
@@ -500,10 +502,12 @@ int main(int argc, char **argv){
         if(!rc) printf("decoder_nonzero_base_contract=OK (reads + writes translated; oob=0)\n");
         goto out;
     }
+#if !defined(DECODER_DECLARATIONS_CONTRACT)
     if(src_window_case()) goto out;
     printf("decoder_src_window=OK (journal + cached replay + FWD timing)\n");
     if(ldr_window_case()) goto out;
     printf("decoder_ldr_window=OK (alias filter + BL skip + journal)\n");
+#endif
 
     if(argc == 5 && (strcmp(argv[1], "resource-clean") == 0 ||
                      strcmp(argv[1], "resource-touched") == 0)){

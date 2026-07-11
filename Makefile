@@ -160,6 +160,11 @@ BASE_ARM_LINKED_TEXT ?= 6653
 BASE_ARM_LINKED_DATA ?= 0
 BASE_ARM_LINKED_BSS ?= 10296
 BASE_ARM_SOFT_DIV ?= 0
+# Optional exactly-once linkage, measured as one implementation object plus one declarations-only
+# static-state wrapper. These are separate soft text ceilings; the default static form above stays
+# the production footprint ratchet.
+BASE_ARM_EXTERNAL_TEXT ?= 6281
+BASE_ARM_EXTERNAL_LINKED_TEXT ?= 6861
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
@@ -176,11 +181,19 @@ ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply
 STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic.c"
 ARM_SINGLE_APPLY_HARNESS = printf '%s\n' '\#include "$(DECODER_CANONICAL_HDR)"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm_single.c"
 STACK_SINGLE_GENERIC_HARNESS = printf '%s\n' '\#include "$(DECODER_CANONICAL_HDR)"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic_single.c"
+ARM_EXTERNAL_IMPL_HARNESS = printf '%s\n' '\#define ULTRAPATCH_IMPLEMENTATION' '\#include "patch_apply.h"' > "$$tmp/patch_apply_external_impl.c"
+ARM_EXTERNAL_APPLY_HARNESS = printf '%s\n' '\#define ULTRAPATCH_DECLARATIONS_ONLY' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_external_arm.c"
+STACK_EXTERNAL_GENERIC_HARNESS = printf '%s\n' '\#define ULTRAPATCH_DECLARATIONS_ONLY' '\#include "patch_apply.h"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_external_stack_generic.c"
+ARM_SINGLE_EXTERNAL_IMPL_HARNESS = printf '%s\n' '\#define ULTRAPATCH_IMPLEMENTATION' '\#include "$(DECODER_CANONICAL_HDR)"' > "$$tmp/patch_apply_external_impl_single.c"
+ARM_SINGLE_EXTERNAL_APPLY_HARNESS = printf '%s\n' '\#define ULTRAPATCH_DECLARATIONS_ONLY' '\#include "$(DECODER_CANONICAL_HDR)"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_external_arm_single.c"
+STACK_SINGLE_EXTERNAL_GENERIC_HARNESS = printf '%s\n' '\#define ULTRAPATCH_DECLARATIONS_ONLY' '\#include "$(DECODER_CANONICAL_HDR)"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_external_stack_generic_single.c"
 # Independent worst-case caller-stack ceilings for the two real integration shapes, gcc -O2,
 # Cortex-M0+ (bytes). scripts/stack_bound.py derives each exact static bound from
 # -fstack-usage frames + its harness object's call graph. check-stack reports and gates both.
 BASE_STACK_STATIC_CEIL_O2 ?= 480
 BASE_STACK_GENERIC_CEIL_O2 ?= 480
+BASE_STACK_EXTERNAL_STATIC_CEIL_O2 ?= 432
+BASE_STACK_EXTERNAL_GENERIC_CEIL_O2 ?= 432
 
 # ---- hard 80 s execution cap on EVERY public target ---------------------------------
 # Owner rule: we do not throw compute just for fun — an operation that cannot finish in
@@ -264,7 +277,9 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
-	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
+	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_ARM_EXTERNAL_TEXT BASE_ARM_EXTERNAL_LINKED_TEXT \
+	BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
+	BASE_STACK_EXTERNAL_STATIC_CEIL_O2 BASE_STACK_EXTERNAL_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
 	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS SINGLE_DECODER_CFLAGS \
@@ -274,7 +289,9 @@ override RELEASE_GATE_FIXED_VARS := \
 	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
 	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
 	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS ARM_SINGLE_APPLY_HARNESS \
-	STACK_SINGLE_GENERIC_HARNESS
+	STACK_SINGLE_GENERIC_HARNESS ARM_EXTERNAL_IMPL_HARNESS ARM_EXTERNAL_APPLY_HARNESS \
+	STACK_EXTERNAL_GENERIC_HARNESS ARM_SINGLE_EXTERNAL_IMPL_HARNESS \
+	ARM_SINGLE_EXTERNAL_APPLY_HARNESS STACK_SINGLE_EXTERNAL_GENERIC_HARNESS
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
@@ -421,10 +438,20 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	$(ARM_SINGLE_APPLY_HARNESS); \
+	$(ARM_EXTERNAL_IMPL_HARNESS); \
+	$(ARM_EXTERNAL_APPLY_HARNESS); \
+	$(ARM_SINGLE_EXTERNAL_IMPL_HARNESS); \
+	$(ARM_SINGLE_EXTERNAL_APPLY_HARNESS); \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
 	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_arm_single.c" -o "$$tmp/patch_apply_arm_single.o"; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_external_impl.c" -o "$$tmp/patch_apply_external_impl.o"; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_external_arm.c" -o "$$tmp/patch_apply_external_arm.o"; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_external_impl_single.c" -o "$$tmp/patch_apply_external_impl_single.o"; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_external_arm_single.c" -o "$$tmp/patch_apply_external_arm_single.o"; \
 	size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.o"); \
 	single_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_single.o"); \
+	external_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_external_impl.o" "$$tmp/patch_apply_external_arm.o"); \
+	external_single_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_external_impl_single.o" "$$tmp/patch_apply_external_arm_single.o"); \
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -439,16 +466,45 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 	set -- $$(printf '%s\n' "$$single_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
 	test "$$obj_text/$$obj_data/$$obj_bss" = "$$1/$$2/$$3" || { \
 		echo "ARM source/single object sizes differ: $$obj_text/$$obj_data/$$obj_bss != $$1/$$2/$$3" >&2; exit 1; }; \
+	set -- $$(printf '%s\n' "$$external_size_out" | awk 'NR>1 { t+=$$1; d+=$$2; b+=$$3 } END { print t, d, b }'); \
+	external_obj_text=$$1; external_obj_data=$$2; external_obj_bss=$$3; \
+	set -- $$(printf '%s\n' "$$external_single_size_out" | awk 'NR>1 { t+=$$1; d+=$$2; b+=$$3 } END { print t, d, b }'); \
+	test "$$external_obj_text/$$external_obj_data/$$external_obj_bss" = "$$1/$$2/$$3" || { \
+		echo "ARM external source/single object totals differ: $$external_obj_text/$$external_obj_data/$$external_obj_bss != $$1/$$2/$$3" >&2; exit 1; }; \
+	echo "arm_external_size_integration=one implementation object + declarations-only static PatchApply wrapper"; \
+	echo "arm_external_object_text=$$external_obj_text"; \
+	echo "arm_external_object_data=$$external_obj_data"; \
+	echo "arm_external_object_bss=$$external_obj_bss"; \
+	echo "arm_external_object_text_delta=$$((external_obj_text-obj_text))"; \
+	echo "arm_external_object_bss_delta=$$((external_obj_bss-obj_bss))"; \
+	test "$$external_obj_data/$$external_obj_bss" = "$$obj_data/$$obj_bss" || { \
+		echo "ARM external object changed state footprint: $$external_obj_data/$$external_obj_bss != $$obj_data/$$obj_bss" >&2; exit 1; }; \
+	test "$$external_obj_text" -le "$(BASE_ARM_EXTERNAL_TEXT)" || { \
+		echo "ARM external object text ceiling exceeded: $$external_obj_text > $(BASE_ARM_EXTERNAL_TEXT)" >&2; exit 1; }; \
+	if [ "$$external_obj_bss" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
+		echo "ARM external .bss hard cap exceeded: $$external_obj_bss > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
+	fi; \
+	impl_defs=$$($(ARM_NM) -g --defined-only "$$tmp/patch_apply_external_impl.o" | awk '$$3=="patch_apply_run"{n++} END{print n+0}'); \
+	caller_defs=$$($(ARM_NM) -g --defined-only "$$tmp/patch_apply_external_arm.o" | awk '$$3=="patch_apply_run"{n++} END{print n+0}'); \
+	test "$$impl_defs/$$caller_defs" = "1/0" || { echo "ARM external linkage does not contain exactly one implementation" >&2; exit 1; }; \
 	for form in source single; do \
-		if [ "$$form" = source ]; then obj="$$tmp/patch_apply_arm.o"; else obj="$$tmp/patch_apply_arm_single.o"; fi; \
+		if [ "$$form" = source ]; then obj="$$tmp/patch_apply_arm.o"; ext_impl="$$tmp/patch_apply_external_impl.o"; ext_call="$$tmp/patch_apply_external_arm.o"; \
+		else obj="$$tmp/patch_apply_arm_single.o"; ext_impl="$$tmp/patch_apply_external_impl_single.o"; ext_call="$$tmp/patch_apply_external_arm_single.o"; fi; \
 		$(ARM_OBJDUMP) -d "$$obj" > "$$tmp/patch_apply_arm_$$form.dump"; \
-		if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm_$$form.dump"; then \
+		$(ARM_OBJDUMP) -d "$$ext_impl" > "$$tmp/patch_apply_external_impl_$$form.dump"; \
+		$(ARM_OBJDUMP) -d "$$ext_call" > "$$tmp/patch_apply_external_call_$$form.dump"; \
+		if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm_$$form.dump" \
+		   "$$tmp/patch_apply_external_impl_$$form.dump" "$$tmp/patch_apply_external_call_$$form.dump"; then \
 			echo "hardware divide instruction found in $$form decoder" >&2; exit 1; \
 		fi; \
 	done; \
 	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm_source.dump" || true); \
 	single_soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm_single.dump" || true); \
 	test "$$soft" -eq "$$single_soft" || { echo "ARM source/single divide references differ" >&2; exit 1; }; \
+	external_soft=$$(grep -Ehc '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_external_impl_source.dump" "$$tmp/patch_apply_external_call_source.dump" | awk '{n+=$$1} END{print n+0}'); \
+	external_single_soft=$$(grep -Ehc '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_external_impl_single.dump" "$$tmp/patch_apply_external_call_single.dump" | awk '{n+=$$1} END{print n+0}'); \
+	test "$$external_soft" -eq "$$external_single_soft" || { echo "ARM external source/single divide references differ" >&2; exit 1; }; \
+	test "$$external_soft" -eq "$(BASE_ARM_SOFT_DIV)" || { echo "ARM external soft-divide policy failed" >&2; exit 1; }; \
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
@@ -458,8 +514,18 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
 		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm_single.map" \
 		"$$tmp/patch_apply_arm_single.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm_single.elf"; \
+	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
+		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_external.map" \
+		"$$tmp/patch_apply_external_impl.o" "$$tmp/patch_apply_external_arm.o" "$$tmp/arm_link_stubs.o" \
+		-lc -lgcc -o "$$tmp/patch_apply_external.elf"; \
+	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
+		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_external_single.map" \
+		"$$tmp/patch_apply_external_impl_single.o" "$$tmp/patch_apply_external_arm_single.o" "$$tmp/arm_link_stubs.o" \
+		-lc -lgcc -o "$$tmp/patch_apply_external_single.elf"; \
 	linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.elf"); \
 	single_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_single.elf"); \
+	external_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_external.elf"); \
+	external_single_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_external_single.elf"); \
 	printf '%s\n' "$$linked_size_out"; \
 	echo "arm_linked_integration=no-startup static PatchApply wrapper + minimal flash stubs"; \
 	set -- $$(printf '%s\n' "$$linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -476,6 +542,24 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 	test "$$linked_text" -le "$(BASE_ARM_LINKED_TEXT)"; \
 	test "$$linked_data" -le "$(BASE_ARM_LINKED_DATA)"; \
 	test "$$linked_bss" -le "$(BASE_ARM_LINKED_BSS)"; \
+	set -- $$(printf '%s\n' "$$external_linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	external_linked_text=$$1; external_linked_data=$$2; external_linked_bss=$$3; \
+	set -- $$(printf '%s\n' "$$external_single_linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	test "$$external_linked_text/$$external_linked_data/$$external_linked_bss" = "$$1/$$2/$$3" || { \
+		echo "ARM external source/single linked sizes differ: $$external_linked_text/$$external_linked_data/$$external_linked_bss != $$1/$$2/$$3" >&2; exit 1; }; \
+	echo "arm_external_linked_integration=no-startup one implementation + declarations-only static wrapper + minimal flash stubs"; \
+	echo "arm_external_linked_text=$$external_linked_text"; \
+	echo "arm_external_linked_data=$$external_linked_data"; \
+	echo "arm_external_linked_bss=$$external_linked_bss"; \
+	echo "arm_external_linked_text_delta=$$((external_linked_text-linked_text))"; \
+	echo "arm_external_linked_bss_delta=$$((external_linked_bss-linked_bss))"; \
+	test "$$external_linked_data/$$external_linked_bss" = "$$linked_data/$$linked_bss" || { \
+		echo "ARM external link changed state footprint: $$external_linked_data/$$external_linked_bss != $$linked_data/$$linked_bss" >&2; exit 1; }; \
+	test "$$external_linked_text" -le "$(BASE_ARM_EXTERNAL_LINKED_TEXT)" || { \
+		echo "ARM external linked text ceiling exceeded: $$external_linked_text > $(BASE_ARM_EXTERNAL_LINKED_TEXT)" >&2; exit 1; }; \
+	if [ "$$external_linked_bss" -gt "$(ARM_BSS_HARD_CAP)" ]; then \
+		echo "ARM external linked .bss hard cap exceeded: $$external_linked_bss > $(ARM_BSS_HARD_CAP)" >&2; exit 1; \
+	fi; \
 	helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_arm.elf" | \
 		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
 		sort | paste -sd, -); \
@@ -483,8 +567,17 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
 		sort | paste -sd, -); \
 	test "$$helpers" = "$$single_helpers" || { echo "ARM source/single runtime helpers differ" >&2; exit 1; }; \
+	external_helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_external.elf" | \
+		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
+		sort | paste -sd, -); \
+	external_single_helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_external_single.elf" | \
+		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
+		sort | paste -sd, -); \
+	test "$$external_helpers" = "$$external_single_helpers" || { echo "ARM external source/single runtime helpers differ" >&2; exit 1; }; \
+	test "$$external_helpers" = "$$helpers" || { echo "ARM external/default runtime helper policies differ" >&2; exit 1; }; \
 	echo "arm_linked_runtime_helpers=$$helpers"; \
-	echo "arm_package_parity=OK (source + canonical single header; object + linked)"
+	echo "arm_package_parity=OK (source + canonical single header; object + linked)"; \
+	echo "arm_external_linkage=OK (exactly one implementation; source + canonical single; compared with one static decoder)"
 
 # Worst-case caller-stack bounds for both supported wrapper shapes. Since the fiber was deleted
 # (44eee88), the whole decode runs on the CALLER's stack; docs/device-integration.md pins the
@@ -503,18 +596,46 @@ check-stack-internal: check-release-profile-internal $(DECODER_CANONICAL_HDR)
 	$(STACK_GENERIC_HARNESS); \
 	$(ARM_SINGLE_APPLY_HARNESS); \
 	$(STACK_SINGLE_GENERIC_HARNESS); \
+	$(ARM_EXTERNAL_IMPL_HARNESS); \
+	$(ARM_EXTERNAL_APPLY_HARNESS); \
+	$(STACK_EXTERNAL_GENERIC_HARNESS); \
+	$(ARM_SINGLE_EXTERNAL_IMPL_HARNESS); \
+	$(ARM_SINGLE_EXTERNAL_APPLY_HARNESS); \
+	$(STACK_SINGLE_EXTERNAL_GENERIC_HARNESS); \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
 	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_arm_single.c" -o "$$tmp/patch_apply_arm_single.o" -fstack-usage; \
 	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_stack_generic_single.c" -o "$$tmp/patch_apply_stack_generic_single.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_impl.c" -o "$$tmp/patch_apply_external_impl_stack.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_arm.c" -o "$$tmp/patch_apply_external_arm_stack.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_stack_generic.c" -o "$$tmp/patch_apply_external_generic_stack.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_impl_single.c" -o "$$tmp/patch_apply_external_impl_single_stack.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_arm_single.c" -o "$$tmp/patch_apply_external_arm_single_stack.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_external_stack_generic_single.c" -o "$$tmp/patch_apply_external_generic_single_stack.o" -fstack-usage; \
+	$(ARM_CC) -nostdlib -r "$$tmp/patch_apply_external_impl_stack.o" "$$tmp/patch_apply_external_arm_stack.o" -o "$$tmp/patch_apply_external_static_combined.o"; \
+	$(ARM_CC) -nostdlib -r "$$tmp/patch_apply_external_impl_stack.o" "$$tmp/patch_apply_external_generic_stack.o" -o "$$tmp/patch_apply_external_generic_combined.o"; \
+	$(ARM_CC) -nostdlib -r "$$tmp/patch_apply_external_impl_single_stack.o" "$$tmp/patch_apply_external_arm_single_stack.o" -o "$$tmp/patch_apply_external_static_single_combined.o"; \
+	$(ARM_CC) -nostdlib -r "$$tmp/patch_apply_external_impl_single_stack.o" "$$tmp/patch_apply_external_generic_single_stack.o" -o "$$tmp/patch_apply_external_generic_single_combined.o"; \
+	cat "$$tmp/patch_apply_external_impl_stack.su" "$$tmp/patch_apply_external_arm_stack.su" > "$$tmp/patch_apply_external_static_combined.su"; \
+	cat "$$tmp/patch_apply_external_impl_stack.su" "$$tmp/patch_apply_external_generic_stack.su" > "$$tmp/patch_apply_external_generic_combined.su"; \
+	cat "$$tmp/patch_apply_external_impl_single_stack.su" "$$tmp/patch_apply_external_arm_single_stack.su" > "$$tmp/patch_apply_external_static_single_combined.su"; \
+	cat "$$tmp/patch_apply_external_impl_single_stack.su" "$$tmp/patch_apply_external_generic_single_stack.su" > "$$tmp/patch_apply_external_generic_single_combined.su"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm_single.o" > "$$tmp/stack_static_single.txt"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic_single.o" > "$$tmp/stack_generic_single.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_external_static_combined.o" > "$$tmp/stack_external_static.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_external_generic_combined.o" > "$$tmp/stack_external_generic.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_external_static_single_combined.o" > "$$tmp/stack_external_static_single.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_external_generic_single_combined.o" > "$$tmp/stack_external_generic_single.txt"; \
 	cmp "$$tmp/stack_static.txt" "$$tmp/stack_static_single.txt" || { \
 		echo "ARM source/single static-wrapper stack results differ" >&2; exit 1; }; \
 	cmp "$$tmp/stack_generic.txt" "$$tmp/stack_generic_single.txt" || { \
 		echo "ARM source/single generic-wrapper stack results differ" >&2; exit 1; }; \
+	cmp "$$tmp/stack_external_static.txt" "$$tmp/stack_external_static_single.txt" || { \
+		echo "ARM external source/single static-wrapper stack results differ" >&2; exit 1; }; \
+	cmp "$$tmp/stack_external_generic.txt" "$$tmp/stack_external_generic_single.txt" || { \
+		echo "ARM external source/single generic-wrapper stack results differ" >&2; exit 1; }; \
 	echo "stack_static_integration=static PatchApply wrapper"; \
 	sed 's/^stack_/stack_static_/' "$$tmp/stack_static.txt"; \
 	echo "stack_static_ceiling_o2=$(BASE_STACK_STATIC_CEIL_O2)"; \
@@ -523,15 +644,32 @@ check-stack-internal: check-release-profile-internal $(DECODER_CANONICAL_HDR)
 	echo "stack_generic_ceiling_o2=$(BASE_STACK_GENERIC_CEIL_O2)"; \
 	static_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_static.txt"); \
 	generic_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_generic.txt"); \
+	external_static_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_external_static.txt"); \
+	external_generic_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_external_generic.txt"); \
 	test -n "$$static_bound"; \
 	test -n "$$generic_bound"; \
+	test -n "$$external_static_bound"; \
+	test -n "$$external_generic_bound"; \
 	if [ "$$static_bound" -gt "$(BASE_STACK_STATIC_CEIL_O2)" ]; then \
 		echo "Static PatchApply wrapper stack ceiling exceeded: $$static_bound > $(BASE_STACK_STATIC_CEIL_O2)" >&2; exit 1; \
 	fi; \
 	if [ "$$generic_bound" -gt "$(BASE_STACK_GENERIC_CEIL_O2)" ]; then \
 		echo "Caller-owned PatchApply * wrapper stack ceiling exceeded: $$generic_bound > $(BASE_STACK_GENERIC_CEIL_O2)" >&2; exit 1; \
 	fi; \
-	echo "stack_package_parity=OK (source + canonical single header; static + generic)"
+	if [ "$$external_static_bound" -gt "$(BASE_STACK_EXTERNAL_STATIC_CEIL_O2)" ]; then \
+		echo "External static PatchApply wrapper stack ceiling exceeded: $$external_static_bound > $(BASE_STACK_EXTERNAL_STATIC_CEIL_O2)" >&2; exit 1; \
+	fi; \
+	if [ "$$external_generic_bound" -gt "$(BASE_STACK_EXTERNAL_GENERIC_CEIL_O2)" ]; then \
+		echo "External caller-owned PatchApply pointer stack ceiling exceeded: $$external_generic_bound > $(BASE_STACK_EXTERNAL_GENERIC_CEIL_O2)" >&2; exit 1; \
+	fi; \
+	echo "stack_external_static_integration=one implementation + declarations-only static PatchApply wrapper"; \
+	echo "stack_external_static_bound_bytes=$$external_static_bound"; \
+	echo "stack_external_static_delta_bytes=$$((external_static_bound-static_bound))"; \
+	echo "stack_external_generic_integration=one implementation + declarations-only caller-owned PatchApply pointer"; \
+	echo "stack_external_generic_bound_bytes=$$external_generic_bound"; \
+	echo "stack_external_generic_delta_bytes=$$((external_generic_bound-generic_bound))"; \
+	echo "stack_package_parity=OK (source + canonical single header; static + generic)"; \
+	echo "stack_external_linkage=OK (source + canonical single; compared with one static decoder)"
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
 # attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
@@ -829,8 +967,12 @@ gate-internal:
 	BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
 	BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
 	BASE_ARM_SOFT_DIV="$(BASE_ARM_SOFT_DIV)" \
+	BASE_ARM_EXTERNAL_TEXT="$(BASE_ARM_EXTERNAL_TEXT)" \
+	BASE_ARM_EXTERNAL_LINKED_TEXT="$(BASE_ARM_EXTERNAL_LINKED_TEXT)" \
 	BASE_STACK_STATIC_CEIL_O2="$(BASE_STACK_STATIC_CEIL_O2)" \
 	BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
+	BASE_STACK_EXTERNAL_STATIC_CEIL_O2="$(BASE_STACK_EXTERNAL_STATIC_CEIL_O2)" \
+	BASE_STACK_EXTERNAL_GENERIC_CEIL_O2="$(BASE_STACK_EXTERNAL_GENERIC_CEIL_O2)" \
 	JOBS="$(JOBS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+#if defined(ULTRAPATCH_DECLARATIONS_ONLY) && defined(ULTRAPATCH_IMPLEMENTATION)
+#error "ULTRAPATCH_DECLARATIONS_ONLY and ULTRAPATCH_IMPLEMENTATION are mutually exclusive"
+#endif
+
 #ifndef UP_PATCH_APPLY_H
 #define UP_PATCH_APPLY_H
 /*
@@ -73,10 +77,13 @@ typedef enum {
 } PatchApplyResult;
 enum { PATCH_PULL_END = 0, PATCH_PULL_BYTE = 1 };
 typedef int (*PatchPull)(void *ctx, uint8_t *out);
+enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
 
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static uint8_t up_image_flash_read(uint32_t image_offset){
     return flash_read((uint32_t)(PATCH_IMAGE_BASE + image_offset));
 }
+#endif
 
 /* Decoder state is owned by the integrator and passed to patch_apply_run(). The header keeps no
  * file-scope storage: embedded users may place this object in .bss, noinit, a bootloader-owned
@@ -176,6 +183,40 @@ _Static_assert(offsetof(up_Arena, apply.sa) == UP_JREGION && (offsetof(up_Arena,
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
 _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 up_DRStream.K (else the REJ_RESOURCE refuse wraps)");
+/* Integration geometry is part of the public type/configuration contract, so every linkage mode
+ * applies the exact same checks. The final address may be UINT32_MAX; capacity therefore subtracts
+ * one before the headroom comparison. */
+_Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
+_Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
+_Static_assert(MAX_IMAGE>0u, "MAX_IMAGE must be nonzero");
+_Static_assert(PATCH_IMAGE_BASE>=0, "PATCH_IMAGE_BASE must not be negative");
+_Static_assert(PATCH_IMAGE_CAPACITY>0, "PATCH_IMAGE_CAPACITY must be positive");
+_Static_assert((PATCH_IMAGE_BASE & (OUTROW-1u))==0u,
+               "PATCH_IMAGE_BASE must be aligned to OUTROW");
+_Static_assert((PATCH_IMAGE_CAPACITY & (OUTROW-1u))==0u,
+               "PATCH_IMAGE_CAPACITY must cover complete OUTROW pages");
+_Static_assert(PATCH_IMAGE_CAPACITY<=UINT32_MAX,
+               "PATCH_IMAGE_CAPACITY must fit uint32_t");
+_Static_assert(PATCH_IMAGE_BASE <= UINT32_MAX-
+               (PATCH_IMAGE_CAPACITY-1u),
+               "PATCH_IMAGE_BASE + PATCH_IMAGE_CAPACITY exceeds uint32_t address space");
+
+/* Linkage modes:
+ *   default                         — complete decoder with internal linkage (legacy header-only form)
+ *   ULTRAPATCH_DECLARATIONS_ONLY   — public state/types, this prototype, and inline accessors only
+ *   ULTRAPATCH_IMPLEMENTATION      — complete decoder with one externally linked implementation
+ * Every TU in an external-linkage integration must use identical wire/device configuration.
+ * Define ULTRAPATCH_IMPLEMENTATION in exactly one TU and ULTRAPATCH_DECLARATIONS_ONLY in callers. */
+#if defined(ULTRAPATCH_DECLARATIONS_ONLY)
+#define UP_PATCH_API extern
+#elif defined(ULTRAPATCH_IMPLEMENTATION)
+#define UP_PATCH_API
+#else
+#define UP_PATCH_API static
+#endif
+UP_PATCH_API PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa,
+                                                                     PatchPull next,
+                                                                     void *ctx);
 
 /* Patch geometry — decoder-OWNED. up_decode_body parses it from the blob envelope; the
  * integrator no longer supplies sizes/direction/span (footguns removed), it only provides
@@ -195,6 +236,7 @@ _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit
 /* without asking the byte source for transport EOF. EOF from the callback is only the       */
 /* truncation/abort path.                                                                    */
 /* ===================================================================================== */
+#if !defined(ULTRAPATCH_DECLARATIONS_ONLY)
 static int up_decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
@@ -213,8 +255,6 @@ static int up_pull_raw(PatchApply *pa, uint8_t*out){
  * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
  * is bigger than the build was sized for, raise the cap (costs SRAM). 2 = CORRUPT: malformed/truncated
  * stream (bounds, underrun, range-coder overflow). 0 = none. Pure diagnostic; never affects decoding. */
-enum { REJ_NONE=0, REJ_RESOURCE=1, REJ_CORRUPT=2 };
-
 static uint8_t up_next_byte(PatchApply *pa){
     uint8_t b;
     if(pa->g_body_left==0) return 0;
@@ -447,23 +487,9 @@ static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 /* OUTROW_DEPTH is configured above; encoder and decoder builds MUST use the same value. */
 #define UP_OROW_NONE UINT32_MAX
 #define UP_OROW_SLOT(base) (uint32_t)(((base)/OUTROW) % OUTROW_DEPTH)
-/* UP_OROW_SLOT / up_out_read / up_out_write use /OUTROW and %OUTROW_DEPTH; both must stay powers of two so
- * they lower to shift/mask — a non-pow2 -D retune would pull libgcc divide helpers into the
- * Cortex-M0+ build (the gate tracks divide policy) and break the encoder's pow2-page contract. */
-_Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
-_Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
-_Static_assert(MAX_IMAGE>0u, "MAX_IMAGE must be nonzero");
-_Static_assert(PATCH_IMAGE_BASE>=0, "PATCH_IMAGE_BASE must not be negative");
-_Static_assert(PATCH_IMAGE_CAPACITY>0, "PATCH_IMAGE_CAPACITY must be positive");
-_Static_assert((PATCH_IMAGE_BASE & (OUTROW-1u))==0u,
-               "PATCH_IMAGE_BASE must be aligned to OUTROW");
-_Static_assert((PATCH_IMAGE_CAPACITY & (OUTROW-1u))==0u,
-               "PATCH_IMAGE_CAPACITY must cover complete OUTROW pages");
-_Static_assert(PATCH_IMAGE_CAPACITY<=UINT32_MAX,
-               "PATCH_IMAGE_CAPACITY must fit uint32_t");
-_Static_assert(PATCH_IMAGE_BASE <= UINT32_MAX-
-               (PATCH_IMAGE_CAPACITY-1u),
-               "PATCH_IMAGE_BASE + PATCH_IMAGE_CAPACITY exceeds uint32_t address space");
+/* UP_OROW_SLOT / up_out_read / up_out_write use /OUTROW and %OUTROW_DEPTH. The shared
+ * integration assertions above keep both powers of two, so these lower to shift/mask rather than
+ * pulling divide helpers into Cortex-M0+ or violating the encoder's page contract. */
 static void up_orow_commit_slot(PatchApply *pa, uint32_t s){
     if(pa->g_orow_base[s]!=UP_OROW_NONE && pa->g_orow_dirty[s]){
         uint32_t base=pa->g_orow_base[s];
@@ -1049,8 +1075,8 @@ static void RC_NOINLINE up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,u
  * callback result is also an abort, never a byte. Valid patches terminate at the header's
  * compressed body length and do not require callback EOF. Returns PATCH_APPLY_DONE (zero; image
  * written, both CRCs verified) or PATCH_APPLY_ERROR (nonzero; g_reject holds the reason). */
-static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, PatchPull next,
-                                                               void *ctx){
+UP_PATCH_API PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, PatchPull next,
+                                                                     void *ctx){
     memset(pa,0,sizeof *pa);
     pa->g_pull_fn=next; pa->g_pull_ctx=ctx;
     if(!up_decode_body(pa) || up_crc32_flash(pa,pa->g_to_size)!=pa->g_want_to){
@@ -1058,6 +1084,7 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, Pa
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
 }
+#endif /* !ULTRAPATCH_DECLARATIONS_ONLY */
 
 /* After PATCH_APPLY_ERROR, the reject reason: REJ_RESOURCE (a decoder cap was exceeded — this
  * firmware needs a larger build) vs REJ_CORRUPT (malformed/truncated/wrong-image). Prefer this
@@ -1078,6 +1105,7 @@ static inline uint32_t patch_apply_image_span(const PatchApply *pa){ return pa->
 static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
 static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa->g_jcount; }
 
+#undef UP_PATCH_API
 #undef RC_RICE_UNARY_MAX
 #undef UP_JREGION
 #undef UP_RING

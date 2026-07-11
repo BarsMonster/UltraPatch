@@ -24,7 +24,9 @@ run_make() {
       -u BASE_RELEASE_FOREIGN_IMAGES -u BASE_RELEASE_GOLDEN_BLOBS \
       -u BASE_ARM_TEXT -u BASE_ARM_DATA -u BASE_ARM_BSS \
       -u BASE_ARM_LINKED_TEXT -u BASE_ARM_LINKED_DATA -u BASE_ARM_LINKED_BSS \
-      -u BASE_ARM_SOFT_DIV -u BASE_STACK_STATIC_CEIL_O2 -u BASE_STACK_GENERIC_CEIL_O2 \
+      -u BASE_ARM_SOFT_DIV -u BASE_ARM_EXTERNAL_TEXT -u BASE_ARM_EXTERNAL_LINKED_TEXT \
+      -u BASE_STACK_STATIC_CEIL_O2 -u BASE_STACK_GENERIC_CEIL_O2 \
+      -u BASE_STACK_EXTERNAL_STATIC_CEIL_O2 -u BASE_STACK_EXTERNAL_GENERIC_CEIL_O2 \
       "${make_argv[@]}" --no-print-directory "$@"
 }
 
@@ -80,7 +82,11 @@ expect_reject corpus_inventory CORPUS_INVENTORY="$tmp/inventory.tsv" \
 expect_reject size_baseline CORPUS_SIZE_BASELINE= release-gate-origin-probe-internal
 expect_reject compression_cap BASE_ONEFACE_GROW=999999 release-gate-origin-probe-internal
 expect_reject arm_ratchet BASE_ARM_TEXT=999999 release-gate-origin-probe-internal
+expect_reject external_arm_ratchet BASE_ARM_EXTERNAL_TEXT=999999 \
+  release-gate-origin-probe-internal
 expect_reject stack_ratchet BASE_STACK_STATIC_CEIL_O2=999999 \
+  release-gate-origin-probe-internal
+expect_reject external_stack_ratchet BASE_STACK_EXTERNAL_STATIC_CEIL_O2=999999 \
   release-gate-origin-probe-internal
 expect_reject release_lock RELEASE_PROFILE_LOCK="$tmp/release.json" \
   release-gate-origin-probe-internal
@@ -136,7 +142,9 @@ if MAKE="$fake_make" HOST_TOOL=/bin/true DECODER_CANONICAL_HDR=/dev/null \
     BASE_ONEFACE_GROW=573 BASE_ONEFACE_REVERT=287 \
     BASE_ARM_TEXT=6073 BASE_ARM_DATA=0 BASE_ARM_BSS=10296 \
     BASE_ARM_LINKED_TEXT=6653 BASE_ARM_LINKED_DATA=0 BASE_ARM_LINKED_BSS=10296 \
-    BASE_ARM_SOFT_DIV=0 BASE_STACK_STATIC_CEIL_O2=480 BASE_STACK_GENERIC_CEIL_O2=480 \
+    BASE_ARM_SOFT_DIV=0 BASE_ARM_EXTERNAL_TEXT=6281 BASE_ARM_EXTERNAL_LINKED_TEXT=6861 \
+    BASE_STACK_STATIC_CEIL_O2=480 BASE_STACK_GENERIC_CEIL_O2=480 \
+    BASE_STACK_EXTERNAL_STATIC_CEIL_O2=432 BASE_STACK_EXTERNAL_GENERIC_CEIL_O2=432 \
     "$ROOT/scripts/run_gate.sh" >"$tmp/evidence.out" 2>"$tmp/evidence.err"; then
   echo "gate accepted successful child statuses without release evidence" >&2
   exit 1

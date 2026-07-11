@@ -110,6 +110,18 @@ require_uint() {
     esac
   fi
 }
+require_int() {
+  local file=$1 key=$2 value
+  if load_metric "$file" "$key"; then
+    value=$METRIC_VALUE
+    case "$value" in
+      -*) value=${value#-} ;;
+    esac
+    case "$value" in
+      ''|*[!0-9]*) evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected integer)" ;;
+    esac
+  fi
+}
 require_uint_le() {
   local file=$1 key=$2 limit=$3
   if load_metric "$file" "$key"; then
@@ -117,6 +129,14 @@ require_uint_le() {
       ''|*[!0-9]*) evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected unsigned integer)" ;;
       *) [ "$METRIC_VALUE" -le "$limit" ] || evidence_error "invalid gate evidence: $file:$key=$METRIC_VALUE exceeds $limit" ;;
     esac
+  fi
+}
+require_same() {
+  local file=$1 left_key=$2 right_key=$3 left right
+  if load_metric "$file" "$left_key"; then left=$METRIC_VALUE; else return; fi
+  if load_metric "$file" "$right_key"; then right=$METRIC_VALUE; else return; fi
+  if [ "$left" != "$right" ]; then
+    evidence_error "invalid gate evidence: $file:$left_key='$left' differs from $right_key='$right'"
   fi
 }
 
@@ -172,6 +192,7 @@ require_exact dec_contract.txt decoder_contract OK
 require_prefix dec_contract.txt decoder_portable "OK ("
 require_prefix dec_contract.txt decoder_address_contract "OK ("
 require_prefix dec_contract.txt decoder_resource_contract "OK ("
+require_prefix dec_contract.txt decoder_linkage_contract "OK ("
 require_exact models.txt model_contract OK
 require_prefix wire_config.txt wire_config_override "OK ("
 require_prefix ab.txt ab_wire_change "OK ("
@@ -200,6 +221,23 @@ load_metric a.txt arm_linked_runtime_helpers || :
 require_exact a.txt soft_div_calls "${BASE_ARM_SOFT_DIV:?}"
 require_exact a.txt arm_bss_hard_cap_overrides "REJECTED (object + linked)"
 require_exact a.txt arm_package_parity "OK (source + canonical single header; object + linked)"
+require_exact a.txt arm_external_size_integration "one implementation object + declarations-only static PatchApply wrapper"
+require_uint_le a.txt arm_external_object_text "${BASE_ARM_EXTERNAL_TEXT:?}"
+require_uint a.txt arm_external_object_data
+require_uint_le a.txt arm_external_object_bss 12288
+require_same a.txt arm_external_object_data arm_object_data
+require_same a.txt arm_external_object_bss arm_object_bss
+require_int a.txt arm_external_object_text_delta
+require_int a.txt arm_external_object_bss_delta
+require_exact a.txt arm_external_linked_integration "no-startup one implementation + declarations-only static wrapper + minimal flash stubs"
+require_uint_le a.txt arm_external_linked_text "${BASE_ARM_EXTERNAL_LINKED_TEXT:?}"
+require_uint a.txt arm_external_linked_data
+require_uint_le a.txt arm_external_linked_bss 12288
+require_same a.txt arm_external_linked_data arm_linked_data
+require_same a.txt arm_external_linked_bss arm_linked_bss
+require_int a.txt arm_external_linked_text_delta
+require_int a.txt arm_external_linked_bss_delta
+require_exact a.txt arm_external_linkage "OK (exactly one implementation; source + canonical single; compared with one static decoder)"
 
 require_exact st.txt stack_static_integration "static PatchApply wrapper"
 require_uint_le st.txt stack_static_bound_bytes "${BASE_STACK_STATIC_CEIL_O2:?}"
@@ -208,6 +246,13 @@ require_exact st.txt stack_generic_integration "caller-owned PatchApply * wrappe
 require_uint_le st.txt stack_generic_bound_bytes "${BASE_STACK_GENERIC_CEIL_O2:?}"
 require_exact st.txt stack_generic_ceiling_o2 "${BASE_STACK_GENERIC_CEIL_O2:?}"
 require_exact st.txt stack_package_parity "OK (source + canonical single header; static + generic)"
+require_exact st.txt stack_external_static_integration "one implementation + declarations-only static PatchApply wrapper"
+require_uint_le st.txt stack_external_static_bound_bytes "${BASE_STACK_EXTERNAL_STATIC_CEIL_O2:?}"
+require_int st.txt stack_external_static_delta_bytes
+require_exact st.txt stack_external_generic_integration "one implementation + declarations-only caller-owned PatchApply pointer"
+require_uint_le st.txt stack_external_generic_bound_bytes "${BASE_STACK_EXTERNAL_GENERIC_CEIL_O2:?}"
+require_int st.txt stack_external_generic_delta_bytes
+require_exact st.txt stack_external_linkage "OK (source + canonical single; compared with one static decoder)"
 
 require_exact m.txt matrix_ok "$release_home_pairs/$release_home_pairs"
 require_exact m.txt full_total "${BASE_FULL_TOTAL:?}"
@@ -245,7 +290,7 @@ kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_ass
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
-kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
+kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage       : ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 kvs 'release_gate.txt|release_gate_contract|release gate contract   : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
@@ -257,9 +302,15 @@ awk -F= -v bt="${BASE_ARM_LINKED_TEXT:?}" -v bd="${BASE_ARM_LINKED_DATA:?}" -v b
 kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : '
 kvs 'a.txt|soft_div_calls|ARM   soft-divide calls  : '
 kvs 'a.txt|arm_package_parity|ARM packaging parity   : '
+awk -F= '/^arm_external_object_text=/{t=$2}/^arm_external_object_data=/{d=$2}/^arm_external_object_bss=/{b=$2}/^arm_external_object_text_delta=/{dt=$2}/^arm_external_object_bss_delta=/{db=$2}END{if(t!="")printf "ARM external object     : %s / %s / %s  (delta vs one static: text %+d, bss %+d)\n",t,d,b,dt,db}' "$tmp/a.txt"
+awk -F= '/^arm_external_linked_text=/{t=$2}/^arm_external_linked_data=/{d=$2}/^arm_external_linked_bss=/{b=$2}/^arm_external_linked_text_delta=/{dt=$2}/^arm_external_linked_bss_delta=/{db=$2}END{if(t!="")printf "ARM external linked     : %s / %s / %s  (delta vs one static: text %+d, bss %+d)\n",t,d,b,dt,db}' "$tmp/a.txt"
+kvs 'a.txt|arm_external_linkage|ARM external linkage   : '
 awk -F= '/^stack_static_bound_bytes=/{b=$2}/^stack_static_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, static wrapper   : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 awk -F= '/^stack_generic_bound_bytes=/{b=$2}/^stack_generic_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, generic pointer  : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
+awk -F= '/^stack_external_static_bound_bytes=/{b=$2}/^stack_external_static_delta_bytes=/{d=$2}END{if(b!="")printf "stack, external static  : %s B  (delta vs one static: %+d B)\n",b,d}' "$tmp/st.txt"
+awk -F= '/^stack_external_generic_bound_bytes=/{b=$2}/^stack_external_generic_delta_bytes=/{d=$2}END{if(b!="")printf "stack, external generic : %s B  (delta vs one static: %+d B)\n",b,d}' "$tmp/st.txt"
 kvs 'st.txt|stack_package_parity|stack packaging parity : '
+kvs 'st.txt|stack_external_linkage|stack external linkage: '
 kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : '
 awk -F= '/^home_size_better=/{b=$2}/^home_size_worse=/{w=$2}/^home_size_equal=/{e=$2}END{if(b!="")printf "home size split         : %s better / %s worse / %s equal\n",b,w,e}' "$tmp/m.txt"
 kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'm.txt|wire_identity|corpus wire identity    : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM pages amplified      : ' 'm.txt|max_maxpageerase|NVM max erases-per-page  : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_unaligned|NVM unaligned calls      : ' 'm.txt|max_oob_page_writes|NVM out-of-range calls   : ' 'm.txt|max_canary_corrupt|NVM canary corruptions  : ' 'm.txt|max_journal|journal peak slots      : '

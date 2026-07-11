@@ -119,7 +119,10 @@ is the host reference/debug mode.
 The generated form is published atomically at `artifacts/patch_apply_single.h`:
 first creation uses mode `0644`, while replacement preserves an existing readable
 permission mode. All release checks consume this exact file rather than private
-per-test regenerations.
+per-test regenerations. Both packaging forms support the default internally linked
+decoder and the opt-in multi-TU split (`ULTRAPATCH_IMPLEMENTATION` in exactly one
+TU, `ULTRAPATCH_DECLARATIONS_ONLY` in callers); the release contract compiles,
+links, and behaviorally exercises all three modes.
 
 For traceability, release notes should include:
 
