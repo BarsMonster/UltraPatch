@@ -89,6 +89,7 @@ CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
 DECODER_PUBLIC_HDRS := $(CONFIG_HDR) src/rc_models.h $(APPLY_HDR)
 DECODER_SINGLE_HDR ?= artifacts/patch_apply_single.h
+override DECODER_CANONICAL_HDR := $(abspath $(DECODER_SINGLE_HDR))
 # Shared host-side NVM emulator, #included by patch_host_backend.c before patch_apply.h.
 NVM_EMU := src/nvm_emu.inc
 # Host encoder modules. The encoder is a normal CLI tool and may rely on this Makefile;
@@ -162,7 +163,10 @@ BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
-ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb $(WIRE_CONFIG_FLAGS) $(DECODER_CONFIG_FLAGS) -I src
+ARM_COMMON_FLAGS := -mcpu=cortex-m0plus -mthumb $(WIRE_CONFIG_FLAGS) $(DECODER_CONFIG_FLAGS)
+ARM_DEC_FLAGS := $(ARM_COMMON_FLAGS) -I src
+ARM_SINGLE_DEC_FLAGS := $(ARM_COMMON_FLAGS)
+SINGLE_DECODER_CFLAGS = $(filter-out -Isrc,$(DECODER_CFLAGS))
 ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
 ARM_LINK_LAYOUT := scripts/arm_link.ld
 # The production ARM size gate intentionally measures the static-state wrapper integration
@@ -170,6 +174,8 @@ ARM_LINK_LAYOUT := scripts/arm_link.ld
 # product notes/gate output must not present this number as shape-independent.
 ARM_APPLY_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm.c"
 STACK_GENERIC_HARNESS = printf '%s\n' '\#include "patch_apply.h"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic.c"
+ARM_SINGLE_APPLY_HARNESS = printf '%s\n' '\#include "$(DECODER_CANONICAL_HDR)"' 'static PatchApply g_patch_apply_state;' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > "$$tmp/patch_apply_arm_single.c"
+STACK_SINGLE_GENERIC_HARNESS = printf '%s\n' '\#include "$(DECODER_CANONICAL_HDR)"' 'PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }' > "$$tmp/patch_apply_stack_generic_single.c"
 # Independent worst-case caller-stack ceilings for the two real integration shapes, gcc -O2,
 # Cortex-M0+ (bytes). scripts/stack_bound.py derives each exact static bound from
 # -fstack-usage frames + its harness object's call graph. check-stack reports and gates both.
@@ -235,8 +241,11 @@ check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profi
 	@MAKE="$(MAKE)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" scripts/check_build_profile.sh
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
-	@python3 scripts/gen_single_header.py "$(DECODER_SINGLE_HDR)" $(DECODER_PUBLIC_HDRS)
-	@echo "decoder_header=$(DECODER_SINGLE_HDR)"
+	@python3 scripts/gen_single_header.py "$(DECODER_CANONICAL_HDR)" $(DECODER_PUBLIC_HDRS)
+	@echo "decoder_header=$(DECODER_CANONICAL_HDR)"
+
+$(DECODER_CANONICAL_HDR): $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
+	@python3 scripts/gen_single_header.py "$(DECODER_CANONICAL_HDR)" $(DECODER_PUBLIC_HDRS)
 
 WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
                            -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
@@ -258,12 +267,14 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
 	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
-	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS LDFLAGS ARM_DEC_FLAGS \
+	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS SINGLE_DECODER_CFLAGS \
+	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_SINGLE_DEC_FLAGS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
 	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
 	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
 	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
-	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS
+	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS ARM_SINGLE_APPLY_HARNESS \
+	STACK_SINGLE_GENERIC_HARNESS
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
@@ -328,14 +339,15 @@ check-wire-config-internal: ultrapatch
 		DEFAULT_ULTRAPATCH='$(HOST_TOOL)' \
 		check-wire-config-probe-internal
 
-check-wire-config-probe-internal: ultrapatch scripts/check_wire_config.sh scripts/gen_single_header.py \
-                                scripts/synth_gen.py test-bench/decoder-contract.c $(DECODER_PUBLIC_HDRS) \
+check-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR) scripts/check_wire_config.sh \
+                                scripts/synth_gen.py test-bench/decoder-contract.c \
                                 $(DEC_STANDALONE_SRCS) $(NVM_EMU) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
-	  SINGLE_DECODER_CFLAGS="$(filter-out -Isrc,$(DECODER_CFLAGS))" \
+	  SINGLE_DECODER_CFLAGS="$(SINGLE_DECODER_CFLAGS)" \
+	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" \
 	  DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
 	  ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
-	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" \
+	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" ARM_SINGLE_DEC_FLAGS="$(ARM_SINGLE_DEC_FLAGS)" \
 	  ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" ARM_BSS_HARD_CAP="$(ARM_BSS_HARD_CAP)" \
 	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_LAYOUT="$(ARM_LINK_LAYOUT)" \
 	  DEFAULT_ULTRAPATCH="$(DEFAULT_ULTRAPATCH)" ULTRAPATCH="$(HOST_TOOL)" \
@@ -404,12 +416,15 @@ check-arm-internal: check-release-profile-internal
 	@MAKE="$(MAKE)" scripts/check_arm_bss_cap.sh
 
 .PHONY: check-arm-measure-internal
-check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
+check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
+	$(ARM_SINGLE_APPLY_HARNESS); \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o"; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$$tmp/patch_apply_arm_single.c" -o "$$tmp/patch_apply_arm_single.o"; \
 	size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.o"); \
+	single_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_single.o"); \
 	printf '%s\n' "$$size_out"; \
 	echo "arm_size_integration=static PatchApply wrapper"; \
 	set -- $$(printf '%s\n' "$$size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
@@ -421,22 +436,37 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	test "$$obj_text" -le "$(BASE_ARM_TEXT)"; \
 	test "$$obj_data" -le "$(BASE_ARM_DATA)"; \
 	test "$$obj_bss" -le "$(BASE_ARM_BSS)"; \
-	$(ARM_OBJDUMP) -d "$$tmp/patch_apply_arm.o" > "$$tmp/patch_apply_arm.dump"; \
-	if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm.dump"; then \
-		echo "hardware divide instruction found"; exit 1; \
-	fi; \
-	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm.dump" || true); \
+	set -- $$(printf '%s\n' "$$single_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	test "$$obj_text/$$obj_data/$$obj_bss" = "$$1/$$2/$$3" || { \
+		echo "ARM source/single object sizes differ: $$obj_text/$$obj_data/$$obj_bss != $$1/$$2/$$3" >&2; exit 1; }; \
+	for form in source single; do \
+		if [ "$$form" = source ]; then obj="$$tmp/patch_apply_arm.o"; else obj="$$tmp/patch_apply_arm_single.o"; fi; \
+		$(ARM_OBJDUMP) -d "$$obj" > "$$tmp/patch_apply_arm_$$form.dump"; \
+		if grep -Eq '\b(udiv|sdiv)\b' "$$tmp/patch_apply_arm_$$form.dump"; then \
+			echo "hardware divide instruction found in $$form decoder" >&2; exit 1; \
+		fi; \
+	done; \
+	soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm_source.dump" || true); \
+	single_soft=$$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$$tmp/patch_apply_arm_single.dump" || true); \
+	test "$$soft" -eq "$$single_soft" || { echo "ARM source/single divide references differ" >&2; exit 1; }; \
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
 	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
 		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm.map" \
 		"$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm.elf"; \
+	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
+		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm_single.map" \
+		"$$tmp/patch_apply_arm_single.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm_single.elf"; \
 	linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.elf"); \
+	single_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_single.elf"); \
 	printf '%s\n' "$$linked_size_out"; \
 	echo "arm_linked_integration=no-startup static PatchApply wrapper + minimal flash stubs"; \
 	set -- $$(printf '%s\n' "$$linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
 	linked_text=$$1; linked_data=$$2; linked_bss=$$3; \
+	set -- $$(printf '%s\n' "$$single_linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	test "$$linked_text/$$linked_data/$$linked_bss" = "$$1/$$2/$$3" || { \
+		echo "ARM source/single linked sizes differ: $$linked_text/$$linked_data/$$linked_bss != $$1/$$2/$$3" >&2; exit 1; }; \
 	echo "arm_linked_text=$$linked_text"; \
 	echo "arm_linked_data=$$linked_data"; \
 	echo "arm_linked_bss=$$linked_bss"; \
@@ -449,7 +479,12 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 	helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_arm.elf" | \
 		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
 		sort | paste -sd, -); \
-	echo "arm_linked_runtime_helpers=$$helpers"
+	single_helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_arm_single.elf" | \
+		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
+		sort | paste -sd, -); \
+	test "$$helpers" = "$$single_helpers" || { echo "ARM source/single runtime helpers differ" >&2; exit 1; }; \
+	echo "arm_linked_runtime_helpers=$$helpers"; \
+	echo "arm_package_parity=OK (source + canonical single header; object + linked)"
 
 # Worst-case caller-stack bounds for both supported wrapper shapes. Since the fiber was deleted
 # (44eee88), the whole decode runs on the CALLER's stack; docs/device-integration.md pins the
@@ -461,15 +496,25 @@ check-arm-measure-internal: $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
 # static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write_page/byte-callback)
 # and toolchain leaves (memmove/memset/__aeabi_uidiv); each ceiling's headroom absorbs those +
 # interrupt-frame slack. Same cross-gcc as check-arm.
-check-stack-internal: check-release-profile-internal
+check-stack-internal: check-release-profile-internal $(DECODER_CANONICAL_HDR)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	$(ARM_APPLY_HARNESS); \
 	$(STACK_GENERIC_HARNESS); \
+	$(ARM_SINGLE_APPLY_HARNESS); \
+	$(STACK_SINGLE_GENERIC_HARNESS); \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_arm.c" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_stack_generic.c" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_arm_single.c" -o "$$tmp/patch_apply_arm_single.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_SINGLE_DEC_FLAGS) $(ARM_STACK_OPT) -c "$$tmp/patch_apply_stack_generic_single.c" -o "$$tmp/patch_apply_stack_generic_single.o" -fstack-usage; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm_single.o" > "$$tmp/stack_static_single.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic_single.o" > "$$tmp/stack_generic_single.txt"; \
+	cmp "$$tmp/stack_static.txt" "$$tmp/stack_static_single.txt" || { \
+		echo "ARM source/single static-wrapper stack results differ" >&2; exit 1; }; \
+	cmp "$$tmp/stack_generic.txt" "$$tmp/stack_generic_single.txt" || { \
+		echo "ARM source/single generic-wrapper stack results differ" >&2; exit 1; }; \
 	echo "stack_static_integration=static PatchApply wrapper"; \
 	sed 's/^stack_/stack_static_/' "$$tmp/stack_static.txt"; \
 	echo "stack_static_ceiling_o2=$(BASE_STACK_STATIC_CEIL_O2)"; \
@@ -485,7 +530,8 @@ check-stack-internal: check-release-profile-internal
 	fi; \
 	if [ "$$generic_bound" -gt "$(BASE_STACK_GENERIC_CEIL_O2)" ]; then \
 		echo "Caller-owned PatchApply * wrapper stack ceiling exceeded: $$generic_bound > $(BASE_STACK_GENERIC_CEIL_O2)" >&2; exit 1; \
-	fi
+	fi; \
+	echo "stack_package_parity=OK (source + canonical single header; static + generic)"
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
 # attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
@@ -500,7 +546,7 @@ check-stack-internal: check-release-profile-internal
 # a non-GNU toolchain's stddef.h supplies its own), (c) a fallback-built host decoder must
 # round-trip the real one-face patch byte-exactly.
 PORTABLE_FALLBACK_FLAGS := -DNO_GNU_EXTENSIONS
-check-decoder-contract-internal: ultrapatch decoder-header-internal
+check-decoder-contract-internal: ultrapatch $(DECODER_CANONICAL_HDR)
 	@set -e; \
 	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \
 		echo "decoder headers may include only their previous shipped support header" >&2; exit 1; \
@@ -512,14 +558,13 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 		echo "decoder header set must not declare file-scope static variables" >&2; exit 1; \
 	fi; \
 	. ./scripts/tempdir.sh; \
-	single="$(DECODER_SINGLE_HDR)"; \
-	singlehdr="$(notdir $(DECODER_SINGLE_HDR))"; \
-	singledir="$(dir $(DECODER_SINGLE_HDR))"; \
+	single="$(DECODER_CANONICAL_HDR)"; \
 	if grep -nE '^[[:space:]]*#include[[:space:]]*"' "$$single" | grep -E '"(patch_config|rc_models|patch_apply)\.h"'; then \
 		echo "generated single decoder header must not include local decoder support headers" >&2; exit 1; \
 	fi; \
-	for inc in patch_apply.h "$$singlehdr"; do \
-		csrc="$$tmp/$${inc%.h}_smoke.c"; obj="$$tmp/$${inc%.h}_smoke.o"; \
+	for form in source single; do \
+		if [ "$$form" = source ]; then inc=patch_apply.h; stem=patch_apply; else inc="$$single"; stem=patch_apply_single; fi; \
+		csrc="$$tmp/$${stem}_smoke.c"; obj="$$tmp/$${stem}_smoke.o"; \
 		{ printf '%s\n' '#include <stdint.h>'; \
 		  printf '%s\n' "#include \"$$inc\""; \
 		  printf '%s\n' 'uint8_t flash_read(uint32_t a){ (void)a; return 0xffu; }'; \
@@ -527,9 +572,9 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 		  printf '%s\n' 'static int next(void *c, uint8_t *out){ (void)c; (void)out; return PATCH_PULL_END; }'; \
 		  printf '%s\n' 'int main(void){ PatchApply pa; return patch_apply_run(&pa, next, 0); }'; \
 		} > "$$csrc"; \
-		if [ "$$inc" = "$$singlehdr" ]; then \
-			$(CC) $(filter-out -Isrc,$(DECODER_CFLAGS)) -Wconversion -I"$$singledir" -c "$$csrc" -o "$$obj"; \
-			$(CC) $(filter-out -Isrc,$(DECODER_CFLAGS)) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -I"$$singledir" -c "$$csrc" -o "$$obj"; \
+		if [ "$$form" = single ]; then \
+			$(CC) $(SINGLE_DECODER_CFLAGS) -Wconversion -c "$$csrc" -o "$$obj"; \
+			$(CC) $(SINGLE_DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -c "$$csrc" -o "$$obj"; \
 		else \
 			$(CC) $(DECODER_CFLAGS) -Wconversion -Isrc -c "$$csrc" -o "$$obj"; \
 			$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Wconversion -Isrc -c "$$csrc" -o "$$obj"; \
@@ -575,19 +620,28 @@ check-decoder-contract-internal: ultrapatch decoder-header-internal
 	    $(DEC_STANDALONE_SRCS) -o "$$tmp/dec_portable"; \
 	FIXTURES="$(FIXTURES)" ONEFACE_ROUNDTRIP=1 \
 	    scripts/oneface_metrics.sh "$(HOST_TOOL)" "$$tmp/dec_portable" >/dev/null; \
-	CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_decoder_api.sh; \
+	CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" \
+	  SINGLE_DECODER_CFLAGS="$(SINGLE_DECODER_CFLAGS)" \
+	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" \
+	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" FIXTURES="$(FIXTURES)" \
+	  scripts/check_decoder_api.sh; \
 	echo "decoder_address_contract=OK (mandatory base/capacity + page alignment + uint32 headroom)"; \
 	echo "decoder_portable=OK (fallback branch: compile + GNU-free purity + one-face round-trip)"; \
 	echo "decoder_contract=OK"
 
 # Pointer-rich in-memory decoder/backend contract under dynamic sanitizers. Standalone so its
 # instrumented compile does not contend with the CPU-saturated corpus workers in `make gate`.
-check-decoder-sanitize-internal: ultrapatch
-	@CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" \
+check-decoder-sanitize-internal: ultrapatch $(DECODER_CANONICAL_HDR)
+	@CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" \
+	  SINGLE_DECODER_CFLAGS="$(SINGLE_DECODER_CFLAGS)" \
+	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" \
+	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
 
-check-models-internal:
-	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh
+check-models-internal: $(DECODER_CANONICAL_HDR)
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" \
+	  SINGLE_DECODER_CFLAGS="$(SINGLE_DECODER_CFLAGS)" \
+	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" scripts/check_models.sh
 
 check-assets-internal:
 	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
@@ -754,15 +808,17 @@ check-corpus-matrix-internal: ultrapatch
 # check-corpus). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
-# metric is visible. The profile-specific host tool is linked atomically BEFORE the legs fork;
-# run_gate.sh then invokes each forked leg with make's `-o $(HOST_TOOL)` (assume-old), so no leg
-# relinks it if a source mtime changes at sub-make startup. Same-profile concurrent top-level
-# builds may both compile, but atomic rename means readers see only a complete equivalent binary.
+# metric is visible. The profile-specific host tool and canonical generated decoder header are
+# published atomically BEFORE the legs fork; run_gate.sh invokes each forked leg with make's `-o`
+# (assume-old) for both exact artifacts, so no leg rebuilds either if a source mtime changes at
+# sub-make startup. Same-profile concurrent top-level builds may both publish equivalent bytes.
 gate-internal:
 	@$(MAKE) --no-print-directory release-gate-inputs-internal
 	@$(MAKE) --no-print-directory all-internal
+	@$(MAKE) --no-print-directory decoder-header-internal
 	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
-	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" RELEASE_PROFILE="$$release_profile" \
+	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" DECODER_CANONICAL_HDR="$(DECODER_CANONICAL_HDR)" \
+	RELEASE_PROFILE="$$release_profile" \
 	BASE_RELEASE_FIXTURES="$(BASE_RELEASE_FIXTURES)" \
 	BASE_RELEASE_HOME_IMAGES="$(BASE_RELEASE_HOME_IMAGES)" \
 	BASE_RELEASE_FOREIGN_IMAGES="$(BASE_RELEASE_FOREIGN_IMAGES)" \

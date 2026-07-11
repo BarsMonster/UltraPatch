@@ -12,7 +12,7 @@
 #include <string.h>
 
 #ifdef DECODER_SINGLE_HEADER
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 #else
 #include "patch_apply.h"
 #endif

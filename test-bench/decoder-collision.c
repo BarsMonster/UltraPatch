@@ -33,7 +33,7 @@ int idx_init(void){ return 9; }
 int op_next_offset(void){ return 10; }
 
 #ifdef DECODER_SINGLE_HEADER
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 #else
 #include "patch_apply.h"
 #endif

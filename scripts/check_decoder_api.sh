@@ -10,12 +10,30 @@ set -eu
 
 : "${CC:?check_decoder_api.sh: CC not set — invoke through make check-decoder-contract}"
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
+: "${SINGLE_DECODER_CFLAGS:?check_decoder_api.sh: SINGLE_DECODER_CFLAGS not set}"
+: "${DECODER_SINGLE_HDR:?check_decoder_api.sh: DECODER_SINGLE_HDR not set}"
+: "${DECODER_PUBLIC_HDRS:?check_decoder_api.sh: DECODER_PUBLIC_HDRS not set}"
 : "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
 NM=${NM:-nm}
 [ -x "$ULTRAPATCH" ] || {
     echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
     exit 2
 }
+case "$DECODER_SINGLE_HDR" in
+    /*) ;;
+    *) echo "check_decoder_api.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
+esac
+[ -f "$DECODER_SINGLE_HDR" ] || {
+    echo "check_decoder_api.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
+    exit 2
+}
+case " $SINGLE_DECODER_CFLAGS " in
+    *" -Isrc "*|*" -I src "*)
+        echo "check_decoder_api.sh: single-header flags must not search src" >&2
+        exit 2
+        ;;
+esac
+single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
 
 FIX="${FIXTURES:-test-bench/fixtures}"
 base="$FIX/v0_base/watch.bin"
@@ -41,7 +59,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
             if(!ok){ print FILENAME ":" FNR ": unnamespaced private function " name; bad=1 }
         }
         END { exit bad ? 1 : 0 }
-    ' src/rc_models.h src/patch_apply.h; then
+    ' $DECODER_PUBLIC_HDRS; then
         echo "decoder private function namespace audit failed" >&2
         exit 1
     fi
@@ -54,12 +72,10 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     dd if="$one" of="$tmp/prefix.to" bs=256 count=1 status=none
     "$ULTRAPATCH" "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
 
-    python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
-        src/patch_config.h src/rc_models.h src/patch_apply.h
-
     # These are behavioral harnesses; production -O2 and -Os compilation is already enforced
     # by the portable/stack/ARM legs.  -O0 materially reduces concurrent gate compile load.
     common="$CFLAGS -O0"
+    single_common="$SINGLE_DECODER_CFLAGS -O0"
 
     # Compile the decoder exactly as an integrator can: the only PatchApply object is an
     # automatic local in decoder_compiled_contract_apply().  Auditing the resulting objects
@@ -67,7 +83,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # attributes can hide storage or allocator calls from a source grep.
     "$CC" $common -c test-bench/decoder-compiled-contract.c \
         -o "$tmp/compiled-contract-source.o"
-    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" \
+    "$CC" $single_common "$single_header_define" \
         -c test-bench/decoder-compiled-contract.c \
         -o "$tmp/compiled-contract-single.o"
 
@@ -137,9 +153,9 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$CC" $common -dM -E "$tmp/macro-before.c" | LC_ALL=C sort > "$tmp/macros-source-before"
     "$CC" $common -dM -E test-bench/decoder-compiled-contract.c | \
         LC_ALL=C sort > "$tmp/macros-source-after"
-    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" -dM -E "$tmp/macro-before.c" | \
+    "$CC" $single_common "$single_header_define" -dM -E "$tmp/macro-before.c" | \
         LC_ALL=C sort > "$tmp/macros-single-before"
-    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" -dM -E \
+    "$CC" $single_common "$single_header_define" -dM -E \
         test-bench/decoder-compiled-contract.c | LC_ALL=C sort > "$tmp/macros-single-after"
 
     for form in source single; do
@@ -175,13 +191,13 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     echo "decoder_compiled_contract=OK (O0 source + single: automatic state, symbols + macros)"
 
     "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision-source.o"
-    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" \
+    "$CC" $single_common "$single_header_define" \
         -c test-bench/decoder-collision.c -o "$tmp/collision-single.o"
     echo "decoder_namespace_contract=OK (source + single header)"
     "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
     "$tmp/nvm-geometry-probe"
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-source"
-    "$CC" $common -DDECODER_SINGLE_HEADER -I"$tmp" test-bench/decoder-contract.c \
+    "$CC" $single_common "$single_header_define" test-bench/decoder-contract.c \
         -Wl,--gc-sections -o "$tmp/contract-single"
 
     "$tmp/contract-source" $args >"$tmp/source.out"
@@ -190,7 +206,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
 
     capflags="-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
     "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-source"
-    "$CC" $common $capflags -DDECODER_SINGLE_HEADER -I"$tmp" test-bench/decoder-contract.c \
+    "$CC" $single_common $capflags "$single_header_define" test-bench/decoder-contract.c \
         -Wl,--gc-sections -o "$tmp/cap-single"
     for decoder in "$tmp/cap-source" "$tmp/cap-single"; do
         "$decoder" resource-clean "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
@@ -204,7 +220,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
         -DPATCH_IMAGE_BASE=0x08000000u -DPATCH_IMAGE_CAPACITY=256u"
     "$CC" $common $capacityflags test-bench/decoder-contract.c \
         -Wl,--gc-sections -o "$tmp/capacity-source"
-    "$CC" $common $capacityflags -DDECODER_SINGLE_HEADER -I"$tmp" \
+    "$CC" $single_common $capacityflags "$single_header_define" \
         test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/capacity-single"
     "$tmp/capacity-source" capacity >"$tmp/capacity-source.out"
     "$tmp/capacity-single" capacity >"$tmp/capacity-single.out"

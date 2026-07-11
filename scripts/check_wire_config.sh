@@ -12,12 +12,14 @@ set -eu
 : "${CFLAGS:?check_wire_config.sh: CFLAGS not set - invoke through make check-wire-config}"
 : "${DECODER_CFLAGS:?check_wire_config.sh: DECODER_CFLAGS not set - invoke through make check-wire-config}"
 : "${SINGLE_DECODER_CFLAGS:?check_wire_config.sh: SINGLE_DECODER_CFLAGS not set - invoke through make check-wire-config}"
+: "${DECODER_SINGLE_HDR:?check_wire_config.sh: DECODER_SINGLE_HDR not set - invoke through make check-wire-config}"
 : "${DEC_STANDALONE_SRCS:?check_wire_config.sh: DEC_STANDALONE_SRCS not set - invoke through make check-wire-config}"
 : "${DEC_DEMO_DEFINES:?check_wire_config.sh: DEC_DEMO_DEFINES not set - invoke through make check-wire-config}"
 : "${ARM_CC:?check_wire_config.sh: ARM_CC not set - invoke through make check-wire-config}"
 : "${ARM_SIZE:?check_wire_config.sh: ARM_SIZE not set - invoke through make check-wire-config}"
 : "${ARM_OBJDUMP:?check_wire_config.sh: ARM_OBJDUMP not set - invoke through make check-wire-config}"
 : "${ARM_DEC_FLAGS:?check_wire_config.sh: ARM_DEC_FLAGS not set - invoke through make check-wire-config}"
+: "${ARM_SINGLE_DEC_FLAGS:?check_wire_config.sh: ARM_SINGLE_DEC_FLAGS not set - invoke through make check-wire-config}"
 : "${ARM_OBJECT_OPT:?check_wire_config.sh: ARM_OBJECT_OPT not set - invoke through make check-wire-config}"
 : "${ARM_BSS_HARD_CAP:?check_wire_config.sh: ARM_BSS_HARD_CAP not set - invoke through make check-wire-config}"
 : "${ARM_LINK_STUBS:?check_wire_config.sh: ARM_LINK_STUBS not set - invoke through make check-wire-config}"
@@ -37,6 +39,27 @@ set -eu
     echo "wire-config probe reused the default-profile encoder" >&2
     exit 2
 }
+case "$DECODER_SINGLE_HDR" in
+    /*) ;;
+    *) echo "check_wire_config.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
+esac
+[ -f "$DECODER_SINGLE_HDR" ] || {
+    echo "check_wire_config.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
+    exit 2
+}
+case " $SINGLE_DECODER_CFLAGS " in
+    *" -Isrc "*|*" -I src "*)
+        echo "check_wire_config.sh: single-header host flags must not search src" >&2
+        exit 2
+        ;;
+esac
+case " $ARM_SINGLE_DEC_FLAGS " in
+    *" -Isrc "*|*" -I src "*)
+        echo "check_wire_config.sh: single-header ARM flags must not search src" >&2
+        exit 2
+        ;;
+esac
+single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
 
 . "$(dirname "$0")/tempdir.sh"
 
@@ -107,11 +130,9 @@ EOF
 # shellcheck disable=SC2086
 "$CC" $DECODER_CFLAGS -I"$tmp" -include "$tmp/decoder_wire_config_assert.h" \
     -c "$tmp/source_wire_config.c" -o "$tmp/source_wire_config.o"
-python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
-    src/patch_config.h src/rc_models.h src/patch_apply.h
 cat > "$tmp/single_wire_config.c" <<'EOF'
 #include <stdint.h>
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 #include "wire_config_assert.h"
 #if !defined(PATCH_IMAGE_BASE) || PATCH_IMAGE_BASE != 0u
 #error "repository decoder integration flags did not reach the generated decoder path"
@@ -125,7 +146,7 @@ static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PUL
 int main(void){ PatchApply state; return patch_apply_run(&state,next,0); }
 EOF
 # shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS -I"$tmp" "$tmp/single_wire_config.c" \
+"$CC" $SINGLE_DECODER_CFLAGS "$single_header_define" "$tmp/single_wire_config.c" \
     -Wl,--gc-sections -o "$tmp/single_wire_config"
 
 # Cross-compile and link the actual product integration shape for both packaging forms. Static
@@ -139,7 +160,7 @@ PatchApplyResult rcv3_run(PatchPull next, void *ctx){
 }
 EOF
 cat > "$tmp/arm_single.c" <<'EOF'
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 static PatchApply g_patch_apply_state;
 PatchApplyResult rcv3_run(PatchPull next, void *ctx){
     return patch_apply_run(&g_patch_apply_state, next, ctx);
@@ -149,8 +170,8 @@ EOF
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -I"$tmp" -include "$tmp/wire_config_assert.h" \
     -c "$tmp/arm_source.c" -o "$tmp/arm_source.o"
 # shellcheck disable=SC2086
-"$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -I"$tmp" -include "$tmp/wire_config_assert.h" \
-    -c "$tmp/arm_single.c" -o "$tmp/arm_single.o"
+"$ARM_CC" $ARM_SINGLE_DEC_FLAGS $ARM_OBJECT_OPT "$single_header_define" \
+    -include "$tmp/wire_config_assert.h" -c "$tmp/arm_single.c" -o "$tmp/arm_single.o"
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -c "$ARM_LINK_STUBS" -o "$tmp/arm_link_stubs.o"
 for form in source single; do
@@ -214,7 +235,7 @@ arm_bss_margin=$((ARM_BSS_HARD_CAP - arm_link_bss))
 "$CC" $DECODER_CFLAGS -O0 test-bench/decoder-contract.c \
     -Wl,--gc-sections -o "$tmp/contract-source"
 # shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS -O0 -DDECODER_SINGLE_HEADER -I"$tmp" \
+"$CC" $SINGLE_DECODER_CFLAGS -O0 "$single_header_define" \
     test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-single"
 
 gen_img(){ python3 scripts/synth_gen.py img "$@"; }
@@ -340,7 +361,7 @@ capflags='-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1'
 "$CC" $DECODER_CFLAGS -O0 $capflags test-bench/decoder-contract.c \
     -Wl,--gc-sections -o "$tmp/cap-source"
 # shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS -O0 $capflags -DDECODER_SINGLE_HEADER -I"$tmp" \
+"$CC" $SINGLE_DECODER_CFLAGS -O0 $capflags "$single_header_define" \
     test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-single"
 for mode in resource-clean resource-touched; do
     if [ "$mode" = resource-clean ]; then

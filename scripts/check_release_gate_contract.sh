@@ -128,7 +128,8 @@ fake_make="$tmp/fake-make"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_make"
 chmod +x "$fake_make"
 profile="release_profile=$(printf '0%.0s' {1..64})"
-if MAKE="$fake_make" HOST_TOOL=/bin/true RELEASE_PROFILE="$profile" JOBS=1 \
+if MAKE="$fake_make" HOST_TOOL=/bin/true DECODER_CANONICAL_HDR=/dev/null \
+    RELEASE_PROFILE="$profile" JOBS=1 \
     BASE_RELEASE_FIXTURES=2 BASE_RELEASE_HOME_IMAGES=16 \
     BASE_RELEASE_FOREIGN_IMAGES=18 BASE_RELEASE_GOLDEN_BLOBS=8 \
     BASE_FULL_TOTAL=4151373 BASE_FOREIGN_TOTAL=1333390 \

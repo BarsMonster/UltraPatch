@@ -362,10 +362,13 @@ make decoder-header
 ```
 
 The generated `artifacts/patch_apply_single.h` inlines the source header set and
-must not include any local decoder support header. `make check-decoder-contract`
-compiles both packaging forms and verifies the generated header without `-Isrc`.
-The encoder uses the same source headers, and model/golden gates enforce
-bit-exactness.
+must not include any local decoder support header. It is the canonical generated
+decoder artifact: `make gate` publishes it once before the parallel checks, then
+passes that exact path to every single-header consumer without `-Isrc`.
+The gate compiles both packaging forms, requires identical ARM object/linked
+footprints and static/generic stack bounds, and exercises the same artifact in
+the API, portability, model, and wire checks. The encoder uses the source headers,
+and model/golden gates enforce bit-exactness.
 
 The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, used by
 both the decoder and the encoder's distance coding; matching builds therefore use the

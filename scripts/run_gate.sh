@@ -6,8 +6,13 @@ set -u
 
 MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
+: "${DECODER_CANONICAL_HDR:?run_gate.sh: DECODER_CANONICAL_HDR not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
+[ -r "$DECODER_CANONICAL_HDR" ] || {
+  echo "run_gate.sh: canonical decoder header is not readable: $DECODER_CANONICAL_HDR" >&2
+  exit 1
+}
 . "$(dirname "$0")/tempdir.sh"
 rc=0
 
@@ -34,19 +39,21 @@ LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory che
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
-  # gate-internal already linked the exact profile-specific host tool before this fork. Pass it
-  # with `-o` (assume-old) so each forked leg treats the prebuilt binary as up-to-date and never
-  # relinks it, even if a source mtime is newer at sub-make startup (an edit landing in
-  # the seconds between the pre-fork build and this loop). The binary itself is atomically
-  # published, but pinning it here also keeps every leg on the exact pre-fork executable.
+  # gate-internal already published the exact profile-specific host tool and canonical generated
+  # decoder header before this fork. Pass both with `-o` (assume-old), so every leg consumes the
+  # same pre-fork artifacts even if an input mtime changes while the gate is running.
   if [ "$target" = check-corpus-matrix-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$DECODER_CANONICAL_HDR" \
+      JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" "$target" >"$tmp/$file" 2>&1 &
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$DECODER_CANONICAL_HDR" \
+      "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-ab-matrix-internal ]; then
-    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
+    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$DECODER_CANONICAL_HDR" \
+      AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
   else
-    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" "$target" >"$tmp/$file" 2>&1 &
+    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$DECODER_CANONICAL_HDR" \
+      "$target" >"$tmp/$file" 2>&1 &
   fi
   pids="$pids $!"
 done
@@ -192,6 +199,7 @@ require_uint_le a.txt arm_linked_bss "${BASE_ARM_LINKED_BSS:?}"
 load_metric a.txt arm_linked_runtime_helpers || :
 require_exact a.txt soft_div_calls "${BASE_ARM_SOFT_DIV:?}"
 require_exact a.txt arm_bss_hard_cap_overrides "REJECTED (object + linked)"
+require_exact a.txt arm_package_parity "OK (source + canonical single header; object + linked)"
 
 require_exact st.txt stack_static_integration "static PatchApply wrapper"
 require_uint_le st.txt stack_static_bound_bytes "${BASE_STACK_STATIC_CEIL_O2:?}"
@@ -199,6 +207,7 @@ require_exact st.txt stack_static_ceiling_o2 "${BASE_STACK_STATIC_CEIL_O2:?}"
 require_exact st.txt stack_generic_integration "caller-owned PatchApply * wrapper"
 require_uint_le st.txt stack_generic_bound_bytes "${BASE_STACK_GENERIC_CEIL_O2:?}"
 require_exact st.txt stack_generic_ceiling_o2 "${BASE_STACK_GENERIC_CEIL_O2:?}"
+require_exact st.txt stack_package_parity "OK (source + canonical single header; static + generic)"
 
 require_exact m.txt matrix_ok "$release_home_pairs/$release_home_pairs"
 require_exact m.txt full_total "${BASE_FULL_TOTAL:?}"
@@ -247,8 +256,10 @@ kvs 'a.txt|arm_linked_integration|ARM linked integration  : '
 awk -F= -v bt="${BASE_ARM_LINKED_TEXT:?}" -v bd="${BASE_ARM_LINKED_DATA:?}" -v bb="${BASE_ARM_LINKED_BSS:?}" '/^arm_linked_text=/{t=$2}/^arm_linked_data=/{d=$2}/^arm_linked_bss=/{b=$2}END{if(t!="")printf "ARM linked text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : '
 kvs 'a.txt|soft_div_calls|ARM   soft-divide calls  : '
+kvs 'a.txt|arm_package_parity|ARM packaging parity   : '
 awk -F= '/^stack_static_bound_bytes=/{b=$2}/^stack_static_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, static wrapper   : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 awk -F= '/^stack_generic_bound_bytes=/{b=$2}/^stack_generic_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, generic pointer  : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
+kvs 'st.txt|stack_package_parity|stack packaging parity : '
 kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : '
 awk -F= '/^home_size_better=/{b=$2}/^home_size_worse=/{w=$2}/^home_size_equal=/{e=$2}END{if(b!="")printf "home size split         : %s better / %s worse / %s equal\n",b,w,e}' "$tmp/m.txt"
 kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'm.txt|wire_identity|corpus wire identity    : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM pages amplified      : ' 'm.txt|max_maxpageerase|NVM max erases-per-page  : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_unaligned|NVM unaligned calls      : ' 'm.txt|max_oob_page_writes|NVM out-of-range calls   : ' 'm.txt|max_canary_corrupt|NVM canary corruptions  : ' 'm.txt|max_journal|journal peak slots      : '

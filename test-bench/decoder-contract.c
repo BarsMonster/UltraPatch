@@ -29,7 +29,7 @@ static uint32_t test_reads;
 static uint32_t test_oob_reads;
 
 #ifdef DECODER_SINGLE_HEADER
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 #else
 #include "patch_apply.h"
 #endif

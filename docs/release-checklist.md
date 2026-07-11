@@ -47,6 +47,9 @@ must report:
 - `model contract`: OK for shared model/default-cap invariants
 - `wire config override`: OK for one nondefault same-name/same-value override
   across encoder plus source, generated, and Cortex-M0+ ARM decoder compile paths
+- ARM and stack packaging parity: the source-header set and the one canonical
+  generated header have identical object/linked footprints and both integration
+  shapes have identical static stack results
 - ARM integration shape and `.text/.data/.bss`
 - ARM soft-divide count
 - `matrix round-trips`: `256/256`
@@ -65,7 +68,9 @@ Also run before release (not part of `make gate`):
   — CI runs this on every push; keeping `CC=clang` on both commands selects the
   same profile-scoped host binary, and the golden check proves that encoder emits
   the frozen wire blobs.
-- `make decoder-header` if publishing a one-file device decoder artifact.
+- `make decoder-header` if explicitly refreshing the one-file device decoder
+  artifact outside `make gate` (the gate refreshes the same canonical path before
+  its parallel checks).
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
@@ -110,6 +115,11 @@ it at `.build/<profile-id>/ultrapatch`. It is built from `src/patch_generate.c`,
 the `src/enc_*.c` subsystem modules, `src/patch_host_backend.c`, and the vendored
 `vendor/libdivsufsort/` sources; encode is its default mode, while `--decode`
 is the host reference/debug mode.
+
+The generated form is published atomically at `artifacts/patch_apply_single.h`:
+first creation uses mode `0644`, while replacement preserves an existing readable
+permission mode. All release checks consume this exact file rather than private
+per-test regenerations.
 
 For traceability, release notes should include:
 

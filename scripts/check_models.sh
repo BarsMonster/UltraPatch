@@ -13,6 +13,23 @@ set -eu
 # from the real CFLAGS block. Direct invocation must therefore go through `make check-models`.
 : "${CC:?check_models.sh: CC not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
 : "${CFLAGS:?check_models.sh: CFLAGS not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
+: "${SINGLE_DECODER_CFLAGS:?check_models.sh: SINGLE_DECODER_CFLAGS not set}"
+: "${DECODER_SINGLE_HDR:?check_models.sh: DECODER_SINGLE_HDR not set}"
+case "$DECODER_SINGLE_HDR" in
+    /*) ;;
+    *) echo "check_models.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
+esac
+[ -f "$DECODER_SINGLE_HDR" ] || {
+    echo "check_models.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
+    exit 2
+}
+case " $SINGLE_DECODER_CFLAGS " in
+    *" -Isrc "*|*" -I src "*)
+        echo "check_models.sh: single-header flags must not search src" >&2
+        exit 2
+        ;;
+esac
+single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
 
 . "$(dirname "$0")/tempdir.sh"
 
@@ -369,13 +386,11 @@ EOF
 "$tmp/range_sink_contract"
 echo "range_sink_contract=OK (carry chain + randomized material/count equivalence)"
 
-# Exercise the same helper as end-users receive it: generate a private fresh single header, then
-# compile and run the identical oracle suite without any encoder headers in the translation unit.
-python3 scripts/gen_single_header.py "$tmp/patch_apply_single.h" \
-    src/patch_config.h src/rc_models.h src/patch_apply.h
+# Exercise the same canonical artifact as every other decoder leg, compiling and running the
+# identical oracle suite without any encoder headers or source-header search path.
 cat > "$tmp/single_model_probe.c" <<'EOF'
 #include <stdint.h>
-#include "patch_apply_single.h"
+#include DECODER_SINGLE_HEADER
 
 #define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
 #include "seed_prob_probe.inc"
@@ -403,7 +418,8 @@ int main(int argc, char **argv){
     return 0;
 }
 EOF
-"$CC" $CFLAGS -I"$tmp" "$tmp/single_model_probe.c" -o "$tmp/single_model_probe"
+"$CC" $SINGLE_DECODER_CFLAGS "$single_header_define" \
+    "$tmp/single_model_probe.c" -o "$tmp/single_model_probe"
 "$tmp/single_model_probe"
 echo "model_seed_prob=OK (source + generated single header)"
 echo "model_rice_cap=OK (boundary + crafted fit + emission feasibility)"

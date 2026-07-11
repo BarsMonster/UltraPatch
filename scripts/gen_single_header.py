@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import stat
 import tempfile
 
 
@@ -61,19 +62,41 @@ def main() -> int:
     parser.add_argument("headers", nargs="+", help="ordered public decoder headers to inline")
     args = parser.parse_args()
 
+    # Read and render every input before inspecting or creating the destination.  In
+    # particular, a missing dependency must never disturb an already-published header.
     text = generate(args.headers)
     if args.output == "-":
         print(text, end="")
     else:
         out = Path(args.output)
+        output_bytes = text.encode("utf-8")
+        try:
+            output_stat = out.lstat()
+        except FileNotFoundError:
+            output_mode = 0o644
+        else:
+            if not stat.S_ISREG(output_stat.st_mode):
+                raise RuntimeError(f"refusing to replace non-regular output: {out}")
+            output_mode = stat.S_IMODE(output_stat.st_mode)
+            # A content-stable generation is a true no-op: preserve the inode,
+            # timestamps, and exact existing permission mode.
+            if out.read_bytes() == output_bytes:
+                return 0
+
         out.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
             dir=out.parent, prefix=f".{out.name}.", suffix=".tmp"
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as temp:
-                temp.write(text)
+            with os.fdopen(fd, "wb") as temp:
+                temp.write(output_bytes)
                 temp.flush()
+                # mkstemp intentionally starts at 0600.  Publish new artifacts at
+                # exactly 0644 regardless of umask, and preserve every permission
+                # bit when atomically replacing an existing regular artifact.  Set
+                # the mode after writing so a special bit cannot be cleared by a
+                # later data write.
+                os.fchmod(temp.fileno(), output_mode)
                 os.fsync(temp.fileno())
             os.replace(temp_name, out)
         finally:
