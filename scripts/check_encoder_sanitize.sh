@@ -12,24 +12,28 @@ set -eu
 . "$(dirname "$0")/tempdir.sh"
 
 san_flags="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
-span_srcs=${ENC_SEAM_SRCS//src\/enc_lz.c/}
+lz_srcs=${ENC_SEAM_SRCS//src\/enc_lz.c/}
 if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
-      test-bench/span-deque-probe.c $span_srcs -Wl,--gc-sections \
-      -o "$tmp/span-deque" 2>"$tmp/span-deque-build.log"; then
-    echo "check_encoder_sanitize: span-deque probe build failed" >&2
-    sed 's/^/    /' "$tmp/span-deque-build.log" >&2
+      test-bench/encoder-lz-probe.c $lz_srcs -Wl,--gc-sections \
+      -o "$tmp/encoder-lz" 2>"$tmp/encoder-lz-build.log"; then
+    echo "check_encoder_sanitize: LZ probe build failed" >&2
+    sed 's/^/    /' "$tmp/encoder-lz-build.log" >&2
     exit 1
 fi
-ASAN_OPTIONS=detect_leaks=1 "$tmp/span-deque" >"$tmp/span-deque.out"
-cat "$tmp/span-deque.out"
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-lz" \
+  "$tmp/span-deque.tsv" "$tmp/out-envelope.tsv" >"$tmp/encoder-lz.out"
+cat "$tmp/encoder-lz.out"
 
+field_srcs=${ENC_SEAM_SRCS//src\/enc_field.c/}
+field_srcs=${field_srcs//src\/enc_emit.c/}
 if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
-      test-bench/ldr-index-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
-      -o "$tmp/ldr-index" 2>"$tmp/ldr-index-build.log"; then
-    echo "check_encoder_sanitize: LDR-index probe build failed" >&2
-    sed 's/^/    /' "$tmp/ldr-index-build.log" >&2
+      test-bench/encoder-field-probe.c $field_srcs -Wl,--gc-sections \
+      -o "$tmp/encoder-field" 2>"$tmp/encoder-field-build.log"; then
+    echo "check_encoder_sanitize: field probe build failed" >&2
+    sed 's/^/    /' "$tmp/encoder-field-build.log" >&2
     exit 1
 fi
-ASAN_OPTIONS=detect_leaks=1 "$tmp/ldr-index" >"$tmp/ldr-index.out"
-cat "$tmp/ldr-index.out"
-echo "encoder_sanitizers=OK (span-deque + LDR-index: ASan + UBSan)"
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-field" \
+  "$tmp/ldr-index.tsv" "$tmp/smap-trim.tsv" >"$tmp/encoder-field.out"
+cat "$tmp/encoder-field.out"
+echo "encoder_sanitizers=OK (field + LZ kernels: ASan + UBSan)"

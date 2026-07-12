@@ -46,6 +46,8 @@ IMG="${IMAGES:-test-bench/images}"
 FIX="${FIXTURES:-test-bench/fixtures}"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
+: "${CLANG:?check_degrade.sh: CLANG not set — invoke through make check-degrade}"
+: "${ENCODER_KERNEL_BASELINE:?check_degrade.sh: encoder kernel baseline not set}"
 : "${ULTRAPATCH:?check_degrade.sh: ULTRAPATCH not set; invoke through make check-degrade}"
 [ -x "$ULTRAPATCH" ] || {
   echo "check_degrade.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
@@ -66,78 +68,11 @@ if ! "$SPLIT" >"$tmp/split-run.out" 2>"$tmp/split-run.err"; then
 fi
 cat "$tmp/split-run.out"
 
-LDRI="$tmp/ldr-index-probe"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L test-bench/ldr-index-probe.c \
-      $ENC_SEAM_SRCS -Wl,--gc-sections -o "$LDRI" 2>"$tmp/ldr-index-build.log"; then
-  echo "check_degrade: LDR-target index oracle build failed" >&2
-  sed 's/^/    /' "$tmp/ldr-index-build.log" >&2; exit 1
-fi
-if ! "$LDRI" >"$tmp/ldr-index.out" 2>"$tmp/ldr-index.err"; then
-  echo "check_degrade: LDR-target index oracle failed: $(cat "$tmp/ldr-index.err")" >&2; exit 1
-fi
-cat "$tmp/ldr-index.out"
-
-SPAN="$tmp/span-deque-probe"
-SPAN_SRCS=${ENC_SEAM_SRCS//src\/enc_lz.c/}
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L test-bench/span-deque-probe.c \
-      $SPAN_SRCS -Wl,--gc-sections -o "$SPAN" 2>"$tmp/span-deque-build.log"; then
-  echo "check_degrade: span-deque oracle build failed" >&2
-  sed 's/^/    /' "$tmp/span-deque-build.log" >&2; exit 1
-fi
-if ! "$SPAN" >"$tmp/span-deque.out" 2>"$tmp/span-deque.err"; then
-  echo "check_degrade: span-deque oracle failed: $(cat "$tmp/span-deque.err")" >&2; exit 1
-fi
-cat "$tmp/span-deque.out"
-
-# Build the full priced parser with the production out-match envelope and with the preserved
-# nested-loop reference. The driver emits every terminal cost and token tuple, so byte equality
-# pins strict-tie predecessor choice as well as the optimum. It includes randomized rows/prices
-# plus empty, dominated/nonmonotone four-entry, disabled, minimum, and >LZ_MAX_MATCH cases.
-OUT_NEW="$tmp/out-envelope-new"
-OUT_OLD="$tmp/out-envelope-old"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DOUT_ENVELOPE_PROBE \
-      test-bench/out-envelope-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
-      -o "$OUT_NEW" 2>"$tmp/out-envelope-new-build.log"; then
-  echo "check_degrade: out-envelope production oracle build failed" >&2
-  sed 's/^/    /' "$tmp/out-envelope-new-build.log" >&2; exit 1
-fi
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DOUT_ENVELOPE_PROBE \
-      -DOUT_ENVELOPE_REFERENCE test-bench/out-envelope-probe.c $ENC_SEAM_SRCS \
-      -Wl,--gc-sections -o "$OUT_OLD" 2>"$tmp/out-envelope-old-build.log"; then
-  echo "check_degrade: out-envelope reference oracle build failed" >&2
-  sed 's/^/    /' "$tmp/out-envelope-old-build.log" >&2; exit 1
-fi
-if ! "$OUT_NEW" >"$tmp/out-envelope-new.out" 2>"$tmp/out-envelope-new.err"; then
-  echo "check_degrade: out-envelope production oracle failed: $(cat "$tmp/out-envelope-new.err")" >&2
-  exit 1
-fi
-if ! "$OUT_OLD" >"$tmp/out-envelope-old.out" 2>"$tmp/out-envelope-old.err"; then
-  echo "check_degrade: out-envelope reference oracle failed: $(cat "$tmp/out-envelope-old.err")" >&2
-  exit 1
-fi
-if ! cmp -s "$tmp/out-envelope-new.out" "$tmp/out-envelope-old.out"; then
-  echo "check_degrade: out-envelope production/reference parser mismatch" >&2
-  diff -u "$tmp/out-envelope-old.out" "$tmp/out-envelope-new.out" | sed -n '1,80p' >&2
-  exit 1
-fi
-tail -n 1 "$tmp/out-envelope-new.out"
-
-# Exact bsdiff suffix-search oracle. The probe validates every result against an independent copy
-# of the legacy recursive min-length memcmp. Adversaries pin prefix exhaustion as equality/left,
-# adjacent-boundary ties choosing `end`, empty operands, repetitive/long-prefix inputs, and a
-# mismatch at the LCP skip.
-SUFFIX_NEW="$tmp/suffix-lcp"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSUFFIX_LCP_PROBE \
-      test-bench/suffix-lcp-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
-      -o "$SUFFIX_NEW" 2>"$tmp/suffix-lcp-new-build.log"; then
-  echo "check_degrade: suffix-LCP production oracle build failed" >&2
-  sed 's/^/    /' "$tmp/suffix-lcp-new-build.log" >&2; exit 1
-fi
-if ! "$SUFFIX_NEW" >"$tmp/suffix-lcp-new.out" 2>"$tmp/suffix-lcp-new.err"; then
-  echo "check_degrade: suffix-LCP production oracle failed: $(cat "$tmp/suffix-lcp-new.err")" >&2
-  exit 1
-fi
-tail -n 1 "$tmp/suffix-lcp-new.out"
+# Pinned semantic results replace copies of historical algorithms. The helper runs the same
+# canonical streams under this compiler and the descriptor-pinned Clang, then checks all five
+# record counts and SHA-256 digests. Explicit boundary assertions remain inside the probes.
+CC="$CC_HOST" CLANG="$CLANG" CFLAGS="$CFLAGS" ENC_SEAM_SRCS="$ENC_SEAM_SRCS" \
+  ENCODER_KERNEL_BASELINE="$ENCODER_KERNEL_BASELINE" scripts/check_encoder_kernels.sh check
 
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
@@ -206,18 +141,6 @@ if ! $CC_HOST $CFLAGS $DEC_DEMO_DEFINES -UOUTROW_DEPTH -DOUTROW_DEPTH=1 $DEC_STA
 fi
 
 j_peak=NA; opc_n=NA; dir_flip=NA; rw=NA; bigspan=NA; seam_pres=NA; seam_corr=NA
-
-TRIM="$tmp/smap-trim-probe"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSMAP_PRETRIM_ORACLE test-bench/smap-trim-probe.c \
-      $ENC_SEAM_SRCS -Wl,--gc-sections -o "$TRIM" 2>"$tmp/trim-build.log"; then
-  note "could not build the shift-map trim probe:"; sed 's/^/    /' "$tmp/trim-build.log" >&2
-  echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1
-fi
-if "$TRIM" >"$tmp/trim.out" 2>"$tmp/trim.err"; then
-  cat "$tmp/trim.out"
-else
-  bad "shift-map trim probe failed: $(cat "$tmp/trim.err")"
-fi
 
 # =========================================================================================
 # (f,g) 24-BIT PACKED-POSITION SEAM — this first-party probe includes the real private plan

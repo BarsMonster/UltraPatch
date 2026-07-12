@@ -355,14 +355,6 @@ static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t fro
                              begin, end, begin_lcp, end_lcp, pos);
 }
 
-#ifdef SUFFIX_LCP_PROBE
-int32_t suffix_lcp_probe_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
-                                const uint8_t *to, int32_t to_size,
-                                int32_t begin, int32_t end, int32_t *pos) {
-    return suffix_search(sa, from, from_size, to, to_size, begin, end, pos);
-}
-#endif
-
 static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
                            const uint8_t *from, int32_t from_size,
                            const uint8_t *to, int32_t to_size, int32_t scan,

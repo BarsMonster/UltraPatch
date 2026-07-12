@@ -180,6 +180,7 @@ IMAGES ?= $(CORPUS_BUILD_DIR)/images
 FOREIGN ?= test-bench/foreign
 CORPUS_INVENTORY ?= test-bench/corpus-inventory.tsv
 WIRE_BASELINE ?= test-bench/wire-baseline.tsv
+ENCODER_KERNEL_BASELINE := test-bench/encoder-kernel-baseline.tsv
 # An empty inventory is the documented custom-measurement mode; callers then provide their own
 # image/fixture roots and do not need the canonical profile-local corpus view.
 CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),$(CORPUS_ASSET_STAMP))
@@ -237,6 +238,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
+ENCODER_KERNEL_BASELINE_LOCK := test-bench/.encoder-kernel-baseline-update.lock
 CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
 	      check-wire-config check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
@@ -256,6 +258,35 @@ gate:
 	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
+
+.PHONY: encoder-kernel-baseline-update encoder-kernel-baseline-update-internal
+# Deliberate semantic changes only: this never runs from normal builds, gate, or golden-update.
+# Review the changed result stream and commit the refreshed baseline with the implementation.
+encoder-kernel-baseline-update:
+	@if [ "$(origin MAKE)" != default ]; then \
+	  echo "encoder kernel baseline update rejects runtime override: MAKE" >&2; exit 1; fi
+	@if [ "$(origin CC)" != file ] || [ "$(origin CLANG)" != file ] || \
+	    [ "$(origin CFLAGS)" != file ] || [ "$(origin CFLAGS_EXTRA)" != undefined ] || \
+	    [ "$(origin CROSS_COMPILE)" != undefined ] || [ "$(origin OPT)" != file ] || \
+	    [ "$(origin WIRE_CONFIG_FLAGS)" != file ] || \
+	    [ "$(origin DECODER_CONFIG_FLAGS)" != file ] || \
+	    [ "$(origin ENC_SEAM_SRCS)" != file ] || \
+	    [ "$(origin ENCODER_KERNEL_BASELINE)" != file ]; then \
+	  echo "encoder kernel baseline update rejects compiler/flag overrides" >&2; exit 1; fi
+	@timeout $(GATE_TIMEOUT) flock --exclusive "$(ENCODER_KERNEL_BASELINE_LOCK)" \
+	  $(MAKE) --no-print-directory encoder-kernel-baseline-update-internal; s=$$?; \
+	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
+	exit $$s
+
+encoder-kernel-baseline-update-internal: scripts/check_encoder_kernels.sh
+	@set -e; candidate=$$(mktemp test-bench/.encoder-kernel-baseline.prepare.XXXXXX); \
+	trap 'rm -f "$$candidate"' EXIT TERM INT; \
+	CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" \
+	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" \
+	  ENCODER_KERNEL_BASELINE_DUMP="$$candidate" scripts/check_encoder_kernels.sh candidate; \
+	mv "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; \
+	trap - EXIT TERM INT; \
+	echo "encoder kernel baseline published"
 
 .PHONY: release-profile-update release-profile-update-internal
 release-profile-update:
@@ -712,10 +743,11 @@ check-edge-internal: ultrapatch
 # op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
-check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
-	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" \
+check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(ENCODER_KERNEL_BASELINE)
+	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" \
 	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
-	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
+	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
+	  ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" scripts/check_degrade.sh
 
 # Golden-wire regression for the four wires not already covered by the corpus matrix. The
 # combined baseline also carries all 290 corpus hashes and 256 home per-pair sizes. On an

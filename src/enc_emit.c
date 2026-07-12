@@ -352,18 +352,6 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     return c;
 }
 
-#ifdef SMAP_PRETRIM_ORACLE
-int smap_wire_feasible_probe(const uint32_t *mb, const int32_t *mv, int mn) {
-    return smap_wire_feasible(mb, mv, mn);
-}
-
-uint64_t smap_wire_price_probe(const uint32_t *mb, const int32_t *mv, int mn,
-                               const FieldInjArena *inj, int fwd) {
-    int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
-    return px_map_total(mb, mv, mn, inj, fwd, dic_bl, dic_ex);
-}
-#endif
-
 typedef uint64_t (*SMapScoreFn)(const uint32_t *mb, const int32_t *mv, int mn, void *ctx);
 
 typedef struct { const FieldInjArena *inj; int fwd; } SMapHitScore;

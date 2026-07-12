@@ -2,51 +2,19 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Exact oracle for bsdiff's boundary-LCP suffix search. It checks every production query directly
- * against a private copy of the legacy recursive comparator and its unusual prefix/tie semantics,
- * then validates complete bsdiff operations and payload bytes over adversarial pairs.
+ * Pinned semantic stream for bsdiff's boundary-LCP suffix search and complete operations.
+ * The real private module is included so no test-only production interface is required.
  */
 #include "enc_internal.h"
-
-#ifndef SUFFIX_LCP_PROBE
-#error "suffix-lcp-probe requires SUFFIX_LCP_PROBE"
-#endif
-
-extern int32_t suffix_lcp_probe_search(const int32_t *sa, const uint8_t *from,
-                                       int32_t from_size, const uint8_t *to, int32_t to_size,
-                                       int32_t begin, int32_t end, int32_t *pos);
+#include "../src/enc_bsdiff.c"
 
 #define CHECK(x) do { if (!(x)) { \
-    fprintf(stderr, "suffix-LCP oracle failed at line %d: %s\n", __LINE__, #x); \
+    fprintf(stderr, "encoder bsdiff probe failed at line %d: %s\n", __LINE__, #x); \
     return 1; \
 } } while (0)
 
 static uint64_t query_count, pair_count;
-
-static int32_t old_matchlen(const uint8_t *from, int32_t from_size,
-                            const uint8_t *to, int32_t to_size) {
-    int32_t n = from_size < to_size ? from_size : to_size;
-    int32_t i;
-    for (i = 0; i < n; i++) if (from[i] != to[i]) break;
-    return i;
-}
-
-static int32_t old_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
-                          const uint8_t *to, int32_t to_size,
-                          int32_t begin, int32_t end, int32_t *pos) {
-    if (end - begin < 2) {
-        int32_t x = old_matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
-        int32_t y = old_matchlen(from + sa[end], from_size - sa[end], to, to_size);
-        if (x > y) { *pos = sa[begin]; return x; }
-        *pos = sa[end]; return y;
-    }
-    int32_t x = begin + (end - begin) / 2;
-    int32_t suffix_n = from_size - sa[x];
-    int32_t n = suffix_n < to_size ? suffix_n : to_size;
-    int cmp = memcmp(from + sa[x], to, (size_t)n);
-    if (cmp < 0) return old_search(sa, from, from_size, to, to_size, x, end, pos);
-    return old_search(sa, from, from_size, to, to_size, begin, x, pos);
-}
+static FILE *records;
 
 static int32_t *make_sa(const uint8_t *from, int32_t n) {
     int32_t *sa = (int32_t *)xmalloc(((size_t)n + 1u) * sizeof(*sa));
@@ -60,25 +28,17 @@ static int run_query(const char *name, const int32_t *sa,
                      const uint8_t *query, int32_t query_size,
                      int32_t begin, int32_t end,
                      int32_t expected_pos, int32_t expected_len) {
-    int32_t old_pos = -1, new_pos = -1;
-    int32_t old_len = old_search(sa, from, from_size, query, query_size,
-                                 begin, end, &old_pos);
-    int32_t new_len = suffix_lcp_probe_search(sa, from, from_size, query, query_size,
-                                              begin, end, &new_pos);
-    if (old_len != new_len || old_pos != new_pos) {
-        fprintf(stderr,
-                "suffix-LCP mismatch case=%s begin=%d end=%d old=%d/%d new=%d/%d\n",
-                name, begin, end, old_pos, old_len, new_pos, new_len);
-        return 1;
-    }
+    int32_t new_pos = -1;
+    int32_t new_len = suffix_search(sa, from, from_size, query, query_size,
+                                    begin, end, &new_pos);
     if ((expected_pos != INT32_MIN && new_pos != expected_pos) ||
         (expected_len != INT32_MIN && new_len != expected_len)) {
         fprintf(stderr, "suffix-LCP unexpected result case=%s got=%d/%d expected=%d/%d\n",
                 name, new_pos, new_len, expected_pos, expected_len);
         return 1;
     }
-    printf("query=%s from=%d q=%d bounds=%d,%d result=%d,%d\n",
-           name, from_size, query_size, begin, end, new_pos, new_len);
+    fprintf(records, "query=%s\tfrom=%d\tq=%d\tbounds=%d,%d\tresult=%d,%d\n",
+            name, from_size, query_size, begin, end, new_pos, new_len);
     query_count++;
     return 0;
 }
@@ -138,8 +98,8 @@ static int adversarial_queries(void) {
     sa = make_sa(tie_from, 4);
     int32_t ib = find_sa_pos(sa, 4, 0), ie = find_sa_pos(sa, 4, 2);
     CHECK(ib >= 0 && ie == ib + 1);
-    CHECK(old_matchlen(tie_from + sa[ib], 4 - sa[ib], tie_query, 2) ==
-          old_matchlen(tie_from + sa[ie], 4 - sa[ie], tie_query, 2));
+    CHECK(matchlen(tie_from + sa[ib], 4 - sa[ib], tie_query, 2) == 1);
+    CHECK(matchlen(tie_from + sa[ie], 4 - sa[ie], tie_query, 2) == 1);
     CHECK(!run_query("adjacent-leaf-equal-tie", sa, tie_from, 4, tie_query, 2,
                      ib, ie, 2, 1));
     free(sa);
@@ -230,12 +190,13 @@ static int run_pair(const char *name, const uint8_t *from, size_t from_n,
         opvec_free(&ops);
         return 1;
     }
-    printf("pair=%s from=%zu to=%zu fuzz=%d ops=%zu", name, from_n, to_n, fuzz, ops.n);
+    fprintf(records, "pair=%s\tfrom=%zu\tto=%zu\tfuzz=%d\tops=%zu", name, from_n, to_n, fuzz, ops.n);
     for (size_t i = 0; i < ops.n; i++)
-        printf(" |%d,%d,%d", ops.v[i].diff_len, ops.v[i].extra_len, ops.v[i].adj);
-    printf(" payload=");
-    for (size_t i = 0; i < to_n; i++) printf("%02x", ops.payload[i]);
-    putchar('\n');
+        fprintf(records, "%s%d,%d,%d", i ? "|" : "\t", ops.v[i].diff_len,
+                ops.v[i].extra_len, ops.v[i].adj);
+    fputs("\tpayload=", records);
+    for (size_t i = 0; i < to_n; i++) fprintf(records, "%02x", ops.payload[i]);
+    fputc('\n', records);
     opvec_free(&ops); pair_count++;
     return 0;
 }
@@ -279,9 +240,13 @@ static int bsdiff_cases(void) {
     return 0;
 }
 
-int main(void) {
-    if (adversarial_queries() || randomized_queries() || bsdiff_cases()) return 1;
-    printf("suffix_lcp_oracle=OK queries=%llu randomized=8192 empty=OK repetitive=OK "
+int main(int argc, char **argv) {
+    if (argc != 2) { fprintf(stderr, "usage: %s RECORDS\n", argv[0]); return 2; }
+    records = fopen(argv[1], "wb"); if (!records) die("open bsdiff record stream");
+    int fail = adversarial_queries() || randomized_queries() || bsdiff_cases();
+    if (fclose(records)) die("close bsdiff record stream");
+    if (fail) return 1;
+    printf("suffix_lcp_results=OK queries=%llu randomized=8192 empty=OK repetitive=OK "
            "long_prefix=OK prefix_exhaustion=both adjacent=OK boundary_mismatch=OK "
            "leaf_ties=OK bsdiff_pairs=%llu ops=OK payloads=OK\n",
            (unsigned long long)query_count, (unsigned long long)pair_count);

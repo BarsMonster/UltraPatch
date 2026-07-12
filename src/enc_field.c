@@ -288,17 +288,9 @@ static int cmp_seg(const void *a, const void *b) {
 }
 static int cmp_seg_rank(const void *a, const void *b) {
     const SegRank *x = (const SegRank *)a, *y = (const SegRank *)b;
-#ifdef SMAP_PRETRIM_ORACLE
-    extern uint64_t smap_pretrim_comparisons;
-    smap_pretrim_comparisons++;
-#endif
     if (x->w != y->w) return (x->w > y->w) - (x->w < y->w);
     return (x->ord > y->ord) - (x->ord < y->ord);
 }
-
-#ifdef SMAP_PRETRIM_ORACLE
-uint64_t smap_pretrim_comparisons;
-#endif
 
 static size_t smap_pretrim(SegCand *pool, size_t pn) {
     if (pn <= SMAP_POOL_MAX) return pn;
@@ -311,17 +303,6 @@ static size_t smap_pretrim(SegCand *pool, size_t pn) {
     for (size_t i = 0; i < pn; i++) if (pool[i].w != UINT32_MAX) pool[out++] = pool[i];
     return out;
 }
-
-#ifdef SMAP_PRETRIM_ORACLE
-size_t smap_pretrim_probe(const uint32_t *weights, size_t n, size_t *survivors) {
-    SegCand *pool = (SegCand *)xmalloc((n ? n : 1u) * sizeof(*pool));
-    for (size_t i = 0; i < n; i++) pool[i] = (SegCand){(uint32_t)i, (int32_t)i, weights[i]};
-    size_t out = smap_pretrim(pool, n);
-    for (size_t i = 0; i < out; i++) survivors[i] = pool[i].b;
-    free(pool);
-    return out;
-}
-#endif
 
 /* Build the FULL deduped candidate map from field injections (BL: k1,k2,need; EX: k2=word
  * value, need): bsdiff op-walk boundaries + span terminator + exact EX value runs, oversized pool
