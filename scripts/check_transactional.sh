@@ -103,12 +103,14 @@ grep -Fq 'patch output aliases input' "$tmp/from-sidecar-symlink.err"
 cmp "$tmp/from.elf" "$tmp/from-sidecar.before" >/dev/null
 
 cp "$base" "$tmp/raw.bin"
-status=0
 "$ULTRAPATCH" "$tmp/raw.bin" "$tmp/to.bin" "$tmp/./raw.elf" \
-  >"$tmp/absent-sidecar.out" 2>"$tmp/absent-sidecar.err" || status=$?
-expect_status_2 "$status" encode_absent_sidecar_slot
-grep -Fq 'patch output aliases input' "$tmp/absent-sidecar.err"
-[ ! -e "$tmp/raw.elf" ]
+  >"$tmp/absent-sidecar.out" 2>"$tmp/absent-sidecar.err"
+[ -s "$tmp/raw.elf" ]
+expect_no_temp "$tmp/raw.elf"
+cp "$tmp/raw.bin" "$tmp/raw-decoded.bin"
+"$ULTRAPATCH" --decode "$tmp/raw-decoded.bin" "$tmp/raw.elf" \
+  >"$tmp/absent-sidecar-decode.out" 2>"$tmp/absent-sidecar-decode.err"
+cmp "$tmp/raw-decoded.bin" "$tmp/to.bin" >/dev/null
 
 cp "$tmp/grow.blob" "$tmp/aliased-image"
 ln "$tmp/aliased-image" "$tmp/aliased-patch"
@@ -119,4 +121,4 @@ expect_status_2 "$status" decode_alias
 grep -Fq 'image aliases patch' "$tmp/decode-alias.err"
 cmp "$tmp/aliased-image" "$tmp/grow.blob" >/dev/null
 
-echo 'transactional_output=OK (rename failures preserve files; binary/sidecar aliases rejected)'
+echo 'transactional_output=OK (rename failures preserve files; present aliases rejected; absent sidecar slots usable)'
