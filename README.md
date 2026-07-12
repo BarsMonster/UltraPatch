@@ -85,7 +85,7 @@ sanitizers, and the required Clang leg to a fresh archive of one clean `main`
 commit and requires explicit evidence from every child command:
 
 ```sh
-/usr/bin/python3 -I -S scripts/release_gate.py
+/usr/bin/python3 scripts/release_gate.py
 ```
 
 This local command validates the selected tool/archive hashes and flags but does
@@ -94,15 +94,17 @@ inside the digest-pinned CI container, is the authoritative release run. For
 the atomic full-profile refresh workflow, release notes, and artifact
 provenance, use `docs/release-checklist.md`.
 
-The binary corpora used by the release gate are tracked under `test-bench/`.
-`test-bench/images` and `test-bench/fixtures` provide the 16 home matrix images
-and the two one-face fixtures; `test-bench/foreign` provides the second
-Cortex-M0+ lineage. `test-bench/release-inventory.tsv` is the canonical ordered
-membership; the asset, per-pair size, corpus-wire, and golden manifests are
-cross-validated against it by `make check-release-inventory`. The root
-`Makefile` uses those paths by default. For a non-release measurement, override
-`IMAGES`, `FIXTURES`, and `FOREIGN`, set `CORPUS_INVENTORY=""` to discover the
-supplied directories, and provide or disable the matching manifests. The
+The release corpus sources are tracked under `test-bench/`. The 16 home matrix
+ELFs and two one-face fixture ELFs are converted to exact binaries with the
+profile-pinned Arm `objcopy` under `.build/<profile-id>/corpus`; the 18 foreign
+binaries remain tracked. `test-bench/corpus-inventory.tsv` is the canonical
+ordered topology and SHA-256 inventory. `test-bench/wire-baseline.tsv` combines
+the 256 home sizes and hashes, 34 foreign hashes, and four additional golden
+wires. `make check-assets` verifies the tracked inputs and generated
+profile-local view, while `make check-release-inventory` cross-validates that
+wire baseline. For a non-release measurement, override `IMAGES`, `FIXTURES`,
+and `FOREIGN`, set `CORPUS_INVENTORY=""` to discover the supplied directories,
+and provide or disable `WIRE_BASELINE`. The
 `check-assets` leg of `make gate` runs concurrently with the matrix, so a stale,
 partial, or mutually inconsistent corpus still fails the gate deterministically.
 `make check-build-profile` separately proves concurrent GCC, Clang, and
@@ -112,26 +114,15 @@ integration-include/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
-random/text/page-boundary images), `make check-golden` (pinned sha256 of eight
-representative blobs — any wire drift fails the gate), `make check-degrade`,
+random/text/page-boundary images), `make check-golden` (four additional pinned
+wires; the corpus matrix pins the other 290 — any wire drift fails the gate),
+`make check-degrade`,
 the ARM size/divide/stack gates, the full 256-pair home corpus matrix, and the
 34 foreign pair-directions — all legs run concurrently, ~35 s warm on the reference machine.
 qemu-based decode validation was removed permanently (owner decision,
 2026-07-03): too slow for its marginal value — a one-time 260-pair qemu-arm
 study found zero host-vs-ARM divergence, and the ARM cross-build gate still
 compiles the real Thumb-1 decoder every cycle.
-
-Create a deterministic standalone corpus bundle, if needed, with:
-
-```sh
-scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
-```
-
-The packer takes its file list from the verified release manifests, includes
-the inventory plus size/wire/golden baselines, validates the staged archive,
-and only then publishes the archive and checksum through same-directory
-renames. A failure before publication preserves both existing outputs; an
-interruption between the two renames is detected by the checksum mismatch.
 
 CI verifies pull requests with the development checks. Pushes to `main` run the
 commit-bound driver in the pinned container and are the authoritative release

@@ -9,13 +9,13 @@ hardware flash validation are external integration work.
 
 - Release commit on `main`.
 - Clean working tree.
-- Pinned corpus assets committed under `test-bench/images`,
-  `test-bench/fixtures`, and `test-bench/foreign`.
-- Canonical ordered membership and the 17 undirected foreign edges committed in
-  `test-bench/release-inventory.tsv`.
-- `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
-  release, with the size/wire/golden baselines validated against the same
-  inventory by `make check-release-inventory`.
+- Home and fixture ELFs committed under `test-bench/images` and
+  `test-bench/fixtures`; foreign binaries committed under `test-bench/foreign`.
+- Ordered membership, asset hashes, and the 17 undirected foreign edges in
+  `test-bench/corpus-inventory.tsv`.
+- Home sizes, all corpus wire hashes, and the four additional golden wires in
+  `test-bench/wire-baseline.tsv`, validated against the inventory by
+  `make check-release-inventory`.
 - The selected host/Arm GCC drivers and named subtools (`cc1`, `collect2`,
   assembler, linker), required Clang and named binutils, `libc.a`/`libgcc.a`
   content hashes, compiler environment policy, effective compile/link flags,
@@ -30,7 +30,7 @@ schema-3 lock:
 /usr/bin/make release-profile-json
 /usr/bin/make release-profile-update
 git diff -- toolchains/release-profile.json
-make check-release-profile check-release-gate-contract
+make check-release-profile
 ```
 
 The atomic updater takes the exclusive release-input lock, rejects runtime
@@ -47,19 +47,17 @@ and absolute launchers, and reject Make launch controls before any recipe runs.
 Run the matching local preflight from a clean checkout on `main`:
 
 ```sh
-/usr/bin/python3 -I -S scripts/release_gate.py
+/usr/bin/python3 scripts/release_gate.py
 ```
 
-The driver rejects inherited Make/Python launch controls, global/system Git
-configuration, non-normal index flags, and a mismatched `GITHUB_SHA`; `-I -S`
-also prevents environment or site-package import injection before those checks. It holds
-the release-input lock, captures one clean `main` commit, and runs from a fresh
-temporary `git archive` export so ignored `.build` state and working-tree bytes
-cannot enter the verification. It streams and captures the build-isolation,
-`make gate`, ASan/UBSan, and required Clang commands, requiring each command's
-explicit success evidence, and rechecks the original branch, commit, index, and
-working tree after every command. Every public Make target retains its hard
-80-second cap. Record the complete output.
+The driver holds the release-input lock, requires a clean `main` checkout (and a
+matching `GITHUB_SHA` when provided), captures that commit, and runs from a
+fresh temporary `git archive` so ignored `.build` state and working-tree bytes
+cannot enter verification. Its child commands receive a small fixed
+environment. It streams the build-isolation, `make gate`, ASan/UBSan, and
+required Clang commands, requires each command's explicit success evidence,
+then rechecks the original branch, commit, and working tree. Every public Make
+target retains its hard 80-second cap. Record the complete output.
 
 This local run verifies that its selected tools and archives match the lock; it
 does not attest its runtime OCI container. The authoritative release result is
@@ -72,12 +70,12 @@ release descriptor before forking its verification legs. It must report:
 - `release_profile`: the validated profile identifier from
   `toolchains/release-profile.json`
 - `release inventory`: all committed asset and wire baselines agree
-- `corpus assets`: verified through `test-bench/corpus.sha256`
-- `foreign assets`: verified through `test-bench/foreign.sha256`
+- `corpus assets` and `foreign assets`: verified through
+  `test-bench/corpus-inventory.tsv`
 - `malformed rejects`: nonzero deterministic reject count
 - `edge inputs`: all synthetic edge cases round-tripped or cleanly refused
-- `golden wire`: OK against the committed `test-bench/golden.sha256` (the wire
-  freeze — an unexplained mismatch blocks release)
+- `golden wire`: OK against the G rows in `test-bench/wire-baseline.tsv` (the
+  C/F rows are checked by the corpus matrix; unexplained drift blocks release)
 - `model contract`: OK for shared model/default-cap invariants
 - `wire config override`: OK for one nondefault same-name/same-value override
   across encoder plus host and Cortex-M0+ ARM decoder compile paths
@@ -100,6 +98,17 @@ and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize`.
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
 
+For an intentional wire change, run `make golden-update`. It measures a private
+candidate, rejects any worse home pair or one-face regression, and updates
+`test-bench/wire-baseline.tsv` plus the four Makefile size pins. Commit those two
+files together. Publication uses ordinary same-directory replacements; if it is
+interrupted between them, restore the pair and rerun:
+
+```sh
+git restore -- Makefile test-bench/wire-baseline.tsv
+make golden-update
+```
+
 The host CLI's successful output-publication contract is the native host OS
 behavior of its same-directory temporary file and `rename()`. A separate
 cross-platform transaction or filesystem durability layer is not a release
@@ -112,23 +121,6 @@ family, `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`,
 `DR_KCAP_BL`, `DR_KCAP_EX`, and any wire-model override belong in that shared
 value. `PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are decoder-only integration
 configuration and must stay separate from the wire flags.
-
-## Corpus Bundle
-
-To publish a standalone copy of the exact binary gate assets:
-
-```sh
-scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
-```
-
-Publish both `artifacts/a1-corpus.tar.gz` and
-`artifacts/a1-corpus.tar.gz.sha256` with the release. The archive is
-deterministic for the canonical release inventory and contains only its verified
-asset paths plus the asset, size, wire, and golden manifests. The packer verifies
-the complete staged archive before same-directory publication; the checksum
-detects an interruption between archive and checksum replacement. Run
-`make check-pack-corpus` to exercise deterministic output and injected
-generation/publication failures.
 
 ## Artifacts
 
@@ -147,10 +139,8 @@ For traceability, release notes should include:
 - Git commit SHA.
 - The `release_commit`, `release_source`, and `release_preflight` lines from the
   matching local driver, plus the URL/status of the authoritative push CI job.
-- `sha256sum test-bench/corpus.sha256`.
-- `sha256sum test-bench/foreign.sha256`.
-- `sha256sum test-bench/release-inventory.tsv`.
-- `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
+- `sha256sum test-bench/corpus-inventory.tsv`.
+- `sha256sum test-bench/wire-baseline.tsv`.
 - `sha256sum toolchains/release-profile.json`.
 - The `release_profile` line from `make gate`.
 - `make gate` output.

@@ -208,7 +208,12 @@ def host_payload() -> dict[str, Any]:
 
 
 def host_descriptor() -> dict[str, Any]:
-    return {"schema": SCHEMA, "environment": environment_policy(), **host_payload()}
+    return {
+        "schema": SCHEMA,
+        "environment": environment_policy(),
+        "corpus_objcopy": tool_identity("UP_PROFILE_ARM_OBJCOPY"),
+        **host_payload(),
+    }
 
 
 def sha256_file(path: Path, label: str) -> str:
@@ -295,6 +300,7 @@ def release_descriptor() -> dict[str, Any]:
             },
             "nm": tool_identity("UP_PROFILE_ARM_NM"),
             "objdump": tool_identity("UP_PROFILE_ARM_OBJDUMP"),
+            "objcopy": tool_identity("UP_PROFILE_ARM_OBJCOPY"),
             "size": tool_identity("UP_PROFILE_ARM_SIZE"),
         },
     }

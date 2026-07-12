@@ -43,6 +43,7 @@ set -u
 
 CC_HOST="${CC:-cc}"
 IMG="${IMAGES:-test-bench/images}"
+FIX="${FIXTURES:-test-bench/fixtures}"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
 : "${ULTRAPATCH:?check_degrade.sh: ULTRAPATCH not set; invoke through make check-degrade}"

@@ -38,7 +38,7 @@ CAND=$(make --no-print-directory -s -C "$tmp/candidate" \
   exit 2
 }
 
-FIX="$ROOT/test-bench/fixtures"
+FIX="${FIXTURES:-$ROOT/test-bench/fixtures}"
 
 # Two small deterministic images produce four home pairs. Alternating the same images across
 # the pinned foreign release names produces all 34 foreign directions. This regression verifies
@@ -50,7 +50,7 @@ python3 "$ROOT/scripts/synth_gen.py" role "$tmp/small/b.bin" from rand 768 907
 ln -s "$tmp/small/a.bin" "$tmp/images/img_00_base/watch.bin"
 ln -s "$tmp/small/b.bin" "$tmp/images/img_01_oneface/watch.bin"
 foreign_versions=$(awk '$1=="foreign" { print $2 }' \
-  "$ROOT/test-bench/release-inventory.tsv")
+  "$ROOT/test-bench/corpus-inventory.tsv")
 [ -n "$foreign_versions" ] || {
   echo "check_ab_matrix.sh: release inventory has no foreign images" >&2
   exit 2

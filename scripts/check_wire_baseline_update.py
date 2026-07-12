@@ -55,11 +55,12 @@ BASE_ONEFACE_GROW ?= 10
 BASE_ONEFACE_REVERT ?= 9
 unrelated := preserved
 """)
-    write(root / "release-inventory.tsv", """fixture base
-home h0
-home h1
-foreign f0
-foreign f1
+    asset_hash = h("a")
+    write(root / "corpus-inventory.tsv", f"""fixture base {asset_hash} {asset_hash}
+home h0 {asset_hash} {asset_hash}
+home h1 {asset_hash} {asset_hash}
+foreign f0 {asset_hash} -
+foreign f1 {asset_hash} -
 foreign-edge f0 f1
 """)
     write(root / "wire-baseline.tsv", baseline())
@@ -97,7 +98,7 @@ def candidate(repo: Path, profile: str, tool_hash: str, *,
 def command(root: Path, candidate_path: Path, metrics: Path, host: Path,
             lock: Path) -> list[str]:
     return [sys.executable, str(PUBLISHER), "--root", str(root),
-            "--inventory", str(root / "release-inventory.tsv"),
+            "--inventory", str(root / "corpus-inventory.tsv"),
             "--candidate-baseline", str(candidate_path), "--metrics", str(metrics),
             "--host-tool", str(host), "--release-profile-lock", str(lock),
             "--home-limit", "40", "--foreign-limit", "20",

@@ -8,7 +8,8 @@ compact compressors, ranked by ratio and annotated with the memory each needs to
 
 ## Method
 
-- **Corpus:** the 16 native/home images (`test-bench/images/img_*/watch.bin`),
+- **Corpus:** the 16 native/home images (derived from
+  `test-bench/images/img_*/watch.elf` under the selected profile),
   99,740–215,812 B each, 2,555,032 B total.
 - **"From-0" encode:** each image is patched from a **0-size source**, so no
   `copy` op can draw from a prior image — the whole target is encoded from
@@ -109,10 +110,11 @@ floor, not the product metric (see `make gate`).
 
 ```sh
 # ultrapatch at a given window (single shared knob moves encoder+decoder):
-make -B WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10'
-cp ultrapatch up10
+make -B WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10' check-assets
+up10=$(make -s WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10' host-tool-path)
+images=$(dirname "$up10")/corpus/images
 : > empty.bin
-for f in test-bench/images/img_*/watch.bin; do ./up10 empty.bin "$f" /tmp/b.blob; \
+for f in "$images"/img_*/watch.bin; do "$up10" empty.bin "$f" /tmp/b.blob; \
     stat -c%s /tmp/b.blob; done | paste -sd+ | bc
 
 # peers (per file, minimal container):

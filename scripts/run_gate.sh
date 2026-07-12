@@ -6,9 +6,14 @@ set -u
 
 MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
+: "${CORPUS_ASSET_STAMP:?run_gate.sh: CORPUS_ASSET_STAMP not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
 : "${RELEASE_CORPUS_INVENTORY:?run_gate.sh: release inventory not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
+[ -r "$CORPUS_ASSET_STAMP" ] || {
+  echo "run_gate.sh: generated corpus is not ready: $CORPUS_ASSET_STAMP" >&2
+  exit 1
+}
 . "$(dirname "$0")/tempdir.sh"
 rc=0
 
@@ -28,9 +33,9 @@ else
 fi
 ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-pack-corpus + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-corpus..."
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-corpus..."
 
-LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-pack-corpus-internal:package.txt:check-pack-corpus check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -39,16 +44,16 @@ for spec in $LEGS; do
   # with `-o` (assume-old), so every leg consumes the same pre-fork artifact even if an input mtime
   # changes while the gate is running.
   if [ "$target" = check-corpus-matrix-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" \
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" \
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-ab-matrix-internal ]; then
-    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" \
+    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
   else
-    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" \
+    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       "$target" >"$tmp/$file" 2>&1 &
   fi
   pids="$pids $!"
@@ -160,9 +165,8 @@ require_exact inventory.txt release_golden_blobs "$release_golden_blobs"
 require_exact inventory.txt release_home_total "${BASE_FULL_TOTAL:?}"
 require_exact inventory.txt release_oneface_grow "${BASE_ONEFACE_GROW:?}"
 require_exact inventory.txt release_oneface_revert "${BASE_ONEFACE_REVERT:?}"
-require_prefix package.txt corpus_package "OK ("
-require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus.sha256"
-require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/foreign.sha256"
+require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus-inventory.tsv"
+require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/corpus-inventory.tsv"
 require_exact malformed.txt malformed_rejects 29
 require_exact e.txt edge_cases 16
 require_exact e.txt edge_roundtrips 15
@@ -250,7 +254,6 @@ kvs() {
 echo "==================== A1 GATE ========================="
 printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
 kvs 'inventory.txt|release_inventory|release inventory        : '
-kvs 'package.txt|corpus_package|corpus package          : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"

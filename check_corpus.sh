@@ -42,7 +42,7 @@ set -u
 JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
-INVENTORY="${CORPUS_INVENTORY-test-bench/release-inventory.tsv}"
+INVENTORY="${CORPUS_INVENTORY-test-bench/corpus-inventory.tsv}"
 TOPOLOGY_HELPER="scripts/corpus_topology.py"
 WIRE_BASE="${WIRE_BASELINE-test-bench/wire-baseline.tsv}"
 SIZE_BASE="${CORPUS_SIZE_BASELINE-$WIRE_BASE}"

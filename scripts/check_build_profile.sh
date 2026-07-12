@@ -14,9 +14,11 @@ make_command="${1:-${MAKE:-make}}"
 host_tool_target="${2:-${HOST_TOOL_TARGET:-host-tool-path}}"
 clang_command="${CLANG:-clang}"
 : "${DECODER_PUBLIC_HDRS:?check_build_profile.sh: DECODER_PUBLIC_HDRS not set by make}"
+objcopy_command="${ARM_OBJCOPY:-arm-none-eabi-objcopy}"
 read -r -a make_argv <<<"$make_command"
-if [ "${#make_argv[@]}" -eq 0 ] || [ -z "$host_tool_target" ] || [ -z "$clang_command" ]; then
-  echo "check_build_profile.sh: empty MAKE, CLANG, or host-tool target" >&2
+if [ "${#make_argv[@]}" -eq 0 ] || [ -z "$host_tool_target" ] || \
+   [ -z "$clang_command" ] || [ -z "$objcopy_command" ]; then
+  echo "check_build_profile.sh: empty MAKE, CLANG, ARM_OBJCOPY, or host-tool target" >&2
   exit 2
 fi
 
@@ -69,9 +71,12 @@ tool_path() {
 gcc_tool=$(tool_path CC=gcc)
 clang_tool=$(tool_path CC="$clang_command")
 alternate_tool=$(tool_path CC=gcc CFLAGS_EXTRA=-DUP_BUILD_PROFILE_ALTERNATE=1)
+objcopy_proxy="$tmp/objcopy-profile-proxy"
+ln -s "$(command -v "$objcopy_command")" "$objcopy_proxy"
+objcopy_tool=$(tool_path CC=gcc ARM_OBJCOPY="$objcopy_proxy")
 
 if [ "$gcc_tool" = "$clang_tool" ] || [ "$gcc_tool" = "$alternate_tool" ] || \
-   [ "$clang_tool" = "$alternate_tool" ]; then
+   [ "$clang_tool" = "$alternate_tool" ] || [ "$objcopy_tool" = "$gcc_tool" ]; then
   echo "check_build_profile.sh: distinct profiles selected the same HOST_TOOL" >&2
   exit 1
 fi

@@ -1,38 +1,18 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
-
-"""Validate that every committed release manifest describes one inventory."""
+"""Validate the release corpus inventory and combined wire baseline."""
 
 import argparse
-import re
+from pathlib import Path
 import sys
 
-from corpus_topology import TopologyError, parse_inventory
+from corpus_topology import TopologyError, parse_inventory, verify_sources
 from wire_baseline import BaselineError, parse_wire_baseline
-
-
-SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def fail(message):
     raise ValueError(message)
-
-
-def hashes(path):
-    result = {}
-    with open(path, encoding="utf-8") as source:
-        for lineno, raw in enumerate(source, 1):
-            values = raw.split()
-            if not values or values[0].startswith("#"):
-                continue
-            if len(values) != 2 or not SHA256_RE.fullmatch(values[0]):
-                fail("%s:%d: invalid asset hash row" % (path, lineno))
-            digest, name = values
-            if name in result:
-                fail("%s:%d: duplicate path %r" % (path, lineno, name))
-            result[name] = digest
-    return result
 
 
 def exact_keys(label, actual, expected):
@@ -47,8 +27,7 @@ def exact_keys(label, actual, expected):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--inventory", required=True)
-    parser.add_argument("--corpus-assets", required=True)
-    parser.add_argument("--foreign-assets", required=True)
+    parser.add_argument("--source-root", default="test-bench")
     parser.add_argument("--wire-baseline", required=True)
     parser.add_argument("--home-total", required=True, type=int)
     parser.add_argument("--oneface-grow", required=True, type=int)
@@ -62,9 +41,8 @@ def main():
 
     try:
         topology = parse_inventory(args.inventory)
-        fixtures = topology.fixtures
-        home = topology.home
-        foreign = topology.foreign
+        verify_sources(topology, Path(args.source_root))
+        fixtures, home, foreign = topology.fixtures, topology.home, topology.foreign
         if (len(fixtures), len(home), len(foreign)) != (
                 args.fixtures, args.home_images, args.foreign_images):
             fail("release inventory cardinality changed: fixtures=%d home=%d foreign=%d" %
@@ -74,17 +52,6 @@ def main():
         if len(topology.foreign_edges) != args.foreign_edges:
             fail("release foreign-edge cardinality changed: %d" %
                  len(topology.foreign_edges))
-
-        corpus_expected = []
-        for ident in fixtures:
-            corpus_expected.extend(("test-bench/fixtures/%s/watch.bin" % ident,
-                                    "test-bench/fixtures/%s/watch.elf" % ident))
-        for ident in home:
-            corpus_expected.extend(("test-bench/images/%s/watch.bin" % ident,
-                                    "test-bench/images/%s/watch.elf" % ident))
-        foreign_expected = ["test-bench/foreign/%s/watch.bin" % ident for ident in foreign]
-        exact_keys("corpus asset manifest", hashes(args.corpus_assets), corpus_expected)
-        exact_keys("foreign asset manifest", hashes(args.foreign_assets), foreign_expected)
 
         baseline = parse_wire_baseline(args.wire_baseline)
         expected_home_pairs = set(topology.home_pairs)
@@ -97,7 +64,6 @@ def main():
 
         expected_foreign_pairs = set(topology.foreign_pairs)
         exact_keys("foreign baseline", baseline.foreign, expected_foreign_pairs)
-
         pins = baseline.golden
         if len(pins) != args.golden_blobs:
             fail("wire baseline has %d golden blobs, expected %d" %

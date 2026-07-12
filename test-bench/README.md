@@ -1,35 +1,26 @@
 # Test Bench
 
-This directory contains the tracked binary corpora used by the A1 verification
-checks. The gate uses 16 matrix images (`images/`) plus the `v0_base` and
-`v1_one_face` fixtures, and a second, unrelated Cortex-M0+ lineage under
+This directory contains the tracked corpus sources used by the A1 verification
+checks. The gate uses 16 matrix ELFs (`images/`) plus the `v0_base` and
+`v1_one_face` fixture ELFs, and a second, unrelated Cortex-M0+ binary lineage under
 `foreign/` (18 CircuitPython feather_m0_express release images, 34 pair-
-directions — see `../docs/foreign-firmware-study.md`); the root `Makefile` reads
-them directly by default.
+directions — see `../docs/foreign-firmware-study.md`). Before a test runs, the
+profile-pinned Arm `objcopy` derives the exact home and fixture binaries under
+`.build/<profile-id>/corpus`, beside copies of their ELF sidecars.
 
-`release-inventory.tsv` is the canonical ordered membership for the two fixtures,
-16 home images, and 18 foreign releases. It also lists the 17 ordered undirected
-foreign edges explicitly; each edge schedules its listed direction followed by
-the reverse direction. `make check-release-inventory` proves that all committed
-asset, home-size, corpus-wire, and golden manifests describe that topology and
-that their sizes agree with the Makefile release pins.
+`corpus-inventory.tsv` is the canonical ordered topology and hash inventory. A
+fixture or home row records its expected derived-binary SHA-256 and tracked ELF
+SHA-256; a foreign row records its tracked binary SHA-256 and `-` for the absent
+ELF. The file also lists the 17 ordered undirected foreign edges explicitly;
+each edge schedules its listed direction followed by the reverse direction.
+`make check-release-inventory` proves that `wire-baseline.tsv` describes that
+topology and agrees with the Makefile release pins.
 
-`corpus.sha256` pins every home `watch.bin`/`watch.elf`; `foreign.sha256` pins
-every `foreign/<ver>/watch.bin`. Both are verified by:
+The tracked inputs and derived binaries are verified by:
 
 ```sh
 make check-assets
 ```
-
-Create a deterministic standalone bundle, if needed, with:
-
-```sh
-scripts/pack_corpus.sh artifacts/a1-corpus.tar.gz
-```
-
-The bundle file list comes from the verified manifests rather than a directory
-scan. It includes `release-inventory.tsv`, the asset manifests, and the
-size/wire/golden baselines needed to identify the exact release corpus.
 
 `make check-malformed` uses the pinned one-face fixture to verify deterministic
 rejection of malformed patch envelopes and truncated blobs without requiring

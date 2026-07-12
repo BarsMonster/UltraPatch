@@ -31,8 +31,9 @@ checks.
 
 The persistent host executable is scoped by a build-profile identifier and is
 written to `.build/<profile-id>/ultrapatch`, not to the repository root. The
-identifier changes with the host compiler identity and every effective build
-flag, so builds with different settings cannot silently reuse one executable.
+identifier changes with the host compiler identity, corpus `objcopy` identity,
+and every effective build flag, so builds with different settings cannot
+silently reuse one executable or generated corpus.
 To obtain the exact path selected by the current Make arguments, run:
 
 ```sh
@@ -59,7 +60,8 @@ make check-build-profile
 Release verification has a stricter provenance contract. The selected host GCC
 driver and its `cc1`, `collect2`, assembler, and linker; required Clang; host
 `nm`; selected GNU Arm GCC driver and its `cc1`, `collect2`, assembler, and
-linker; the other named Arm binutils; `libc.a`/`libgcc.a` content hashes; clean
+linker; the other named Arm binutils, including the `objcopy` used to derive
+the profile-local corpus binaries; `libc.a`/`libgcc.a` content hashes; clean
 compiler environment; and effective compile/link flags are pinned in
 `toolchains/release-profile.json`. The full schema-3 lock also records the
 immutable OCI digest configured for authoritative push CI. `make gate` validates
@@ -73,7 +75,7 @@ Refresh the complete lock with the repository workflow:
 /usr/bin/make release-profile-json   # inspect the complete candidate wrapper
 /usr/bin/make release-profile-update # atomic, mode-preserving publication
 git diff -- toolchains/release-profile.json
-make check-release-profile check-release-gate-contract
+make check-release-profile
 ```
 
 The updater takes the exclusive release-input lock, validates and preserves the
@@ -110,16 +112,14 @@ make check-arm
 make gate
 ```
 
-For a local release preflight, run `/usr/bin/python3 -I -S scripts/release_gate.py`
-from a clean `main` checkout with Python/Make launch controls unset. The driver
-requires this isolated, no-site Python startup so import search paths cannot be
-injected before its own environment checks. It
-rejects non-normal index flags, exports the captured commit into a fresh
-temporary tree, and requires explicit evidence from the build-profile, gate,
-sanitizer, and Clang commands. It proves that the selected local inputs match the
-lock, but it does not attest that the local process is running in the recorded
-OCI image. The successful push workflow at the exact `github.sha`, inside the
-pinned container digest, is the authoritative release run.
+For a local release preflight, run `/usr/bin/python3 scripts/release_gate.py`
+from a clean `main` checkout. The driver holds the release-input lock, exports
+the captured commit into a fresh temporary tree, runs with a small fixed child
+environment, and requires explicit evidence from the build-profile, gate,
+sanitizer, and Clang commands. It verifies that the selected local inputs match
+the lock, but it does not attest that the local process is running in the
+recorded OCI image. The successful push workflow at the exact `github.sha`,
+inside the pinned container digest, is the authoritative release run.
 
 `make check-arm` cross-builds the Cortex-M0+ decoder object and prints and
 gates both its relocatable and no-startup linked ARM `text`/`data`/`bss` sizes

@@ -74,6 +74,13 @@
         "executable_sha256": "51298db8b38198bd918e307400695a8a3187bf4f49646261da2ae1cef6ba900b",
         "version": "GNU nm (2.45.50.20251209-1ubuntu1+23build1) 2.45.50.20251209"
       },
+      "objcopy": {
+        "command": [
+          "arm-none-eabi-objcopy"
+        ],
+        "executable_sha256": "a9259f3319b2ea02174d0bd6e90c331dcaac54d7e8738c3281bb8c66bfc5e892",
+        "version": "GNU objcopy (2.45.50.20251209-1ubuntu1+23build1) 2.45.50.20251209"
+      },
       "objdump": {
         "command": [
           "arm-none-eabi-objdump"

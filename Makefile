@@ -39,6 +39,7 @@ ARM_PREFIX ?= arm-none-eabi-
 ARM_CC ?= $(ARM_PREFIX)gcc
 ARM_SIZE ?= $(ARM_PREFIX)size
 ARM_OBJDUMP ?= $(ARM_PREFIX)objdump
+ARM_OBJCOPY ?= $(ARM_PREFIX)objcopy
 ARM_NM ?= $(ARM_PREFIX)nm
 ARM_OBJECT_OPT ?= -Os
 ARM_STACK_OPT ?= -O2
@@ -97,8 +98,9 @@ override HOST_BACKEND_SRCS := $(HOST_BACKEND_SRC)
 override HOST_LINK_OBJECTS := $(addprefix obj/,$(HOST_ENCODER_SRCS:.c=.o) \
                                                    $(HOST_BACKEND_SRCS:.c=.o))
 
-# Host builds are isolated by the compiler identity and every effective build flag. The profile
-# helper emits canonical JSON without workspace paths; its SHA-256 is both the build-directory
+# Host builds and derived corpus binaries are isolated by compiler/objcopy identity and every
+# effective build flag. The profile helper emits canonical JSON without workspace paths; its
+# SHA-256 is both the build-directory
 # key and the provenance identity. Tests receive the exact binary through ULTRAPATCH, so a GCC,
 # Clang, or alternate-config invocation never executes whichever shared root binary linked last.
 override UP_PROFILE_CC := $(CC)
@@ -118,6 +120,7 @@ override UP_PROFILE_LINK_OBJECTS := $(HOST_LINK_OBJECTS)
 override UP_PROFILE_ARM_CC := $(ARM_CC)
 override UP_PROFILE_ARM_SIZE := $(ARM_SIZE)
 override UP_PROFILE_ARM_OBJDUMP := $(ARM_OBJDUMP)
+override UP_PROFILE_ARM_OBJCOPY := $(ARM_OBJCOPY)
 override UP_PROFILE_ARM_NM := $(ARM_NM)
 override UP_PROFILE_ARM_SOURCE_FLAGS = $(ARM_DEC_FLAGS)
 override UP_PROFILE_ARM_LINK_FLAGS = $(ARM_LINK_FLAGS)
@@ -130,7 +133,8 @@ export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
 export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
 export UP_PROFILE_RECIPE_REVISION UP_PROFILE_ENCODER_SOURCES
 export UP_PROFILE_BACKEND_SOURCES UP_PROFILE_LINK_OBJECTS
-export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_NM
+export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_OBJCOPY
+export UP_PROFILE_ARM_NM
 export UP_PROFILE_ARM_SOURCE_FLAGS
 export UP_PROFILE_ARM_LINK_FLAGS UP_PROFILE_ARM_LINK_LIBS
 export UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
@@ -166,13 +170,19 @@ ENC_SEAM_SRCS := $(filter-out src/enc_plan.c,$(ENC_MODULE_SRCS)) $(HOST_BACKEND_
 # Standalone host-decoder TU pair + demo defines, shared once by dec_portable, check_degrade's D=1, and all-internal.
 DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
 DEC_DEMO_DEFINES := -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L
-FIXTURES ?= test-bench/fixtures
-IMAGES ?= test-bench/images
+override CORPUS_BUILD_DIR := $(abspath $(BUILD_DIR))/corpus
+override CORPUS_ASSET_STAMP := $(CORPUS_BUILD_DIR)/.ready
+override CORPUS_SOURCE_ELFS := $(wildcard test-bench/fixtures/*/watch.elf) \
+                               $(wildcard test-bench/images/*/watch.elf)
+override CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
+FIXTURES ?= $(CORPUS_BUILD_DIR)/fixtures
+IMAGES ?= $(CORPUS_BUILD_DIR)/images
 FOREIGN ?= test-bench/foreign
-CORPUS_MANIFEST ?= test-bench/corpus.sha256
-FOREIGN_MANIFEST ?= test-bench/foreign.sha256
-CORPUS_INVENTORY ?= test-bench/release-inventory.tsv
+CORPUS_INVENTORY ?= test-bench/corpus-inventory.tsv
 WIRE_BASELINE ?= test-bench/wire-baseline.tsv
+# An empty inventory is the documented custom-measurement mode; callers then provide their own
+# image/fixture roots and do not need the canonical profile-local corpus view.
+CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),$(CORPUS_ASSET_STAMP))
 
 # Release scope pins. The inventory names every member in order; these cardinalities make a
 # deletion or reduced release set an explicit policy change rather than a self-consistent shrink.
@@ -228,7 +238,7 @@ GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
 CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize \
-          check-wire-config check-build-profile check-release-profile check-release-inventory check-pack-corpus \
+	      check-wire-config check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
@@ -285,7 +295,8 @@ check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
 	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"
 
 check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profile.py
-	@MAKE="$(MAKE)" CLANG="$(CLANG)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" \
+	@MAKE="$(MAKE)" CLANG="$(CLANG)" ARM_OBJCOPY="$(ARM_OBJCOPY)" \
+	  RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" \
 	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" scripts/check_build_profile.sh
 
 # Required second-compiler leg. It remains outside `make gate`, but is a capped public target
@@ -297,7 +308,7 @@ check-clang-internal: check-release-profile-internal
 	@echo "clang_contract=OK (descriptor-pinned build + checks + golden wire)"
 
 .PHONY: check-clang-golden-internal
-check-clang-golden-internal: ultrapatch
+check-clang-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
 
@@ -314,7 +325,7 @@ LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9 -DJSLOTS=600u
 # edits remain the intentional, reviewable way to change a release input. The profile verifier
 # separately proves the exact compiler versions, flags, and multilib contents.
 override RELEASE_GATE_FIXED_VARS := \
-	FIXTURES IMAGES FOREIGN CORPUS_MANIFEST FOREIGN_MANIFEST \
+	FIXTURES IMAGES FOREIGN \
 	CORPUS_INVENTORY WIRE_BASELINE \
 	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES \
 	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
@@ -322,7 +333,7 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
-	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
+	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
 	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS NVM_EMU ENC_MODULE_SRCS \
@@ -374,12 +385,12 @@ golden-update-inputs-internal:
 
 check-release-inventory-internal: scripts/check_release_inventory.py scripts/corpus_topology.py \
                                   $(CORPUS_INVENTORY) \
-                                  $(CORPUS_MANIFEST) $(FOREIGN_MANIFEST) \
+                                  $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS) \
                                   $(WIRE_BASELINE)
 	@python3 scripts/corpus_topology.py test
 	@python3 scripts/check_release_inventory.py \
 	  --inventory "$(CORPUS_INVENTORY)" \
-	  --corpus-assets "$(CORPUS_MANIFEST)" --foreign-assets "$(FOREIGN_MANIFEST)" \
+	  --source-root test-bench \
 	  --wire-baseline "$(WIRE_BASELINE)" --home-total "$(BASE_FULL_TOTAL)" \
 	  --oneface-grow "$(BASE_ONEFACE_GROW)" --oneface-revert "$(BASE_ONEFACE_REVERT)" \
 	  --fixtures "$(BASE_RELEASE_FIXTURES)" --home-images "$(BASE_RELEASE_HOME_IMAGES)" \
@@ -387,10 +398,16 @@ check-release-inventory-internal: scripts/check_release_inventory.py scripts/cor
 	  --foreign-edges "$(BASE_RELEASE_FOREIGN_EDGES)" \
 	  --golden-blobs "$(BASE_RELEASE_GOLDEN_BLOBS)"
 
-check-pack-corpus-internal: scripts/pack_corpus.sh scripts/check_pack_corpus.sh \
-                            scripts/check_release_inventory.py scripts/corpus_topology.py \
-                            $(CORPUS_INVENTORY)
-	@scripts/check_pack_corpus.sh
+.PHONY: corpus-assets-internal
+corpus-assets-internal: $(CORPUS_ASSET_STAMP)
+
+$(CORPUS_ASSET_STAMP): scripts/corpus_topology.py $(CORPUS_INVENTORY) \
+                       $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS) | profile-check
+	@python3 scripts/corpus_topology.py materialize --inventory "$(CORPUS_INVENTORY)" \
+	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)" \
+	  --objcopy "$(ARM_OBJCOPY)"
+	@set -e; tmp="$@.$$$$.tmp"; trap 'rm -f "$$tmp"' EXIT; \
+	  printf '%s\n' 'corpus_assets=ready' >"$$tmp"; mv -f "$$tmp" "$@"; trap - EXIT
 
 .PHONY: check-wire-config-probe-internal check-low-memory-wire-config-probe-internal
 check-wire-config-internal: ultrapatch
@@ -400,7 +417,8 @@ check-wire-config-internal: ultrapatch
 	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(LOW_MEMORY_WIRE_CONFIG_FLAGS)' \
 		check-low-memory-wire-config-probe-internal
 
-check-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) scripts/check_wire_config.sh \
+check-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSET_PREREQ) \
+                                scripts/check_wire_config.sh \
                                 scripts/synth_gen.py test-bench/decoder-contract.c \
                                 $(DECODER_INTEGRATION_TU) \
                                 $(DEC_STANDALONE_SRCS) $(NVM_EMU) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
@@ -416,6 +434,7 @@ check-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) scripts/chec
 	  FIXTURES="$(FIXTURES)" scripts/check_wire_config.sh
 
 check-low-memory-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) \
+                                               $(CORPUS_ASSET_PREREQ) \
                                                scripts/check_low_memory_config.sh \
                                                test-bench/decoder-contract.c
 	@CC="$(CC)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
@@ -455,7 +474,7 @@ $(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(PROFILE_MANIFEST) | profile-check
 	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
 	@echo "host_tool=$(HOST_TOOL)"
 
-check-internal: ultrapatch
+check-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	"$(HOST_TOOL)" --help >"$$tmp/help.txt"; \
@@ -575,7 +594,7 @@ check-stack-internal: check-release-profile-internal $(DECODER_PUBLIC_HDRS) \
 # a non-GNU toolchain's stddef.h supplies its own), (c) a fallback-built host decoder must
 # round-trip the real one-face patch byte-exactly.
 PORTABLE_FALLBACK_FLAGS := -DNO_GNU_EXTENSIONS
-check-decoder-contract-internal: ultrapatch $(DECODER_PUBLIC_HDRS)
+check-decoder-contract-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSET_PREREQ)
 	@set -e; \
 	if awk 'FNR==1{allowed=prev; n=split(FILENAME,a,"/"); prev=a[n]} /^[[:space:]]*#include[[:space:]]*"/ && (allowed=="" || index($$0,"\"" allowed "\"")==0){print FILENAME ":" FNR ":" $$0; bad=1} END{exit bad?1:0}' $(DECODER_PUBLIC_HDRS); then :; else \
 		echo "decoder headers may include only their previous shipped support header" >&2; exit 1; \
@@ -646,7 +665,7 @@ check-decoder-contract-internal: ultrapatch $(DECODER_PUBLIC_HDRS)
 
 # Pointer-rich in-memory decoder/backend contract under dynamic sanitizers. Standalone so its
 # instrumented compile does not contend with the CPU-saturated corpus workers in `make gate`.
-check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS)
+check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSET_PREREQ)
 	@CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" \
 	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
@@ -654,9 +673,9 @@ check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS)
 check-models-internal: $(DECODER_PUBLIC_HDRS)
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh
 
-check-assets-internal:
-	@scripts/verify_corpus.sh "$(CORPUS_MANIFEST)"
-	@scripts/verify_corpus.sh "$(FOREIGN_MANIFEST)" foreign_assets
+check-assets-internal: $(CORPUS_ASSET_STAMP)
+	@python3 scripts/corpus_topology.py verify --inventory "$(CORPUS_INVENTORY)" \
+	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)"
 
 # qemu-based decode validation REMOVED - permanent decision (owner, 2026-07-03): too slow
 # for its marginal value (the 260-pair matrix re-encoded every corpus pair just to apply it
@@ -665,7 +684,7 @@ check-assets-internal:
 # real Thumb-1 decoder every cycle, and a one-time 260-pair qemu study (db6d693) found ZERO
 # divergence. Do not reintroduce qemu legs into the gate.
 
-check-malformed-internal: ultrapatch
+check-malformed-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_transactional.sh
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_elf_ranges.sh
@@ -683,8 +702,8 @@ check-edge-internal: ultrapatch
 # op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
-check-degrade-internal: ultrapatch
-	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" \
+check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" \
 	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
 	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
 
@@ -694,7 +713,7 @@ check-degrade-internal: ultrapatch
 # round-trip/write-safety and no-regression policy, then replaces the baseline and its four
 # Makefile ratchets. Commit both files in the SAME commit. If publication is interrupted between
 # the ordinary replaces, restore both files from Git and rerun the target.
-check-golden-internal: ultrapatch scripts/check_wire_baseline_update.py \
+check-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/check_wire_baseline_update.py \
                        scripts/publish_wire_baselines.py scripts/wire_baseline.py \
                        scripts/corpus_topology.py $(WIRE_BASELINE)
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
@@ -704,8 +723,8 @@ check-golden-internal: ultrapatch scripts/check_wire_baseline_update.py \
 
 # Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
 # measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.
-check-ab-matrix-internal: ultrapatch
-	@scripts/check_ab_matrix.sh
+check-ab-matrix-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
+	@FIXTURES="$(FIXTURES)" scripts/check_ab_matrix.sh
 
 golden-update-internal: scripts/publish_wire_baselines.py scripts/wire_baseline.py \
                         scripts/corpus_topology.py
@@ -713,7 +732,7 @@ golden-update-internal: scripts/publish_wire_baselines.py scripts/wire_baseline.
 	@$(MAKE) --no-print-directory golden-update-measure-internal
 
 .PHONY: golden-update-measure-internal
-golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py \
+golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publish_wire_baselines.py \
                                 scripts/corpus_topology.py $(CORPUS_INVENTORY)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
@@ -795,7 +814,8 @@ check-corpus-internal: ultrapatch
 	exit "$$rc"
 
 .PHONY: check-corpus-matrix-internal
-check-corpus-matrix-internal: ultrapatch scripts/corpus_topology.py $(CORPUS_INVENTORY)
+check-corpus-matrix-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology.py \
+                              $(CORPUS_INVENTORY)
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	CORPUS_INVENTORY="$(CORPUS_INVENTORY)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
@@ -823,8 +843,10 @@ check-corpus-matrix-internal: ultrapatch scripts/corpus_topology.py $(CORPUS_INV
 gate-internal:
 	@$(MAKE) --no-print-directory release-gate-inputs-internal
 	@$(MAKE) --no-print-directory all-internal
+	@$(MAKE) --no-print-directory corpus-assets-internal
 	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
 	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" \
+	CORPUS_ASSET_STAMP="$(CORPUS_ASSET_STAMP)" \
 	RELEASE_PROFILE="$$release_profile" \
 	BASE_RELEASE_FIXTURES="$(BASE_RELEASE_FIXTURES)" \
 	BASE_RELEASE_HOME_IMAGES="$(BASE_RELEASE_HOME_IMAGES)" \
