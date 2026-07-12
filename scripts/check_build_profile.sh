@@ -118,11 +118,10 @@ run_make -B BUILD_ROOT="$build_root" CC=gcc CPATH="$poison" all-internal \
   }
 
 gcc_dir=$(dirname "$gcc_tool")
-gcc_recipe="$gcc_dir/host-build.recipe.json"
 gcc_encoder_obj="$gcc_dir/obj/src/enc_util.o"
 gcc_backend_obj="$gcc_dir/obj/src/patch_host_backend.o"
 gcc_vendor_obj="$gcc_dir/obj/vendor/libdivsufsort/divsufsort.o"
-for artifact in "$gcc_recipe" "$gcc_encoder_obj" "${gcc_encoder_obj%.o}.d" \
+for artifact in "$gcc_encoder_obj" "${gcc_encoder_obj%.o}.d" \
                 "$gcc_backend_obj" "${gcc_backend_obj%.o}.d" \
                 "$gcc_vendor_obj" "${gcc_vendor_obj%.o}.d"; do
   [ -f "$artifact" ] || {
@@ -131,40 +130,36 @@ for artifact in "$gcc_recipe" "$gcc_encoder_obj" "${gcc_encoder_obj%.o}.d" \
   }
 done
 
-# The pinned profile and local recipe must describe the exact role split: encoder/vendor TUs use
-# CFLAGS, while only the backend embedding patch_apply.h receives decoder integration defines.
-python3 - "$gcc_dir/profile.json" "$gcc_recipe" <<'PY'
+# The profile describes the exact role split and link order: encoder/vendor TUs use CFLAGS, while
+# only the backend embedding patch_apply.h receives decoder integration defines.
+python3 - "$gcc_dir/profile.json" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 profile = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-recipe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 flags = profile["flags"]
-encoder = recipe["encoder"]["flags"]
-backend = recipe["decoder_backend"]["flags"]
-assert encoder == flags["encoder_cflags"]
-assert backend == flags["backend_cflags"]
-assert "-DPATCH_IMAGE_BASE=0u" not in encoder
-assert "-D_POSIX_C_SOURCE=200809L" not in encoder
-assert "-DPATCH_IMAGE_BASE=0u" in backend
-assert "-D_POSIX_C_SOURCE=200809L" in backend
-assert recipe["link"]["driver_flags"] == flags["link_driver_flags"]
-assert recipe["link"]["ldflags"] == flags["ldflags"]
-assert recipe["encoder"]["sources"][-1] == "vendor/libdivsufsort/divsufsort.c"
-assert recipe["decoder_backend"]["sources"] == ["src/patch_host_backend.c"]
+build = profile["build"]
+encoder = build["source_roles"]["encoder"]
+backend = build["source_roles"]["decoder_backend"]
+assert build["recipe_revision"] == "per-tu-v1"
+assert encoder[-1] == "vendor/libdivsufsort/divsufsort.c"
+assert backend == ["src/patch_host_backend.c"]
+assert build["link_objects"] == ["obj/" + source.removesuffix(".c") + ".o"
+                                  for source in encoder + backend]
+assert "-DPATCH_IMAGE_BASE=0u" not in flags["encoder_cflags"]
+assert "-D_POSIX_C_SOURCE=200809L" not in flags["encoder_cflags"]
+assert "-DPATCH_IMAGE_BASE=0u" in flags["backend_cflags"]
+assert "-D_POSIX_C_SOURCE=200809L" in flags["backend_cflags"]
 PY
 
-# A no-op invocation refreshes the content check for the recipe signature, but does not disturb
-# any object, dependency, recipe, or executable timestamp/inode.
+# A no-op invocation does not disturb any object, dependency, or executable timestamp/inode.
 noop_tool_before=$(file_state "$gcc_tool")
-noop_recipe_before=$(file_state "$gcc_recipe")
 noop_encoder_before=$(file_state "$gcc_encoder_obj")
 noop_backend_before=$(file_state "$gcc_backend_obj")
 noop_vendor_before=$(file_state "$gcc_vendor_obj")
 run_make BUILD_ROOT="$build_root" CC=gcc ultrapatch >/dev/null
 require_unchanged "$noop_tool_before" "$(file_state "$gcc_tool")" "no-op host tool"
-require_unchanged "$noop_recipe_before" "$(file_state "$gcc_recipe")" "no-op recipe signature"
 require_unchanged "$noop_encoder_before" "$(file_state "$gcc_encoder_obj")" "no-op encoder object"
 require_unchanged "$noop_backend_before" "$(file_state "$gcc_backend_obj")" "no-op backend object"
 require_unchanged "$noop_vendor_before" "$(file_state "$gcc_vendor_obj")" "no-op vendored object"
@@ -200,49 +195,31 @@ require_unchanged "$decoder_encoder_before" "$(file_state "$gcc_encoder_obj")" \
 require_unchanged "$decoder_vendor_before" "$(file_state "$gcc_vendor_obj")" \
   "vendored object after decoder-header touch"
 
-# Source ordering and explicit recipe revisions are not part of the compiler profile, so the
-# content-stable build signature must invalidate objects/linking inside the same profile directory.
-default_recipe_hash=$(sha256sum "$gcc_recipe")
-default_recipe_hash=${default_recipe_hash%% *}
-source_obj_before=$(file_state "$gcc_encoder_obj")
-source_tool_before=$(file_state "$gcc_tool")
+# Source ordering and explicit recipe revisions participate in the profile ID and select isolated
+# build directories without disturbing the default profile.
+default_tool_before=$(file_state "$gcc_tool")
 reordered_modules='src/enc_plan.c src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c src/enc_rc.c src/enc_lz.c src/enc_emit.c'
+reordered_tool=$(tool_path CC=gcc ENC_MODULE_SRCS="$reordered_modules")
+revision_tool=$(tool_path CC=gcc HOST_BUILD_RECIPE_TAG=per-tu-regression)
+if [ "$reordered_tool" = "$gcc_tool" ] || [ "$revision_tool" = "$gcc_tool" ] || \
+   [ "$reordered_tool" = "$revision_tool" ]; then
+  echo "check_build_profile.sh: build recipe identities selected the same HOST_TOOL" >&2
+  exit 1
+fi
 run_make BUILD_ROOT="$build_root" CC=gcc ENC_MODULE_SRCS="$reordered_modules" ultrapatch >/dev/null
-reordered_hash=$(sha256sum "$gcc_recipe")
-reordered_hash=${reordered_hash%% *}
-require_changed "$default_recipe_hash" "$reordered_hash" "encoder source-list recipe"
-require_changed "$source_obj_before" "$(file_state "$gcc_encoder_obj")" \
-  "encoder object after source-list change"
-require_changed "$source_tool_before" "$(file_state "$gcc_tool")" \
-  "host tool after source-list change"
-"$gcc_tool" --help >/dev/null
-
-run_make BUILD_ROOT="$build_root" CC=gcc ultrapatch >/dev/null
-restored_recipe_hash=$(sha256sum "$gcc_recipe")
-restored_recipe_hash=${restored_recipe_hash%% *}
-require_unchanged "$default_recipe_hash" "$restored_recipe_hash" "restored source-list recipe"
-tag_obj_before=$(file_state "$gcc_encoder_obj")
-tag_tool_before=$(file_state "$gcc_tool")
 run_make BUILD_ROOT="$build_root" CC=gcc HOST_BUILD_RECIPE_TAG=per-tu-regression ultrapatch >/dev/null
-tagged_hash=$(sha256sum "$gcc_recipe")
-tagged_hash=${tagged_hash%% *}
-require_changed "$default_recipe_hash" "$tagged_hash" "build-recipe tag signature"
-require_changed "$tag_obj_before" "$(file_state "$gcc_encoder_obj")" \
-  "encoder object after recipe change"
-require_changed "$tag_tool_before" "$(file_state "$gcc_tool")" \
-  "host tool after recipe change"
-run_make BUILD_ROOT="$build_root" CC=gcc ultrapatch >/dev/null
+"$reordered_tool" --help >/dev/null
+"$revision_tool" --help >/dev/null
+require_unchanged "$default_tool_before" "$(file_state "$gcc_tool")" \
+  "default host tool after alternate build recipes"
 
 # The Makefile itself is a direct object/link prerequisite. Simulate touching it and prove every
-# role is recompiled even though the content-stable recipe JSON correctly keeps its old mtime.
-makefile_recipe_before=$(file_state "$gcc_recipe")
+# role is recompiled within the selected profile.
 makefile_encoder_before=$(file_state "$gcc_encoder_obj")
 makefile_backend_before=$(file_state "$gcc_backend_obj")
 makefile_vendor_before=$(file_state "$gcc_vendor_obj")
 makefile_tool_before=$(file_state "$gcc_tool")
 run_make -W Makefile BUILD_ROOT="$build_root" CC=gcc ultrapatch >/dev/null
-require_unchanged "$makefile_recipe_before" "$(file_state "$gcc_recipe")" \
-  "content-stable recipe after Makefile touch"
 require_changed "$makefile_encoder_before" "$(file_state "$gcc_encoder_obj")" \
   "encoder object after Makefile touch"
 require_changed "$makefile_backend_before" "$(file_state "$gcc_backend_obj")" \
@@ -252,20 +229,7 @@ require_changed "$makefile_vendor_before" "$(file_state "$gcc_vendor_obj")" \
 require_changed "$makefile_tool_before" "$(file_state "$gcc_tool")" \
   "host tool after Makefile touch"
 
-# run_gate.sh assumes the already-published tool with make -o. Prove that contract skips the
-# complete compile/link subtree even when a changed recipe tag would otherwise force a rebuild.
-old_tool_before=$(file_state "$gcc_tool")
-old_recipe_before=$(file_state "$gcc_recipe")
-old_encoder_before=$(file_state "$gcc_encoder_obj")
-old_backend_before=$(file_state "$gcc_backend_obj")
-run_make -o "$gcc_tool" BUILD_ROOT="$build_root" CC=gcc \
-  HOST_BUILD_RECIPE_TAG=old-target-must-not-rebuild ultrapatch >/dev/null
-require_unchanged "$old_tool_before" "$(file_state "$gcc_tool")" "-o host tool"
-require_unchanged "$old_recipe_before" "$(file_state "$gcc_recipe")" "-o recipe signature"
-require_unchanged "$old_encoder_before" "$(file_state "$gcc_encoder_obj")" "-o encoder object"
-require_unchanged "$old_backend_before" "$(file_state "$gcc_backend_obj")" "-o backend object"
-
-# Decoder flag changes receive their own exact profile and appear only in the backend recipe.
+# Decoder flag changes receive their own exact profile and appear only in the backend flags.
 decoder_probe_flags='-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u -DUP_BACKEND_PROFILE_PROBE=1'
 decoder_tool=$(tool_path CC=gcc DECODER_CONFIG_FLAGS="$decoder_probe_flags")
 [ "$decoder_tool" != "$gcc_tool" ] || {
@@ -274,15 +238,15 @@ decoder_tool=$(tool_path CC=gcc DECODER_CONFIG_FLAGS="$decoder_probe_flags")
 }
 run_make BUILD_ROOT="$build_root" CC=gcc DECODER_CONFIG_FLAGS="$decoder_probe_flags" \
   ultrapatch >/dev/null
-python3 - "$(dirname "$decoder_tool")/host-build.recipe.json" <<'PY'
+python3 - "$(dirname "$decoder_tool")/profile.json" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-recipe = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+profile = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 probe = "-DUP_BACKEND_PROFILE_PROBE=1"
-assert probe in recipe["decoder_backend"]["flags"]
-assert probe not in recipe["encoder"]["flags"]
+assert probe in profile["flags"]["backend_cflags"]
+assert probe not in profile["flags"]["encoder_cflags"]
 PY
 "$decoder_tool" --help >/dev/null
 

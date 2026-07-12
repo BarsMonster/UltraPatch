@@ -143,6 +143,39 @@
         "executable_sha256": "4e5fcaa3cdc160173cb5cfe7aa35dc39d7aa1f06ba8d75b8d923bbae5473991b",
         "version": "GNU assembler (GNU Binutils for Ubuntu) 2.46"
       },
+      "build": {
+        "link_objects": [
+          "obj/src/patch_generate.o",
+          "obj/src/enc_util.o",
+          "obj/src/enc_elf.o",
+          "obj/src/enc_bsdiff.o",
+          "obj/src/enc_field.o",
+          "obj/src/enc_rc.o",
+          "obj/src/enc_lz.o",
+          "obj/src/enc_emit.o",
+          "obj/src/enc_plan.o",
+          "obj/vendor/libdivsufsort/divsufsort.o",
+          "obj/src/patch_host_backend.o"
+        ],
+        "recipe_revision": "per-tu-v1",
+        "source_roles": {
+          "decoder_backend": [
+            "src/patch_host_backend.c"
+          ],
+          "encoder": [
+            "src/patch_generate.c",
+            "src/enc_util.c",
+            "src/enc_elf.c",
+            "src/enc_bsdiff.c",
+            "src/enc_field.c",
+            "src/enc_rc.c",
+            "src/enc_lz.c",
+            "src/enc_emit.c",
+            "src/enc_plan.c",
+            "vendor/libdivsufsort/divsufsort.c"
+          ]
+        }
+      },
       "cc1": {
         "command": [
           "cc1"

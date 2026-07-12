@@ -107,20 +107,12 @@ typedef struct {
 enum { PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11, PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20, PLAN_RAW_N };
 enum { PLAN_DF_UNMASK, PLAN_DF_MASK, PLAN_DF_N };
 enum { PLAN_SPEC_N = 5 };
-/* The ordered plan registry is the sole definition of sweep order and cached preparation.
- * df selects the normalized input pair; raw_key names the reusable bsdiff result. */
+/* The ordered plan registry is the sole definition of sweep order. df selects the normalized
+ * input pair; raw_key selects one of the four prepared bsdiff results. */
 typedef struct {
     uint8_t variant, fuzz, df, raw_key;
 } PlanSpec;
 extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
-/* A suffix array belongs to one immutable normalized source and may price any number of targets/
- * fuzz thresholds. The host owns this lifecycle; no indexed state reaches the decoder. */
-typedef struct {
-    const uint8_t *from;
-    int32_t from_size;
-    int32_t *sa;
-    uint8_t empty_source;
-} BsdiffIndex;
 /* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
 typedef struct {
     Buf from_df[PLAN_DF_N], to_df[PLAN_DF_N];
@@ -280,9 +272,6 @@ void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
 void pair_analysis_free(PairAnalysis *pa);
 void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
                         Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
-void bsdiff_index_build(BsdiffIndex *index, const Buf *from);
-void bsdiff_index_free(BsdiffIndex *index);
-OpVec bsdiff_ops_indexed(const BsdiffIndex *index, const Buf *to, int fuzz);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);

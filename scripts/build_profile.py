@@ -178,8 +178,24 @@ def tool_identity(name: str) -> dict[str, Any]:
 
 
 def host_payload() -> dict[str, Any]:
+    recipe_revision = env_words("UP_PROFILE_RECIPE_REVISION")
+    encoder_sources = env_words("UP_PROFILE_ENCODER_SOURCES")
+    backend_sources = env_words("UP_PROFILE_BACKEND_SOURCES")
+    link_objects = env_words("UP_PROFILE_LINK_OBJECTS")
+    if len(recipe_revision) != 1:
+        raise ProfileError("UP_PROFILE_RECIPE_REVISION must contain exactly one word")
+    if not encoder_sources or not backend_sources or not link_objects:
+        raise ProfileError("host build source roles and link objects must not be empty")
     return {
         "compiler": tool_identity("UP_PROFILE_CC"),
+        "build": {
+            "recipe_revision": recipe_revision[0],
+            "source_roles": {
+                "encoder": encoder_sources,
+                "decoder_backend": backend_sources,
+            },
+            "link_objects": link_objects,
+        },
         "flags": {
             "encoder_cflags": env_words("UP_PROFILE_ENCODER_CFLAGS"),
             "backend_cflags": env_words("UP_PROFILE_BACKEND_CFLAGS"),

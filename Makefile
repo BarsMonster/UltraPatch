@@ -83,6 +83,20 @@ DECODER_CFLAGS = $(CFLAGS) $(DECODER_CONFIG_FLAGS)
 LDFLAGS += -Wl,--gc-sections
 HOST_BACKEND_DEFINES := -D_POSIX_C_SOURCE=200809L
 
+# Host-tool build roles and link order are part of the profile identity. A recipe semantic change,
+# source-list edit, or object reorder therefore selects a fresh profile directory instead of
+# invalidating unrelated artifacts through a second signature file inside an existing profile.
+DIVSUF := vendor/libdivsufsort/divsufsort.c
+ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
+                   src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
+HOST_BACKEND_SRC := src/patch_host_backend.c
+TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
+HOST_BUILD_RECIPE_TAG ?= per-tu-v1
+override HOST_ENCODER_SRCS := $(filter-out $(HOST_BACKEND_SRC),$(TOOL_SRCS))
+override HOST_BACKEND_SRCS := $(HOST_BACKEND_SRC)
+override HOST_LINK_OBJECTS := $(addprefix obj/,$(HOST_ENCODER_SRCS:.c=.o) \
+                                                   $(HOST_BACKEND_SRCS:.c=.o))
+
 # Host builds are isolated by the compiler identity and every effective build flag. The profile
 # helper emits canonical JSON without workspace paths; its SHA-256 is both the build-directory
 # key and the provenance identity. Tests receive the exact binary through ULTRAPATCH, so a GCC,
@@ -97,6 +111,10 @@ override UP_PROFILE_LINK_CFLAGS := $(CFLAGS)
 override UP_PROFILE_LDFLAGS := $(LDFLAGS)
 override UP_PROFILE_WIRE_FLAGS := $(WIRE_CONFIG_FLAGS)
 override UP_PROFILE_DECODER_FLAGS := $(DECODER_CONFIG_FLAGS)
+override UP_PROFILE_RECIPE_REVISION := $(HOST_BUILD_RECIPE_TAG)
+override UP_PROFILE_ENCODER_SOURCES := $(HOST_ENCODER_SRCS)
+override UP_PROFILE_BACKEND_SOURCES := $(HOST_BACKEND_SRCS)
+override UP_PROFILE_LINK_OBJECTS := $(HOST_LINK_OBJECTS)
 override UP_PROFILE_ARM_CC := $(ARM_CC)
 override UP_PROFILE_ARM_SIZE := $(ARM_SIZE)
 override UP_PROFILE_ARM_OBJDUMP := $(ARM_OBJDUMP)
@@ -111,6 +129,8 @@ export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_NM UP_PROFILE_ENV_UNSET
 export UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
 export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
 export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
+export UP_PROFILE_RECIPE_REVISION UP_PROFILE_ENCODER_SOURCES
+export UP_PROFILE_BACKEND_SOURCES UP_PROFILE_LINK_OBJECTS
 export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_NM
 export UP_PROFILE_ARM_SOURCE_FLAGS UP_PROFILE_ARM_SINGLE_FLAGS
 export UP_PROFILE_ARM_LINK_FLAGS UP_PROFILE_ARM_LINK_LIBS
@@ -128,13 +148,13 @@ endif
 override PROFILE_MANIFEST := $(BUILD_DIR)/profile.json
 override HOST_TOOL := $(abspath $(BUILD_DIR))/ultrapatch
 override HOST_OBJ_DIR := $(abspath $(BUILD_DIR))/obj
-override HOST_BUILD_RECIPE := $(abspath $(BUILD_DIR))/host-build.recipe.json
+override HOST_TOOL_OBJECTS := $(addprefix $(abspath $(BUILD_DIR))/,$(HOST_LINK_OBJECTS))
+override HOST_TOOL_DEPFILES := $(HOST_TOOL_OBJECTS:.o=.d)
 RELEASE_PROFILE_LOCK ?= toolchains/release-profile.json
 override ULTRAPATCH := $(HOST_TOOL)
 override ULTRAPATCH_DECODE := $(HOST_TOOL)
 export ULTRAPATCH ULTRAPATCH_DECODE
 
-DIVSUF := vendor/libdivsufsort/divsufsort.c
 CONFIG_HDR := src/patch_config.h
 APPLY_HDR := src/patch_apply.h
 DECODER_PUBLIC_HDRS := $(CONFIG_HDR) src/rc_models.h $(APPLY_HDR)
@@ -142,44 +162,13 @@ DECODER_SINGLE_HDR ?= artifacts/patch_apply_single.h
 override DECODER_CANONICAL_HDR := $(abspath $(DECODER_SINGLE_HDR))
 # Shared host-side NVM emulator, #included by patch_host_backend.c before patch_apply.h.
 NVM_EMU := src/nvm_emu.inc
-# Host encoder modules. The encoder is a normal CLI tool and may rely on this Makefile;
-# the device decoder remains header-only for integrators.
-ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
-                   src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 GEN_HDR := src/rc_models.h $(CONFIG_HDR) src/enc_internal.h
 # The host backend owns the single reference-decoder copy used by encode
 # selfcheck, CLI decode, and standalone decoder builds.
-HOST_BACKEND_SRC := src/patch_host_backend.c
 ENC_SEAM_SRCS := $(filter-out src/enc_plan.c,$(ENC_MODULE_SRCS)) $(HOST_BACKEND_SRC) $(DIVSUF)
 # Standalone host-decoder TU pair + demo defines, shared once by dec_portable, check_degrade's D=1, and all-internal.
 DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
 DEC_DEMO_DEFINES := -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L
-TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
-
-# The CLI is built per translation unit under its compiler/flag profile. Encoder and vendored
-# sources use the encoder flags; only the TU that embeds patch_apply.h receives the decoder
-# integration flags. The recipe tag deliberately participates in the build signature so a recipe
-# semantic change can invalidate an otherwise unchanged compiler profile.
-HOST_BUILD_RECIPE_TAG ?= per-tu-v1
-override HOST_ENCODER_SRCS := $(filter-out $(HOST_BACKEND_SRC),$(TOOL_SRCS))
-override HOST_ENCODER_OBJS := $(addprefix $(HOST_OBJ_DIR)/,$(HOST_ENCODER_SRCS:.c=.o))
-override HOST_BACKEND_OBJS := $(addprefix $(HOST_OBJ_DIR)/,$(HOST_BACKEND_SRC:.c=.o))
-override HOST_TOOL_OBJECTS := $(HOST_ENCODER_OBJS) $(HOST_BACKEND_OBJS)
-override HOST_TOOL_DEPFILES := $(HOST_TOOL_OBJECTS:.o=.d)
-
-override UP_BUILD_CC := $(CC)
-override UP_BUILD_ENCODER_SOURCES := $(HOST_ENCODER_SRCS)
-override UP_BUILD_BACKEND_SOURCES := $(HOST_BACKEND_SRC)
-override UP_BUILD_OBJECTS := $(patsubst $(HOST_OBJ_DIR)/%,obj/%,$(HOST_TOOL_OBJECTS))
-override UP_BUILD_ENCODER_FLAGS := $(CFLAGS)
-override UP_BUILD_BACKEND_FLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
-override UP_BUILD_LINK_FLAGS := $(CFLAGS)
-override UP_BUILD_LDFLAGS := $(LDFLAGS)
-override UP_BUILD_RECIPE_TAG := $(HOST_BUILD_RECIPE_TAG)
-export UP_BUILD_CC UP_BUILD_ENCODER_SOURCES UP_BUILD_BACKEND_SOURCES UP_BUILD_OBJECTS
-export UP_BUILD_ENCODER_FLAGS UP_BUILD_BACKEND_FLAGS UP_BUILD_LINK_FLAGS UP_BUILD_LDFLAGS
-export UP_BUILD_RECIPE_TAG
-
 FIXTURES ?= test-bench/fixtures
 IMAGES ?= test-bench/images
 FOREIGN ?= test-bench/foreign
@@ -448,14 +437,8 @@ check-low-memory-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR)
 	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" ULTRAPATCH="$(HOST_TOOL)" \
 	  FIXTURES="$(FIXTURES)" scripts/check_low_memory_config.sh
 
-.PHONY: FORCE
-FORCE:
-
-$(HOST_BUILD_RECIPE): FORCE Makefile scripts/write_build_recipe.py $(PROFILE_MANIFEST) | profile-check
-	@python3 scripts/write_build_recipe.py "$@"
-
 $(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
-                                     $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
+                                     $(PROFILE_MANIFEST) | profile-check
 	@mkdir -p "$(dir $@)"
 	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
 	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
@@ -465,7 +448,7 @@ $(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
 		-c "$<" -o "$$obj"; \
 	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
 
-$(HOST_OBJ_DIR)/%.o: %.c Makefile $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
+$(HOST_OBJ_DIR)/%.o: %.c Makefile $(PROFILE_MANIFEST) | profile-check
 	@mkdir -p "$(dir $@)"
 	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
 	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
@@ -477,7 +460,7 @@ $(HOST_OBJ_DIR)/%.o: %.c Makefile $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | pro
 
 -include $(HOST_TOOL_DEPFILES)
 
-$(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(HOST_BUILD_RECIPE) $(PROFILE_MANIFEST) | profile-check
+$(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(PROFILE_MANIFEST) | profile-check
 	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
 	@mkdir -p "$(dir $(HOST_TOOL))"
 	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \

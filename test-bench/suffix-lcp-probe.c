@@ -2,10 +2,9 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Exact oracle for bsdiff's boundary-LCP suffix search. The degrade gate builds this once with
- * the production search and once with SUFFIX_LCP_REFERENCE, and compares every printed query,
- * bsdiff operation, and payload byte. Each build also checks every query directly against a
- * private copy of the legacy recursive comparator and its unusual prefix/tie semantics.
+ * Exact oracle for bsdiff's boundary-LCP suffix search. It checks every production query directly
+ * against a private copy of the legacy recursive comparator and its unusual prefix/tie semantics,
+ * then validates complete bsdiff operations and payload bytes over adversarial pairs.
  */
 #include "enc_internal.h"
 

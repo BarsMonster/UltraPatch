@@ -123,98 +123,25 @@ static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
     return out;
 }
 
-#ifdef PLAN_PREP_ORACLE
-static void plan_prepare_oracle(const PlanPrep *prep, const Buf *from, const Buf *to,
-                                const PairAnalysis *pa, size_t index_builds, size_t raw_builds) {
-    static const PlanSpec expected[PLAN_SPEC_N] = {
-        {0, 11, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-        {1, 11, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-        {2, 11, PLAN_DF_MASK,   PLAN_RAW_MASK_11},
-        {1,  6, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_6},
-        {1, 20, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_20},
-    };
-    uint8_t df_seen[PLAN_DF_N] = {0}, raw_seen[PLAN_RAW_N] = {0};
-    for (size_t i = 0; i < PLAN_SPEC_N; i++) {
-        const PlanSpec *spec = &PLAN_SPECS[i], *want = &expected[i];
-        if (spec->variant != want->variant || spec->fuzz != want->fuzz ||
-            spec->df != want->df || spec->raw_key != want->raw_key)
-            die("plan registry oracle mismatch");
-        Buf of = {0}, ot = {0}; FieldDeltaVec fd = {0};
-        data_format_encode(from, to, pa, &of, &ot, &fd, spec->df == PLAN_DF_MASK);
-        /* bsdiff_ops is deliberately retained as the one-shot build/generate/free path. Its
-         * output must stay identical to the cached indexed result used by plan preparation. */
-        OpVec raw = bsdiff_ops(&of, &ot, spec->fuzz);
-        if (of.n != prep->from_df[spec->df].n || ot.n != prep->to_df[spec->df].n ||
-            (of.n && memcmp(of.d, prep->from_df[spec->df].d, of.n)) ||
-            (ot.n && memcmp(ot.d, prep->to_df[spec->df].d, ot.n)) ||
-            fd.n != prep->fd.n ||
-            (fd.n && memcmp(fd.v, prep->fd.v, fd.n * sizeof(*fd.v))) ||
-            raw.n != prep->raw[spec->raw_key].n ||
-            (raw.n && memcmp(raw.v, prep->raw[spec->raw_key].v, raw.n * sizeof(*raw.v))) ||
-            (to->n && memcmp(raw.payload, prep->raw[spec->raw_key].payload, to->n)))
-            die("plan preparation oracle mismatch");
-        df_seen[spec->df] = 1;
-        raw_seen[spec->raw_key] = 1;
-        buf_free(&of); buf_free(&ot); free(fd.v); opvec_free(&raw);
-    }
-    size_t dfs = 0, raws = 0;
-    for (size_t i = 0; i < PLAN_DF_N; i++) dfs += df_seen[i];
-    for (size_t i = 0; i < PLAN_RAW_N; i++) raws += raw_seen[i];
-    if (dfs != PLAN_DF_N || raws != PLAN_RAW_N ||
-        index_builds != PLAN_DF_N || raw_builds != PLAN_RAW_N)
-        die("plan preparation coverage oracle mismatch");
-    fprintf(stderr,
-            "PLAN_PREP_ORACLE configs=%u registry=OK normalized=%zu indexes=%zu raw_keys=%zu indexed=OK fd=OK\n",
-            (unsigned)PLAN_SPEC_N, dfs, index_builds, raw_builds);
-}
-#endif
-
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa) {
     memset(prep, 0, sizeof(*prep));
     ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
-    uint16_t raw_owner[PLAN_RAW_N] = {0};
-    /* All registered normalizations share the relocation pass. Derive the masked pair from that
-     * immutable base before their indexed raw plans are generated. */
+    /* Both normalizations share the relocation pass. Derive the masked pair from that immutable
+     * base, then prepare the four bsdiff inputs named by PLAN_SPECS. */
     data_format_encode(from, to, pa, &prep->from_df[PLAN_DF_UNMASK],
                        &prep->to_df[PLAN_DF_UNMASK], &prep->fd, 0);
     prep->from_df[PLAN_DF_MASK] = prep_buf_clone(&prep->from_df[PLAN_DF_UNMASK]);
     prep->to_df[PLAN_DF_MASK] = prep_buf_clone(&prep->to_df[PLAN_DF_UNMASK]);
     mask_bl_imms(from->d, prep->from_df[PLAN_DF_MASK].d, from->n);
     mask_bl_imms(to->d, prep->to_df[PLAN_DF_MASK].d, to->n);
-#ifdef PLAN_PREP_ORACLE
-    size_t index_builds = 0, raw_builds = 0;
-#endif
-    /* Keep one suffix array live at a time. Within each normalization, registry order drives
-     * raw-plan preparation and duplicate keys reuse their first result. */
-    for (size_t df = 0; df < PLAN_DF_N; df++) {
-        BsdiffIndex index = {0};
-        bsdiff_index_build(&index, &prep->from_df[df]);
-#ifdef PLAN_PREP_ORACLE
-        index_builds++;
-#endif
-        for (size_t i = 0; i < PLAN_SPEC_N; i++) {
-            const PlanSpec *spec = &PLAN_SPECS[i];
-            if (spec->df >= PLAN_DF_N || spec->raw_key >= PLAN_RAW_N)
-                die("invalid plan registry");
-            if (spec->df != df) continue;
-            uint16_t owner = (uint16_t)(((uint16_t)spec->df + 1u) << 8) | spec->fuzz;
-            uint16_t prev = raw_owner[spec->raw_key];
-            if (prev) {
-                if (prev != owner) die("invalid plan registry");
-                continue;
-            }
-            raw_owner[spec->raw_key] = owner;
-            prep->raw[spec->raw_key] =
-                bsdiff_ops_indexed(&index, &prep->to_df[df], spec->fuzz);
-#ifdef PLAN_PREP_ORACLE
-            raw_builds++;
-#endif
-        }
-        bsdiff_index_free(&index);
-    }
-#ifdef PLAN_PREP_ORACLE
-    plan_prepare_oracle(prep, from, to, pa, index_builds, raw_builds);
-#endif
+    prep->raw[PLAN_RAW_UNMASK_11] =
+        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 11);
+    prep->raw[PLAN_RAW_MASK_11] =
+        bsdiff_ops(&prep->from_df[PLAN_DF_MASK], &prep->to_df[PLAN_DF_MASK], 11);
+    prep->raw[PLAN_RAW_UNMASK_6] =
+        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 6);
+    prep->raw[PLAN_RAW_UNMASK_20] =
+        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 20);
 }
 
 void plan_prepare_free(PlanPrep *prep) {

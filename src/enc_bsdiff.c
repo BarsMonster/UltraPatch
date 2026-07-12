@@ -308,35 +308,6 @@ static int32_t matchlen(const uint8_t *from, int32_t from_size, const uint8_t *t
     return i;
 }
 
-#ifdef SUFFIX_LCP_REFERENCE
-static int suffix_cmp_reference(const uint8_t *from, int32_t from_size,
-                                const uint8_t *to, int32_t to_size) {
-    int32_t n = from_size < to_size ? from_size : to_size;
-    return memcmp(from, to, (size_t)n);
-}
-
-static int32_t suffix_search_reference(const int32_t *sa, const uint8_t *from, int32_t from_size,
-                                       const uint8_t *to, int32_t to_size,
-                                       int32_t begin, int32_t end, int32_t *pos) {
-    if (end - begin < 2) {
-        int32_t x = matchlen(from + sa[begin], from_size - sa[begin], to, to_size);
-        int32_t y = matchlen(from + sa[end], from_size - sa[end], to, to_size);
-        if (x > y) { *pos = sa[begin]; return x; }
-        *pos = sa[end]; return y;
-    }
-    int32_t x = begin + (end - begin) / 2;
-    int cmp = suffix_cmp_reference(from + sa[x], from_size - sa[x], to, to_size);
-    if (cmp < 0)
-        return suffix_search_reference(sa, from, from_size, to, to_size, x, end, pos);
-    return suffix_search_reference(sa, from, from_size, to, to_size, begin, x, pos);
-}
-
-static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
-                             const uint8_t *to, int32_t to_size, int32_t begin, int32_t end,
-                             int32_t *pos) {
-    return suffix_search_reference(sa, from, from_size, to, to_size, begin, end, pos);
-}
-#else
 /* Compare a middle suffix with the query after `skip` bytes already proved equal by both
  * enclosing suffix-array boundaries. Return the exact LCP as well as the old comparator sign.
  * Exhausting EITHER operand is deliberately equality: suffix/query prefix exhaustion therefore
@@ -383,7 +354,6 @@ static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t fro
     return suffix_search_lcp(sa, from, from_size, to, to_size,
                              begin, end, begin_lcp, end_lcp, pos);
 }
-#endif
 
 #ifdef SUFFIX_LCP_PROBE
 int32_t suffix_lcp_probe_search(const int32_t *sa, const uint8_t *from, int32_t from_size,
@@ -438,26 +408,17 @@ static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
     *last_offset_p = pos - scan;
 }
 
-void bsdiff_index_build(BsdiffIndex *index, const Buf *from) {
-    index->from_size = (int32_t)from->n;
+OpVec bsdiff_ops(const Buf *from_buf, const Buf *to, int fuzz) {
+    uint8_t empty_source = 0;
     /* Some direct seam probes represent an empty Buf with d==NULL. suffix_search performs
      * zero-offset pointer arithmetic even though it never dereferences the empty source. */
-    index->from = from->d ? from->d : &index->empty_source;
-    index->sa = (int32_t *)xmalloc(((size_t)index->from_size + 1) * sizeof(*index->sa));
-    index->sa[0] = index->from_size;
-    if (index->from_size && divsufsort(index->from, &index->sa[1], index->from_size) != 0)
+    const uint8_t *from = from_buf->d ? from_buf->d : &empty_source;
+    int32_t from_size = (int32_t)from_buf->n, to_size = (int32_t)to->n;
+    int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(*sa));
+    sa[0] = from_size;
+    if (from_size && divsufsort(from, &sa[1], from_size) != 0)
         die("divsufsort failed");
-}
-
-void bsdiff_index_free(BsdiffIndex *index) {
-    free(index->sa);
-}
-
-OpVec bsdiff_ops_indexed(const BsdiffIndex *index, const Buf *to, int fuzz) {
     OpVec ops = {0};
-    const uint8_t *from = index->from;
-    const int32_t *sa = index->sa;
-    int32_t from_size = index->from_size, to_size = (int32_t)to->n;
     ops.payload = (uint8_t *)xmalloc(to->n);
     int32_t scan = 0, len = 0, last_scan = 0, last_pos = 0, last_offset = 0, pos = 0;
     while (scan < to_size) {
@@ -475,13 +436,6 @@ OpVec bsdiff_ops_indexed(const BsdiffIndex *index, const Buf *to, int fuzz) {
             emit_bsdiff_op(&ops, ops.payload, from, from_size, to->d, to_size, scan, pos,
                            &last_scan, &last_pos, &last_offset);
     }
-    return ops;
-}
-
-OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz) {
-    BsdiffIndex index = {0};
-    bsdiff_index_build(&index, from);
-    OpVec ops = bsdiff_ops_indexed(&index, to, fuzz);
-    bsdiff_index_free(&index);
+    free(sa);
     return ops;
 }

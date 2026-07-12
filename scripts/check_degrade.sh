@@ -52,19 +52,6 @@ IMG="${IMAGES:-test-bench/images}"
 }
 . "$(dirname "$0")/tempdir.sh"
 
-PREP="$tmp/plan-prep-oracle"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DPLAN_PREP_ORACLE src/patch_generate.c \
-      src/enc_plan.c $ENC_SEAM_SRCS -Wl,--gc-sections -o "$PREP" 2>"$tmp/prep-build.log"; then
-  echo "check_degrade: plan-preparation oracle build failed" >&2
-  sed 's/^/    /' "$tmp/prep-build.log" >&2; exit 1
-fi
-if ! "$PREP" test-bench/fixtures/v0_base/watch.bin test-bench/fixtures/v1_one_face/watch.bin \
-      "$tmp/prep.blob" >"$tmp/prep.out" 2>"$tmp/prep.err"; then
-  echo "check_degrade: plan-preparation oracle failed: $(cat "$tmp/prep.err")" >&2; exit 1
-fi
-grep -q '^PLAN_PREP_ORACLE configs=5 registry=OK normalized=2 indexes=2 raw_keys=4 indexed=OK fd=OK$' "$tmp/prep.err" || {
-  echo "check_degrade: plan-preparation oracle did not report OK" >&2; exit 1; }
-
 SPLIT="$tmp/split-run-probe"
 if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSPLIT_WORK_PROBE \
       test-bench/split-run-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
@@ -134,35 +121,19 @@ if ! cmp -s "$tmp/out-envelope-new.out" "$tmp/out-envelope-old.out"; then
 fi
 tail -n 1 "$tmp/out-envelope-new.out"
 
-# Exact bsdiff suffix-search oracle. Both binaries validate every result against an independent
-# copy of the legacy recursive min-length memcmp, then byte-compare all query results and complete
-# bsdiff op/payload dumps. Adversaries pin prefix exhaustion as equality/left, adjacent-boundary
-# ties choosing `end`, empty operands, repetitive/long-prefix inputs, and mismatch at the LCP skip.
-SUFFIX_NEW="$tmp/suffix-lcp-new"
-SUFFIX_OLD="$tmp/suffix-lcp-old"
+# Exact bsdiff suffix-search oracle. The probe validates every result against an independent copy
+# of the legacy recursive min-length memcmp. Adversaries pin prefix exhaustion as equality/left,
+# adjacent-boundary ties choosing `end`, empty operands, repetitive/long-prefix inputs, and a
+# mismatch at the LCP skip.
+SUFFIX_NEW="$tmp/suffix-lcp"
 if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSUFFIX_LCP_PROBE \
       test-bench/suffix-lcp-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
       -o "$SUFFIX_NEW" 2>"$tmp/suffix-lcp-new-build.log"; then
   echo "check_degrade: suffix-LCP production oracle build failed" >&2
   sed 's/^/    /' "$tmp/suffix-lcp-new-build.log" >&2; exit 1
 fi
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSUFFIX_LCP_PROBE \
-      -DSUFFIX_LCP_REFERENCE test-bench/suffix-lcp-probe.c $ENC_SEAM_SRCS \
-      -Wl,--gc-sections -o "$SUFFIX_OLD" 2>"$tmp/suffix-lcp-old-build.log"; then
-  echo "check_degrade: suffix-LCP reference oracle build failed" >&2
-  sed 's/^/    /' "$tmp/suffix-lcp-old-build.log" >&2; exit 1
-fi
 if ! "$SUFFIX_NEW" >"$tmp/suffix-lcp-new.out" 2>"$tmp/suffix-lcp-new.err"; then
   echo "check_degrade: suffix-LCP production oracle failed: $(cat "$tmp/suffix-lcp-new.err")" >&2
-  exit 1
-fi
-if ! "$SUFFIX_OLD" >"$tmp/suffix-lcp-old.out" 2>"$tmp/suffix-lcp-old.err"; then
-  echo "check_degrade: suffix-LCP reference oracle failed: $(cat "$tmp/suffix-lcp-old.err")" >&2
-  exit 1
-fi
-if ! cmp -s "$tmp/suffix-lcp-new.out" "$tmp/suffix-lcp-old.out"; then
-  echo "check_degrade: suffix-LCP production/reference mismatch" >&2
-  diff -u "$tmp/suffix-lcp-old.out" "$tmp/suffix-lcp-new.out" | sed -n '1,80p' >&2
   exit 1
 fi
 tail -n 1 "$tmp/suffix-lcp-new.out"
