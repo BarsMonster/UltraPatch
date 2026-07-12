@@ -82,83 +82,41 @@ make gate
 
 The matching local release preflight additionally binds those checks,
 sanitizers, and the required Clang leg to a fresh archive of one clean `main`
-commit and requires explicit evidence from every child command:
+commit:
 
 ```sh
 /usr/bin/python3 scripts/release_gate.py
 ```
 
-This local command validates the selected tool/archive hashes and flags but does
-not attest the OCI runtime. A successful push job for the exact `github.sha`,
-inside the digest-pinned CI container, is the authoritative release run. For
-the atomic full-profile refresh workflow, release notes, and artifact
-provenance, use `docs/release-checklist.md`.
+The complete release workflow, required evidence, profile refresh procedure,
+and artifact provenance are authoritative in
+[`docs/release-checklist.md`](docs/release-checklist.md).
 
-The release corpus sources are tracked under `test-bench/`. The 16 home matrix
-ELFs and two one-face fixture ELFs are converted to exact binaries with the
-profile-pinned Arm `objcopy` under `.build/<profile-id>/corpus`; the 18 foreign
-binaries remain tracked. `test-bench/corpus-inventory.tsv` is the canonical
-ordered topology and SHA-256 inventory. `test-bench/wire-baseline.tsv` combines
-the 256 home sizes and hashes, 34 foreign hashes, and four additional golden
-wires. `make check-assets` verifies the tracked inputs and generated
-profile-local view, while `make check-release-inventory` cross-validates that
-wire baseline. For a non-release measurement, override `IMAGES`, `FIXTURES`,
-and `FOREIGN`, set `CORPUS_INVENTORY=""` to discover the supplied directories,
-and provide or disable `WIRE_BASELINE`. The
-`check-assets` leg of `make gate` runs concurrently with the matrix, so a stale,
-partial, or mutually inconsistent corpus still fails the gate deterministically.
-`make check-build-profile` separately proves concurrent GCC, Clang, and
-alternate-flag builds cannot collide. `make gate` validates the checked release
-profile, then also runs `make check-decoder-contract` (public-header-set,
-integration-include/no-globals/no-heap
-decoder API contract), `make check-malformed` (a deterministic reject-regression
-suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
-application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
-random/text/page-boundary images), `make check-golden` (four additional pinned
-wires; the corpus matrix pins the other 290 — any wire drift fails the gate),
-`make check-degrade`,
-the ARM size/divide/stack gates, the full 256-pair home corpus matrix, and the
-34 foreign pair-directions — all legs run concurrently, ~35 s warm on the reference machine.
-qemu-based decode validation was removed permanently (owner decision,
-2026-07-03): too slow for its marginal value — a one-time 260-pair qemu-arm
-study found zero host-vs-ARM divergence, and the ARM cross-build gate still
-compiles the real Thumb-1 decoder every cycle.
-
-CI verifies pull requests with the development checks. Pushes to `main` run the
-commit-bound driver in the pinned container and are the authoritative release
-verification.
+The tracked corpus topology and hashes are described in
+[`test-bench/README.md`](test-bench/README.md). `make gate` is authoritative for
+the release-profile validation and complete concurrent correctness suite;
+`make check-build-profile` separately validates build isolation.
 
 Device integration contract:
 
-- Install `src/patch_apply.h`, `src/rc_models.h`, and `src/patch_config.h`
-  together, then include only `patch_apply.h` from one update module. Allocate
-  a caller-owned `PatchApply` state object.
+- Install `patch_apply.h`, `rc_models.h`, and `patch_config.h` together, include
+  only `patch_apply.h` from one update module, and allocate a caller-owned
+  `PatchApply` state object.
 - Define `PATCH_IMAGE_BASE` as the aligned absolute device address of the
   patchable image (`0` in repository host tests), and define the page-aligned
   `PATCH_IMAGE_CAPACITY` as the complete physical patch partition size from that
   base.
-- Provide exactly two flash primitives: `flash_read(uint32_t)` and
-  `flash_write_page(uint32_t, const uint8_t[OUTROW])`. Both receive absolute
-  device addresses; one page-write call erases and fully programs the page. The
-  write primitive deliberately returns `void`: a driver may verify/retry
-  internally, but any unrecoverable failure after a write requires full
-  external reflash; the final CRC detects integrity and does not provide
-  recovery.
-- Authenticate the update, then run the WHOLE blob through
+- Provide `flash_read(uint32_t)` and
+  `flash_write_page(uint32_t, const uint8_t[OUTROW])`; both receive absolute
+  addresses and a page write erases and fully programs one page.
+- Authenticate the update, then run the whole blob through
   `patch_apply_run(&state, callback, ctx)` — the callback serves blob bytes (it may
   block internally), returning `PATCH_PULL_BYTE` for a byte or `PATCH_PULL_END`
-  to stop. The `PatchApplyResult` return is the verdict (`PATCH_APPLY_DONE == 0`;
-  errors are nonzero). The decoder parses the envelope and verifies both CRC
-  gates itself; there is no coroutine/fiber.
-- Do not run concurrent decodes against the same flash image; see
-  `docs/device-integration.md` before wiring it into a bootloader.
-
-The decoder rejects an envelope whose page-rounded image span exceeds
-`PATCH_IMAGE_CAPACITY` before its first flash read. This is a pre-apply partition
-guard, not recovery: after the first page write, any later decoder, transport,
-power, or flash failure has no rollback path and requires a full external
-reflash. Earlier detection of such post-write failures cannot recover the image
-and is therefore not a decoder design goal.
+  to stop. Treat `PATCH_APPLY_DONE` as success and every other result as failure.
+- Do not decode concurrently against one flash image. Read
+  [`docs/device-integration.md`](docs/device-integration.md) for the complete
+  flash, memory, wire-configuration, authentication, and recovery contract
+  before bootloader integration.
 
 ## License
 
