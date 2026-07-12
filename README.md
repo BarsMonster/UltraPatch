@@ -133,11 +133,7 @@ Device integration contract:
 
 - Include either generated `artifacts/patch_apply_single.h`, or
   `src/patch_apply.h` with its two support headers beside it on the include
-  path. A plain include keeps the legacy internally linked decoder and belongs
-  in one update module. For direct use from several modules, define
-  `ULTRAPATCH_IMPLEMENTATION` in exactly one decoder implementation TU and
-  `ULTRAPATCH_DECLARATIONS_ONLY` before the header in each caller TU; the two
-  modes are mutually exclusive. Allocate a caller-owned `PatchApply` state object.
+  path, in one update module. Allocate a caller-owned `PatchApply` state object.
 - Define `PATCH_IMAGE_BASE` as the aligned absolute device address of the
   patchable image (`0` in repository host tests), and define the page-aligned
   `PATCH_IMAGE_CAPACITY` as the complete physical patch partition size from that

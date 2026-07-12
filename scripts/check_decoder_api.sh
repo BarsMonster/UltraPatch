@@ -136,196 +136,31 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     audit_decoder_object "$tmp/compiled-contract-source.o" source-header
     audit_decoder_object "$tmp/compiled-contract-single.o" single-header
 
-    # Exercise all three supported linkage modes against both packaging forms.  The
-    # declarations-only TUs compile under the project -Werror policy and must refer to,
-    # rather than define, patch_apply_run.  The implementation object must be the sole
-    # decoder export, and linking a second copy must fail on that strong external symbol.
-    keep_inline_flag=
-    if printf '%s\n' 'int decoder_keep_inline_probe;' | \
-         "$CC" $CFLAGS -fkeep-inline-functions -x c -c -o /dev/null - \
-         >/dev/null 2>&1; then
-        keep_inline_flag=-fkeep-inline-functions
-    fi
-
-    audit_declarations_object(){
-        decl_obj=$1
-        decl_label=$2
-        decl_exports=$(LC_ALL=C "$NM" -g --defined-only -P "$decl_obj" | \
-            awk '{ print $1 " " $2 }')
-        if [ "$decl_exports" != "decoder_linkage_call_one T" ]; then
-            echo "$decl_label declarations object has unexpected exports:" >&2
-            printf '%s\n' "$decl_exports" >&2
-            exit 1
-        fi
-        decl_private=$(LC_ALL=C "$NM" -a -P "$decl_obj" | \
-            awk '$2 ~ /^[Tt]$/ && ($1 ~ /^(up_|rc_)/ || $1 == "patch_apply_run") { print $1 " " $2 }')
-        if [ -n "$decl_private" ]; then
-            echo "$decl_label declarations object emitted decoder-private text:" >&2
-            printf '%s\n' "$decl_private" >&2
-            exit 1
-        fi
-        decl_writable=$(LC_ALL=C "$NM" -a -P "$decl_obj" | \
-            awk '$2 ~ /^[BbCcDdGgSs]$/ { print $1 " " $2 }')
-        if [ -n "$decl_writable" ]; then
-            echo "$decl_label declarations object defines writable storage:" >&2
-            printf '%s\n' "$decl_writable" >&2
-            exit 1
-        fi
-        decl_undefined=$(LC_ALL=C "$NM" -u -P "$decl_obj" | awk '{ print $1 }' | LC_ALL=C sort -u)
-        if [ "$decl_undefined" != patch_apply_run ]; then
-            echo "$decl_label declarations object has unexpected dependencies:" >&2
-            printf '%s\n' "$decl_undefined" >&2
-            exit 1
-        fi
-    }
-
+    # The former multi-TU linkage macros are rejected explicitly. Without this contract an old
+    # declarations-only caller could silently start compiling a private decoder copy after the
+    # mode's removal.
     for form in source single; do
         if [ "$form" = source ]; then
             linkage_flags="$common"
         else
             linkage_flags="$single_common $single_header_define"
         fi
-        linkage_src=test-bench/decoder-linkage-contract.c
-        "$CC" $linkage_flags -DDECODER_LINKAGE_STATIC "$linkage_src" \
-            -Wl,--gc-sections -o "$tmp/linkage-static-$form"
-        "$tmp/linkage-static-$form"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_IMPLEMENTATION -c "$linkage_src" \
-            -o "$tmp/linkage-implementation-$form.o"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_CALLER_ONE -c "$linkage_src" \
-            -o "$tmp/linkage-caller-one-$form.o"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_CALLER_TWO -c "$linkage_src" \
-            -o "$tmp/linkage-caller-two-$form.o"
-        "$CC" $linkage_flags $keep_inline_flag -DNO_GNU_EXTENSIONS \
-            -DDECODER_LINKAGE_CALLER_ONE \
-            -c "$linkage_src" -o "$tmp/linkage-caller-one-$form-portable.o"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_IMPLEMENTATION_TWICE -c "$linkage_src" \
-            -o "$tmp/linkage-implementation-twice-$form.o"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_DECLARATIONS_TWICE -c "$linkage_src" \
-            -o "$tmp/linkage-declarations-twice-$form.o"
-        "$CC" $linkage_flags -UPATCH_IMAGE_BASE -UPATCH_IMAGE_CAPACITY \
-            -DPATCH_IMAGE_BASE=0xffffff00u -DPATCH_IMAGE_CAPACITY=256u \
-            -DDECODER_LINKAGE_CALLER_ONE -c "$linkage_src" \
-            -o "$tmp/linkage-top-page-$form.o"
-        # Compile an otherwise identical valid capacity immediately before the
-        # negative probe.  In the project's C99 compatibility mode some libc/compiler
-        # combinations implement _Static_assert with a negative-width declaration and
-        # therefore do not preserve its message in diagnostics.
-        "$CC" $linkage_flags -UPATCH_IMAGE_CAPACITY -DPATCH_IMAGE_CAPACITY=256u \
-            -DDECODER_LINKAGE_CALLER_ONE -c "$linkage_src" \
-            -o "$tmp/linkage-valid-geometry-$form.o"
-        if "$CC" $linkage_flags -UPATCH_IMAGE_CAPACITY -DPATCH_IMAGE_CAPACITY=257u \
-             -DDECODER_LINKAGE_CALLER_ONE -c "$linkage_src" \
-             -o "$tmp/linkage-invalid-geometry-$form.o" \
-             >"$tmp/linkage-invalid-geometry-$form.out" \
-             2>"$tmp/linkage-invalid-geometry-$form.err"; then
-            echo "$form declarations-only mode accepted invalid image geometry" >&2
-            exit 1
-        fi
-        for caller in one two; do
-            role=$(printf '%s' "$caller" | tr '[:lower:]' '[:upper:]')
-            "$CC" $linkage_flags $keep_inline_flag \
-                -DDECODER_LINKAGE_CALLER_$role -c "$linkage_src" \
-                -o "$tmp/linkage-caller-$caller-$form-keep.o"
-        done
-
-        audit_declarations_object "$tmp/linkage-caller-one-$form.o" "$form"
-        audit_declarations_object "$tmp/linkage-caller-one-$form-keep.o" "$form keep-inline"
-        audit_declarations_object "$tmp/linkage-caller-one-$form-portable.o" "$form portable"
-
-        implementation_exports=$(LC_ALL=C "$NM" -g --defined-only -P \
-            "$tmp/linkage-implementation-$form.o" | awk '{ print $1 " " $2 }')
-        if [ "$implementation_exports" != "patch_apply_run T" ]; then
-            echo "$form external implementation has unexpected exports:" >&2
-            printf '%s\n' "$implementation_exports" >&2
-            exit 1
-        fi
-        implementation_writable=$(LC_ALL=C "$NM" -a -P \
-            "$tmp/linkage-implementation-$form.o" | \
-            awk '$2 ~ /^[BbCcDdGgSs]$/ { print $1 " " $2 }')
-        if [ -n "$implementation_writable" ]; then
-            echo "$form external implementation defines writable storage:" >&2
-            printf '%s\n' "$implementation_writable" >&2
-            exit 1
-        fi
-        implementation_allocators=$(LC_ALL=C "$NM" -u -P \
-            "$tmp/linkage-implementation-$form.o" | awk \
-            '$1 ~ /^(malloc|calloc|realloc|reallocarray|free|cfree|aligned_alloc|posix_memalign|memalign|valloc|pvalloc)$/ { print $1 }')
-        if [ -n "$implementation_allocators" ]; then
-            echo "$form external implementation refers to dynamic allocation:" >&2
-            printf '%s\n' "$implementation_allocators" >&2
-            exit 1
-        fi
-        for caller in one two; do
-            for suffix in '' -keep; do
-                private_text=$(LC_ALL=C "$NM" -a -P \
-                    "$tmp/linkage-caller-$caller-$form$suffix.o" | \
-                    awk '$2 ~ /^[Tt]$/ && ($1 ~ /^(up_|rc_)/ || $1 == "patch_apply_run") { print $1 " " $2 }')
-                if [ -n "$private_text" ]; then
-                    echo "$form declarations-only caller $caller emitted decoder-private text$suffix:" >&2
-                    printf '%s\n' "$private_text" >&2
-                    exit 1
-                fi
-            done
-            if ! LC_ALL=C "$NM" -u -P "$tmp/linkage-caller-$caller-$form.o" | \
-                 awk '$1 == "patch_apply_run" { found=1 } END { exit found ? 0 : 1 }'; then
-                echo "$form declarations-only caller $caller does not reference patch_apply_run" >&2
+        for mode in ULTRAPATCH_IMPLEMENTATION ULTRAPATCH_DECLARATIONS_ONLY; do
+            if "$CC" $linkage_flags -D"$mode" -c test-bench/decoder-compiled-contract.c \
+                 -o "$tmp/obsolete-$form-$mode.o" \
+                 >"$tmp/obsolete-$form-$mode.out" 2>"$tmp/obsolete-$form-$mode.err"; then
+                echo "$form decoder accepted removed linkage mode $mode" >&2
                 exit 1
             fi
-            if LC_ALL=C "$NM" -g --defined-only -P "$tmp/linkage-caller-$caller-$form.o" | \
-                 awk '$1 == "patch_apply_run" { found=1 } END { exit found ? 0 : 1 }'; then
-                echo "$form declarations-only caller $caller defines patch_apply_run" >&2
+            if ! grep -q 'external decoder linkage was removed' \
+                 "$tmp/obsolete-$form-$mode.err"; then
+                echo "$form decoder rejected $mode without the migration diagnostic" >&2
+                cat "$tmp/obsolete-$form-$mode.err" >&2
                 exit 1
             fi
         done
-
-        "$CC" $linkage_flags "$tmp/linkage-implementation-$form.o" \
-            "$tmp/linkage-caller-one-$form.o" "$tmp/linkage-caller-two-$form.o" \
-            -Wl,--gc-sections -o "$tmp/linkage-external-$form"
-        "$tmp/linkage-external-$form"
-        "$CC" $linkage_flags -DULTRAPATCH_DECLARATIONS_ONLY \
-            -DDECODER_DECLARATIONS_CONTRACT -c test-bench/decoder-contract.c \
-            -o "$tmp/contract-external-$form.o"
-        "$CC" $linkage_flags "$tmp/linkage-implementation-$form.o" \
-            "$tmp/contract-external-$form.o" -Wl,--gc-sections \
-            -o "$tmp/contract-external-$form"
-        "$tmp/contract-external-$form" $args > "$tmp/contract-external-$form.out"
-        "$CC" $linkage_flags -DDECODER_LINKAGE_IMPLEMENTATION -c "$linkage_src" \
-            -o "$tmp/linkage-implementation-duplicate-$form.o"
-        duplicate_exports=$(LC_ALL=C "$NM" -g --defined-only -P \
-            "$tmp/linkage-implementation-duplicate-$form.o" | awk '{ print $1 " " $2 }')
-        if [ "$duplicate_exports" != "patch_apply_run T" ]; then
-            echo "$form second external implementation has unexpected exports:" >&2
-            printf '%s\n' "$duplicate_exports" >&2
-            exit 1
-        fi
-        if "$CC" $linkage_flags "$tmp/linkage-implementation-$form.o" \
-             "$tmp/linkage-implementation-duplicate-$form.o" \
-             "$tmp/linkage-caller-one-$form.o" "$tmp/linkage-caller-two-$form.o" \
-             -Wl,--gc-sections -o "$tmp/linkage-duplicate-$form" \
-             >"$tmp/linkage-duplicate-$form.out" 2>"$tmp/linkage-duplicate-$form.err"; then
-            echo "$form accepted two ULTRAPATCH_IMPLEMENTATION translation units" >&2
-            exit 1
-        fi
-        if ! grep -q 'patch_apply_run' "$tmp/linkage-duplicate-$form.err"; then
-            echo "$form duplicate-implementation link failed for an unexpected reason:" >&2
-            cat "$tmp/linkage-duplicate-$form.err" >&2
-            exit 1
-        fi
-        if "$CC" $linkage_flags -DDECODER_LINKAGE_CONFLICT -c "$linkage_src" \
-             -o "$tmp/linkage-conflict-$form.o" \
-             >"$tmp/linkage-conflict-$form.out" 2>"$tmp/linkage-conflict-$form.err"; then
-            echo "$form accepted both decoder linkage modes in one translation unit" >&2
-            exit 1
-        fi
-        if ! grep -q 'ULTRAPATCH_DECLARATIONS_ONLY and ULTRAPATCH_IMPLEMENTATION are mutually exclusive' \
-             "$tmp/linkage-conflict-$form.err"; then
-            echo "$form linkage-mode conflict failed for an unexpected reason:" >&2
-            cat "$tmp/linkage-conflict-$form.err" >&2
-            exit 1
-        fi
     done
-    cmp "$tmp/contract-external-source.out" "$tmp/contract-external-single.out"
-    echo "decoder_linkage_contract=OK (static + declarations-only + one external implementation; source + single)"
+    echo "decoder_linkage_contract=OK (internal header-only; obsolete external modes rejected; source + single)"
 
     # Snapshot preprocessor state with the decoder's system prerequisites already loaded,
     # then include each packaging form. No existing consumer macro may be removed or changed.
@@ -394,8 +229,6 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$tmp/contract-source" $args >"$tmp/source.out"
     "$tmp/contract-single" $args >"$tmp/single.out"
     cmp "$tmp/source.out" "$tmp/single.out"
-    grep -vE '^decoder_(src|ldr)_window=' "$tmp/source.out" > "$tmp/default-public.out"
-    cmp "$tmp/default-public.out" "$tmp/contract-external-source.out"
 
     capflags="-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
     "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-source"
