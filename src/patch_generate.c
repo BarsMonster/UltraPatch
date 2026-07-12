@@ -5,6 +5,7 @@
  * A1 host encoder CLI entry point.
  */
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "enc_internal.h"
 
@@ -25,6 +26,63 @@ static int optional_sidecar_present(const char *path) {
     if (errno == ENOENT || errno == ENOTDIR) return 0;
     perror(path);
     exit(2);
+}
+
+/* Compare directory-entry names even when the entry does not exist yet.  stat(path) alone
+ * cannot protect an absent optional sidecar: "x.elf" and "./x.elf" (or paths through two
+ * names for the same parent directory) reserve the same output slot. */
+static int stat_parent(const char *path, struct stat *st) {
+    const char *slash = strrchr(path, '/');
+    size_t dir_n = slash ? (size_t)(slash - path) : 0;
+    const char *dir = ".";
+    char *owned = NULL;
+    if (slash) {
+        if (dir_n == 0) dir = "/";
+        else {
+            owned = (char *)xmalloc(dir_n + 1u);
+            memcpy(owned, path, dir_n);
+            owned[dir_n] = '\0';
+            dir = owned;
+        }
+    }
+    if (stat(dir, st) == 0) {
+        free(owned);
+        return 1;
+    }
+    int err = errno;
+    if (err != ENOENT && err != ENOTDIR) {
+        errno = err;
+        perror(dir);
+    }
+    free(owned);
+    return err == ENOENT || err == ENOTDIR ? 0 : -1;
+}
+
+static int same_path_slot(const char *a, const char *b) {
+    const char *abase = strrchr(a, '/'), *bbase = strrchr(b, '/');
+    abase = abase ? abase + 1 : a;
+    bbase = bbase ? bbase + 1 : b;
+    if (strcmp(abase, bbase) != 0) return 0;
+    struct stat adir, bdir;
+    int ar = stat_parent(a, &adir), br;
+    if (ar <= 0) return ar;
+    br = stat_parent(b, &bdir);
+    if (br <= 0) return br;
+    return adir.st_dev == bdir.st_dev && adir.st_ino == bdir.st_ino;
+}
+
+static void reject_patch_output(const char *patch_out, const char *input,
+                                int input_present, int reserve_slot) {
+    int conflict = reserve_slot ? same_path_slot(patch_out, input) : 0;
+    if (conflict < 0) exit(2);
+    if (!conflict && input_present) {
+        conflict = file_alias(patch_out, input);
+        if (conflict < 0) exit(2);
+    }
+    if (conflict) {
+        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, input);
+        exit(2);
+    }
 }
 
 static uint32_t checked_image_size(const Buf *b, const char *name) {
@@ -57,19 +115,13 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 }
 
 void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
-    int alias = file_alias(patch_out, from_image);
-    if (alias < 0) exit(2);
-    if (alias) {
-        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, from_image);
-        exit(2);
-    }
-    alias = file_alias(patch_out, to_image);
-    if (alias < 0) exit(2);
-    if (alias) {
-        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, to_image);
-        exit(2);
-    }
     char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
+    int felf_present = optional_sidecar_present(felf);
+    int telf_present = optional_sidecar_present(telf);
+    reject_patch_output(patch_out, from_image, 1, 0);
+    reject_patch_output(patch_out, to_image, 1, 0);
+    reject_patch_output(patch_out, felf, felf_present, 1);
+    reject_patch_output(patch_out, telf, telf_present, 1);
     Buf from = slurp(from_image), to = slurp(to_image);
     uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");
     /* A same-basename .elf sidecar is OPTIONAL: without it the whole image is treated as opaque data (zeroed
@@ -77,8 +129,8 @@ void encode_a1(const char *from_image, const char *to_image, const char *patch_o
      * A present-but-malformed ELF still dies loudly — only absence is tolerated. This
      * enables raw-binary pairs (edge gate, foreign firmware without build artifacts). */
     Ranges fr = {0}, tr = {0};
-    if (optional_sidecar_present(felf)) fr = elf_ranges(felf, &from, "from");
-    if (optional_sidecar_present(telf)) tr = elf_ranges(telf, &to, "to");
+    if (felf_present) fr = elf_ranges(felf, &from, "from");
+    if (telf_present) tr = elf_ranges(telf, &to, "to");
     PairAnalysis pa;
     pair_analysis_init(&pa, &from, &to, &fr, &tr);
     PlanPrep prep;

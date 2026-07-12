@@ -60,6 +60,8 @@ expect_no_temp "$tmp/image.bin"
 
 cp "$base" "$tmp/from.bin"
 cp "$one" "$tmp/to.bin"
+cp "${base%.bin}.elf" "$tmp/from.elf"
+cp "${one%.bin}.elf" "$tmp/to.elf"
 ln "$tmp/from.bin" "$tmp/from-output.blob"
 status=0
 "$ULTRAPATCH" "$tmp/from.bin" "$tmp/to.bin" "$tmp/from-output.blob" \
@@ -76,6 +78,38 @@ expect_status_2 "$status" encode_to_alias
 grep -Fq 'patch output aliases input' "$tmp/to-alias.err"
 cmp "$tmp/to.bin" "$one" >/dev/null
 
+cp "$tmp/from.elf" "$tmp/from-sidecar.before"
+status=0
+"$ULTRAPATCH" "$tmp/from.bin" "$tmp/to.bin" "$tmp/from.elf" \
+  >"$tmp/from-sidecar.out" 2>"$tmp/from-sidecar.err" || status=$?
+expect_status_2 "$status" encode_from_sidecar_direct
+grep -Fq 'patch output aliases input' "$tmp/from-sidecar.err"
+cmp "$tmp/from.elf" "$tmp/from-sidecar.before" >/dev/null
+
+ln "$tmp/to.elf" "$tmp/to-sidecar-hardlink.blob"
+status=0
+"$ULTRAPATCH" "$tmp/from.bin" "$tmp/to.bin" "$tmp/to-sidecar-hardlink.blob" \
+  >"$tmp/to-sidecar-hardlink.out" 2>"$tmp/to-sidecar-hardlink.err" || status=$?
+expect_status_2 "$status" encode_to_sidecar_hardlink
+grep -Fq 'patch output aliases input' "$tmp/to-sidecar-hardlink.err"
+cmp "$tmp/to.elf" "${one%.bin}.elf" >/dev/null
+
+ln -s "$tmp/from.elf" "$tmp/from-sidecar-symlink.blob"
+status=0
+"$ULTRAPATCH" "$tmp/from.bin" "$tmp/to.bin" "$tmp/from-sidecar-symlink.blob" \
+  >"$tmp/from-sidecar-symlink.out" 2>"$tmp/from-sidecar-symlink.err" || status=$?
+expect_status_2 "$status" encode_from_sidecar_symlink
+grep -Fq 'patch output aliases input' "$tmp/from-sidecar-symlink.err"
+cmp "$tmp/from.elf" "$tmp/from-sidecar.before" >/dev/null
+
+cp "$base" "$tmp/raw.bin"
+status=0
+"$ULTRAPATCH" "$tmp/raw.bin" "$tmp/to.bin" "$tmp/./raw.elf" \
+  >"$tmp/absent-sidecar.out" 2>"$tmp/absent-sidecar.err" || status=$?
+expect_status_2 "$status" encode_absent_sidecar_slot
+grep -Fq 'patch output aliases input' "$tmp/absent-sidecar.err"
+[ ! -e "$tmp/raw.elf" ]
+
 cp "$tmp/grow.blob" "$tmp/aliased-image"
 ln "$tmp/aliased-image" "$tmp/aliased-patch"
 status=0
@@ -85,4 +119,4 @@ expect_status_2 "$status" decode_alias
 grep -Fq 'image aliases patch' "$tmp/decode-alias.err"
 cmp "$tmp/aliased-image" "$tmp/grow.blob" >/dev/null
 
-echo 'transactional_output=OK (rename failures preserve files; aliases rejected)'
+echo 'transactional_output=OK (rename failures preserve files; binary/sidecar aliases rejected)'
