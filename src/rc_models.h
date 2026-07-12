@@ -216,9 +216,19 @@ static RC_NOINLINE void rc_ugg_init(up_UGGamma*g){
 }
 
 static inline void rc_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w){
-    for(int s=0;s<256;s++) w[256+s]=hist[s];
-    for(int m=255;m>=1;m--) w[m]=w[2*m]+w[2*m+1];
-    for(int m=1;m<256;m++) up_bt_set(t,m-1,rc_lit_seed_prob(w[2*m],w[m]));
+    /* Leaves are already resident in hist[]. Keeping a second 256-word leaf copy in the
+     * decoder's phase-overlaid seed workspace only inflated PatchApply: build the internal
+     * nodes directly against hist and retain only those nodes in w[]. */
+    for(int m=255;m>=1;m--){
+        int leaf=2*m>=256;
+        uint32_t l=leaf?hist[2*m-256]:w[2*m];
+        uint32_t r=leaf?hist[2*m+1-256]:w[2*m+1];
+        w[m]=l+r;
+    }
+    for(int m=1;m<256;m++){
+        uint32_t l=2*m>=256?hist[2*m-256]:w[2*m];
+        up_bt_set(t,m-1,rc_lit_seed_prob(l,w[m]));
+    }
 }
 
 /* Thumb BL/BLX local-branch halfword pattern (F000 / D000), tested on pristine source bytes. */

@@ -153,12 +153,12 @@ BASE_FULL_TOTAL ?= 4151373
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6073
+BASE_ARM_TEXT ?= 6329
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 10296
-BASE_ARM_LINKED_TEXT ?= 6653
+BASE_ARM_BSS ?= 9752
+BASE_ARM_LINKED_TEXT ?= 6909
 BASE_ARM_LINKED_DATA ?= 0
-BASE_ARM_LINKED_BSS ?= 10296
+BASE_ARM_LINKED_BSS ?= 9752
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
@@ -250,7 +250,7 @@ $(DECODER_CANONICAL_HDR): $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
                            -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
                            -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
-LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9
+LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9 -DJSLOTS=600u
 
 # `make gate` is a release certification, not a configurable measurement. These variables may
 # still be overridden on their individual measurement targets and A/B runs; the release gate and

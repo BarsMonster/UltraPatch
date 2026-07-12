@@ -40,6 +40,9 @@ cat > "$tmp/low_memory_assert.h" <<'EOF'
 #if WINDOW_LOG != 9
 #error "low-memory WINDOW_LOG override missing"
 #endif
+#if JSLOTS != 600u
+#error "low-memory JSLOTS override missing"
+#endif
 #ifdef DECODER_SINGLE_HEADER
 #include DECODER_SINGLE_HEADER
 #else
@@ -80,4 +83,4 @@ done
 
 [ "$roundtrips" -eq 2 ]
 echo "wire_config_low_memory_roundtrips=$roundtrips"
-echo "wire_config_low_memory=OK (WINDOW_LOG=9 seed-dominant arena; one-face x2; source + single)"
+echo "wire_config_low_memory=OK (WINDOW_LOG=9 JSLOTS=600 seed-dominant arena; one-face x2; source + single)"

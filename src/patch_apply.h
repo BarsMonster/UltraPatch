@@ -97,8 +97,25 @@ typedef struct { uint32_t range, code; } up_RangeDec;
 /* JSLOTS is configured above. Encoder and decoder builds MUST use the same macro name/value; the
  * encoder plans against that budget and DEGRADES over-budget plans host-side (over-budget reads
  * ship as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly
- * here (REJ_RESOURCE). */
-#define UP_JREGION (JSLOTS*4u)                   /* journal byte region: JSLOTS uint32 slots (3072 B) */
+ * here (REJ_RESOURCE).
+ *
+ * Preserve positions become a strictly ascending 24-bit key sequence after grow positions are
+ * complemented. Store its low 16 bits directly and its high 8 bits as an Elias-Fano unary bitmap;
+ * a high-byte sample every eight entries bounds lookup reconstruction to one short group. Values
+ * stay byte-addressable and all JSLOTS entries remain available. */
+#define UP_JLOW_BITS 16u
+#define UP_JSTRIDE 8u
+#define UP_JHIGH_VALUES (RC_PACKED_POS_LIMIT >> UP_JLOW_BITS)
+#define UP_JSAMPLES ((JSLOTS + UP_JSTRIDE - 1u) / UP_JSTRIDE)
+#define UP_JBIT_BITS (JSLOTS + UP_JHIGH_VALUES - 1u)
+#define UP_JBIT_BYTES ((UP_JBIT_BITS + 7u) / 8u)
+typedef struct {
+    uint8_t sample_hi[UP_JSAMPLES];
+    uint8_t high_bits[UP_JBIT_BYTES];
+    uint16_t low[JSLOTS];
+    uint8_t value[JSLOTS];
+} up_Journal;
+#define UP_JREGION ((uint32_t)((sizeof(up_Journal) + 3u) & ~3u))
 /* LZSS window W (defined here so up_ApplyState can size the apply phase). Default value above
  * keeps the decoder within the 12 KiB SRAM cap; encoder and decoder builds MUST use the same
  * WINDOW_LOG value so distance coding uses the exact same window. */
@@ -117,8 +134,8 @@ typedef struct {
 } up_ApplyState;
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
-    struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
-    struct { uint32_t jbuf[JSLOTS]; up_ApplyState sa; } apply;
+    struct { uint32_t hist0[256], hist1[256], w[256]; } seed;
+    struct { up_Journal journal; up_ApplyState sa; } apply;
 } up_Arena;
 /* The apply member dominates at production defaults, while smaller supported windows can make
  * the fixed literal-seed workspace larger. Keep the apply expression explicit so the assertion
@@ -185,6 +202,8 @@ typedef struct PatchApply {
 _Static_assert(sizeof(up_Arena) == UP_ARENA_BYTES, "arena union size drifted from UP_ARENA_BYTES (.bss would change)");
 _Static_assert(offsetof(up_Arena, apply.sa) == UP_JREGION && (offsetof(up_Arena, apply.sa) & 3u)==0u,
                "up_ApplyState must sit at UP_JREGION and be >=4-aligned (it holds uint32 fields)");
+_Static_assert(RC_PACKED_POS_BITS==24u && UP_JHIGH_VALUES==256u,
+               "succinct journal requires the 24-bit packed-position contract");
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
 _Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 up_DRStream.K (else the REJ_RESOURCE refuse wraps)");
@@ -417,12 +436,11 @@ static uint32_t up_crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, 
 }
 
 /* ===================================================================================== */
-/* never-evict journal — FLAT SORTED uint32 slots, each packed (pos<<8)|byte (the op_corr      */
-/* packing). Preserve positions are globally monotonic: ascending for FWD; grow stores each    */
-/* ascending wire block into reverse destination indices, making the array globally descending. */
-/* Lookup is one direction-aware binary search on slot>>8. RC_PACKED_POS_BITS positions span   */
-/* 16 MiB. Over-depth (would exceed JSLOTS) is REFUSED before writing the op. Lives in the      */
-/* apply phase ONLY (overlaid in ARENA front).                                                  */
+/* never-evict journal — succinct monotone 24-bit positions plus byte values. FWD positions */
+/* are already ascending; grow positions are complemented after each ascending wire block is */
+/* written into reverse destination indices. Low 16 bits are direct. For entry i, one bit at  */
+/* (high+i) represents the high 8 bits; a high-byte sample every UP_JSTRIDE entries bounds     */
+/* reconstruction. Over-depth is REFUSED before writing the op. Lives in the apply phase only. */
 /* ===================================================================================== */
 /* DEREL dict cap (corpus distinct-value peak ~179 per substream + margin). The STREAMED-DELTA wire
  * (12 KiB build) holds NO resident per-detection store — only a small MOVE-TO-FRONT dict of the
@@ -433,18 +451,51 @@ static uint32_t up_crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, 
 /* DR_KCAP_* and OPC_CAP are configured above. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
-/* Direction-aware binary search on slot>>8 over [0, g_jcount). */
-static int up_jr_find(PatchApply *pa, uint32_t pos){
-    int lo=0, hi=(int)pa->g_jcount-1;
-    while(lo<=hi){ int mid=(int)(((unsigned)lo+(unsigned)hi)>>1);
-        uint32_t k=pa->ARENA.apply.jbuf[mid]>>8;
-        if(k==pos) return mid;
-        if(pa->g_FWD ? k<pos : k>pos) lo=mid+1; else hi=mid-1; }
+static uint32_t up_jr_key(const PatchApply *pa, uint32_t pos){
+    return pa->g_FWD ? pos : (RC_PACKED_POS_LIMIT-1u-pos);
+}
+static void RC_NOINLINE up_jr_put(PatchApply *pa, uint32_t at, uint32_t pos, uint8_t value){
+    up_Journal *j=&pa->ARENA.apply.journal;
+    uint32_t key=up_jr_key(pa,pos), high=key>>UP_JLOW_BITS, bit=high+at;
+    j->low[at]=(uint16_t)key;
+    j->value[at]=value;
+    j->high_bits[bit>>3]|=(uint8_t)(1u<<(bit&7u));
+    if((at&(UP_JSTRIDE-1u))==0u) j->sample_hi[at/UP_JSTRIDE]=(uint8_t)high;
+}
+/* Select the next unary-high marker. A next entry is known to exist at every call site; the
+ * sequence's total high growth is at most 255, so the simple branch loop avoids ARM ctz helpers. */
+static uint32_t up_jr_next_mark(const up_Journal *j, uint32_t bit){
+    do { bit++; } while(!(j->high_bits[bit>>3]&(uint8_t)(1u<<(bit&7u))));
+    return bit;
+}
+/* Binary-search sampled full keys, then reconstruct at most UP_JSTRIDE entries. */
+static int RC_NOINLINE up_jr_find(PatchApply *pa, uint32_t pos){
+    if(pos>=RC_PACKED_POS_LIMIT) return -1;
+    const up_Journal *j=&pa->ARENA.apply.journal;
+    uint32_t key=up_jr_key(pa,pos), groups=((uint32_t)pa->g_jcount+UP_JSTRIDE-1u)/UP_JSTRIDE;
+    uint32_t lo=0, hi=groups;
+    while(lo<hi){
+        uint32_t mid=(lo+hi)>>1, at=mid*UP_JSTRIDE;
+        uint32_t k=((uint32_t)j->sample_hi[mid]<<UP_JLOW_BITS)|j->low[at];
+        if(k<=key) lo=mid+1u; else hi=mid;
+    }
+    if(!lo) return -1;
+    uint32_t group=lo-1u, at=group*UP_JSTRIDE;
+    uint32_t end=at+UP_JSTRIDE;
+    if(end>(uint32_t)pa->g_jcount) end=pa->g_jcount;
+    uint32_t bit=(uint32_t)j->sample_hi[group]+at;
+    for(;at<end;at++){
+        uint32_t k=((bit-at)<<UP_JLOW_BITS)|j->low[at];
+        if(k==key) return (int)at;
+        if(k>key) break;
+        if(at+1u<end) bit=up_jr_next_mark(j,bit);
+    }
     return -1;
 }
 static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
+    if(!pa->g_jcount) return 0;
     int at=up_jr_find(pa,pos);
-    if(at>=0){ *out=(uint8_t)pa->ARENA.apply.jbuf[at]; return 1; }
+    if(at>=0){ *out=pa->ARENA.apply.journal.value[at]; return 1; }
     return 0;
 }
 
@@ -883,7 +934,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
                 if(pos>=pa->g_from_size){ pa->g_rcerr=1; return; }
                 if(pos>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
                 uint32_t at=(uint32_t)pa->g_jcount+(pa->g_FWD?i:n-1u-i);
-                pa->ARENA.apply.jbuf[at]=(pos<<8)|up_image_flash_read(pos);
+                up_jr_put(pa,at,pos,up_image_flash_read(pos));
             }
         }
         if(pa->g_rcerr) return;
@@ -990,6 +1041,10 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
       up_lit_tree_from_hist(&pa->M_lit0[0],hist0,w);
       for(int c=1;c<UP_LIT0_CTX;c++) pa->M_lit0[c]=pa->M_lit0[0];
       up_lit_tree_from_hist(&pa->M_lit1,hist1,w); }
+    /* Literal seeding occupied the same arena phase. Unary-high insertion uses OR, so clear the
+     * bitmap it overlaid before any preserve entry is recorded; samples/lows/values are assigned
+     * in full before their corresponding index becomes visible through g_jcount. */
+    memset(pa->ARENA.apply.journal.high_bits,0,sizeof pa->ARENA.apply.journal.high_bits);
     { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
 }
@@ -1098,6 +1153,12 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 
 #undef RC_RICE_UNARY_MAX
 #undef UP_JREGION
+#undef UP_JLOW_BITS
+#undef UP_JSTRIDE
+#undef UP_JHIGH_VALUES
+#undef UP_JSAMPLES
+#undef UP_JBIT_BITS
+#undef UP_JBIT_BYTES
 #undef UP_RING
 #undef UP_MASK
 #undef UP_ARENA_BYTES

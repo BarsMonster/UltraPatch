@@ -231,6 +231,34 @@ static void put_u16(uint8_t *p, uint32_t at, uint16_t v){
     p[at] = (uint8_t)v; p[at + 1u] = (uint8_t)(v >> 8);
 }
 
+/* Exercise every succinct-journal slot across all 256 high buckets in both directions. This is
+ * deliberately independent of patch generation: it catches unary-marker/sample reconstruction
+ * errors even when a corpus happens to cluster all preserve positions in one 64 KiB region. */
+static int journal_codec_case(void){
+    enum { POS_LIMIT = 1u << 24 };
+    PatchApply pa;
+    CHECK(JSLOTS >= 2u);
+    const uint32_t step=(POS_LIMIT-1u)/(JSLOTS-1u);
+    for(int fwd=0;fwd<=1;fwd++){
+        memset(&pa,0,sizeof pa); pa.g_FWD=fwd;
+        for(uint32_t i=0;i<JSLOTS;i++){
+            uint32_t key=i*step;
+            uint32_t pos=fwd?key:(POS_LIMIT-1u-key);
+            up_jr_put(&pa,i,pos,(uint8_t)(i*37u+11u));
+        }
+        pa.g_jcount=(uint16_t)JSLOTS;
+        for(uint32_t i=0;i<JSLOTS;i++){
+            uint32_t key=i*step;
+            uint32_t pos=fwd?key:(POS_LIMIT-1u-key);
+            uint8_t value=0;
+            CHECK(up_jr_get(&pa,pos,&value)==1 && value==(uint8_t)(i*37u+11u));
+            if(i+1u<JSLOTS) CHECK(up_jr_get(&pa,fwd?pos+1u:pos-1u,&value)==0);
+        }
+        { uint8_t value=0; CHECK(up_jr_get(&pa,POS_LIMIT,&value)==0); }
+    }
+    return 0;
+}
+
 /* The rolling source word is peek-only: journaled pristine bytes may be cached across an
  * overwritten physical source, but FWD LDR metadata appears only when up_wr_copy actually consumes
  * those bytes. A suppressed 2-mod-4 BL must likewise clear its skipped target without recording
@@ -254,11 +282,11 @@ static int src_window_case(void){
     /* Physical bytes have been overwritten, but the ascending FWD journal preserves an LDR at
      * source 8: 0x4801 targets 16. The other two bytes make the raw-word check unambiguous. */
     memset(test_flash + 8u, 0xa5, 4u);
+    up_jr_put(&pa, 0, 8u, 0x01u);
+    up_jr_put(&pa, 1, 9u, 0x48u);
+    up_jr_put(&pa, 2, 10u, 0x5au);
+    up_jr_put(&pa, 3, 11u, 0xc3u);
     pa.g_jcount = 4;
-    pa.ARENA.apply.jbuf[0] = (8u << 8) | 0x01u;
-    pa.ARENA.apply.jbuf[1] = (9u << 8) | 0x48u;
-    pa.ARENA.apply.jbuf[2] = (10u << 8) | 0x5au;
-    pa.ARENA.apply.jbuf[3] = (11u << 8) | 0xc3u;
     test_reads = 0;
     uint32_t w = up_hy_word4_peek(&pa, 8);
     CHECK(w == UINT32_C(0xc35a4801) && test_reads == 0u);
@@ -323,9 +351,9 @@ static int ldr_window_case(void){
     memset(test_flash, 0, test_flash_n);
     memset(&pa, 0, sizeof pa);
     pa.g_from_size = test_flash_n; pa.g_FWD = 0; pa.g_psrc_even = UINT32_MAX;
+    up_jr_put(&pa, 0, 1001u, 0x48u); /* grow journal is descending */
+    up_jr_put(&pa, 1, 1000u, 0xffu); /* LDR +1024 -> 2024 */
     pa.g_jcount = 2;
-    pa.ARENA.apply.jbuf[0] = (1001u << 8) | 0x48u; /* grow journal is descending */
-    pa.ARENA.apply.jbuf[1] = (1000u << 8) | 0xffu; /* LDR +1024 -> 2024 */
     CHECK(ldr_oracle(&pa, 0, 4096, 2024u) == 1);
     CHECK(up_grow_ldr_take(&pa, 0, 4096, 2024u) == 1);
     return 0;
@@ -500,6 +528,9 @@ int main(int argc, char **argv){
         if(!rc) printf("decoder_nonzero_base_contract=OK (reads + writes translated; oob=0)\n");
         goto out;
     }
+    if(journal_codec_case()) goto out;
+    printf("decoder_journal_codec=OK (%u slots + 256 high buckets + both directions)\n",
+           (unsigned)JSLOTS);
     if(src_window_case()) goto out;
     printf("decoder_src_window=OK (journal + cached replay + FWD timing)\n");
     if(ldr_window_case()) goto out;
