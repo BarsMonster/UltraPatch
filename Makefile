@@ -2,9 +2,11 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# Canonical release-input candidates/updaters are authorities, not configurable builds. Establish
-# their executable search path before BUILD_PROFILE_ID invokes Python during Makefile parsing.
-override CANONICAL_AUTHORITY_GOAL := $(firstword $(filter release-profile-json release-profile-update encoder-kernel-baseline-update,$(MAKECMDGOALS)))
+# Release certification and canonical input publishers are authorities, not configurable builds.
+# Establish their executable search path before BUILD_PROFILE_ID invokes Python during Makefile
+# parsing, and reject launch controls before any recipe can be skipped or ignored.
+override CANONICAL_AUTHORITY_GOAL := $(firstword $(filter gate golden-update \
+	release-profile-json release-profile-update encoder-kernel-baseline-update,$(MAKECMDGOALS)))
 ifneq ($(CANONICAL_AUTHORITY_GOAL),)
 override PATH := /usr/bin:/bin
 export PATH
@@ -248,15 +250,11 @@ CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-cla
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
 $(CAPPED): %:
-	@if [ "$*" = golden-update ] && [ "$(origin MAKE)" != default ]; then \
-	  echo "golden update rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
 	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 gate:
-	@if [ "$(origin MAKE)" != default ]; then \
-	  echo "release gate rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
 	@timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
 	  flock --shared "$(ENCODER_KERNEL_BASELINE_LOCK)" \
 	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
@@ -286,8 +284,6 @@ encoder-kernel-baseline-update: scripts/check_encoder_kernels.sh
 
 .PHONY: release-profile-update release-profile-update-internal
 release-profile-update:
-	@if [ "$(origin MAKE)" != default ]; then \
-	  echo "release-profile-update rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
 	@/usr/bin/timeout $(GATE_TIMEOUT) /usr/bin/flock --exclusive "$(WIRE_BASELINE_LOCK)" \
 	  /usr/bin/make --no-print-directory release-profile-update-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
@@ -304,8 +300,8 @@ release-profile-json:
 	@/usr/bin/python3 -I -S scripts/build_profile.py release-lock-json "$(RELEASE_PROFILE_LOCK)"
 
 release-profile-update-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
-	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
-	@/usr/bin/python3 -I -S scripts/build_profile.py refresh-release "$(RELEASE_PROFILE_LOCK)"
+	@$(canonical_authority_origin_check) && \
+	  /usr/bin/python3 -I -S scripts/build_profile.py refresh-release "$(RELEASE_PROFILE_LOCK)"
 
 # Validate on every public use, including when an explicit BUILD_DIR points at a manifest created
 # by another compiler/config. Identical concurrent checks are safe because ensure-host publishes
@@ -373,41 +369,38 @@ override RELEASE_GATE_UNSET_VARS := \
 	DECODER_INTEGRATION_PROBE_FLAGS REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
 
 # A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
-# substituted shell/make commands can false-success. For public mutation goals, reject all
+# substituted shell/make commands can false-success. For public authority goals, reject all
 # launch controls and release-input substitutions while Make is still parsing; $(error) cannot
-# be suppressed by ignore-errors mode. The release-profile publisher recurses only after that
-# guard; the kernel publisher stays in its guarded public recipe.
-.PHONY: release-gate-origin-probe-internal release-gate-inputs-internal
-release-gate-origin-probe-internal:
-	@set -eu; bad=0; \
-	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "release gate rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
-	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "release gate requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+# be suppressed by ignore-errors mode. Keep one internal probe as defense for direct use of the
+# non-public recursive targets.
+.PHONY: canonical-authority-origin-probe-internal release-gate-inputs-internal
+define canonical_authority_origin_check
+set -eu; bad=0; \
+	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "canonical authority rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
+	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "canonical authority requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
 	test "$$bad" -eq 0
+endef
+
+canonical-authority-origin-probe-internal:
+	@$(canonical_authority_origin_check)
 
 release-gate-inputs-internal: scripts/build_profile.py
-	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
-	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
-	@echo "release_gate_inputs=OK (canonical repository inputs + pinned release profile)"
+	@$(canonical_authority_origin_check) && \
+	  python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null && \
+	  echo "release_gate_inputs=OK (canonical repository inputs + pinned release profile)"
 
-.PHONY: golden-update-origin-probe-internal golden-update-inputs-internal \
-        golden-update-validate-canonical-internal
-golden-update-origin-probe-internal:
-	@set -eu; bad=0; \
-	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "golden update rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
-	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "golden update requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
-	test "$$bad" -eq 0
-
+.PHONY: golden-update-inputs-internal golden-update-validate-canonical-internal
 golden-update-validate-canonical-internal:
 	@$(MAKE) --no-print-directory check-release-inventory-internal
 	@$(MAKE) --no-print-directory check-assets-internal
 	@echo "golden_update_canonical_inputs=OK (inventory + corpus/foreign asset hashes)"
 
 golden-update-inputs-internal:
-	@$(MAKE) --no-print-directory golden-update-origin-probe-internal
-	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
-	@flock --shared "$(WIRE_BASELINE_LOCK)" \
-	  $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null
-	@echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
+	@$(canonical_authority_origin_check) && \
+	  python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null && \
+	  flock --shared "$(WIRE_BASELINE_LOCK)" \
+	    $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null && \
+	  echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
 
 check-release-inventory-internal: scripts/check_release_inventory.py scripts/corpus_topology.py \
                                   $(CORPUS_INVENTORY) \
