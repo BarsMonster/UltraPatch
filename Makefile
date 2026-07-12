@@ -250,6 +250,7 @@ $(DECODER_CANONICAL_HDR): $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
                            -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
                            -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
+LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9
 
 # `make gate` is a release certification, not a configurable measurement. These variables may
 # still be overridden on their individual measurement targets and A/B runs; the release gate and
@@ -272,7 +273,8 @@ override RELEASE_GATE_FIXED_VARS := \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
 	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
 	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
-	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS ARM_LINK_STUBS ARM_LINK_LAYOUT \
+	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS LOW_MEMORY_WIRE_CONFIG_FLAGS \
+	ARM_LINK_STUBS ARM_LINK_LAYOUT \
 	ARM_APPLY_HARNESS STACK_GENERIC_HARNESS ARM_SINGLE_APPLY_HARNESS \
 	STACK_SINGLE_GENERIC_HARNESS
 override RELEASE_GATE_UNSET_VARS := \
@@ -333,11 +335,13 @@ check-pack-corpus-internal: scripts/pack_corpus.sh scripts/check_pack_corpus.sh 
                             scripts/check_release_inventory.py $(CORPUS_INVENTORY)
 	@scripts/check_pack_corpus.sh
 
-.PHONY: check-wire-config-probe-internal
+.PHONY: check-wire-config-probe-internal check-low-memory-wire-config-probe-internal
 check-wire-config-internal: ultrapatch
 	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(WIRE_CONFIG_PROBE_FLAGS)' \
 		DEFAULT_ULTRAPATCH='$(HOST_TOOL)' \
 		check-wire-config-probe-internal
+	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(LOW_MEMORY_WIRE_CONFIG_FLAGS)' \
+		check-low-memory-wire-config-probe-internal
 
 check-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR) scripts/check_wire_config.sh \
                                 scripts/synth_gen.py test-bench/decoder-contract.c \
@@ -352,6 +356,14 @@ check-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR) scripts/ch
 	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_LAYOUT="$(ARM_LINK_LAYOUT)" \
 	  DEFAULT_ULTRAPATCH="$(DEFAULT_ULTRAPATCH)" ULTRAPATCH="$(HOST_TOOL)" \
 	  FIXTURES="$(FIXTURES)" scripts/check_wire_config.sh
+
+check-low-memory-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR) \
+                                               scripts/check_low_memory_config.sh \
+                                               test-bench/decoder-contract.c
+	@CC="$(CC)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
+	  SINGLE_DECODER_CFLAGS="$(SINGLE_DECODER_CFLAGS)" \
+	  DECODER_SINGLE_HDR="$(DECODER_CANONICAL_HDR)" ULTRAPATCH="$(HOST_TOOL)" \
+	  FIXTURES="$(FIXTURES)" scripts/check_low_memory_config.sh
 
 .PHONY: FORCE
 FORCE:

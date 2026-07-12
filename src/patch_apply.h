@@ -115,12 +115,19 @@ typedef struct {
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } up_ApplyState;
-#define UP_ARENA_BYTES (UP_JREGION + (uint32_t)sizeof(up_ApplyState))
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. */
 typedef union {
     struct { uint32_t hist0[256], hist1[256], w[512]; } seed;
     struct { uint32_t jbuf[JSLOTS]; up_ApplyState sa; } apply;
 } up_Arena;
+/* The apply member dominates at production defaults, while smaller supported windows can make
+ * the fixed literal-seed workspace larger. Keep the apply expression explicit so the assertion
+ * below still detects unexpected padding between its journal and state. */
+#define UP_ARENA_BYTES \
+    ((UP_JREGION + (uint32_t)sizeof(up_ApplyState)) > \
+             (uint32_t)sizeof(((up_Arena *)0)->seed) \
+         ? (UP_JREGION + (uint32_t)sizeof(up_ApplyState)) \
+         : (uint32_t)sizeof(((up_Arena *)0)->seed))
 
 typedef struct PatchApply {
     uint32_t g_image_span;
