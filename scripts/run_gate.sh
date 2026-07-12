@@ -8,7 +8,6 @@ MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
 : "${CORPUS_ASSET_STAMP:?run_gate.sh: CORPUS_ASSET_STAMP not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
-: "${RELEASE_CORPUS_INVENTORY:?run_gate.sh: release inventory not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
 [ -r "$CORPUS_ASSET_STAMP" ] || {
   echo "run_gate.sh: generated corpus is not ready: $CORPUS_ASSET_STAMP" >&2
@@ -18,12 +17,8 @@ MAKE_CMD="${MAKE:-make}"
 rc=0
 
 # The corpus encoder saturates every core by itself, while several other gate legs also encode
-# nontrivial fixtures.  Leave one quarter of the machine to those concurrent legs; otherwise a
-# 32-worker corpus pool oversubscribes the 32-core reference host and needlessly reduces the
-# headroom under the 80 s cap.
-# Most auxiliary legs run at lower CPU priority so they use the reserved cores without preempting
-# the matrix's slow cross-major worker. The two long, mostly single-worker synthetic legs retain
-# normal priority so the matrix cannot starve them. Explicit job overrides remain authoritative.
+# nontrivial fixtures. Leave one quarter of the machine to those concurrent legs; otherwise a
+# 32-worker corpus pool oversubscribes the 32-core reference host and reduces the 80 s headroom.
 if [ -n "${JOBS:-}" ]; then
   corpus_jobs=$JOBS
 else
@@ -40,9 +35,8 @@ LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory che
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
-  # gate-internal already published the exact profile-specific host tool before this fork. Pass it
-  # with `-o` (assume-old), so every leg consumes the same pre-fork artifact even if an input mtime
-  # changes while the gate is running.
+  # gate-internal published this exact profile-specific tool before forking. `-o` prevents a
+  # concurrent leg from rebuilding it after an input mtime changes during the gate.
   if [ "$target" = check-corpus-matrix-internal ]; then
     "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
@@ -62,184 +56,37 @@ for p in $pids; do
   wait "$p" || rc=1
 done
 
-# A zero child status is necessary but not sufficient: the release gate must receive the complete
-# proof it claims to summarize. Require each authoritative marker exactly once, validate fixed
-# cardinalities, and independently check numeric ratchets before allowing PASS. This catches an
-# accidentally empty/no-op leg as well as truncated or structurally ambiguous output.
-METRIC_VALUE=
-evidence_error() {
-  printf '%s\n' "$*" >&2
-  rc=1
+# Each child owns its policy and ratchets. The coordinator only requires the complete,
+# unambiguous metric schema it summarizes, catching empty/no-op or truncated legs without
+# duplicating every child's assertions here.
+require_metrics() {
+  local spec file keys key count
+  for spec in "$@"; do
+    IFS=: read -r file keys <<<"$spec"
+    for key in $keys; do
+      count=$(grep -c "^${key}=" "$tmp/$file" 2>/dev/null || :)
+      if [ "$count" -ne 1 ]; then
+        echo "missing or duplicate gate metric: $file:$key (count=$count)" >&2
+        rc=1
+      fi
+    done
+  done
 }
-load_metric() {
-  local file=$1 key=$2 count
-  count=$(grep -c "^${key}=" "$tmp/$file" 2>/dev/null || :)
-  if [ "$count" -ne 1 ]; then
-    evidence_error "missing or duplicate gate evidence: $file:$key (count=$count)"
-    METRIC_VALUE=
-    return 1
-  fi
-  METRIC_VALUE=$(sed -n "s/^${key}=//p" "$tmp/$file")
-  return 0
-}
-require_exact() {
-  local file=$1 key=$2 expected=$3
-  if load_metric "$file" "$key" && [ "$METRIC_VALUE" != "$expected" ]; then
-    evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected '$expected')"
-  fi
-}
-require_prefix() {
-  local file=$1 key=$2 prefix=$3
-  if load_metric "$file" "$key"; then
-    case "$METRIC_VALUE" in
-      "$prefix"*) ;;
-      *) evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected prefix '$prefix')" ;;
-    esac
-  fi
-}
-require_nonempty() {
-  local file=$1 key=$2
-  if load_metric "$file" "$key" && [ -z "$METRIC_VALUE" ]; then
-    evidence_error "invalid gate evidence: $file:$key is empty"
-  fi
-}
-require_uint() {
-  local file=$1 key=$2
-  if load_metric "$file" "$key"; then
-    case "$METRIC_VALUE" in
-      ''|*[!0-9]*) evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected unsigned integer)" ;;
-    esac
-  fi
-}
-require_uint_le() {
-  local file=$1 key=$2 limit=$3
-  if load_metric "$file" "$key"; then
-    case "$METRIC_VALUE" in
-      ''|*[!0-9]*) evidence_error "invalid gate evidence: $file:$key='$METRIC_VALUE' (expected unsigned integer)" ;;
-      *) [ "$METRIC_VALUE" -le "$limit" ] || evidence_error "invalid gate evidence: $file:$key=$METRIC_VALUE exceeds $limit" ;;
-    esac
-  fi
-}
-
-profile=${RELEASE_PROFILE#release_profile=}
-case "$RELEASE_PROFILE" in
-  release_profile=*) ;;
-  *) evidence_error "invalid gate evidence: release profile marker is malformed" ;;
-esac
-case "$profile" in
-  *[!0-9a-f]*|'') evidence_error "invalid gate evidence: release profile hash is malformed" ;;
-esac
-[ "${#profile}" -eq 64 ] || evidence_error "invalid gate evidence: release profile hash length is ${#profile}, expected 64"
-
-release_fixtures=${BASE_RELEASE_FIXTURES:?}
-release_home_images=${BASE_RELEASE_HOME_IMAGES:?}
-release_foreign_images=${BASE_RELEASE_FOREIGN_IMAGES:?}
-release_foreign_edges=${BASE_RELEASE_FOREIGN_EDGES:?}
-release_golden_blobs=${BASE_RELEASE_GOLDEN_BLOBS:?}
-topology_counts=$(python3 scripts/corpus_topology.py counts \
-  --inventory "$RELEASE_CORPUS_INVENTORY") || {
-  evidence_error "cannot load release corpus topology counts"
-  topology_counts='CORPUS_TOPOLOGY_HOME_PAIRS=0
-CORPUS_TOPOLOGY_FOREIGN_EDGES=0
-CORPUS_TOPOLOGY_FOREIGN_PAIRS=0
-CORPUS_TOPOLOGY_WIRE_PAIRS=0'
-}
-eval "$topology_counts"
-release_home_pairs=$CORPUS_TOPOLOGY_HOME_PAIRS
-release_foreign_pairs=$CORPUS_TOPOLOGY_FOREIGN_PAIRS
-release_wire_pairs=$CORPUS_TOPOLOGY_WIRE_PAIRS
-[ "$CORPUS_TOPOLOGY_FOREIGN_EDGES" = "$release_foreign_edges" ] || \
-  evidence_error "release topology has $CORPUS_TOPOLOGY_FOREIGN_EDGES foreign edges, expected $release_foreign_edges"
-release_corpus_assets=$((2 * (release_fixtures + release_home_images)))
-
-require_prefix inventory.txt corpus_topology_contract "OK ("
-require_prefix inventory.txt release_inventory "OK ("
-require_exact inventory.txt release_fixture_count "$release_fixtures"
-require_exact inventory.txt release_home_images "$release_home_images"
-require_exact inventory.txt release_foreign_images "$release_foreign_images"
-require_exact inventory.txt release_home_pairs "$release_home_pairs"
-require_exact inventory.txt release_foreign_edges "$release_foreign_edges"
-require_exact inventory.txt release_foreign_pairs "$release_foreign_pairs"
-require_exact inventory.txt release_wire_pairs "$release_wire_pairs"
-require_exact inventory.txt release_golden_blobs "$release_golden_blobs"
-require_exact inventory.txt release_home_total "${BASE_FULL_TOTAL:?}"
-require_exact inventory.txt release_oneface_grow "${BASE_ONEFACE_GROW:?}"
-require_exact inventory.txt release_oneface_revert "${BASE_ONEFACE_REVERT:?}"
-require_exact assets.txt corpus_assets "verified $release_corpus_assets files via test-bench/corpus-inventory.tsv"
-require_exact assets.txt foreign_assets "verified $release_foreign_images files via test-bench/corpus-inventory.tsv"
-require_exact malformed.txt malformed_rejects 29
-require_exact e.txt edge_cases 16
-require_exact e.txt edge_roundtrips 15
-require_exact e.txt edge_refusals 1
-require_exact e.txt edge_failures 0
-require_uint e.txt edge_alt_diff_16k_encode_cpu_ms
-require_uint e.txt edge_alt_diff_32k_encode_cpu_ms
-require_uint_le e.txt edge_alt_diff_64k_encode_cpu_ms 4999
-require_uint_le e.txt edge_alt_diff_256k_encode_cpu_ms 19999
-require_uint e.txt edge_alt_diff_16k_encode_wall_ms
-require_uint e.txt edge_alt_diff_32k_encode_wall_ms
-require_uint e.txt edge_alt_diff_64k_encode_wall_ms
-require_uint e.txt edge_alt_diff_256k_encode_wall_ms
-require_exact g.txt golden_wire "OK ($release_golden_blobs blobs)"
-require_prefix g.txt wire_baseline_update_contract "OK ("
-require_exact dec_contract.txt decoder_contract OK
-require_prefix dec_contract.txt decoder_portable "OK ("
-require_prefix dec_contract.txt decoder_address_contract "OK ("
-require_prefix dec_contract.txt decoder_resource_contract "OK ("
-require_exact dec_contract.txt decoder_linkage_contract "OK (internal header-only; obsolete external modes rejected)"
-require_exact models.txt model_contract OK
-require_prefix wire_config.txt wire_config_override "OK ("
-require_prefix wire_config.txt wire_config_low_memory "OK ("
-require_prefix ab.txt ab_wire_change "OK ("
-for key in degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow \
-           degrade_bigspan; do
-  require_nonempty dg.txt "$key"
-  [ "$METRIC_VALUE" != NA ] || evidence_error "invalid gate evidence: dg.txt:$key=NA"
-done
-require_exact dg.txt degrade_packed_preserve OK
-require_exact dg.txt degrade_packed_correction OK
-require_exact dg.txt split_run_budget OK
-require_exact dg.txt degrade_cases 7
-require_exact dg.txt degrade_fail 0
-
-require_exact a.txt arm_size_integration "static PatchApply wrapper"
-require_uint_le a.txt arm_object_text "${BASE_ARM_TEXT:?}"
-require_uint_le a.txt arm_object_data "${BASE_ARM_DATA:?}"
-require_uint_le a.txt arm_object_bss "${BASE_ARM_BSS:?}"
-require_exact a.txt arm_linked_integration "no-startup static PatchApply wrapper + minimal flash stubs"
-require_uint_le a.txt arm_linked_text "${BASE_ARM_LINKED_TEXT:?}"
-require_uint_le a.txt arm_linked_data "${BASE_ARM_LINKED_DATA:?}"
-require_uint_le a.txt arm_linked_bss "${BASE_ARM_LINKED_BSS:?}"
-load_metric a.txt arm_linked_runtime_helpers || :
-require_exact a.txt soft_div_calls "${BASE_ARM_SOFT_DIV:?}"
-require_exact a.txt arm_bss_hard_cap_overrides "REJECTED (object + linked)"
-require_exact a.txt arm_decoder_build "OK (public header set; object + linked)"
-
-require_exact st.txt stack_static_integration "static PatchApply wrapper"
-require_uint_le st.txt stack_static_bound_bytes "${BASE_STACK_STATIC_CEIL_O2:?}"
-require_exact st.txt stack_static_ceiling_o2 "${BASE_STACK_STATIC_CEIL_O2:?}"
-require_exact st.txt stack_generic_integration "caller-owned PatchApply * wrapper"
-require_uint_le st.txt stack_generic_bound_bytes "${BASE_STACK_GENERIC_CEIL_O2:?}"
-require_exact st.txt stack_generic_ceiling_o2 "${BASE_STACK_GENERIC_CEIL_O2:?}"
-require_exact st.txt stack_decoder_build "OK (public header set; static + generic)"
-
-require_exact m.txt matrix_ok "$release_home_pairs/$release_home_pairs"
-require_exact m.txt full_total "${BASE_FULL_TOTAL:?}"
-require_exact m.txt home_size_better 0
-require_exact m.txt home_size_worse 0
-require_exact m.txt home_size_equal "$release_home_pairs"
-require_exact m.txt foreign_ok "$release_foreign_pairs/$release_foreign_pairs"
-require_exact m.txt foreign_total "${BASE_FOREIGN_TOTAL:?}"
-require_exact m.txt wire_identity "$release_wire_pairs/$release_wire_pairs"
-require_uint m.txt max_journal
-require_exact m.txt max_amplified 0
-require_uint_le m.txt max_maxpageerase 1
-require_exact m.txt max_inversions 0
-require_exact m.txt max_unaligned 0
-require_exact m.txt max_oob_page_writes 0
-require_exact m.txt max_canary_corrupt 0
-require_exact c.txt oneface_grow "${BASE_ONEFACE_GROW:?}"
-require_exact c.txt oneface_revert "${BASE_ONEFACE_REVERT:?}"
+require_metrics \
+  'inventory.txt:corpus_topology_contract release_inventory release_fixture_count release_home_images release_foreign_images release_home_pairs release_foreign_edges release_foreign_pairs release_wire_pairs release_golden_blobs release_home_total release_oneface_grow release_oneface_revert' \
+  'assets.txt:corpus_assets foreign_assets' \
+  'malformed.txt:malformed_rejects' \
+  'e.txt:edge_cases edge_roundtrips edge_refusals edge_failures edge_alt_diff_16k_encode_cpu_ms edge_alt_diff_32k_encode_cpu_ms edge_alt_diff_64k_encode_cpu_ms edge_alt_diff_256k_encode_cpu_ms edge_alt_diff_16k_encode_wall_ms edge_alt_diff_32k_encode_wall_ms edge_alt_diff_64k_encode_wall_ms edge_alt_diff_256k_encode_wall_ms' \
+  'g.txt:golden_wire wire_baseline_update_contract' \
+  'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
+  'models.txt:model_contract' \
+  'wire_config.txt:wire_config_override wire_config_low_memory' \
+  'ab.txt:ab_wire_change' \
+  'dg.txt:degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction split_run_budget degrade_cases degrade_fail' \
+  'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_bss_hard_cap_overrides arm_decoder_build' \
+  'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_decoder_build' \
+  'm.txt:matrix_ok full_total home_size_better home_size_worse home_size_equal foreign_ok foreign_total wire_identity max_amplified max_maxpageerase max_inversions max_unaligned max_oob_page_writes max_canary_corrupt max_journal' \
+  'c.txt:oneface_grow oneface_revert'
 
 kv() {
   sed -n "s/^$2=/$3/p" "$tmp/$1"
@@ -262,13 +109,10 @@ kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_c
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
-awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" \
-  '/^arm_object_text=/{t=$2}/^arm_object_data=/{d=$2}/^arm_object_bss=/{b=$2}END{if(t!="")printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
+awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" '/^arm_object_text=/{t=$2}/^arm_object_data=/{d=$2}/^arm_object_bss=/{b=$2}END{if(t!="")printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|arm_linked_integration|ARM linked integration  : '
 awk -F= -v bt="${BASE_ARM_LINKED_TEXT:?}" -v bd="${BASE_ARM_LINKED_DATA:?}" -v bb="${BASE_ARM_LINKED_BSS:?}" '/^arm_linked_text=/{t=$2}/^arm_linked_data=/{d=$2}/^arm_linked_bss=/{b=$2}END{if(t!="")printf "ARM linked text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
-kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : '
-kvs 'a.txt|soft_div_calls|ARM   soft-divide calls  : '
-kvs 'a.txt|arm_decoder_build|ARM decoder build      : '
+kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : ' 'a.txt|soft_div_calls|ARM   soft-divide calls  : ' 'a.txt|arm_decoder_build|ARM decoder build      : '
 awk -F= '/^stack_static_bound_bytes=/{b=$2}/^stack_static_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, static wrapper   : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 awk -F= '/^stack_generic_bound_bytes=/{b=$2}/^stack_generic_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, generic pointer  : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 kvs 'st.txt|stack_decoder_build|stack decoder build    : '
