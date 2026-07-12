@@ -145,9 +145,23 @@ export UP_PROFILE_ARM_LINK_FLAGS UP_PROFILE_ARM_LINK_LIBS
 export UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
 
 BUILD_ROOT ?= .build
+# These maintenance targets neither build nor execute the encoder. Avoid probing every host/ARM
+# tool merely to clean artifacts, inspect the release inventory, or run GCC's standalone analyzer.
+# A mixed invocation remains profile-dependent if any requested goal needs the host tool.
+override PROFILE_INDEPENDENT_GOALS := clean-all clean-all-internal \
+	check-analyze check-analyze-internal \
+	check-release-inventory check-release-inventory-internal
+override PROFILE_INDEPENDENT_INVOCATION := $(and \
+	$(filter default,$(origin MAKECMDGOALS)), \
+	$(strip $(MAKECMDGOALS)), \
+	$(if $(strip $(filter-out $(PROFILE_INDEPENDENT_GOALS),$(MAKECMDGOALS))),,1))
+ifeq ($(strip $(PROFILE_INDEPENDENT_INVOCATION)),1)
+override BUILD_PROFILE_ID := profile-not-required
+else
 override BUILD_PROFILE_ID := $(shell /usr/bin/python3 -I -S scripts/build_profile.py host-id)
 ifeq ($(strip $(BUILD_PROFILE_ID)),)
 $(error failed to derive the host build profile)
+endif
 endif
 BUILD_DIR ?= $(BUILD_ROOT)/$(BUILD_PROFILE_ID)
 ifeq ($(abspath $(BUILD_DIR)),$(CURDIR))
@@ -449,7 +463,9 @@ $(HOST_OBJ_DIR)/%.o: %.c Makefile $(PROFILE_MANIFEST) | profile-check
 		-c "$<" -o "$$obj"; \
 	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
 
+ifneq ($(strip $(PROFILE_INDEPENDENT_INVOCATION)),1)
 -include $(HOST_TOOL_DEPFILES)
+endif
 
 $(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(PROFILE_MANIFEST) | profile-check
 	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
