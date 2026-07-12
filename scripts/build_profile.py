@@ -271,10 +271,7 @@ def release_descriptor() -> dict[str, Any]:
             "cc": tool_identity("UP_PROFILE_ARM_CC"),
             "cc1": gcc_program_identity(arm_cc, "Arm", "cc1", with_version=False),
             "collect2": gcc_program_identity(arm_cc, "Arm", "collect2"),
-            "compile_flags": {
-                "single_header": env_words("UP_PROFILE_ARM_SINGLE_FLAGS"),
-                "source_headers": arm_source_flags,
-            },
+            "compile_flags": {"decoder_headers": arm_source_flags},
             "link": {
                 "flags": env_words("UP_PROFILE_ARM_LINK_FLAGS"),
                 "libraries": env_words("UP_PROFILE_ARM_LINK_LIBS"),

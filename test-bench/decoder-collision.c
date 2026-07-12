@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Consumer namespace regression: ordinary application identifiers that the decoder
- * formerly occupied must remain usable with both public header packaging forms.
+ * formerly occupied must remain usable with the public header set.
  */
 #include <stdint.h>
 
@@ -32,11 +32,7 @@ int fl_init(void){ return 8; }
 int idx_init(void){ return 9; }
 int op_next_offset(void){ return 10; }
 
-#ifdef DECODER_SINGLE_HEADER
-#include DECODER_SINGLE_HEADER
-#else
 #include "patch_apply.h"
-#endif
 
 #if !defined(BT_PROBS) || !defined(BT_BYTES) || !defined(UG_CTX) || \
     !defined(UG_C) || !defined(UG_GAMMA_MANT) || !defined(SMAP_CAP) || \

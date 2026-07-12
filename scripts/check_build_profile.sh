@@ -13,6 +13,7 @@ fi
 make_command="${1:-${MAKE:-make}}"
 host_tool_target="${2:-${HOST_TOOL_TARGET:-host-tool-path}}"
 clang_command="${CLANG:-clang}"
+: "${DECODER_PUBLIC_HDRS:?check_build_profile.sh: DECODER_PUBLIC_HDRS not set by make}"
 read -r -a make_argv <<<"$make_command"
 if [ "${#make_argv[@]}" -eq 0 ] || [ -z "$host_tool_target" ] || [ -z "$clang_command" ]; then
   echo "check_build_profile.sh: empty MAKE, CLANG, or host-tool target" >&2
@@ -189,11 +190,11 @@ decoder_vendor_before=$(file_state "$gcc_vendor_obj")
 decoder_tool_before=$(file_state "$gcc_tool")
 run_make -W "$decoder_header" BUILD_ROOT="$build_root" CC=gcc ultrapatch >/dev/null
 require_changed "$decoder_before" "$(file_state "$gcc_backend_obj")" "decoder backend object"
-require_changed "$decoder_tool_before" "$(file_state "$gcc_tool")" "decoder-header host tool"
+require_changed "$decoder_tool_before" "$(file_state "$gcc_tool")" "decoder public-header host tool"
 require_unchanged "$decoder_encoder_before" "$(file_state "$gcc_encoder_obj")" \
-  "encoder object after decoder-header touch"
+  "encoder object after decoder public-header touch"
 require_unchanged "$decoder_vendor_before" "$(file_state "$gcc_vendor_obj")" \
-  "vendored object after decoder-header touch"
+  "vendored object after decoder public-header touch"
 
 # Source ordering and explicit recipe revisions participate in the profile ID and select isolated
 # build directories without disturbing the default profile.
@@ -279,107 +280,17 @@ if find "$(dirname "$same_tool")" -type f -name '*.tmp' -print -quit | grep -q .
 fi
 run_make BUILD_ROOT="$same_root" CC=gcc ultrapatch >/dev/null
 
-# The distributor is a content-stable atomic publisher, not just a concatenation recipe.  Exercise
-# its filesystem contract through Make's DECODER_PUBLIC_HDRS-driven hook so this regression never
-# grows a second hard-coded public-header list.
-header_dir="$tmp/single-header"
-header="$header_dir/patch_apply_single.h"
+# Exercise the public packaging contract without a repository include path. The integration TU
+# includes only patch_apply.h; its two transitive support headers must be installed beside it.
+header_dir="$tmp/public-headers"
 mkdir -p "$header_dir"
-
-# A first publication has a fixed public-readable mode even under a restrictive caller umask.
-( umask 0077; run_make DECODER_SINGLE_HDR="$header" decoder-header-internal ) \
-  >"$tmp/header-first.log" 2>&1
-if [ ! -s "$header" ] || [ "$(stat -c '%a' "$header")" != 644 ]; then
-  echo "check_build_profile.sh: first single-header publication was not nonempty mode 0644" >&2
-  cat "$tmp/header-first.log" >&2
-  exit 1
-fi
-grep -q '^/\* ===== begin src/patch_apply.h ===== \*/$' "$header"
-header_hash=$(sha256sum "$header")
-header_hash=${header_hash%% *}
-header_state=$(stat -c '%i:%s:%y:%a' "$header")
-
-# Identical bytes are a genuine no-op, including inode, timestamp, and permissions.
-run_make DECODER_SINGLE_HDR="$header" decoder-header-internal >"$tmp/header-noop.log" 2>&1
-require_unchanged "$header_state" "$(stat -c '%i:%s:%y:%a' "$header")" \
-  "content-stable single header"
-noop_hash=$(sha256sum "$header")
-noop_hash=${noop_hash%% *}
-require_unchanged "$header_hash" "$noop_hash" "content-stable single-header bytes"
-
-# Replacing stale regular artifacts preserves their exact readable permission mode.
-printf '\n/* stale */\n' >> "$header"
-chmod 0440 "$header"
-run_make DECODER_SINGLE_HDR="$header" decoder-header-internal >"$tmp/header-0440.log" 2>&1
-mode=$(stat -c '%a' "$header")
-restored_hash=$(sha256sum "$header")
-restored_hash=${restored_hash%% *}
-if [ "$mode" != 440 ] || [ "$restored_hash" != "$header_hash" ]; then
-  echo "check_build_profile.sh: single-header overwrite did not preserve mode 0440" >&2
-  exit 1
-fi
-
-chmod 0640 "$header"
-printf '\n/* stale again */\n' >> "$header"
-run_make DECODER_SINGLE_HDR="$header" decoder-header-internal >"$tmp/header-0640.log" 2>&1
-mode=$(stat -c '%a' "$header")
-restored_hash=$(sha256sum "$header")
-restored_hash=${restored_hash%% *}
-if [ "$mode" != 640 ] || [ "$restored_hash" != "$header_hash" ]; then
-  echo "check_build_profile.sh: single-header overwrite did not preserve mode 0640" >&2
-  exit 1
-fi
-
-# All source reads precede destination handling.  A missing dependency must preserve the
-# published bytes, inode/timestamp, and permission mode and must leave no sibling temporary.
-missing_state=$(stat -c '%i:%s:%y:%a' "$header")
-missing_hash=$(sha256sum "$header")
-missing_hash=${missing_hash%% *}
-if python3 scripts/gen_single_header.py "$header" "$tmp/missing-public-header.h" \
-    >"$tmp/header-missing.log" 2>&1; then
-  echo "check_build_profile.sh: single-header generation accepted a missing dependency" >&2
-  exit 1
-fi
-require_unchanged "$missing_state" "$(stat -c '%i:%s:%y:%a' "$header")" \
-  "single header after missing dependency"
-after_missing_hash=$(sha256sum "$header")
-after_missing_hash=${after_missing_hash%% *}
-require_unchanged "$missing_hash" "$after_missing_hash" \
-  "single-header bytes after missing dependency"
-
-# Same-destination publishers use private sibling temporaries and converge on canonical bytes.
-printf '\n/* concurrent stale */\n' >> "$header"
-run_make DECODER_SINGLE_HDR="$header" decoder-header-internal >"$tmp/header-a.log" 2>&1 &
-header_a=$!
-run_make DECODER_SINGLE_HDR="$header" decoder-header-internal >"$tmp/header-b.log" 2>&1 &
-header_b=$!
-rc=0
-wait "$header_a" || rc=1
-wait "$header_b" || rc=1
-if [ "$rc" -ne 0 ] || [ ! -s "$header" ]; then
-  echo "check_build_profile.sh: concurrent single-header generation failed" >&2
-  cat "$tmp/header-a.log" "$tmp/header-b.log" >&2
-  exit 1
-fi
-concurrent_hash=$(sha256sum "$header")
-concurrent_hash=${concurrent_hash%% *}
-if [ "$concurrent_hash" != "$header_hash" ] || [ "$(stat -c '%a' "$header")" != 640 ]; then
-  echo "check_build_profile.sh: concurrent single-header publication was not canonical mode 0640" >&2
-  exit 1
-fi
-if find "$header_dir" -maxdepth 1 -name '.patch_apply_single.h.*.tmp' -print -quit | grep -q .; then
-  echo "check_build_profile.sh: single-header generation left a temporary file" >&2
-  exit 1
-fi
-
-# Compile as an external integrator would: the generated header and consumer are isolated in a
-# private directory, and the compiler receives no repository or src include search path.
+cp $DECODER_PUBLIC_HDRS "$header_dir/"
 cat > "$header_dir/consumer.c" <<'EOF'
 #include <stdint.h>
 #define CORTEX_M0 1
 #define PATCH_IMAGE_BASE 0u
 #define PATCH_IMAGE_CAPACITY 67108864u
-#include "patch_apply_single.h"
+#include "patch_apply.h"
 
 uint8_t flash_read(uint32_t absolute_addr){
     (void)absolute_addr;
@@ -394,7 +305,7 @@ static int pull_end(void *ctx, uint8_t *out){
     (void)out;
     return PATCH_PULL_END;
 }
-int consume_single_header(void){
+int consume_decoder(void){
     PatchApply state;
     return (int)patch_apply_run(&state, pull_end, 0);
 }
@@ -425,4 +336,4 @@ if [ "$shared_before" != "$shared_after" ]; then
   exit 1
 fi
 
-echo "build_profiles=OK (exact per-TU flags/deps; incremental rebuilds; gcc/clang/config isolated; same-profile artifacts atomic; single-header publish atomic; shared BUILD_DIR mismatch immutable)"
+echo "build_profiles=OK (exact per-TU flags/deps; incremental rebuilds; gcc/clang/config isolated; same-profile artifacts atomic; isolated public-header integration; shared BUILD_DIR mismatch immutable)"

@@ -1,15 +1,12 @@
 # Device Integration Contract
 
-The production decoder is header-only. Integrators have two supported packaging
-choices:
+The production decoder is header-only. Install `patch_apply.h`, `rc_models.h`,
+and `patch_config.h` together, then include only `patch_apply.h` from integration
+code. The entrypoint uses normal local includes for its two companion headers;
+it is not required to be a self-contained physical file.
 
-- Include the generated public single header from `make decoder-header`
-  (`artifacts/patch_apply_single.h` by default).
-- Include the source header set rooted at `src/patch_apply.h`, with
-  `src/rc_models.h` and `src/patch_config.h` beside it on the include path.
-
-Both forms compile the same decoder, require explicit `PATCH_IMAGE_BASE` and
-`PATCH_IMAGE_CAPACITY`, and require the two flash primitives below.
+The decoder requires explicit `PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` and
+the two flash primitives below.
 The decoder owns no global static state and uses no heap; the integrator owns
 the `PatchApply` state object so the Cortex-M0+ SRAM gate remains meaningful.
 
@@ -28,9 +25,9 @@ bytes. The integrator does not parse the envelope and cannot get it wrong.
 ## Ownership
 
 Include the decoder from one update translation unit and allocate one
-caller-owned `PatchApply` object for the run. With the source-header-set form,
-application code includes only `patch_apply.h`; the support headers are included
-by it. Entropy models, the journal arena, and the output page cache live inside
+caller-owned `PatchApply` object for the run. Application code includes only
+`patch_apply.h`; the support headers are included by it. Entropy models, the
+journal arena, and the output page cache live inside
 the `PatchApply` object. There is no coroutine, no fiber, no private decode
 stack, and no heap allocation -- the decode runs on the caller's stack plus the
 caller-owned state object.
@@ -359,21 +356,12 @@ host and ARM decoder harnesses keep them separately in
 `DECODER_CONFIG_FLAGS='-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u'`.
 
 The decoder defaults and wire-model helpers are shared through
-`src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only source
-header application code includes. To ship one physical public header, run:
-
-```sh
-make decoder-header
-```
-
-The generated `artifacts/patch_apply_single.h` inlines the source header set and
-must not include any local decoder support header. It is the canonical generated
-decoder artifact: `make gate` publishes it once before the parallel checks, then
-passes that exact path to every single-header consumer without `-Isrc`.
-The gate compiles both packaging forms, requires identical ARM object/linked
-footprints and static/generic stack bounds, and exercises the same artifact in
-the API, portability, model, and wire checks. The encoder uses the source headers,
-and model/golden gates enforce bit-exactness.
+`src/patch_config.h` and `src/rc_models.h`; `patch_apply.h` is the only header
+application code includes. Ship all three files in one include directory. The
+gate copies that header set into an isolated integration directory and compiles
+a consumer that includes only `patch_apply.h`, then runs the API, portability,
+model, wire, ARM-footprint, and stack checks once against the real headers. The
+model/golden gates continue to enforce encoder/decoder bit-exactness.
 
 The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, used by
 both the decoder and the encoder's distance coding; matching builds therefore use the

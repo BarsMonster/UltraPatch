@@ -3,23 +3,19 @@
 # SPDX-License-Identifier: MIT
 
 # End-to-end regression for the Makefile's shared wire override path. The caller recursively
-# rebuilds the full host tool with nondefault WIRE_CONFIG_FLAGS. Besides compiling the source,
-# generated single-header, and Cortex-M0+ forms, this test applies alternate wires through both
-# host header forms and proves the alternate encoder emits a wire the default encoder does not.
+# rebuilds the full host tool with nondefault WIRE_CONFIG_FLAGS, compiles the public decoder
+# header set for host and Cortex-M0+, and proves the alternate encoder changes the expected wire.
 set -eu
 
 : "${CC:?check_wire_config.sh: CC not set - invoke through make check-wire-config}"
 : "${CFLAGS:?check_wire_config.sh: CFLAGS not set - invoke through make check-wire-config}"
 : "${DECODER_CFLAGS:?check_wire_config.sh: DECODER_CFLAGS not set - invoke through make check-wire-config}"
-: "${SINGLE_DECODER_CFLAGS:?check_wire_config.sh: SINGLE_DECODER_CFLAGS not set - invoke through make check-wire-config}"
-: "${DECODER_SINGLE_HDR:?check_wire_config.sh: DECODER_SINGLE_HDR not set - invoke through make check-wire-config}"
 : "${DEC_STANDALONE_SRCS:?check_wire_config.sh: DEC_STANDALONE_SRCS not set - invoke through make check-wire-config}"
 : "${DEC_DEMO_DEFINES:?check_wire_config.sh: DEC_DEMO_DEFINES not set - invoke through make check-wire-config}"
 : "${ARM_CC:?check_wire_config.sh: ARM_CC not set - invoke through make check-wire-config}"
 : "${ARM_SIZE:?check_wire_config.sh: ARM_SIZE not set - invoke through make check-wire-config}"
 : "${ARM_OBJDUMP:?check_wire_config.sh: ARM_OBJDUMP not set - invoke through make check-wire-config}"
 : "${ARM_DEC_FLAGS:?check_wire_config.sh: ARM_DEC_FLAGS not set - invoke through make check-wire-config}"
-: "${ARM_SINGLE_DEC_FLAGS:?check_wire_config.sh: ARM_SINGLE_DEC_FLAGS not set - invoke through make check-wire-config}"
 : "${ARM_OBJECT_OPT:?check_wire_config.sh: ARM_OBJECT_OPT not set - invoke through make check-wire-config}"
 : "${ARM_BSS_HARD_CAP:?check_wire_config.sh: ARM_BSS_HARD_CAP not set - invoke through make check-wire-config}"
 : "${ARM_LINK_STUBS:?check_wire_config.sh: ARM_LINK_STUBS not set - invoke through make check-wire-config}"
@@ -41,27 +37,6 @@ set -eu
     echo "wire-config probe reused the default-profile encoder" >&2
     exit 2
 }
-case "$DECODER_SINGLE_HDR" in
-    /*) ;;
-    *) echo "check_wire_config.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
-esac
-[ -f "$DECODER_SINGLE_HDR" ] || {
-    echo "check_wire_config.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
-    exit 2
-}
-case " $SINGLE_DECODER_CFLAGS " in
-    *" -Isrc "*|*" -I src "*)
-        echo "check_wire_config.sh: single-header host flags must not search src" >&2
-        exit 2
-        ;;
-esac
-case " $ARM_SINGLE_DEC_FLAGS " in
-    *" -Isrc "*|*" -I src "*)
-        echo "check_wire_config.sh: single-header ARM flags must not search src" >&2
-        exit 2
-        ;;
-esac
-single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
 
 . "$(dirname "$0")/tempdir.sh"
 
@@ -132,55 +107,20 @@ EOF
 # shellcheck disable=SC2086
 "$CC" $DECODER_CFLAGS -I"$tmp" -include "$tmp/decoder_wire_config_assert.h" \
     -c "$tmp/source_wire_config.c" -o "$tmp/source_wire_config.o"
-cat > "$tmp/single_wire_config.c" <<'EOF'
-#include <stdint.h>
-#include DECODER_SINGLE_HEADER
-#include "wire_config_assert.h"
-#if !defined(PATCH_IMAGE_BASE) || PATCH_IMAGE_BASE != 0u
-#error "repository decoder integration flags did not reach the generated decoder path"
-#endif
-#if !defined(PATCH_IMAGE_CAPACITY) || PATCH_IMAGE_CAPACITY != 67108864u
-#error "repository decoder capacity did not reach the generated decoder path"
-#endif
-uint8_t flash_read(uint32_t addr){ (void)addr; return 0xffu; }
-void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
-static int next(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PULL_END; }
-int main(void){ PatchApply state; return patch_apply_run(&state,next,0); }
-EOF
-# shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS "$single_header_define" "$tmp/single_wire_config.c" \
-    -Wl,--gc-sections -o "$tmp/single_wire_config"
 
-# Cross-compile and link the actual product integration shape for both packaging forms through
-# the same tracked TU as check-arm/check-stack. Static PatchApply storage makes the alternate
-# SRAM cost visible; source/single equality proves the generated artifact is identical.
+# Cross-compile and link the actual product integration shape through the same tracked TU as
+# check-arm/check-stack. Static PatchApply storage makes the alternate SRAM cost visible.
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -I"$tmp" -include "$tmp/wire_config_assert.h" \
     -DDECODER_INTEGRATION_STATIC -c "$DECODER_INTEGRATION_TU" -o "$tmp/arm_source.o"
 # shellcheck disable=SC2086
-"$ARM_CC" $ARM_SINGLE_DEC_FLAGS $ARM_OBJECT_OPT "$single_header_define" \
-    -include "$tmp/wire_config_assert.h" -DDECODER_INTEGRATION_STATIC \
-    -c "$DECODER_INTEGRATION_TU" -o "$tmp/arm_single.o"
-# shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -c "$ARM_LINK_STUBS" -o "$tmp/arm_link_stubs.o"
-for form in source single; do
-    # shellcheck disable=SC2086
-    "$ARM_CC" $ARM_LINK_FLAGS "$tmp/arm_$form.o" "$tmp/arm_link_stubs.o" \
-        $ARM_LINK_LIBS -o "$tmp/arm_$form.elf"
-done
+# shellcheck disable=SC2086
+"$ARM_CC" $ARM_LINK_FLAGS "$tmp/arm_source.o" "$tmp/arm_link_stubs.o" \
+    $ARM_LINK_LIBS -o "$tmp/arm_source.elf"
 arm_size_triplet(){ "$ARM_SIZE" "$1" | awk 'NR==2 { print $1 "/" $2 "/" $3 }'; }
 arm_obj_source=$(arm_size_triplet "$tmp/arm_source.o")
-arm_obj_single=$(arm_size_triplet "$tmp/arm_single.o")
 arm_link_source=$(arm_size_triplet "$tmp/arm_source.elf")
-arm_link_single=$(arm_size_triplet "$tmp/arm_single.elf")
-[ "$arm_obj_source" = "$arm_obj_single" ] || {
-    echo "alternate ARM source/single object sizes differ: $arm_obj_source != $arm_obj_single" >&2
-    exit 1
-}
-[ "$arm_link_source" = "$arm_link_single" ] || {
-    echo "alternate ARM source/single linked sizes differ: $arm_link_source != $arm_link_single" >&2
-    exit 1
-}
 check_arm_storage(){
     arm_form=$1
     arm_kind=$2
@@ -197,22 +137,18 @@ check_arm_storage(){
     fi
 }
 check_arm_storage source object "$arm_obj_source"
-check_arm_storage single object "$arm_obj_single"
 check_arm_storage source linked "$arm_link_source"
-check_arm_storage single linked "$arm_link_single"
 
-for form in source single; do
-    "$ARM_OBJDUMP" -d "$tmp/arm_$form.o" > "$tmp/arm_$form.dump"
-    if grep -Eq '\b(udiv|sdiv)\b' "$tmp/arm_$form.dump"; then
-        echo "alternate ARM $form object contains a hardware divide instruction" >&2
-        exit 1
-    fi
-    arm_soft_div=$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$tmp/arm_$form.dump" || true)
-    if [ "$arm_soft_div" -ne 0 ]; then
-        echo "alternate ARM $form object has software divide/mod references: actual=$arm_soft_div" >&2
-        exit 1
-    fi
-done
+"$ARM_OBJDUMP" -d "$tmp/arm_source.o" > "$tmp/arm_source.dump"
+if grep -Eq '\b(udiv|sdiv)\b' "$tmp/arm_source.dump"; then
+    echo "alternate ARM decoder contains a hardware divide instruction" >&2
+    exit 1
+fi
+arm_soft_div=$(grep -Ec '__aeabi_.*div|__aeabi_.*mod' "$tmp/arm_source.dump" || true)
+if [ "$arm_soft_div" -ne 0 ]; then
+    echo "alternate ARM decoder has software divide/mod references: actual=$arm_soft_div" >&2
+    exit 1
+fi
 arm_obj_bss=${arm_obj_source##*/}
 arm_link_bss=${arm_link_source##*/}
 arm_bss_margin=$((ARM_BSS_HARD_CAP - arm_link_bss))
@@ -223,9 +159,6 @@ arm_bss_margin=$((ARM_BSS_HARD_CAP - arm_link_bss))
 # shellcheck disable=SC2086
 "$CC" $DECODER_CFLAGS -O0 test-bench/decoder-contract.c \
     -Wl,--gc-sections -o "$tmp/contract-source"
-# shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS -O0 "$single_header_define" \
-    test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-single"
 
 gen_img(){ python3 scripts/synth_gen.py img "$@"; }
 gen_role(){ python3 scripts/synth_gen.py role "$@"; }
@@ -260,10 +193,7 @@ encode_and_apply(){
         "$ULTRAPATCH" "$from" "$to" "$tmp/$name.blob" >/dev/null
     fi
     "$tmp/contract-source" success "$from" "$to" "$tmp/$name.blob" \
-        >"$tmp/$name.source.out"
-    "$tmp/contract-single" success "$from" "$to" "$tmp/$name.blob" \
-        >"$tmp/$name.single.out"
-    cmp "$tmp/$name.source.out" "$tmp/$name.single.out"
+        >"$tmp/$name.out"
     roundtrips=$((roundtrips + 1))
 }
 
@@ -341,7 +271,7 @@ grep -Eq 'from image too large for this decoder build: 1048577 > 1048576$' \
 
 # A test-only one-entry de-relocation dictionary gives both resource outcomes: the 256-byte
 # prefix rejects while all four output rows are still buffered, whereas the full one-face update
-# rejects after physical writes. Both public header forms must report the same behavior.
+# rejects after physical writes.
 dd if="$base" of="$tmp/resource.from" bs=256 count=1 status=none
 dd if="$one" of="$tmp/resource.to" bs=256 count=1 status=none
 "$ULTRAPATCH" "$tmp/resource.from" "$tmp/resource.to" "$tmp/resource.blob" >/dev/null
@@ -349,25 +279,20 @@ capflags='-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1'
 # shellcheck disable=SC2086
 "$CC" $DECODER_CFLAGS -O0 $capflags test-bench/decoder-contract.c \
     -Wl,--gc-sections -o "$tmp/cap-source"
-# shellcheck disable=SC2086
-"$CC" $SINGLE_DECODER_CFLAGS -O0 $capflags "$single_header_define" \
-    test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-single"
 for mode in resource-clean resource-touched; do
     if [ "$mode" = resource-clean ]; then
         rfrom="$tmp/resource.from"; rto="$tmp/resource.to"; rblob="$tmp/resource.blob"
     else
         rfrom="$base"; rto="$one"; rblob="$tmp/oneface_grow.blob"
     fi
-    "$tmp/cap-source" "$mode" "$rfrom" "$rto" "$rblob" >"$tmp/$mode.source.out"
-    "$tmp/cap-single" "$mode" "$rfrom" "$rto" "$rblob" >"$tmp/$mode.single.out"
-    cmp "$tmp/$mode.source.out" "$tmp/$mode.single.out"
+    "$tmp/cap-source" "$mode" "$rfrom" "$rto" "$rblob" >"$tmp/$mode.out"
 done
 
 [ "$roundtrips" -eq 5 ]
-echo "wire_config_roundtrips=$roundtrips (one-face x2 + long-window + row + degrade; source + single)"
+echo "wire_config_roundtrips=$roundtrips (one-face x2 + long-window + row + degrade)"
 echo "wire_config_long_window=$alternate_long/$default_long (alternate/default; W10=REJECT)"
 echo "wire_config_row_depth=OK (D4 journal=0; D2=REJECT)"
 echo "wire_config_max_image=OK (1048577 rejected by 1048576 cap)"
-echo "wire_config_resource=OK (clean + touched; source + single)"
-echo "wire_config_arm=$arm_obj_source object $arm_link_source linked (source=single; divide=0; bss_margin=$arm_bss_margin)"
-echo "wire_config_override=OK (full encoder + source/generated/ARM decoders; behavioral)"
+echo "wire_config_resource=OK (clean + touched)"
+echo "wire_config_arm=$arm_obj_source object $arm_link_source linked (divide=0; bss_margin=$arm_bss_margin)"
+echo "wire_config_override=OK (full encoder + host/ARM public-header decoders; behavioral)"

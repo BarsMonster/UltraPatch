@@ -30,14 +30,7 @@
         "version": "collect2 version 14.2.1 20241119"
       },
       "compile_flags": {
-        "single_header": [
-          "-mcpu=cortex-m0plus",
-          "-mthumb",
-          "-DCORTEX_M0",
-          "-DPATCH_IMAGE_BASE=0u",
-          "-DPATCH_IMAGE_CAPACITY=67108864u"
-        ],
-        "source_headers": [
+        "decoder_headers": [
           "-mcpu=cortex-m0plus",
           "-mthumb",
           "-DCORTEX_M0",

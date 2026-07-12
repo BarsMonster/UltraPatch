@@ -23,8 +23,8 @@ package-install step intentionally does not use `sudo`.
 
 The host `gcc` builds the `ultrapatch` encoder CLI and the host decoder wrapper
 (the Makefile uses `$(CROSS_COMPILE)gcc`, i.e. plain `gcc`, when `CROSS_COMPILE`
-is empty); `python3` drives the single-header generator and the stack-bound
-analysis that several `make gate` legs run. The GNU Arm compiler, binutils, and
+is empty); `python3` drives the build/profile checks and stack-bound analysis
+that several `make gate` legs run. The GNU Arm compiler, binutils, and
 Newlib packages provide the Cortex-M0+ compile, link, size, divide-policy, and
 stack-analysis tools. Clang is the required second host compiler for the release
 checks.
@@ -45,9 +45,8 @@ external test wrapper.
 
 Among persistent build directories, `make clean` removes only the selected
 profile under the canonical `.build` tree; `make clean-all` removes that whole
-canonical tree. Both also remove the default generated single header and any
-legacy root CLI. Make deliberately refuses to recursively clean custom or
-external `BUILD_DIR` paths.
+canonical tree. Both also remove any legacy root CLI. Make deliberately refuses
+to recursively clean custom or external `BUILD_DIR` paths.
 
 `make check-build-profile` is a separate regression for this isolation. It
 builds colliding configurations and verifies that they resolve to distinct,

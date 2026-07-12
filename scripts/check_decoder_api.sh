@@ -2,16 +2,13 @@
 # Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# Run the same in-memory public-API contract against the source decoder headers and
-# the generated single-header distribution.  A deliberately undersized de-relocation
-# dictionary build additionally proves both clean (pre-write) and recovery-required
-# (post-write) REJ_RESOURCE outcomes without weakening the production configuration.
+# Run the in-memory public-API contract against the shipped decoder header set. A deliberately
+# undersized de-relocation dictionary build additionally proves both clean (pre-write) and
+# recovery-required (post-write) REJ_RESOURCE outcomes without weakening production settings.
 set -eu
 
 : "${CC:?check_decoder_api.sh: CC not set — invoke through make check-decoder-contract}"
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
-: "${SINGLE_DECODER_CFLAGS:?check_decoder_api.sh: SINGLE_DECODER_CFLAGS not set}"
-: "${DECODER_SINGLE_HDR:?check_decoder_api.sh: DECODER_SINGLE_HDR not set}"
 : "${DECODER_PUBLIC_HDRS:?check_decoder_api.sh: DECODER_PUBLIC_HDRS not set}"
 : "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
 NM=${NM:-nm}
@@ -19,22 +16,6 @@ NM=${NM:-nm}
     echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
     exit 2
 }
-case "$DECODER_SINGLE_HDR" in
-    /*) ;;
-    *) echo "check_decoder_api.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
-esac
-[ -f "$DECODER_SINGLE_HDR" ] || {
-    echo "check_decoder_api.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
-    exit 2
-}
-case " $SINGLE_DECODER_CFLAGS " in
-    *" -Isrc "*|*" -I src "*)
-        echo "check_decoder_api.sh: single-header flags must not search src" >&2
-        exit 2
-        ;;
-esac
-single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
-
 FIX="${FIXTURES:-test-bench/fixtures}"
 base="$FIX/v0_base/watch.bin"
 one="$FIX/v1_one_face/watch.bin"
@@ -75,17 +56,13 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # These are behavioral harnesses; production -O2 and -Os compilation is already enforced
     # by the portable/stack/ARM legs.  -O0 materially reduces concurrent gate compile load.
     common="$CFLAGS -O0"
-    single_common="$SINGLE_DECODER_CFLAGS -O0"
 
     # Compile the decoder exactly as an integrator can: the only PatchApply object is an
     # automatic local in decoder_compiled_contract_apply().  Auditing the resulting objects
     # closes the gap left by the lexical no-global/no-allocation checks above: macros and
     # attributes can hide storage or allocator calls from a source grep.
     "$CC" $common -c test-bench/decoder-compiled-contract.c \
-        -o "$tmp/compiled-contract-source.o"
-    "$CC" $single_common "$single_header_define" \
-        -c test-bench/decoder-compiled-contract.c \
-        -o "$tmp/compiled-contract-single.o"
+        -o "$tmp/compiled-contract.o"
 
     audit_decoder_object(){
         obj=$1
@@ -133,37 +110,28 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
             exit 1
         fi
     }
-    audit_decoder_object "$tmp/compiled-contract-source.o" source-header
-    audit_decoder_object "$tmp/compiled-contract-single.o" single-header
+    audit_decoder_object "$tmp/compiled-contract.o" public-header
 
     # The former multi-TU linkage macros are rejected explicitly. Without this contract an old
     # declarations-only caller could silently start compiling a private decoder copy after the
     # mode's removal.
-    for form in source single; do
-        if [ "$form" = source ]; then
-            linkage_flags="$common"
-        else
-            linkage_flags="$single_common $single_header_define"
+    for mode in ULTRAPATCH_IMPLEMENTATION ULTRAPATCH_DECLARATIONS_ONLY; do
+        if "$CC" $common -D"$mode" -c test-bench/decoder-compiled-contract.c \
+             -o "$tmp/obsolete-$mode.o" \
+             >"$tmp/obsolete-$mode.out" 2>"$tmp/obsolete-$mode.err"; then
+            echo "decoder accepted removed linkage mode $mode" >&2
+            exit 1
         fi
-        for mode in ULTRAPATCH_IMPLEMENTATION ULTRAPATCH_DECLARATIONS_ONLY; do
-            if "$CC" $linkage_flags -D"$mode" -c test-bench/decoder-compiled-contract.c \
-                 -o "$tmp/obsolete-$form-$mode.o" \
-                 >"$tmp/obsolete-$form-$mode.out" 2>"$tmp/obsolete-$form-$mode.err"; then
-                echo "$form decoder accepted removed linkage mode $mode" >&2
-                exit 1
-            fi
-            if ! grep -q 'external decoder linkage was removed' \
-                 "$tmp/obsolete-$form-$mode.err"; then
-                echo "$form decoder rejected $mode without the migration diagnostic" >&2
-                cat "$tmp/obsolete-$form-$mode.err" >&2
-                exit 1
-            fi
-        done
+        if ! grep -q 'external decoder linkage was removed' "$tmp/obsolete-$mode.err"; then
+            echo "decoder rejected $mode without the migration diagnostic" >&2
+            cat "$tmp/obsolete-$mode.err" >&2
+            exit 1
+        fi
     done
-    echo "decoder_linkage_contract=OK (internal header-only; obsolete external modes rejected; source + single)"
+    echo "decoder_linkage_contract=OK (internal header-only; obsolete external modes rejected)"
 
     # Snapshot preprocessor state with the decoder's system prerequisites already loaded,
-    # then include each packaging form. No existing consumer macro may be removed or changed.
+    # then include the public entrypoint. No existing consumer macro may be removed or changed.
     # The only additions are this exact public configuration/include-guard allowlist; every
     # decoder-private implementation macro must therefore be sealed by patch_apply.h.
     {
@@ -176,95 +144,63 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
         printf '%s\n' UP_PATCH_APPLY_H UP_PATCH_CONFIG_H UP_RC_MODELS_H WINDOW_LOG
     } | LC_ALL=C sort > "$tmp/public-macro-allowlist"
 
-    "$CC" $common -dM -E "$tmp/macro-before.c" | LC_ALL=C sort > "$tmp/macros-source-before"
+    "$CC" $common -dM -E "$tmp/macro-before.c" | LC_ALL=C sort > "$tmp/macros-before"
     "$CC" $common -dM -E test-bench/decoder-compiled-contract.c | \
-        LC_ALL=C sort > "$tmp/macros-source-after"
-    "$CC" $single_common "$single_header_define" -dM -E "$tmp/macro-before.c" | \
-        LC_ALL=C sort > "$tmp/macros-single-before"
-    "$CC" $single_common "$single_header_define" -dM -E \
-        test-bench/decoder-compiled-contract.c | LC_ALL=C sort > "$tmp/macros-single-after"
-
-    for form in source single; do
-        comm -23 "$tmp/macros-$form-before" "$tmp/macros-$form-after" \
-            > "$tmp/macros-$form-removed"
-        if [ -s "$tmp/macros-$form-removed" ]; then
-            echo "$form decoder header removed or changed consumer macros:" >&2
-            cat "$tmp/macros-$form-removed" >&2
-            exit 1
-        fi
-        comm -13 "$tmp/macros-$form-before" "$tmp/macros-$form-after" \
-            > "$tmp/macros-$form-added"
-        awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
-            "$tmp/macros-$form-before" | LC_ALL=C sort -u > "$tmp/macros-$form-before-names"
-        comm -23 "$tmp/public-macro-allowlist" "$tmp/macros-$form-before-names" \
-            > "$tmp/macros-$form-expected-names"
-        awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
-            "$tmp/macros-$form-added" | LC_ALL=C sort -u > "$tmp/macros-$form-added-names"
-        if ! cmp -s "$tmp/macros-$form-expected-names" "$tmp/macros-$form-added-names"; then
-            echo "$form decoder header macro delta is outside the public allowlist" >&2
-            echo "expected added macro names:" >&2
-            cat "$tmp/macros-$form-expected-names" >&2
-            echo "actual added macros:" >&2
-            cat "$tmp/macros-$form-added" >&2
-            exit 1
-        fi
-    done
-    if ! cmp -s "$tmp/macros-source-added" "$tmp/macros-single-added"; then
-        echo "source and single-header decoder macro deltas differ" >&2
-        diff -u "$tmp/macros-source-added" "$tmp/macros-single-added" >&2 || :
+        LC_ALL=C sort > "$tmp/macros-after"
+    comm -23 "$tmp/macros-before" "$tmp/macros-after" > "$tmp/macros-removed"
+    if [ -s "$tmp/macros-removed" ]; then
+        echo "decoder header removed or changed consumer macros:" >&2
+        cat "$tmp/macros-removed" >&2
         exit 1
     fi
-    echo "decoder_compiled_contract=OK (O0 source + single: automatic state, symbols + macros)"
+    comm -13 "$tmp/macros-before" "$tmp/macros-after" > "$tmp/macros-added"
+    awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
+        "$tmp/macros-before" | LC_ALL=C sort -u > "$tmp/macros-before-names"
+    comm -23 "$tmp/public-macro-allowlist" "$tmp/macros-before-names" \
+        > "$tmp/macros-expected-names"
+    awk '$1 == "#define" { name=$2; sub(/\(.*/, "", name); print name }' \
+        "$tmp/macros-added" | LC_ALL=C sort -u > "$tmp/macros-added-names"
+    if ! cmp -s "$tmp/macros-expected-names" "$tmp/macros-added-names"; then
+        echo "decoder header macro delta is outside the public allowlist" >&2
+        echo "expected added macro names:" >&2
+        cat "$tmp/macros-expected-names" >&2
+        echo "actual added macros:" >&2
+        cat "$tmp/macros-added" >&2
+        exit 1
+    fi
+    echo "decoder_compiled_contract=OK (O0: automatic state, symbols + macros)"
 
-    "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision-source.o"
-    "$CC" $single_common "$single_header_define" \
-        -c test-bench/decoder-collision.c -o "$tmp/collision-single.o"
-    echo "decoder_namespace_contract=OK (source + single header)"
+    "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision.o"
+    echo "decoder_namespace_contract=OK"
     "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
     "$tmp/nvm-geometry-probe"
-    "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-source"
-    "$CC" $single_common "$single_header_define" test-bench/decoder-contract.c \
-        -Wl,--gc-sections -o "$tmp/contract-single"
-
-    "$tmp/contract-source" $args >"$tmp/source.out"
-    "$tmp/contract-single" $args >"$tmp/single.out"
-    cmp "$tmp/source.out" "$tmp/single.out"
+    "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract"
+    "$tmp/contract" $args >"$tmp/contract.out"
 
     capflags="-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
-    "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap-source"
-    "$CC" $single_common $capflags "$single_header_define" test-bench/decoder-contract.c \
-        -Wl,--gc-sections -o "$tmp/cap-single"
-    for decoder in "$tmp/cap-source" "$tmp/cap-single"; do
-        "$decoder" resource-clean "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
-        "$decoder" resource-touched "$base" "$one" "$tmp/grow.blob" >/dev/null
-    done
+    "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap"
+    "$tmp/cap" resource-clean "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
+    "$tmp/cap" resource-touched "$base" "$one" "$tmp/grow.blob" >/dev/null
 
     # A nonzero absolute base plus a one-page partition exercises address translation and the
-    # oversized-envelope guard in both distributed header forms. Before the guard this crafted
+    # oversized-envelope guard. Before the guard this crafted
     # envelope caused one out-of-range CRC read; it must now reject with zero flash accesses.
     capacityflags="-UPATCH_IMAGE_BASE -UPATCH_IMAGE_CAPACITY \
         -DPATCH_IMAGE_BASE=0x08000000u -DPATCH_IMAGE_CAPACITY=256u"
     "$CC" $common $capacityflags test-bench/decoder-contract.c \
-        -Wl,--gc-sections -o "$tmp/capacity-source"
-    "$CC" $single_common $capacityflags "$single_header_define" \
-        test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/capacity-single"
-    "$tmp/capacity-source" capacity >"$tmp/capacity-source.out"
-    "$tmp/capacity-single" capacity >"$tmp/capacity-single.out"
-    cmp "$tmp/capacity-source.out" "$tmp/capacity-single.out"
-    "$tmp/capacity-source" success "$tmp/prefix.from" "$tmp/prefix.to" \
-        "$tmp/prefix.blob" >"$tmp/nonzero-source.out"
-    "$tmp/capacity-single" success "$tmp/prefix.from" "$tmp/prefix.to" \
-        "$tmp/prefix.blob" >"$tmp/nonzero-single.out"
-    cmp "$tmp/nonzero-source.out" "$tmp/nonzero-single.out"
+        -Wl,--gc-sections -o "$tmp/capacity"
+    "$tmp/capacity" capacity >"$tmp/capacity.out"
+    "$tmp/capacity" success "$tmp/prefix.from" "$tmp/prefix.to" \
+        "$tmp/prefix.blob" >"$tmp/nonzero.out"
 
-    cat "$tmp/source.out"
-    cat "$tmp/capacity-source.out"
-    cat "$tmp/nonzero-source.out"
-    echo "decoder_resource_contract=OK (clean + touched; source + single header)"
+    cat "$tmp/contract.out"
+    cat "$tmp/capacity.out"
+    cat "$tmp/nonzero.out"
+    echo "decoder_resource_contract=OK (clean + touched)"
 fi
 
 # The backend and byte callback are the only pointer-rich code in this contract.  One
-# source-header run under ASan+UBSan catches harness/decoder boundary mistakes.  It is a
+# public-header run under ASan+UBSan catches harness/decoder boundary mistakes. It is a
 # standalone target rather than concurrent with the CPU-saturated 290-pair gate.
 if [ "${DECODER_API_SANITIZE:-0}" = 1 ]; then
     "$CC" $CFLAGS -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \

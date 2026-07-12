@@ -80,10 +80,8 @@ release descriptor before forking its verification legs. It must report:
   freeze — an unexplained mismatch blocks release)
 - `model contract`: OK for shared model/default-cap invariants
 - `wire config override`: OK for one nondefault same-name/same-value override
-  across encoder plus source, generated, and Cortex-M0+ ARM decoder compile paths
-- ARM and stack packaging parity: the source-header set and the one canonical
-  generated header have identical object/linked footprints and both integration
-  shapes have identical static stack results
+  across encoder plus host and Cortex-M0+ ARM decoder compile paths
+- ARM object/linked footprint and both static/generic integration stack bounds
 - ARM integration shape and `.text/.data/.bss`
 - ARM soft-divide count
 - `matrix round-trips`: `256/256`
@@ -97,10 +95,7 @@ release descriptor before forking its verification legs. It must report:
 
 The driver also runs `make check-clang`, which uses the descriptor-pinned `CLANG`
 command for a warning-clean build, proves that its encoder emits the frozen wire,
-and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize`. Run
-`make decoder-header` only if explicitly
-refreshing the one-file device decoder artifact outside `make gate` (the gate
-refreshes the same canonical path before its parallel checks).
+and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize`.
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
@@ -138,20 +133,14 @@ generation/publication failures.
 ## Artifacts
 
 The release source artifact is the Git commit. The device decoder artifact is
-either the generated single header from `make decoder-header` or the decoder
-source header set rooted at `src/patch_apply.h`. The host tool is the unified
-`ultrapatch` CLI at the path printed by `make host-tool-path`; normal builds place
-it at `.build/<profile-id>/ultrapatch`. It is built from `src/patch_generate.c`,
-the `src/enc_*.c` subsystem modules, `src/patch_host_backend.c`, and the vendored
-`vendor/libdivsufsort/` sources; encode is its default mode, while `--decode`
-is the host reference/debug mode.
-
-The generated form is published atomically at `artifacts/patch_apply_single.h`:
-first creation uses mode `0644`, while replacement preserves an existing readable
-permission mode. All release checks consume this exact file rather than private
-per-test regenerations. The source-header and generated-header forms both emit the
-same internally linked decoder and are compiled and behaviorally exercised by the
-release contract.
+the three-file header set rooted at `src/patch_apply.h`, with `src/rc_models.h`
+and `src/patch_config.h` installed beside it. Integration code includes only
+`patch_apply.h`; it is not a self-contained amalgamation. The host tool is the
+unified `ultrapatch` CLI at the path printed by `make host-tool-path`; normal
+builds place it at `.build/<profile-id>/ultrapatch`. It is built from
+`src/patch_generate.c`, the `src/enc_*.c` subsystem modules,
+`src/patch_host_backend.c`, and the vendored `vendor/libdivsufsort/` sources;
+encode is its default mode, while `--decode` is the host reference/debug mode.
 
 For traceability, release notes should include:
 
@@ -161,8 +150,6 @@ For traceability, release notes should include:
 - `sha256sum test-bench/corpus.sha256`.
 - `sha256sum test-bench/foreign.sha256`.
 - `sha256sum test-bench/release-inventory.tsv`.
-- `sha256sum artifacts/patch_apply_single.h` when a one-file decoder header is
-  published.
 - `sha256sum artifacts/a1-corpus.tar.gz` when a corpus bundle is published.
 - `sha256sum toolchains/release-profile.json`.
 - The `release_profile` line from `make gate`.

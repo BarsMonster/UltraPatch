@@ -4,11 +4,7 @@
  *
  * Compile-only integration shapes shared by the ARM size, stack, and wire-config checks.
  */
-#ifdef DECODER_SINGLE_HEADER
-#include DECODER_SINGLE_HEADER
-#else
 #include "patch_apply.h"
-#endif
 
 #if defined(DECODER_INTEGRATION_STATIC) == defined(DECODER_INTEGRATION_GENERIC)
 #error "select exactly one decoder integration shape"

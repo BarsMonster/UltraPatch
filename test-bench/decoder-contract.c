@@ -2,9 +2,8 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Executable public-API contract for the header-only decoder.  This one source is
- * compiled against both src/patch_apply.h and the generated single-header artifact.
- * The flash backend deliberately lives here: the production decoder remains allocator-
+ * Executable public-API contract for the header-only decoder. The flash backend
+ * deliberately lives here: the production decoder remains allocator-
  * free and owns no globals, while the test can inspect every physical write.
  */
 #include <stdint.h>
@@ -28,11 +27,7 @@ static uint32_t test_corrupt_addr;
 static uint32_t test_reads;
 static uint32_t test_oob_reads;
 
-#ifdef DECODER_SINGLE_HEADER
-#include DECODER_SINGLE_HEADER
-#else
 #include "patch_apply.h"
-#endif
 
 uint8_t flash_read(uint32_t addr){
     uint32_t offset;

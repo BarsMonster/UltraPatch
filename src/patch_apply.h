@@ -13,6 +13,8 @@
 /*
  * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
  * Production solution; integration and release gates are documented under docs/.
+ * This is the only header application code includes. Install it beside the companion
+ * patch_config.h and rc_models.h headers; the public entrypoint is intentionally not amalgamated.
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
  * callback (which may block internally — e.g. poll a UART ring) and passes the blob —

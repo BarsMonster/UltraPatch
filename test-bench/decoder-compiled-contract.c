@@ -11,11 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#ifdef DECODER_SINGLE_HEADER
-#include DECODER_SINGLE_HEADER
-#else
 #include "patch_apply.h"
-#endif
 
 PatchApplyResult decoder_compiled_contract_apply(PatchPull next, void *ctx){
     PatchApply state;

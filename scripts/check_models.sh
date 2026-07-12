@@ -13,23 +13,6 @@ set -eu
 # from the real CFLAGS block. Direct invocation must therefore go through `make check-models`.
 : "${CC:?check_models.sh: CC not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
 : "${CFLAGS:?check_models.sh: CFLAGS not set — invoke via 'make check-models' (it supplies CC/CFLAGS)}"
-: "${SINGLE_DECODER_CFLAGS:?check_models.sh: SINGLE_DECODER_CFLAGS not set}"
-: "${DECODER_SINGLE_HDR:?check_models.sh: DECODER_SINGLE_HDR not set}"
-case "$DECODER_SINGLE_HDR" in
-    /*) ;;
-    *) echo "check_models.sh: DECODER_SINGLE_HDR must be absolute" >&2; exit 2 ;;
-esac
-[ -f "$DECODER_SINGLE_HDR" ] || {
-    echo "check_models.sh: canonical decoder header is missing: $DECODER_SINGLE_HDR" >&2
-    exit 2
-}
-case " $SINGLE_DECODER_CFLAGS " in
-    *" -Isrc "*|*" -I src "*)
-        echo "check_models.sh: single-header flags must not search src" >&2
-        exit 2
-        ;;
-esac
-single_header_define="-DDECODER_SINGLE_HEADER=\"$DECODER_SINGLE_HDR\""
 
 . "$(dirname "$0")/tempdir.sh"
 
@@ -386,41 +369,6 @@ EOF
 "$tmp/range_sink_contract"
 echo "range_sink_contract=OK (carry chain + randomized material/count equivalence)"
 
-# Exercise the same canonical artifact as every other decoder leg, compiling and running the
-# identical oracle suite without any encoder headers or source-header search path.
-cat > "$tmp/single_model_probe.c" <<'EOF'
-#include <stdint.h>
-#include DECODER_SINGLE_HEADER
-
-#define CHECK(x) do { if(!(x)) return __LINE__; } while(0)
-#include "seed_prob_probe.inc"
-
-uint8_t flash_read(uint32_t addr){ return (uint8_t)addr; }
-void flash_write_page(uint32_t addr, const uint8_t page[OUTROW]){ (void)addr; (void)page; }
-static int no_bytes_single(void *ctx, uint8_t *out){ (void)ctx; (void)out; return PATCH_PULL_END; }
-
-int main(int argc, char **argv){
-    (void)argv;
-    int r=check_seed_prob();
-    uint8_t bl[4];
-    if(r) return r;
-    CHECK(rc_i32_from_u32(0u)==0);
-    CHECK(rc_i32_from_u32(0x7fffffffu)==INT32_MAX);
-    CHECK(rc_i32_from_u32(0x80000000u)==INT32_MIN);
-    CHECK(rc_unzz32_value(UINT32_MAX)==INT32_MIN);
-    rc_bl_pack(0x800000u,bl);
-    CHECK(rc_bl_imm24s((uint16_t)(bl[0]|((uint16_t)bl[1]<<8)),
-                       (uint16_t)(bl[2]|((uint16_t)bl[3]<<8)))==-8388608);
-    CHECK(rc_rice_feasible((1u<<20)-1u,0u));
-    CHECK(rc_rice_feasible(1u<<20,0u));
-    CHECK(!rc_rice_feasible((1u<<20)+1u,0u));
-    if(argc==12345){ PatchApply pa; return patch_apply_run(&pa,no_bytes_single,0); }
-    return 0;
-}
-EOF
-"$CC" $SINGLE_DECODER_CFLAGS "$single_header_define" \
-    "$tmp/single_model_probe.c" -o "$tmp/single_model_probe"
-"$tmp/single_model_probe"
-echo "model_seed_prob=OK (source + generated single header)"
+echo "model_seed_prob=OK (shared encoder/decoder model)"
 echo "model_rice_cap=OK (boundary + crafted fit + emission feasibility)"
 echo "model_contract=OK"

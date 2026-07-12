@@ -5,8 +5,9 @@ Final A1 firmware patcher for the Sensor Watch target.
 Production code lives under `src/`, with third-party code under `vendor/`:
 
 - `src/patch_apply.h`: reusable header-only streaming in-place decoder entry point;
-  ship it with `src/rc_models.h` and `src/patch_config.h`, or generate the
-  single public decoder header with `make decoder-header`.
+  ship it beside `src/rc_models.h` and `src/patch_config.h`. Integration code
+  includes only `patch_apply.h`; that entrypoint uses normal local includes and
+  is not a self-contained amalgamation.
 - `src/patch_host_backend.c`: shared host reference-decoder backend used by
   `ultrapatch --decode` and encoder self-verification, including the host NVM
   emulator.
@@ -28,18 +29,12 @@ make
 make check
 ```
 
-Generate the standalone public decoder header:
+To integrate the decoder, install `patch_apply.h`, `rc_models.h`, and
+`patch_config.h` in the same include directory, then include only:
 
-```sh
-make decoder-header
+```c
+#include "patch_apply.h"
 ```
-
-By default this writes `artifacts/patch_apply_single.h`, containing
-`patch_config.h`, `rc_models.h`, and `patch_apply.h` in dependency order. The
-generator publishes a new artifact as mode `0644` (and preserves an existing
-readable mode on replacement). The release gate generates this one canonical
-path before its parallel legs start; model, API, portability, wire, ARM-size,
-and stack tests all consume that exact file without the `src/` include path.
 
 `WIRE_CONFIG_FLAGS` is the single repository build path for wire-affecting
 overrides and defaults to `-DCORTEX_M0`. Encoder and decoder builds **MUST** use
@@ -112,8 +107,8 @@ supplied directories, and provide or disable the matching manifests. The
 partial, or mutually inconsistent corpus still fails the gate deterministically.
 `make check-build-profile` separately proves concurrent GCC, Clang, and
 alternate-flag builds cannot collide. `make gate` validates the checked release
-profile, then also runs `make check-decoder-contract` (source-header-set and
-generated-single-header/no-globals/no-heap
+profile, then also runs `make check-decoder-contract` (public-header-set,
+integration-include/no-globals/no-heap
 decoder API contract), `make check-malformed` (a deterministic reject-regression
 suite for malformed envelopes, truncations, corrupt bodies, and wrong-base
 application), `make check-edge` (synthetic edge-input pairs: empty/tiny/equal/
@@ -144,9 +139,9 @@ verification.
 
 Device integration contract:
 
-- Include either generated `artifacts/patch_apply_single.h`, or
-  `src/patch_apply.h` with its two support headers beside it on the include
-  path, in one update module. Allocate a caller-owned `PatchApply` state object.
+- Install `src/patch_apply.h`, `src/rc_models.h`, and `src/patch_config.h`
+  together, then include only `patch_apply.h` from one update module. Allocate
+  a caller-owned `PatchApply` state object.
 - Define `PATCH_IMAGE_BASE` as the aligned absolute device address of the
   patchable image (`0` in repository host tests), and define the page-aligned
   `PATCH_IMAGE_CAPACITY` as the complete physical patch partition size from that
