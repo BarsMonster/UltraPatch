@@ -142,22 +142,31 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     done
     echo "decoder_linkage_contract=OK (internal header-only; obsolete external modes rejected)"
 
-    # Snapshot preprocessor state with the decoder's system prerequisites already loaded,
-    # then include the public entrypoint. No existing consumer macro may be removed or changed.
+    # Snapshot preprocessor state with the decoder's system prerequisites and representative
+    # former-private-name sentinels already loaded, then include the public entrypoint. No existing
+    # consumer macro may be removed or changed.
     # The only additions are this exact public configuration/include-guard allowlist; every
     # decoder-private implementation macro must therefore be sealed by patch_apply.h.
     {
         printf '%s\n' '#include <stddef.h>'
         printf '%s\n' '#include <stdint.h>'
         printf '%s\n' '#include <string.h>'
+        printf '%s\n' '#define RING 7u' '#define MASK 3u' '#define ARENA_BYTES 11u'
+        printf '%s\n' '#define ULEB32_OVERFLOW(sh,b) ((sh)==(b))'
+        printf '%s\n' '#define BT_PROBS 13u' '#define BT_BYTES 17u' '#define UG_CTX 19'
+        printf '%s\n' '#define UG_C(x) ((x)+23)' '#define UG_GAMMA_MANT 29'
+        printf '%s\n' '#define SMAP_CAP 31' '#define LIT0_CTX 37' '#define IDX_CTX 41'
+        printf '%s\n' '#define DR_HIT_INIT 43u'
     } > "$tmp/macro-before.c"
+    cp "$tmp/macro-before.c" "$tmp/macro-after.c"
+    printf '%s\n' '#include "patch_apply.h"' >> "$tmp/macro-after.c"
     {
         printf '%s\n' DR_KCAP_BL DR_KCAP_EX JSLOTS MAX_IMAGE OPC_CAP OUTROW OUTROW_DEPTH
         printf '%s\n' UP_PATCH_APPLY_H UP_PATCH_CONFIG_H UP_RC_MODELS_H WINDOW_LOG
     } | LC_ALL=C sort > "$tmp/public-macro-allowlist"
 
     "$CC" $common -dM -E "$tmp/macro-before.c" | LC_ALL=C sort > "$tmp/macros-before"
-    "$CC" $common -dM -E test-bench/decoder-compiled-contract.c | \
+    "$CC" $common -dM -E "$tmp/macro-after.c" | \
         LC_ALL=C sort > "$tmp/macros-after"
     comm -23 "$tmp/macros-before" "$tmp/macros-after" > "$tmp/macros-removed"
     if [ -s "$tmp/macros-removed" ]; then
@@ -190,8 +199,6 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     grep -q 'wire constants are owned by patch_config.h' "$tmp/override.err"
     echo "decoder_wire_constants=OK (shared config; production overrides rejected)"
 
-    "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision.o"
-    echo "decoder_namespace_contract=OK"
     "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
     "$tmp/nvm-geometry-probe"
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract"
