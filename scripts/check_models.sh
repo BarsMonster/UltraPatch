@@ -317,8 +317,9 @@ int main(void){
     Token *v=(Token *)xcalloc(n,sizeof(*v));
     TokenVec tv={v,n,n};
     up_UGRice g,before_g;
-    REnc rc,before;
-    Buf out;
+    up_UGGamma gg,gg_before,gm,gc;
+    REnc rc,before,mr,cr;
+    Buf out,mout,cout;
     int k,r;
 
     ugr_init_e(&g,0);
@@ -327,14 +328,39 @@ int main(void){
     CHECK(ugr_price(&g,RC_RICE_UNARY_MAX+1u)==UINT32_MAX);
     re_init(&rc);
     ugr_encode(&g,&rc,RC_RICE_UNARY_MAX);
-    CHECK(!rc.rice_overflow);
+    CHECK(!rc.coding_overflow);
     out=re_flush_opt(&rc); buf_free(&out);
     ugr_init_e(&g,0); re_init(&rc); before=rc; before_g=g;
     ugr_encode(&g,&rc,RC_RICE_UNARY_MAX+1u);
-    CHECK(rc.rice_overflow);
+    CHECK(rc.coding_overflow);
     CHECK(rc.low==before.low && rc.range==before.range && rc.cache==before.cache &&
           rc.csz==before.csz && rc.out.d==before.out.d && rc.out.n==before.out.n);
     CHECK(memcmp(&g,&before_g,sizeof(g))==0);
+    buf_free(&rc.out);
+
+    ugg_init_e(&gg);
+    CHECK(ugg_price(&gg,UINT32_MAX-1u)!=UINT32_MAX);
+    gg_before=gg;
+    CHECK(ugg_price(&gg,UINT32_MAX)==UINT32_MAX);
+    CHECK(memcmp(&gg,&gg_before,sizeof(gg))==0);
+
+    ugg_init_e(&gm); ugg_init_e(&gc); re_init(&mr); re_init_count(&cr);
+    ugg_encode(&gm,&mr,UINT32_MAX-1u);
+    ugg_encode(&gc,&cr,UINT32_MAX-1u);
+    CHECK(!mr.coding_overflow && !cr.coding_overflow);
+    CHECK(memcmp(&gm,&gc,sizeof(gm))==0);
+    CHECK(mr.low==cr.low && mr.range==cr.range && mr.cache==cr.cache &&
+          mr.csz==cr.csz && mr.out.n==cr.out.n);
+    mout=re_flush_opt(&mr); cout=re_flush_opt(&cr);
+    CHECK(mout.n==cout.n && cout.d==NULL && cout.cap==0);
+    buf_free(&mout);
+
+    ugg_init_e(&gg); re_init(&rc); before=rc; gg_before=gg;
+    ugg_encode(&gg,&rc,UINT32_MAX);
+    CHECK(rc.coding_overflow);
+    CHECK(rc.low==before.low && rc.range==before.range && rc.cache==before.cache &&
+          rc.csz==before.csz && rc.out.d==before.out.d && rc.out.n==before.out.n);
+    CHECK(memcmp(&gg,&gg_before,sizeof(gg))==0);
     buf_free(&rc.out);
 
     for(size_t i=0;i<n;i++) v[i]=(Token){'R',0,1,1};
@@ -371,4 +397,5 @@ echo "range_sink_contract=OK (carry chain + randomized material/count equivalenc
 
 echo "model_seed_prob=OK (shared encoder/decoder model)"
 echo "model_rice_cap=OK (boundary + crafted fit + emission feasibility)"
+echo "model_gamma_cap=OK (UINT32 boundary + material/count equivalence)"
 echo "model_contract=OK"

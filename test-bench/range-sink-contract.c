@@ -15,7 +15,7 @@ static int same_core(const REnc *material, const REnc *counted) {
     CHECK(material->range == counted->range);
     CHECK(material->cache == counted->cache);
     CHECK(material->csz == counted->csz);
-    CHECK(material->rice_overflow == counted->rice_overflow);
+    CHECK(material->coding_overflow == counted->coding_overflow);
     CHECK(material->out.n == counted->out.n);
     CHECK(counted->count_only && counted->out.d == NULL && counted->out.cap == 0);
     return 0;

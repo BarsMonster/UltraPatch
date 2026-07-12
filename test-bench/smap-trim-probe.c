@@ -4,6 +4,9 @@
 
 extern uint64_t smap_pretrim_comparisons;
 size_t smap_pretrim_probe(const uint32_t *weights, size_t n, size_t *survivors);
+int smap_wire_feasible_probe(const uint32_t *mb, const int32_t *mv, int mn);
+uint64_t smap_wire_price_probe(const uint32_t *mb, const int32_t *mv, int mn,
+                               const FieldInjArena *inj, int fwd);
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "smap-trim check failed at line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
@@ -35,10 +38,55 @@ static uint64_t now_ns(void) {
     return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
 }
 
+static int check_wire_feasibility(void) {
+    static FieldInj fields[] = {
+        { 0u, EV_BL, 4u, 7, 12u },
+        { 0u, EV_EX, 0u, -9, 20u }
+    };
+    FieldInjArena inj = { fields, 2u, 2u };
+    uint32_t first_max_b[] = { UINT32_MAX };
+    uint32_t first_maxm1_b[] = { UINT32_MAX - 1u };
+    uint32_t later_max_b[] = { 0u, UINT32_MAX };
+    uint32_t equal_b[] = { 1u, 1u };
+    uint32_t descending_b[] = { 2u, 1u };
+    uint32_t pre_cap_b[UP_SMAP_CAP + 1];
+    int32_t pre_cap_v[UP_SMAP_CAP + 1];
+    int32_t zero_v[] = { 0 };
+    int32_t later_v[] = { INT32_MAX, 1 };
+    int32_t min_v[] = { INT32_MIN };
+    uint64_t inf = UINT64_MAX / 2u;
+    uint64_t no_map = smap_wire_price_probe(NULL, NULL, 0, &inj, 1);
+
+    for (int i = 0; i <= UP_SMAP_CAP; i++) {
+        pre_cap_b[i] = (uint32_t)i;
+        pre_cap_v[i] = i;
+    }
+
+    CHECK(smap_wire_feasible_probe(NULL, NULL, 0));
+    CHECK(!smap_wire_feasible_probe(NULL, NULL, -1));
+    CHECK(smap_wire_feasible_probe(first_maxm1_b, zero_v, 1));
+    CHECK(!smap_wire_feasible_probe(first_max_b, zero_v, 1));
+    CHECK(smap_wire_feasible_probe(later_max_b, later_v, 2));
+    CHECK(!smap_wire_feasible_probe(equal_b, later_v, 2));
+    CHECK(!smap_wire_feasible_probe(descending_b, later_v, 2));
+    CHECK(!smap_wire_feasible_probe(first_maxm1_b, min_v, 1));
+    CHECK(smap_wire_feasible_probe(pre_cap_b, pre_cap_v, UP_SMAP_CAP + 1));
+    CHECK(no_map < inf);
+    CHECK(smap_wire_price_probe(first_maxm1_b, zero_v, 1, &inj, 1) < inf);
+    CHECK(smap_wire_price_probe(later_max_b, later_v, 2, &inj, 0) < inf);
+    CHECK(smap_wire_price_probe(pre_cap_b, pre_cap_v, UP_SMAP_CAP + 1, &inj, 1) < inf);
+    CHECK(smap_wire_price_probe(first_max_b, zero_v, 1, &inj, 1) == inf);
+    CHECK(smap_wire_price_probe(first_maxm1_b, min_v, 1, &inj, 1) == inf);
+    CHECK(!(smap_wire_price_probe(first_max_b, zero_v, 1, &inj, 1) < no_map));
+    puts("smap_wire_feasibility=OK empty/pre-cap/max-1/later-max/zigzag/mixed-BL-EX");
+    return 0;
+}
+
 int main(void) {
     enum { MAXP = 512, STRESS_P = 8192, REPS = 3 };
     uint32_t weights[STRESS_P], seed = UINT32_C(0xa341316c);
     size_t oldv[STRESS_P], newv[STRESS_P];
+    if (check_wire_feasibility()) return 1;
     for (int c = 0; c < 256; c++) {
         size_t n = (size_t)(rnd(&seed) % MAXP);
         for (size_t i = 0; i < n; i++) {

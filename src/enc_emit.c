@@ -192,6 +192,29 @@ static int32_t smap_resid(const uint32_t *mb, const int32_t *mv, int mn,
     return rc_i32_from_u32((uint32_t)need - (uint32_t)pred);
 }
 
+/* The map header uses Gamma(value), whose stored positive integer is value+1. Validate its field
+ * representation and ordering before either proxy pricing or emission so an internal candidate
+ * cannot wrap a first boundary/value to zero or reconstruct a nonascending map. A later
+ * UINT32_MAX boundary is valid: its wire value is the positive gap minus one. */
+static int smap_wire_feasible(const uint32_t *mb, const int32_t *mv, int mn) {
+    /* The bits fitter intentionally prices its pre-cap working set, so enforce the decoder's
+     * UP_SMAP_CAP only at exact emission after fitting has reduced the candidate. */
+    if (mn < 0) return 0;
+    uint32_t prev = 0;
+    for (int i = 0; i < mn; i++) {
+        uint32_t wire_gap;
+        if (i == 0) {
+            wire_gap = mb[i];
+        } else {
+            if (mb[i] <= prev) return 0;
+            wire_gap = mb[i] - prev - 1u;
+        }
+        if (wire_gap == UINT32_MAX || rc_zz32(mv[i]) == UINT32_MAX) return 0;
+        prev = mb[i];
+    }
+    return 1;
+}
+
 /* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
  * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
@@ -219,14 +242,18 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
      * coded through the BORROWED M.pre.gdl (count+gaps) / M.pre.gadj (zz values) gamma models — mirror of the
      * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ugg_encode). */
-    ugg_encode(&M.pre.gdl, &rc, (uint32_t)mn);
-    { uint32_t prev = 0;
-      for (int i = 0; i < mn; i++) {
-          uint32_t gap = mb[i] - prev;
-          ugg_encode(&M.pre.gdl, &rc, i ? gap - 1u : gap);
-          prev = mb[i];
-          ugg_encode(&M.pre.gadj, &rc, rc_zz32(mv[i]));
-      } }
+    if (mn > UP_SMAP_CAP || !smap_wire_feasible(mb, mv, mn)) {
+        rc.coding_overflow = 1;
+    } else {
+        ugg_encode(&M.pre.gdl, &rc, (uint32_t)mn);
+        { uint32_t prev = 0;
+          for (int i = 0; i < mn; i++) {
+              uint32_t gap = mb[i] - prev;
+              ugg_encode(&M.pre.gdl, &rc, i ? gap - 1u : gap);
+              prev = mb[i];
+              ugg_encode(&M.pre.gadj, &rc, rc_zz32(mv[i]));
+          } }
+    }
     /* now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj, inits dval/dibl/diex/
      * pg/pgn/pg2/gel), mirroring rc_init_prekd() in decode_body before its token loop. */
     rc_init_prekd(&M.pre);
@@ -252,7 +279,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
         content_cursor_to(&ec, rows[step].content_end, NULL);
     }
     if (ec.pos != content->n || ec.tok_i != seq->n || ec.tok_mode) die("content token cursor out of sync");
-    if (rc.rice_overflow) *overflow = 1;
+    if (rc.coding_overflow) *overflow = 1;
     return re_flush_opt(&rc);
 }
 
@@ -293,6 +320,7 @@ static uint64_t px_delta(DRE *D, up_IdxUnary *gix, up_BitTree *dval, int32_t del
 /* map header bits (raw gamma, 1 bit each): count + per entry (gap gamma + zz value gamma), scaled
  * to PR_SCALE units so it adds to the residual price. Mirrors the emit_body map-header writer. */
 static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
+    if (!smap_wire_feasible(mb, mv, mn)) return UINT64_MAX / 2u;
     uint64_t bits = gammalen_u32((uint32_t)mn + 1u);   /* raw gamma proxy for count */
     uint32_t prev = 0;
     for (int i = 0; i < mn; i++) {
@@ -308,10 +336,11 @@ static uint64_t px_hdr_bits(const uint32_t *mb, const int32_t *mv, int mn) {
 static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
                              const FieldInjArena *inj, int fwd,
                              int32_t *dic_bl, int32_t *dic_ex) {
+    uint64_t c = px_hdr_bits(mb, mv, mn);
+    if (c == UINT64_MAX / 2u) return c;
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
     up_IdxUnary di_bl, di_ex; up_idx_init(&di_bl, RC_IDX_SEED); up_idx_init(&di_ex, RC_IDX_SEED);
     up_BitTree dval; up_bt_init(&dval);
-    uint64_t c = px_hdr_bits(mb, mv, mn);
     int overflow = 0;
     for (size_t i = 0; i < inj->n; i++) {
         const FieldInj *fk = field_inj_key(inj, fwd, i);
@@ -322,6 +351,18 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     }
     return c;
 }
+
+#ifdef SMAP_PRETRIM_ORACLE
+int smap_wire_feasible_probe(const uint32_t *mb, const int32_t *mv, int mn) {
+    return smap_wire_feasible(mb, mv, mn);
+}
+
+uint64_t smap_wire_price_probe(const uint32_t *mb, const int32_t *mv, int mn,
+                               const FieldInjArena *inj, int fwd) {
+    int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
+    return px_map_total(mb, mv, mn, inj, fwd, dic_bl, dic_ex);
+}
+#endif
 
 typedef uint64_t (*SMapScoreFn)(const uint32_t *mb, const int32_t *mv, int mn, void *ctx);
 

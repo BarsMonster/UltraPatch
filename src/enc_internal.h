@@ -134,7 +134,7 @@ typedef struct {
     uint32_t csz;
     Buf out;
     size_t count_zero_run;
-    int rice_overflow;
+    int coding_overflow;
 } REnc;
 /* up_UGRice/up_UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
  * them directly (no runtime 'code' tag). DRE wraps the shared up_DRStream with the host-only MTF dict
