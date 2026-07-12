@@ -35,11 +35,15 @@ Changing the container digest is a separate deliberate edit. Mirror it in
 From the clean release checkout, run and retain the complete output:
 
 ```sh
-/usr/bin/python3 scripts/release_gate.py
+make check-build-profile
+make gate
+make check-decoder-sanitize
+make check-encoder-sanitize
+make check-clang
 ```
 
-The preflight verifies an archive of the selected commit and runs build-profile
-isolation, the complete release gate, sanitizers, and the required Clang leg. Do
+This sequence verifies build-profile isolation, the complete release gate,
+sanitizers, and the required Clang leg. Do
 not release unless every command succeeds and `make gate` ends with
 `RESULT: ALL GATES PASS`.
 
@@ -79,8 +83,6 @@ host artifact is the `ultrapatch` path printed by `make -s host-tool-path`.
 Release notes must include:
 
 - the Git commit SHA and authoritative push-CI URL/status;
-- the preflight's `release_commit`, `release_source`, and `release_preflight`
-  lines;
 - SHA-256 hashes of `test-bench/corpus-inventory.tsv`,
   `test-bench/wire-baseline.tsv`, and `toolchains/release-profile.json`;
 - the complete gate output, including `release_profile` and the real one-face

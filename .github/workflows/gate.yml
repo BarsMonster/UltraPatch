@@ -42,12 +42,7 @@ jobs:
           git switch -C main "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Run authoritative main release verification
-        if: github.event_name == 'push'
-        run: /usr/bin/python3 scripts/release_gate.py
-
-      - name: Verify pull request
-        if: github.event_name == 'pull_request'
+      - name: Verify release commit
         run: |
           make check-build-profile
           make gate

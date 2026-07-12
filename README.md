@@ -47,12 +47,9 @@ authentication, watchdog, concurrency, and recovery requirements.
 ```sh
 make check-build-profile
 make gate
-```
-
-The full local release preflight is:
-
-```sh
-/usr/bin/python3 scripts/release_gate.py
+make check-decoder-sanitize
+make check-encoder-sanitize
+make check-clang
 ```
 
 The authoritative release procedure and required evidence are in

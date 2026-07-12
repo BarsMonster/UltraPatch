@@ -34,9 +34,13 @@ make -s host-tool-path
 
 Do not assume a root-level `./ultrapatch` or guess a profile directory.
 
-For a release, run the preflight below from a clean `main` checkout and follow
+For a release, run the full sequence below from a clean `main` checkout and follow
 [the release checklist](docs/release-checklist.md):
 
 ```sh
-/usr/bin/python3 scripts/release_gate.py
+make check-build-profile
+make gate
+make check-decoder-sanitize
+make check-encoder-sanitize
+make check-clang
 ```
