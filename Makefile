@@ -237,7 +237,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
-CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize \
+CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
 	      check-wire-config check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
@@ -669,6 +669,12 @@ check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSE
 	@CC="$(CC)" NM="$(NM)" CFLAGS="$(DECODER_CFLAGS)" \
 	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
+
+# Host-encoder algorithm probes under dynamic sanitizers. Standalone so the instrumented
+# builds do not contend with the CPU-saturated corpus workers in `make gate`.
+check-encoder-sanitize-internal:
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" \
+	  scripts/check_encoder_sanitize.sh
 
 check-models-internal: $(DECODER_PUBLIC_HDRS)
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh

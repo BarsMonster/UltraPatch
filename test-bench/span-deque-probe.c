@@ -37,13 +37,16 @@ static TokenVec old_bootstrap_parse(size_t n, const uint8_t *content, const uint
         dpr[d] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
                                           : ugr_price(&pt->gd, d - 1u);
     size_t *next = old_next_starts(n, ncand, nocand);
-    const Cand *crow = (const Cand *)cands->d + cands->n / sizeof(Cand);
+    size_t cand_off = cands->n / sizeof(Cand);
     uint64_t *cost = (uint64_t *)xmalloc((n + 1u) * sizeof(*cost));
     Token *nxt = (Token *)xcalloc(n + 1u, sizeof(*nxt));
     const uint64_t inf = UINT64_MAX / 4u;
     cost[n] = 0;
     for (size_t ri = n; ri-- > 0;) {
-        crow -= ncand[ri];
+        int nc = ncand[ri];
+        cand_off -= (size_t)nc;
+        const Cand *row = NULL;
+        if (nc) row = (const Cand *)cands->d + cand_off;
         uint64_t best = inf; Token bt = {0};
         size_t lim = n < ri + maxrun ? n : ri + maxrun;
         size_t dense_end = ri + 8u < lim ? ri + 8u : lim;
@@ -58,8 +61,8 @@ static TokenVec old_bootstrap_parse(size_t n, const uint8_t *content, const uint
             if (c < best) { best = c; bt = (Token){'S', (int32_t)ri, (int32_t)(j - ri), 0}; }
             if (j >= n) break;
         }
-        for (int ci = 0; ci < ncand[ri]; ci++) {
-            int32_t bd = crow[ci].dist, bl = crow[ci].len;
+        for (int ci = 0; ci < nc; ci++) {
+            int32_t bd = row[ci].dist, bl = row[ci].len;
             for (int32_t l = 3; l <= bl; l++) {
                 uint64_t c = PR_SCALE + dpr[bd] + (uint64_t)mlen[l] +
                              cost[ri + (size_t)l];
@@ -142,6 +145,37 @@ static void random_prices(PriceTab *pt) {
     pt->bootstrap_simple = 1;
 }
 
+static int span_only_cover(const TokenVec *tv, size_t n) {
+    size_t pos = 0;
+    for (size_t i = 0; i < tv->n; i++) {
+        const Token *t = &tv->v[i];
+        if (t->type != 'S' || t->start < 0 || (size_t)t->start != pos ||
+            t->len <= 0 || (size_t)t->len > n - pos) return 0;
+        pos += (size_t)t->len;
+    }
+    return pos == n;
+}
+
+static int empty_no_match_cases(void) {
+    static const size_t lengths[] = { 0, 1, 2, LZ_MAX_RUN + 17u };
+    uint8_t l0[256], l1[256]; memset(l0, 1, sizeof(l0)); memset(l1, 1, sizeof(l1));
+    for (size_t z = 0; z < sizeof(lengths) / sizeof(lengths[0]); z++) {
+        size_t n = lengths[z];
+        uint8_t *content = (uint8_t *)xcalloc(n ? n : 1u, 1);
+        uint8_t *tags = (uint8_t *)xcalloc(n ? n : 1u, 1);
+        uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1u, 1);
+        CandArena cands = {0};
+        PriceTab pt; bootstrap_prices(&pt, l0, l1);
+        CHECK(!check_case(n, content, tags, &cands, ncand, NULL, &pt));
+        pt.bootstrap_simple = 0;
+        TokenVec adaptive = lz_parse_priced(n, content, tags, &cands, ncand,
+                                            NULL, NULL, &pt);
+        CHECK(span_only_cover(&adaptive, n));
+        free(adaptive.v); free(content); free(tags); free(ncand);
+    }
+    return 0;
+}
+
 static int boundary_cases(void) {
     static const uint16_t lengths[] = {
         1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
@@ -159,9 +193,9 @@ static int boundary_cases(void) {
         uint8_t *ncand = (uint8_t *)xcalloc(n ? n : 1u, 1);
         uint8_t *nocand = (uint8_t *)xcalloc(n ? n : 1u, 1);
         for (size_t j = 0; j < n; j++) nocand[j] = 1; /* every long endpoint eligible */
-        CandArena cands = { (uint8_t *)xmalloc(1), 0, 1 };
+        CandArena cands = {0};
         int fail = check_case(n, content, tags, &cands, ncand, nocand, &pt);
-        free(cands.d); free(content); free(tags); free(ncand); free(nocand);
+        free(content); free(tags); free(ncand); free(nocand);
         if (fail) return 1;
     }
     return 0;
@@ -173,7 +207,7 @@ static int randomized_cases(void) {
         size_t n = 1u + rnd32() % 192u;
         uint8_t *content = (uint8_t *)xmalloc(n), *tags = (uint8_t *)xmalloc(n);
         uint8_t *ncand = (uint8_t *)xcalloc(n, 1), *nocand = (uint8_t *)xcalloc(n, 1);
-        CandArena cands = { (uint8_t *)xmalloc(1), 0, 1 };
+        CandArena cands = {0};
         for (size_t i = 0; i < n; i++) { content[i] = (uint8_t)rnd32(); tags[i] = (uint8_t)(rnd32() & 1u); }
         for (size_t i = 0; i < n; i++) {
             nocand[i] = (uint8_t)((rnd32() & 3u) == 0u);
@@ -195,7 +229,7 @@ static int randomized_cases(void) {
 }
 
 int main(void) {
-    if (boundary_cases() || randomized_cases()) return 1;
-    printf("span_deque_oracle=OK boundaries=27 equal_ties=1 randomized=384 costs=OK predecessors=OK tokens=OK\n");
+    if (empty_no_match_cases() || boundary_cases() || randomized_cases()) return 1;
+    printf("span_deque_oracle=OK empty_no_match=4 bootstrap=OK adaptive=OK boundaries=27 equal_ties=1 randomized=384 costs=OK predecessors=OK tokens=OK\n");
     return 0;
 }

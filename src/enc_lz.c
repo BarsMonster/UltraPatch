@@ -414,7 +414,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                           : ugr_price(&pt->gd, D - 1u);
     const uint64_t INF = UINT64_MAX / 4;
     if (pt->bootstrap_simple) {
-        const Cand *crow = (const Cand *)cands->d + cands->n / sizeof(Cand);
+        size_t cand_off = cands->n / sizeof(Cand);
         uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
         Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
         size_t longmax = n < maxrun ? n : maxrun;
@@ -435,7 +435,10 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         }
         cost[n] = 0;
         for (size_t ri = n; ri-- > 0;) {
-            crow -= ncand[ri];
+            int nc = ncand[ri];
+            cand_off -= (size_t)nc;
+            const Cand *row = NULL;
+            if (nc) row = (const Cand *)cands->d + cand_off;
             uint64_t best = INF;
             Token bt = {0};
             size_t lim = n < ri + maxrun ? n : ri + maxrun;
@@ -471,8 +474,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                              (span_lit[j] - span_lit[ri]) + cost[j];
                 if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
             }
-            for (int ci = 0; ci < ncand[ri]; ci++) {
-                int32_t bd = crow[ci].dist, bl = crow[ci].len;
+            for (int ci = 0; ci < nc; ci++) {
+                int32_t bd = row[ci].dist, bl = row[ci].len;
                 for (int32_t l = 3; l <= bl; l++) {
                     uint64_t c = PR_SCALE + dpr[bd] + (uint64_t)mlen[l] + cost[ri + (size_t)l];
                     if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
@@ -542,7 +545,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; }
     cost[0] = 0; rep[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, flag.h=0 */
     int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];
-    const Cand *crow = (const Cand *)cands->d;
+    size_t cand_off = 0;
     const OCand *ocrow = ocands ? (const OCand *)ocands->d : NULL;
     for (size_t i = 0; i <= n; i++) {
         /* Reverse the old predecessor->endpoint span walk. Short spans may end anywhere;
@@ -595,8 +598,9 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
          * (rep0) pricing is fully covered by the explicit rep probe below, so the candidate
          * loop prices fresh only. State-independent; computed once per position. */
         int nc = ncand[i];
-        const Cand *row = crow;
-        crow += nc;
+        const Cand *row = NULL;
+        if (nc) row = (const Cand *)cands->d + cand_off;
+        cand_off += (size_t)nc;
         int no = nocand ? nocand[i] : 0;
         const OCand *orow = ocrow;
         if (ocrow) ocrow += no;
