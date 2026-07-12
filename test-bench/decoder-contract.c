@@ -118,6 +118,22 @@ static int pull_result(void *ctx, uint8_t *out){
     return p->result;
 }
 
+typedef struct {
+    const uint8_t *d;
+    size_t n;
+    size_t i;
+    size_t calls;
+    int abort_result;
+} PullAbort;
+
+static int pull_abort(void *ctx, uint8_t *out){
+    PullAbort *p = (PullAbort *)ctx;
+    p->calls++;
+    if(p->i == p->n) return p->abort_result;
+    *out = p->d[p->i++];
+    return PATCH_PULL_BYTE;
+}
+
 static int load_flash(const Bytes *from, uint32_t span, Bytes *before){
     uint32_t r = 0x91e10da5u;
     uint32_t physical = span ? (span+OUTROW-1u)&~(OUTROW-1u) : 0u;
@@ -177,6 +193,22 @@ static size_t put_uleb(uint8_t *out, uint32_t v){
         out[n++] = (uint8_t)(b | (v ? 0x80u : 0u));
     }while(v);
     return n;
+}
+
+/* Every envelope has four uLEBs after its CRC pair: source size, signed size delta,
+ * direction-specific source seed, and counted body length. */
+static int body_offset(const Bytes *blob, size_t *out){
+    size_t at = 8u;
+    if(blob->n < at) return 1;
+    for(int field = 0; field < 4; field++){
+        uint8_t b;
+        do{
+            if(at == blob->n) return 1;
+            b = blob->d[at++];
+        }while(b & 0x80u);
+    }
+    *out = at;
+    return 0;
 }
 
 /* A page-plus-one logical span would make the old decoder scan one byte beyond this backend
@@ -392,7 +424,7 @@ static int early_eof_case(PatchApply *pa, const Bytes *from, const Bytes *to, co
 
 static int pull_result_case(PatchApply *pa, const Bytes *from, const Bytes *to){
     Bytes before = {0};
-    int invalid_results[2] = {-1, 2};
+    int invalid_results[3] = {PATCH_PULL_END, -1, 2};
     uint32_t span = image_span(from, to);
     for(size_t i=0;i<sizeof invalid_results/sizeof invalid_results[0];i++){
         PullResult pull = { invalid_results[i], 0 };
@@ -401,6 +433,31 @@ static int pull_result_case(PatchApply *pa, const Bytes *from, const Bytes *to){
         CHECK(result == PATCH_APPLY_ERROR && patch_apply_reject(pa) == REJ_CORRUPT);
         CHECK(pull.calls == 1u);
         CHECK(patch_apply_flash_touched(pa) == 0 && test_reads == 0u && test_writes == 0u);
+        CHECK(test_oob_reads == 0u && test_oob_writes == 0u && test_unaligned_writes == 0u);
+        CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
+        free(before.d); before.d = NULL; before.n = 0;
+    }
+    return 0;
+}
+
+static int body_abort_case(PatchApply *pa, const Bytes *from, const Bytes *to,
+                           const Bytes *blob){
+    Bytes before = {0};
+    int abort_results[2] = {PATCH_PULL_END, 2};
+    uint32_t span = image_span(from, to);
+    size_t header_n;
+    CHECK(body_offset(blob, &header_n) == 0);
+    CHECK(header_n + 1u < blob->n);
+    for(size_t i = 0; i < sizeof abort_results/sizeof abort_results[0]; i++){
+        size_t available = header_n + 1u;
+        PullAbort pull = {blob->d, available, 0, 0, abort_results[i]};
+        CHECK(load_flash(from, span, &before) == 0);
+        PatchApplyResult result = patch_apply_run(pa, pull_abort, &pull);
+        CHECK(result == PATCH_APPLY_ERROR && patch_apply_reject(pa) == REJ_CORRUPT);
+        CHECK(pull.i == available && pull.calls == available + 1u);
+        CHECK(pa->g_body_left == 0u && pa->g_rcerr == 1u);
+        CHECK(up_next_byte(pa) == 0u && pull.calls == available + 1u);
+        CHECK(patch_apply_flash_touched(pa) == 0 && test_reads > 0u && test_writes == 0u);
         CHECK(test_oob_reads == 0u && test_oob_writes == 0u && test_unaligned_writes == 0u);
         CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
         free(before.d); before.d = NULL; before.n = 0;
@@ -545,12 +602,13 @@ int main(int argc, char **argv){
     if(read_file(argv[1], &from) || read_file(argv[2], &to) || read_file(argv[3], &blob) ||
        read_file(argv[4], &from2) || read_file(argv[5], &to2) || read_file(argv[6], &blob2)) goto out;
 
-    /* One caller-owned state object is deliberately reused across success -> failure ->
-     * success, then across clean-early and touched-late failures. */
+    /* One caller-owned state object is deliberately reused across success -> envelope/body
+     * failures -> success, then across clean-early and touched-late failures. */
     if(success_case(&pa, &from, &to, &blob, &forward1)) goto out;
     if(outer_framing_case(&pa, &from, &to, &blob)) goto out;
     if(early_eof_case(&pa, &from, &to, &blob)) goto out;
     if(pull_result_case(&pa, &from, &to)) goto out;
+    if(body_abort_case(&pa, &from, &to, &blob)) goto out;
     if(success_case(&pa, &from2, &to2, &blob2, &forward2)) goto out;
     if(forward1 == forward2){ rc = fail(__LINE__, "grow/revert directions differ"); goto out; }
     if(early_crc_case(&pa, &from, &to, &blob)) goto out;
@@ -560,7 +618,7 @@ int main(int argc, char **argv){
     printf("decoder_page_contract=OK (aligned full-page calls + trailing canary preserved)\n");
     printf("decoder_api_contract=OK (state reuse + counted framing + early-clean/late-touched rejects)\n");
     printf("decoder_result_contract=OK (DONE=0 ERROR!=0; pull END=0 BYTE=1 exact)\n");
-    printf("decoder_pull_abort=OK (negative + non-BYTE stop before flash)\n");
+    printf("decoder_pull_abort=OK (envelope + body END/non-BYTE; callback once)\n");
     rc = 0;
 out:
     free(test_flash);

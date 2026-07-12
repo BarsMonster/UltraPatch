@@ -156,13 +156,12 @@ typedef struct PatchApply {
 
     PatchPull g_pull_fn;
     void *g_pull_ctx;
-    /* HOT-FLAG PLACEMENT INVARIANT: these decode error/EOF/reject latches are touched on nearly
+    /* HOT-FLAG PLACEMENT INVARIANT: these decode error/reject latches are touched on nearly
      * every range-coder step, so they are packed into the low alignment hole right after the two
-     * pointers (offsets ~32..35) instead of being sunk to the struct tail. Thumb-1 ldrb/strb take
+     * pointers (offsets ~32..34) instead of being sunk to the struct tail. Thumb-1 ldrb/strb take
      * only a 5-bit immediate offset, so a flag byte at a LOW struct offset stays reachable cheaply,
      * whereas a tail byte forces an extra address add. Keep any future hot flag byte HERE (low), not
      * appended at the end: a naive "all loose bytes at the tail" layout was measured at +72 B .text. */
-    uint8_t g_pull_eof;
     uint8_t g_rcerr;
     uint8_t g_reject;   /* only REJ_RESOURCE cap sites set this during decode; REJ_CORRUPT is
                          * assigned once at the patch_apply_run boundary for every other failure */
@@ -256,14 +255,10 @@ static int up_decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_re
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
 static void up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w);
 
-/* one raw blob byte straight from the callback; EOF is latched so a spent stream stays spent
- * (later reads keep returning 0 without re-invoking the callback). */
+/* One raw blob byte straight from the callback. Envelope callers unwind immediately on failure;
+ * the counted-body caller owns its persistent abort state. */
 static int up_pull_raw(PatchApply *pa, uint8_t*out){
-    int pull_result;
-    if(pa->g_pull_eof) return 0;
-    pull_result=pa->g_pull_fn(pa->g_pull_ctx,out);
-    if(pull_result!=PATCH_PULL_BYTE){ pa->g_pull_eof=1; return 0; }
-    return 1;
+    return pa->g_pull_fn(pa->g_pull_ctx,out)==PATCH_PULL_BYTE;
 }
 /* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
  * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
