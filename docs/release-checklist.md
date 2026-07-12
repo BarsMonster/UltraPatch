@@ -16,6 +16,8 @@ hardware flash validation are external integration work.
 - Home sizes, all corpus wire hashes, and the four additional golden wires in
   `test-bench/wire-baseline.tsv`, validated against the inventory by
   `make check-release-inventory`.
+- The five compiler-independent encoder kernel result digests in
+  `test-bench/encoder-kernel-baseline.tsv`.
 - The selected host/Arm GCC drivers and named subtools (`cc1`, `collect2`,
   assembler, linker), required Clang and named binutils, `libc.a`/`libgcc.a`
   content hashes, compiler environment policy, effective compile/link flags,
@@ -93,7 +95,8 @@ release descriptor before forking its verification legs. It must report:
 
 The driver also runs `make check-clang`, which uses the descriptor-pinned `CLANG`
 command for a warning-clean build, proves that its encoder emits the frozen wire,
-and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize`.
+and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize` and
+`make check-encoder-sanitize`.
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
@@ -108,6 +111,11 @@ interrupted between them, restore the pair and rerun:
 git restore -- Makefile test-bench/wire-baseline.tsv
 make golden-update
 ```
+
+For a deliberate semantic change to an encoder kernel, run
+`make encoder-kernel-baseline-update`, inspect the changed digests, and commit
+`test-bench/encoder-kernel-baseline.tsv` with the implementation. The updater is
+explicit and never runs from normal builds, `make gate`, or `make golden-update`.
 
 The host CLI's successful output-publication contract is the native host OS
 behavior of its same-directory temporary file and `rename()`. A separate

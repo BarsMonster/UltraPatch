@@ -2,33 +2,40 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# The canonical profile candidate/updater is an authority, not a configurable build. Establish
-# its executable search path before BUILD_PROFILE_ID invokes Python during Makefile parsing.
-# The recursive internal target has a different goal and simply inherits this exported value.
-override RELEASE_PROFILE_AUTHORITY_GOAL := $(firstword $(filter release-profile-json release-profile-update,$(MAKECMDGOALS)))
-ifneq ($(RELEASE_PROFILE_AUTHORITY_GOAL),)
+# Canonical release-input candidates/updaters are authorities, not configurable builds. Establish
+# their executable search path before BUILD_PROFILE_ID invokes Python during Makefile parsing.
+override CANONICAL_AUTHORITY_GOAL := $(firstword $(filter release-profile-json release-profile-update encoder-kernel-baseline-update,$(MAKECMDGOALS)))
+ifneq ($(CANONICAL_AUTHORITY_GOAL),)
 override PATH := /usr/bin:/bin
 export PATH
+# Appending below would otherwise retain ambient CFLAGS/LDFLAGS while changing their reported
+# origin to `file`, defeating the later fixed-origin check.
+ifneq ($(filter environment environment\ override command\ line,$(origin CFLAGS)),)
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: CFLAGS (origin $(origin CFLAGS)))
+endif
+ifneq ($(filter environment environment\ override command\ line,$(origin LDFLAGS)),)
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: LDFLAGS (origin $(origin LDFLAGS)))
+endif
 ifneq ($(filter default undefined,$(origin GNUMAKEFLAGS)),$(origin GNUMAKEFLAGS))
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: GNUMAKEFLAGS (origin $(origin GNUMAKEFLAGS)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: GNUMAKEFLAGS (origin $(origin GNUMAKEFLAGS)))
 endif
 ifneq ($(filter default undefined,$(origin MAKEFILES)),$(origin MAKEFILES))
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKEFILES (origin $(origin MAKEFILES)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKEFILES (origin $(origin MAKEFILES)))
 endif
 ifneq ($(origin MAKE),default)
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKE (origin $(origin MAKE)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKE (origin $(origin MAKE)))
 endif
 ifneq ($(filter default file,$(origin SHELL)),$(origin SHELL))
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: SHELL (origin $(origin SHELL)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: SHELL (origin $(origin SHELL)))
 endif
 ifneq ($(SHELL),/bin/sh)
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: SHELL ($(SHELL)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: SHELL ($(SHELL)))
 endif
 ifneq ($(origin .SHELLFLAGS),default)
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: .SHELLFLAGS (origin $(origin .SHELLFLAGS)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: .SHELLFLAGS (origin $(origin .SHELLFLAGS)))
 endif
 ifneq ($(strip $(filter-out --no-print-directory,$(MAKEFLAGS))),)
-$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKEFLAGS ($(MAKEFLAGS)))
+$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKEFLAGS ($(MAKEFLAGS)))
 endif
 endif
 
@@ -255,38 +262,31 @@ gate:
 	@if [ "$(origin MAKE)" != default ]; then \
 	  echo "release gate rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
 	@timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
+	  flock --shared "$(ENCODER_KERNEL_BASELINE_LOCK)" \
 	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
-.PHONY: encoder-kernel-baseline-update encoder-kernel-baseline-update-internal
+.PHONY: encoder-kernel-baseline-update
 # Deliberate semantic changes only: this never runs from normal builds, gate, or golden-update.
 # Review the changed result stream and commit the refreshed baseline with the implementation.
-encoder-kernel-baseline-update:
-	@if [ "$(origin MAKE)" != default ]; then \
-	  echo "encoder kernel baseline update rejects runtime override: MAKE" >&2; exit 1; fi
-	@if [ "$(origin CC)" != file ] || [ "$(origin CLANG)" != file ] || \
-	    [ "$(origin CFLAGS)" != file ] || [ "$(origin CFLAGS_EXTRA)" != undefined ] || \
-	    [ "$(origin CROSS_COMPILE)" != undefined ] || [ "$(origin OPT)" != file ] || \
-	    [ "$(origin WIRE_CONFIG_FLAGS)" != file ] || \
-	    [ "$(origin DECODER_CONFIG_FLAGS)" != file ] || \
-	    [ "$(origin ENC_SEAM_SRCS)" != file ] || \
-	    [ "$(origin ENCODER_KERNEL_BASELINE)" != file ]; then \
-	  echo "encoder kernel baseline update rejects compiler/flag overrides" >&2; exit 1; fi
-	@timeout $(GATE_TIMEOUT) flock --exclusive "$(ENCODER_KERNEL_BASELINE_LOCK)" \
-	  $(MAKE) --no-print-directory encoder-kernel-baseline-update-internal; s=$$?; \
+encoder-kernel-baseline-update: scripts/check_encoder_kernels.sh
+	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" \
+	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" \
+	  /usr/bin/timeout $(GATE_TIMEOUT) /usr/bin/flock --exclusive "$(ENCODER_KERNEL_BASELINE_LOCK)" \
+	  /bin/sh -eu -c 'candidate=$$(/usr/bin/mktemp test-bench/.encoder-kernel-baseline.prepare.XXXXXX); \
+	    trap '\''/usr/bin/rm -f "$$candidate"'\'' EXIT TERM INT; \
+	    ENCODER_KERNEL_BASELINE_DUMP="$$candidate" scripts/check_encoder_kernels.sh candidate; \
+	    /usr/bin/chmod 0644 "$$candidate"; \
+	    if /usr/bin/cmp -s "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; then \
+	      /usr/bin/chmod 0644 "$(ENCODER_KERNEL_BASELINE)"; \
+	      echo "encoder_kernel_baseline_update=NOOP"; \
+	    else \
+	      /usr/bin/mv "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; \
+	      echo "encoder_kernel_baseline_update=COMMITTED"; \
+	    fi'; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
-
-encoder-kernel-baseline-update-internal: scripts/check_encoder_kernels.sh
-	@set -e; candidate=$$(mktemp test-bench/.encoder-kernel-baseline.prepare.XXXXXX); \
-	trap 'rm -f "$$candidate"' EXIT TERM INT; \
-	CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" \
-	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" \
-	  ENCODER_KERNEL_BASELINE_DUMP="$$candidate" scripts/check_encoder_kernels.sh candidate; \
-	mv "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; \
-	trap - EXIT TERM INT; \
-	echo "encoder kernel baseline published"
 
 .PHONY: release-profile-update release-profile-update-internal
 release-profile-update:
@@ -361,13 +361,13 @@ LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9 -DJSLOTS=600u
 # separately proves the exact compiler versions, flags, and multilib contents.
 override RELEASE_GATE_FIXED_VARS := \
 	FIXTURES IMAGES FOREIGN \
-	CORPUS_INVENTORY WIRE_BASELINE \
+	CORPUS_INVENTORY WIRE_BASELINE ENCODER_KERNEL_BASELINE \
 	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES \
 	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
-	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
+	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK ENCODER_KERNEL_BASELINE_LOCK \
 	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
 	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
@@ -377,15 +377,15 @@ override RELEASE_GATE_FIXED_VARS := \
 	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS LOW_MEMORY_WIRE_CONFIG_FLAGS TOOLCHAIN_ENV_UNSET \
 	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
 override RELEASE_GATE_UNSET_VARS := \
-	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP \
+	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP ENCODER_KERNEL_BASELINE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
 	DECODER_INTEGRATION_PROBE_FLAGS REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
 
 # A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
-# substituted shell/make commands can false-success. For the public mutation goal, reject all
+# substituted shell/make commands can false-success. For public mutation goals, reject all
 # launch controls and release-input substitutions while Make is still parsing; $(error) cannot
-# be suppressed by ignore-errors mode. The recursive publisher uses the distinct *-internal
-# goal, so its normal MAKEFLAGS/MAKELEVEL state is unaffected.
+# be suppressed by ignore-errors mode. The release-profile publisher recurses only after that
+# guard; the kernel publisher stays in its guarded public recipe.
 .PHONY: release-gate-origin-probe-internal release-gate-inputs-internal
 release-gate-origin-probe-internal:
 	@set -eu; bad=0; \
@@ -924,7 +924,7 @@ clean-all-internal:
 
 # This parse-time authority check must follow every release variable definition. It still runs
 # before any recipe and therefore cannot be suppressed by MAKEFLAGS=-i/-n/-t.
-ifneq ($(RELEASE_PROFILE_AUTHORITY_GOAL),)
-$(foreach v,$(RELEASE_GATE_FIXED_VARS),$(if $(filter file,$(origin $(v))),,$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects runtime override: $(v) (origin $(origin $(v))))))
-$(foreach v,$(RELEASE_GATE_UNSET_VARS),$(if $(filter undefined,$(origin $(v))),,$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) requires unset mode: $(v) (origin $(origin $(v))))))
+ifneq ($(CANONICAL_AUTHORITY_GOAL),)
+$(foreach v,$(RELEASE_GATE_FIXED_VARS),$(if $(filter file,$(origin $(v))),,$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: $(v) (origin $(origin $(v))))))
+$(foreach v,$(RELEASE_GATE_UNSET_VARS),$(if $(filter undefined,$(origin $(v))),,$(error $(CANONICAL_AUTHORITY_GOAL) requires unset mode: $(v) (origin $(origin $(v))))))
 endif

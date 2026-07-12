@@ -36,4 +36,16 @@ fi
 ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-field" \
   "$tmp/ldr-index.tsv" "$tmp/smap-trim.tsv" >"$tmp/encoder-field.out"
 cat "$tmp/encoder-field.out"
-echo "encoder_sanitizers=OK (field + LZ kernels: ASan + UBSan)"
+
+bsdiff_srcs=${ENC_SEAM_SRCS//src\/enc_bsdiff.c/}
+if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
+      test-bench/encoder-bsdiff-probe.c $bsdiff_srcs -Wl,--gc-sections \
+      -o "$tmp/encoder-bsdiff" 2>"$tmp/encoder-bsdiff-build.log"; then
+    echo "check_encoder_sanitize: suffix/LCP probe build failed" >&2
+    sed 's/^/    /' "$tmp/encoder-bsdiff-build.log" >&2
+    exit 1
+fi
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-bsdiff" \
+  "$tmp/suffix-lcp.tsv" >"$tmp/encoder-bsdiff.out"
+cat "$tmp/encoder-bsdiff.out"
+echo "encoder_sanitizers=OK (field + LZ + suffix/LCP kernels: ASan + UBSan)"

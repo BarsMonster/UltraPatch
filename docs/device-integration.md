@@ -59,8 +59,8 @@ Arm toolchain the ratchets are:
 
 | Footprint form (`gcc -Os`, Cortex-M0+ `-mthumb`) | text | data | bss |
 | ------------------------------------------------ | ----:| ----:| ---:|
-| Relocatable static-wrapper object | 6329 B | 0 B | 9752 B |
-| No-startup linked image | 6909 B | 0 B | 9752 B |
+| Relocatable static-wrapper object | 6309 B | 0 B | 9752 B |
+| No-startup linked image | 6889 B | 0 B | 9752 B |
 
 The linked text includes minimal `flash_read`/`flash_write_page` stubs
 and the pulled `memcpy`, `memmove`, and `memset` implementations. It excludes
