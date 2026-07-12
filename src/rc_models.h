@@ -302,7 +302,7 @@ static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, 
     return rc_i32_from_u32(0u - (uint32_t)rc_smap_at(b,v,n,word));
 }
 
-/* MTF dict-index UNARY model: UP_IDX_CTX per-position priors (min(pos,UP_IDX_CTX-1) clamp). The encoded
+/* MTF cache-index UNARY model: UP_IDX_CTX per-position priors (min(pos,UP_IDX_CTX-1) clamp). The encoded
  * index is ~54% zero, so unary fits the concentration; UP_IDX_CTX=5 is the corpus optimum (4/6/8/16 all
  * code worse). Shared struct + seed; the encode/decode loops live in each side. */
 #define UP_IDX_CTX 5
@@ -312,18 +312,21 @@ static inline void up_idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<UP_ID
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
     if(j){ int32_t t=dic[j]; memmove(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
 }
-static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,int32_t v){
-    memmove(&dic[1],&dic[0],(size_t)(*K)*sizeof(dic[0]));
-    dic[0]=v; (*K)++;
+static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,uint16_t cap,int32_t v){
+    uint16_t n=*K;
+    if(n<cap) (*K)++;
+    else n=(uint16_t)(cap-1u);
+    memmove(&dic[1],&dic[0],(size_t)n*sizeof(dic[0]));
+    dic[0]=v;
 }
 RC_ALWAYS_INLINE uint8_t rc_dr_rep_ctx(uint8_t rh,int32_t last){
     return (uint8_t)(rh | (last==0 ? 2 : 0));
 }
-/* STREAMED-DELTA per-stream state (bl, ex): a MOVE-TO-FRONT dict of distinct delta values + an
- * adaptive "repeat-last" bit + an adaptive "dict-hit" bit. The dict array lives OUTSIDE the struct
+/* STREAMED-DELTA per-stream state (bl, ex): a bounded MOVE-TO-FRONT cache of delta values + an
+ * adaptive "repeat-last" bit + an adaptive "cache-hit" bit. The cache array lives OUTSIDE the struct
  * so bl/ex get separate caps; single-sourced here so decoder + encoder share the neutral init. */
 typedef struct {
-    uint16_t K;                       /* MTF dict entries in use (index 0 = most-recently-used) */
+    uint16_t K;                       /* MTF cache entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } up_DRStream;
 RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
@@ -363,11 +366,11 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * decoder M_rep0 and the encoder Models.rep0/last_dist. */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
 
-/* MTF dict-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF dict makes the hit-bit==1 likely, so seed
+/* MTF cache-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF cache makes the hit-bit==1 likely, so seed
  * the adaptive hit model high. 576 = tuned corpus optimum. (Decoder dr_init / encoder dr_init_e.) */
 #define UP_DR_HIT_INIT 576u
 
-/* MTF dict-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
+/* MTF cache-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
  * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
  * corpus optimum. (Shared up_idx_init seeds both sides.) */
 #define RC_IDX_SEED 2816u
@@ -410,7 +413,7 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
  * via rc_init_prekd) without moving the wire. */
 typedef struct {
     up_BitTree  dval;                         /* MTF escape + [C] correction bytes */
-    up_IdxUnary dibl, diex;                   /* MTF dict-index unary priors (bl/ex) */
+    up_IdxUnary dibl, diex;                   /* MTF cache-index unary priors (bl/ex) */
     up_UGGamma  pg, pgn, pg2, gdl, gel, gadj; /* preserve/corr gaps + counts + per-op geometry */
 } up_PreKdModels;
 typedef struct {

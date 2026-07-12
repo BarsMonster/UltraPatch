@@ -188,6 +188,12 @@ static int check_shared_models(void){
     for(int i = 0; i < PROBE_IDX_CTX; i++) CHECK(idx.u[i] == 1234u);
     rc_dr_init(&ds, dic, PROBE_DR_HIT_INIT);
     CHECK(ds.K == 1 && dic[0] == 0 && ds.hit == PROBE_DR_HIT_INIT && ds.rh == 0);
+    rc_mtf_insert_i32(dic, &ds.K, 4, 1);
+    rc_mtf_insert_i32(dic, &ds.K, 4, 2);
+    rc_mtf_insert_i32(dic, &ds.K, 4, 3);
+    CHECK(ds.K == 4 && dic[0] == 3 && dic[1] == 2 && dic[2] == 1 && dic[3] == 0);
+    rc_mtf_insert_i32(dic, &ds.K, 4, 4);
+    CHECK(ds.K == 4 && dic[0] == 4 && dic[1] == 3 && dic[2] == 2 && dic[3] == 1);
     CHECK(rc_dr_rep_ctx(0, 0) == 2);
     CHECK(rc_dr_rep_ctx(1, 0) == 3);
     CHECK(rc_dr_rep_ctx(1, 5) == 1);

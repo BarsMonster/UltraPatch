@@ -88,7 +88,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     plan_prepare(&prep, &from, &to, &pa);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the
      * smallest complete envelope ships and ties keep the earliest entry. A config whose plan
-     * exceeds a decoder resource cap (journal/corrections/DR dict) returns an empty body and
+     * exceeds a decoder resource cap (journal/corrections) returns an empty body and
      * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
      * in-family firmware. */
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);

@@ -135,7 +135,7 @@ typedef struct {
     int coding_overflow;
 } REnc;
 /* up_UGRice/up_UGGamma (shared wire model structs) are single-sourced in rc_models.h; the encoder uses
- * them directly (no runtime 'code' tag). DRE wraps the shared up_DRStream with the host-only MTF dict
+ * them directly (no runtime 'code' tag). DRE wraps the shared up_DRStream with the host-only MTF cache
  * pointer + cap; the shared fields (K/rep/hit/rh) live in .s so rc_dr_init can init both sides. */
 typedef struct { int32_t *dic; uint16_t cap; up_DRStream s; } DRE;
 

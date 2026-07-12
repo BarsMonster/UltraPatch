@@ -36,7 +36,7 @@
  * positions are DERIVED by a local halfword pattern; ldr positions are DERIVED per op (a field is
  * ldr iff an ldr-literal instruction in the same op's copy range targets it) — so positions are
  * never shipped, only the per-field delta VALUES, pulled inline from the single stream (adaptive
- * MTF dict + order-1/zero-context repeat bit). A copy that reads a from-byte already overwritten by
+ * MTF cache + order-1/zero-context repeat bit). A copy that reads a from-byte already overwritten by
  * the output frontier reads it from the never-evict journal, driven by the preserve events [P]. Output is
  * staged in a monotonic 256 B page write-back cache so each NVM page is erased+programmed exactly
  * once (no write amplification).
@@ -93,10 +93,11 @@ static uint8_t up_image_flash_read(uint32_t image_offset){
 typedef struct { uint32_t range, code; } up_RangeDec;
 
 /* STREAMED-DELTA per-stream state up_DRStream (bl, ex) is single-sourced in rc_models.h: a
- * MOVE-TO-FRONT dict of distinct delta values + an adaptive "repeat-last" bit + an adaptive
- * "dict-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (in dict? -> MTF index
+ * bounded MOVE-TO-FRONT cache + an adaptive "repeat-last" bit + an adaptive
+ * "cache-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (cached? -> MTF index
  * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
- * dict array is outside the struct so bl/ex get separate caps (distinct-value peaks: bl 180, ex 106). */
+ * via the index UGolomb | else escape value as zigzag uLEB via M_dval, inserted at front). The
+ * cache array is outside the struct so bl/ex get separate capacities. */
 
 /* JSLOTS is configured above. Encoder and decoder builds MUST use the same macro name/value; the
  * encoder plans against that budget and DEGRADES over-budget plans host-side (over-budget reads
@@ -209,7 +210,8 @@ _Static_assert(RC_PACKED_POS_BITS==24u && UP_JHIGH_VALUES==256u,
                "succinct journal requires the 24-bit packed-position contract");
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
-_Static_assert(DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u, "DR_KCAP_* must fit uint16 up_DRStream.K (else the REJ_RESOURCE refuse wraps)");
+_Static_assert(DR_KCAP_BL > 0u && DR_KCAP_EX > 0u && DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u,
+               "DR_KCAP_* must be nonzero and fit uint16 up_DRStream.K");
 /* Integration geometry is part of the public type/configuration contract, so every build applies
  * the exact same checks. The final address may be UINT32_MAX; capacity therefore subtracts
  * one before the headroom comparison. */
@@ -263,8 +265,8 @@ static int up_pull_raw(PatchApply *pa, uint8_t*out){
     return pa->g_pull_fn(pa->g_pull_ctx,out)==PATCH_PULL_BYTE;
 }
 /* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
- * RESOURCE: a corpus-overfit cap was exceeded (journal full / per-op cap / dict cap) — this firmware
- * is bigger than the build was sized for, raise the cap (costs SRAM). 2 = CORRUPT: malformed/truncated
+ * RESOURCE: a bounded resident structure was exceeded (journal / per-op corrections) — this
+ * firmware is bigger than the build was sized for. 2 = CORRUPT: malformed/truncated
  * stream (bounds, underrun, range-coder overflow). 0 = none. Pure diagnostic; never affects decoding. */
 static uint8_t up_next_byte(PatchApply *pa){
     uint8_t b;
@@ -367,7 +369,7 @@ static int32_t up_s_bv(PatchApply *pa, up_BitTree*t,int rate){
 /* the unary-prefix "continue"-seed helper (per-op geometry: firmware delta op magnitudes are
  * essentially never tiny, a structural prior that makes the very first op as cheap as the warmed-up
  * state) is single-sourced as rc_ugg_seed_cont in rc_models.h, folded into rc_init_prekd/rc_init_tok. */
-/* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF dict-index code:
+/* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF cache-index code:
  * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
  * corrupt run-on so a zero-fill stream can't spin forever / shift by >=32 (UP_RC_UNARY_MAX for gamma,
  * RC_RICE_UNARY_MAX for rice); on overflow it sets g_rcerr and returns 0 so the mantissa loop is a
@@ -398,7 +400,7 @@ static uint32_t up_s_ug_gamma(PatchApply *pa, up_UGGamma*g){
     int cl=(int)up_s_unary(pa,g->u,UP_UG_CTX,UP_RC_UNARY_MAX);
     return ((1u<<cl) | up_s_ug_mant_gamma(pa,g,cl)) - 1u;
 }
-/* MTF dict-index model: a lean adaptive UNARY code. UP_IDX_CTX / up_IdxUnary / up_idx_init are single-sourced
+/* MTF cache-index model: a lean adaptive UNARY code. UP_IDX_CTX / up_IdxUnary / up_idx_init are single-sourced
  * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,UP_IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (up_pull_delta validates j vs K). */
@@ -441,12 +443,9 @@ static uint32_t up_crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, 
 /* (high+i) represents the high 8 bits; a high-byte sample every UP_JSTRIDE entries bounds     */
 /* reconstruction. Over-depth is REFUSED before writing the op. Lives in the apply phase only. */
 /* ===================================================================================== */
-/* DEREL dict cap (corpus distinct-value peak ~179 per substream + margin). The STREAMED-DELTA wire
- * (12 KiB build) holds NO resident per-detection store — only a small MOVE-TO-FRONT dict of the
- * distinct delta values (the frequently-repeated relocation offsets keep tiny MTF indices). */
-/* Caps are corpus-peak + margin; over-cap input is REJECTED (CRC-gated, never silent-wrong), not
- * applied. All -D overridable (#ifndef) so a deployment with a known firmware family can re-tune
- * them; raising a cap costs SRAM and must be followed by the release gate. */
+/* The STREAMED-DELTA wire holds no resident per-detection store, only bounded MOVE-TO-FRONT
+ * caches. A full cache evicts its least-recent value; every miss remains representable as a
+ * full-width escape, independent of firmware diversity. */
 /* DR_KCAP_* and OPC_CAP are configured above. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
@@ -503,7 +502,7 @@ static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
 /* The journal-aware pristine reads + the bl/ldr predicates live with the apply state below.    */
 /* ===================================================================================== */
 /* ---- piecewise shift map (D1): predicts BL/EX de-reloc deltas from addresses/values the
- * decoder already has in hand; only the RESIDUAL (delta - pred) rides the MTF dict streams.
+ * decoder already has in hand; only the RESIDUAL (delta - pred) rides the MTF cache streams.
  * rc_smap_at(x) = value of the last segment with boundary <= x, else 0 (also 0 when no map).
  * Values are BYTE shifts; BL predictions divide by 2 (imm24 is in halfwords) with C
  * truncation-toward-zero on both sides (bit-exact vs patch_generate). ---- */
@@ -605,8 +604,7 @@ static int32_t up_pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int
         rc_mtf_promote_i32(dic,j);
     } else {
         v=up_s_bv(pa,&pa->MDL_pre.dval, RC_DVAL_RATE);
-        if((uint32_t)d->K>=cap){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return 0; }   /* distinct-value cap -> reject */
-        rc_mtf_insert_i32(dic,&d->K,v);
+        rc_mtf_insert_i32(dic,&d->K,(uint16_t)cap,v);
     }
     return v;
 }

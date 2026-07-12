@@ -118,7 +118,7 @@ static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
     rc_dr_init(&d->s, d->dic, hitseed);
 }
 
-enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC, DR_TR_OVER };
+enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC };
 typedef struct { uint8_t kind, ri; uint32_t idx; } DRTrans;
 
 static DRTrans dr_transition(DRE *D, int32_t delta) {
@@ -133,21 +133,19 @@ static DRTrans dr_transition(DRE *D, int32_t delta) {
         tr.idx = (uint32_t)(j - 1);
     } else {
         if (j == 0) die("unexpected delta dict index 0");
-        if (D->s.K >= D->cap) { tr.kind = DR_TR_OVER; return tr; }
-        rc_mtf_insert_i32(D->dic, &D->s.K, delta);
+        rc_mtf_insert_i32(D->dic, &D->s.K, D->cap, delta);
         tr.kind = DR_TR_ESC;
     }
     return tr;
 }
 
 static uint64_t delta_xfer(DRE *D, up_IdxUnary *gix, up_BitTree *dval,
-                           REnc *r, int32_t delta, int *overflow) {
+                           REnc *r, int32_t delta) {
     DRTrans tr = dr_transition(D, delta);
     if (tr.kind == DR_TR_REP) {
         return ug_bit_xfer(r, &D->s.rep[tr.ri], 1, 1);
     }
     uint64_t c = ug_bit_xfer(r, &D->s.rep[tr.ri], 0, 1);
-    if (tr.kind == DR_TR_OVER) { *overflow = 1; return c; }
     if (tr.kind == DR_TR_HIT) {
         c += ug_bit_xfer(r, &D->s.hit, 1, 1);
         c += unary_xfer(r, gix->u, UP_IDX_CTX - 1, tr.idx, 1);
@@ -158,11 +156,10 @@ static uint64_t delta_xfer(DRE *D, up_IdxUnary *gix, up_BitTree *dval,
     return c;
 }
 
-static void emit_delta(Models *M, REnc *r, int kind, int32_t delta, int *overflow) {
-    if (*overflow) return;   /* stream already infeasible: state frozen, output discarded */
+static void emit_delta(Models *M, REnc *r, int kind, int32_t delta) {
     DRE *D = kind == EV_BL ? &M->dr_bl : &M->dr_ex;
     up_IdxUnary *gix = kind == EV_BL ? &M->pre.dibl : &M->pre.diex;
-    (void)delta_xfer(D, gix, &M->pre.dval, r, delta, overflow);
+    (void)delta_xfer(D, gix, &M->pre.dval, r, delta);
 }
 
 static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
@@ -274,7 +271,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
             const FieldInj *ij = &inj->v[ii];
             int32_t delta = mn ? smap_resid(mb, mv, mn, ij->kind, ij->k1, ij->k2, ij->need) : ij->need;
             content_cursor_to(&ec, ij->cc, NULL);
-            emit_delta(&M, &rc, ij->kind, delta, overflow);
+            emit_delta(&M, &rc, ij->kind, delta);
         }
         content_cursor_to(&ec, rows[step].content_end, NULL);
     }
@@ -311,10 +308,9 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
  * second-order); the final map choice is always settled by encode_body's exact full-body byte
  * gate, which competes this map against the hit-count map and the no-map body. ---- */
 
-/* price one residual through the MTF/rep/hit/escape machine (mirror emit_delta); overflow past the
- * decoder dict cap prices +infinity so an infeasible map can never win. */
-static uint64_t px_delta(DRE *D, up_IdxUnary *gix, up_BitTree *dval, int32_t delta, int *overflow) {
-    return delta_xfer(D, gix, dval, NULL, delta, overflow);
+/* Price one residual through the bounded MTF/rep/hit/escape machine (mirror emit_delta). */
+static uint64_t px_delta(DRE *D, up_IdxUnary *gix, up_BitTree *dval, int32_t delta) {
+    return delta_xfer(D, gix, dval, NULL, delta);
 }
 
 /* map header bits (raw gamma, 1 bit each): count + per entry (gap gamma + zz value gamma), scaled
@@ -341,13 +337,11 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
     DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
     up_IdxUnary di_bl, di_ex; up_idx_init(&di_bl, RC_IDX_SEED); up_idx_init(&di_ex, RC_IDX_SEED);
     up_BitTree dval; up_bt_init(&dval);
-    int overflow = 0;
     for (size_t i = 0; i < inj->n; i++) {
         const FieldInj *fk = field_inj_key(inj, fwd, i);
         int32_t resid = smap_resid(mb, mv, mn, fk->kind, fk->k1, fk->k2, fk->need);
         c += px_delta(fk->kind == EV_BL ? &bl : &ex, fk->kind == EV_BL ? &di_bl : &di_ex,
-                      &dval, resid, &overflow);
-        if (overflow) return UINT64_MAX / 2;
+                      &dval, resid);
     }
     return c;
 }

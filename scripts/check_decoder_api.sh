@@ -205,15 +205,6 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract"
     "$tmp/contract" $args >"$tmp/contract.out"
 
-    cap_headers="$tmp/cap-headers"
-    mkdir "$cap_headers"
-    cp $DECODER_PUBLIC_HDRS "$cap_headers/"
-    sed -i 's/^#define DR_KCAP_BL 208$/#define DR_KCAP_BL 1/' "$cap_headers/patch_config.h"
-    sed -i 's/^#define DR_KCAP_EX 128$/#define DR_KCAP_EX 1/' "$cap_headers/patch_config.h"
-    "$CC" -I"$cap_headers" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap"
-    "$tmp/cap" resource-clean "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
-    "$tmp/cap" resource-touched "$base" "$one" "$tmp/grow.blob" >/dev/null
-
     # A nonzero absolute base plus a one-page partition exercises address translation and the
     # oversized-envelope guard. Before the guard this crafted
     # envelope caused one out-of-range CRC read; it must now reject with zero flash accesses.
@@ -228,7 +219,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     cat "$tmp/contract.out"
     cat "$tmp/capacity.out"
     cat "$tmp/nonzero.out"
-    echo "decoder_resource_contract=OK (clean + touched)"
+    echo "decoder_resource_contract=OK (bounded delta caches + resident cap checks)"
 fi
 
 # The backend and byte callback are the only pointer-rich code in this contract.  One

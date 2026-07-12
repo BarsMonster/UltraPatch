@@ -561,26 +561,6 @@ static int nvm_failure_case(PatchApply *pa, const Bytes *from, const Bytes *to, 
     return 0;
 }
 
-static int resource_case(PatchApply *pa, const Bytes *from, const Bytes *to,
-                         const Bytes *blob, int want_touched){
-    Bytes before = {0};
-    uint32_t span = image_span(from, to);
-    CHECK(load_flash(from, span, &before) == 0);
-    Result r = run_blob(pa, blob->d, blob->n);
-    CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_RESOURCE);
-    CHECK(r.consumed > 8u && r.consumed <= blob->n && r.calls == r.consumed);
-    CHECK(r.touched == want_touched);
-    CHECK(writes_bounded(&r, span));
-    if(want_touched){
-        CHECK(r.writes > 0u);
-    }else{
-        CHECK(r.writes == 0u);
-        CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
-    }
-    free(before.d);
-    return 0;
-}
-
 int main(int argc, char **argv){
     Bytes from = {0}, to = {0}, blob = {0}, from2 = {0}, to2 = {0}, blob2 = {0};
     PatchApply pa;
@@ -609,13 +589,6 @@ int main(int argc, char **argv){
     if(ldr_window_case()) goto out;
     printf("decoder_ldr_window=OK (alias filter + BL skip + journal)\n");
 
-    if(argc == 5 && (strcmp(argv[1], "resource-clean") == 0 ||
-                     strcmp(argv[1], "resource-touched") == 0)){
-        if(read_file(argv[2], &from) || read_file(argv[3], &to) || read_file(argv[4], &blob)) goto out;
-        rc = resource_case(&pa, &from, &to, &blob, strcmp(argv[1], "resource-touched") == 0);
-        if(!rc) printf("decoder_resource_contract=OK (%s)\n", argv[1]);
-        goto out;
-    }
     if(argc != 7){
         fprintf(stderr, "usage: %s <from1> <to1> <blob1> <from2> <to2> <blob2>\n", argv[0]);
         goto out;

@@ -22,21 +22,21 @@
 
 /* Unsigned 8-bit wire revision. A nonzero value is folded into the source CRC so mismatched
  * encoder/decoder revisions reject before the first flash write without growing the envelope. */
-#define PATCH_WIRE_VERSION ((uint8_t)1u)
+#define PATCH_WIRE_VERSION ((uint8_t)2u)
 
 /* Plausibility cap on envelope image sizes; decoder cursors are signed 32-bit. */
 #define MAX_IMAGE (64u<<20)
 
 /* Canonical constants, shared by decoder and encoder through rc_models.h. PATCH_IMAGE_BASE and
  * PATCH_IMAGE_CAPACITY remain decoder/device integration settings because they are not wire
- * properties. WINDOW_LOG is the LZ window log;
- * JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the encoder plans against; OUTROW x
- * OUTROW_DEPTH is the uncommitted NVM page window. */
+ * properties. WINDOW_LOG is the LZ window log; JSLOTS/OPC_CAP are decoder reject caps;
+ * DR_KCAP_* size the always-representable relocation caches; OUTROW x OUTROW_DEPTH is the
+ * uncommitted NVM page window. */
 #define WINDOW_LOG 10
 #define JSLOTS 768u
 #define OPC_CAP 80
-#define DR_KCAP_BL 208
-#define DR_KCAP_EX 128
+#define DR_KCAP_BL 152
+#define DR_KCAP_EX 88
 #define OUTROW 256u
 #define OUTROW_DEPTH 2u
 

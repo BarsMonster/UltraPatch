@@ -278,8 +278,8 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, pc, &caps);
     /* degradation snapshot: load-bearing for direction-sweep pruning and DEGRADE_STATS */
     r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
-    /* decoder resource-cap feasibility (mirror patch_apply OPC_CAP / JSLOTS): an over-cap plan
-     * would be rejected on-device; treat as infeasible so a lower variant ships instead. */
+    /* Decoder resource feasibility mirrors patch_apply OPC_CAP / JSLOTS. Relocation-cache misses
+     * remain representable escapes and therefore do not make a plan infeasible. */
     int feasible = caps.ok;
     Buf body = {0};
     if (feasible) {

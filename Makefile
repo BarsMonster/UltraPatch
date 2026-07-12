@@ -211,19 +211,19 @@ BASE_RELEASE_HOME_IMAGES ?= 16
 BASE_RELEASE_FOREIGN_IMAGES ?= 18
 BASE_RELEASE_FOREIGN_EDGES ?= 17
 BASE_RELEASE_GOLDEN_BLOBS ?= 4
-BASE_FULL_TOTAL ?= 4151373
+BASE_FULL_TOTAL ?= 4148576
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
 # Ratchets like BASE_FULL_TOTAL — a wire regression on the product firmware was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
-BASE_FOREIGN_TOTAL ?= 1333390
+BASE_FOREIGN_TOTAL ?= 1299431
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6313
+BASE_ARM_TEXT ?= 6297
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 9752
-BASE_ARM_LINKED_TEXT ?= 6893
+BASE_ARM_BSS ?= 9368
+BASE_ARM_LINKED_TEXT ?= 6877
 BASE_ARM_LINKED_DATA ?= 0
-BASE_ARM_LINKED_BSS ?= 9752
+BASE_ARM_LINKED_BSS ?= 9368
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
