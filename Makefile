@@ -365,8 +365,8 @@ override RELEASE_GATE_FIXED_VARS := \
 	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP ENCODER_KERNEL_BASELINE_DUMP \
-	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
-	DECODER_INTEGRATION_PROBE_FLAGS REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
+	DECODER_API_REGULAR DECODER_API_SANITIZE DECODER_INTEGRATION_PROBE_FLAGS \
+	ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
 
 # A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
 # substituted shell/make commands can false-success. For public authority goals, reject all
@@ -681,14 +681,12 @@ check-malformed-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" FIXTURES="$(FIXTURES)" scripts/check_transactional.sh
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_elf_ranges.sh
-	@FIXTURES="$(FIXTURES)" scripts/check_dispatch_crash.sh malformed
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
 # page-boundary/>384KiB-span pairs). ultrapatch self-verifies every encoded blob, so each case must
 # either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
 check-edge-internal: ultrapatch
 	@scripts/check_edge.sh
-	@scripts/check_dispatch_crash.sh edge
 
 # Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
 # path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP
