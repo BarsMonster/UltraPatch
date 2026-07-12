@@ -17,7 +17,7 @@ static int old_query(const uint8_t *src, uint32_t source_size,
         scan_halfwords++;
         uint16_t up = rc_u16le(src + a);
         if (rc_thumb_ldr_lit(up) &&
-            rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk)
+            rc_ldr_target((uint32_t)a, up & 0xffu) == fpk)
             return 1;
     }
     return 0;
@@ -64,6 +64,30 @@ static int boundary_cases(void) {
     return fail;
 }
 
+static int arithmetic_boundaries(void) {
+    int fail = 0;
+#define REQUIRE(x) do { if (!(x)) { \
+    fprintf(stderr, "ldr arithmetic boundary failed: %s\n", #x); fail = 1; \
+} } while (0)
+    REQUIRE(rc_ldr_target(0u, 0u) == 4u);
+    REQUIRE(rc_ldr_target(2u, 0u) == 4u);
+    REQUIRE(rc_ldr_target(3u, 1u) == 8u);
+    REQUIRE(rc_ldr_target(0x7ffffffeu, 255u) == 0x800003fcu);
+    REQUIRE(rc_ldr_target(UINT32_MAX, 0u) == 0u);
+
+    REQUIRE(rc_ldr_target_in_op(10, 22, 28u));             /* exact endpoint */
+    REQUIRE(!rc_ldr_target_in_op(10, 21, 28u));            /* crosses endpoint */
+    REQUIRE(!rc_ldr_target_in_op(10, -1, 12u));            /* negative length */
+    REQUIRE(!rc_ldr_target_in_op(INT32_MAX, 1, 0u));       /* signed end overflow */
+    REQUIRE(rc_ldr_target_in_op(INT32_MAX - 7, 7, 0x7ffffff8u));
+    REQUIRE(!rc_ldr_target_in_op(0, INT32_MAX, UINT32_MAX - 3u));
+    REQUIRE(rc_ldr_target_in_op(-7, 15, 4u));              /* negative origin */
+    REQUIRE(!rc_ldr_target_in_op(-7, 10, 0u));             /* end before one word */
+    REQUIRE(!rc_ldr_target_in_op(0, 8, 1u));               /* unaligned target */
+#undef REQUIRE
+    return fail;
+}
+
 static uint32_t rnd_state = 0x6c647269u;
 static uint32_t rnd32(void) {
     rnd_state = rnd_state * 1664525u + 1013904223u;
@@ -98,8 +122,8 @@ static int randomized_cases(void) {
 }
 
 int main(void) {
-    if (boundary_cases() || randomized_cases()) return 1;
-    printf("ldr_index_oracle=OK boundary=10 randomized=65536 queries=%llu scan_halfwords=%llu\n",
+    if (arithmetic_boundaries() || boundary_cases() || randomized_cases()) return 1;
+    printf("ldr_index_oracle=OK arithmetic=14 boundary=10 randomized=65536 queries=%llu scan_halfwords=%llu\n",
            (unsigned long long)queries, (unsigned long long)scan_halfwords);
     return 0;
 }

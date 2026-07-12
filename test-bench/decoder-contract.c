@@ -217,7 +217,7 @@ static int ldr_oracle(PatchApply *pa, int32_t fp0, int32_t dl, uint32_t fpk){
     if(!rc_ldr_target_in_op(fp0, dl, fpk)) return 0;
     for(int32_t a = rc_ldr_scan_first(fp0, fpk); a + 2 <= (int32_t)fpk; a += 2){
         uint16_t up = (uint16_t)(up_hy_src_peek(pa, a) | ((uint16_t)up_hy_src_peek(pa, a + 1) << 8));
-        if(rc_thumb_ldr_lit(up) && rc_ldr_target(a, (int32_t)(up & 0xffu)) == (int32_t)fpk) return 1;
+        if(rc_thumb_ldr_lit(up) && rc_ldr_target((uint32_t)a, up & 0xffu) == fpk) return 1;
     }
     return 0;
 }

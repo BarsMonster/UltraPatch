@@ -85,7 +85,7 @@ static void disassemble(const uint8_t *f, size_t fsize,
             } else if (rc_thumb_ldr_lit(up)) {        /* ldr (literal) */
                 /* scan addresses are always even, so (ins & ~3) matches the historic
                    "round even address back to 4-alignment" step exactly. */
-                uint32_t address = (uint32_t)rc_ldr_target((int32_t)ins, up & 0xff);
+                uint32_t address = rc_ldr_target(ins, up & 0xffu);
                 if ((size_t)address + 4 <= fsize) {
                     int32_t v = rc_i32_from_u32(rc_u32le(f + address));
                     map_push(&ldr, address, v);

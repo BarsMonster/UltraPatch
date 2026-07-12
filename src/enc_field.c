@@ -32,7 +32,7 @@ void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t
     for (uint32_t a = 0; a + 2u <= source_size; a += 2u) {
         uint16_t up = rc_u16le(source + a);
         if (!rc_thumb_ldr_lit(up)) continue;
-        uint32_t t = (uint32_t)rc_ldr_target((int32_t)a, (int32_t)(up & 0xffu));
+        uint32_t t = rc_ldr_target(a, up & 0xffu);
         if (t > source_size || source_size - t < 4u) continue;
         uint16_t back = (uint16_t)(t - a);           /* exact domain: 2..1024 */
         uint16_t *slot = &idx->back[t >> 2];

@@ -680,7 +680,7 @@ static inline int up_grow_ldr_take(PatchApply *pa, int32_t fp0, int32_t dl, uint
         uint16_t up=(uint16_t)(up_hy_src_peek(pa,(int32_t)a) |
                                ((uint16_t)up_hy_src_peek(pa,(int32_t)a+1)<<8));
         if(rc_thumb_ldr_lit(up)){
-            uint32_t t=(uint32_t)rc_ldr_target((int32_t)a,(int32_t)(up&0xffu));
+            uint32_t t=rc_ldr_target(a,up&0xffu);
             /* fpk is already an in-source SAME-OP field start, and LDR targets are 4-aligned;
              * therefore t<=fpk also proves t+4 is in both the source and this op. */
             if(t<=fpk) up_psrc_ldr_put(pa,t);
@@ -758,7 +758,7 @@ static uint8_t up_hy_src_peek(PatchApply *pa, int32_t fp){
 }
 static void up_hy_half_rec(PatchApply *pa, uint32_t a, uint8_t lo, uint8_t hi){
     uint16_t up=(uint16_t)(lo | ((uint16_t)hi<<8));
-    if(rc_thumb_ldr_lit(up)) up_psrc_ldr_put(pa,(uint32_t)rc_ldr_target((int32_t)a,(int32_t)lo));
+    if(rc_thumb_ldr_lit(up)) up_psrc_ldr_put(pa,rc_ldr_target(a,lo));
 }
 /* record one pristine source byte at fp into the packed FWD ldr metadata.
  * Out-of-range fp is a no-op (matches up_hy_src_peek's range gate). */

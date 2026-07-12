@@ -261,14 +261,18 @@ static inline void rc_bl_dereloc(uint16_t up, uint16_t lo, uint32_t delta, uint8
 }
 
 /* Thumb LDR-literal target byte address from the instruction address (halfword-scanned, rounded
- * back to 4-alignment) + imm8 word field: (addr & ~3) + 4*imm8 + 4. Signed to match the op-local
- * field cursors. */
+ * back to 4-alignment) + imm8 word field: (addr & ~3u) + 4u*imm8 + 4u. Address arithmetic is
+ * explicitly unsigned: literal targets may cross INT32_MAX, while op-local cursors stay signed. */
 static inline int rc_thumb_ldr_lit(uint16_t up){ return (up&0xf800u)==0x4800u; }
-static inline int32_t rc_ldr_target(int32_t addr, int32_t imm8){
-    return (addr & ~3) + 4*imm8 + 4;
+static inline uint32_t rc_ldr_target(uint32_t addr, uint32_t imm8){
+    /* The word-domain form is identical modulo uint32_t and smaller on Thumb-1. */
+    return ((addr>>2)+imm8+1u)<<2;
 }
 static inline int rc_ldr_target_in_op(int32_t fp0, int32_t dl, uint32_t fpk){
-    return !(fpk&3u) && (int32_t)fpk + 4 <= fp0 + dl;
+    int32_t end;
+    if((fpk&3u) || dl<0 || fp0>INT32_MAX-dl) return 0;
+    end=fp0+dl;
+    return end>=4 && fpk<=(uint32_t)end-4u;
 }
 static inline int32_t rc_ldr_scan_first(int32_t fp0, uint32_t fpk){
     int32_t lo=(int32_t)fpk-1024;

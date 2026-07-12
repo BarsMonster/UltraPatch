@@ -241,9 +241,15 @@ static int check_reloc_helpers(void){
     CHECK(rc_ldr_scan_first(0, 0) == 0);
     CHECK(rc_ldr_scan_first(0, 1025u) == 2);
     CHECK(rc_ldr_scan_first(100, 1100u) == 100);
-    CHECK(rc_ldr_target(12, 3) == 28);
+    CHECK(rc_ldr_target(12u, 3u) == 28u);
+    CHECK(rc_ldr_target(0x7ffffffeu, 255u) == 0x800003fcu);
     CHECK(rc_ldr_target_in_op(10, 22, 16));
     CHECK(!rc_ldr_target_in_op(10, 22, 17));
+    CHECK(rc_ldr_target_in_op(10, 22, 28u));
+    CHECK(!rc_ldr_target_in_op(10, 21, 28u));
+    CHECK(!rc_ldr_target_in_op(INT32_MAX, 1, 0u));
+    CHECK(!rc_ldr_target_in_op(0, INT32_MAX, UINT32_MAX - 3u));
+    CHECK(rc_ldr_target_in_op(-7, 15, 4u));
     return 0;
 }
 

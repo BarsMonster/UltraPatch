@@ -22,4 +22,14 @@ if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
 fi
 ASAN_OPTIONS=detect_leaks=1 "$tmp/span-deque" >"$tmp/span-deque.out"
 cat "$tmp/span-deque.out"
-echo "encoder_sanitizers=OK (span-deque: ASan + UBSan)"
+
+if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
+      test-bench/ldr-index-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
+      -o "$tmp/ldr-index" 2>"$tmp/ldr-index-build.log"; then
+    echo "check_encoder_sanitize: LDR-index probe build failed" >&2
+    sed 's/^/    /' "$tmp/ldr-index-build.log" >&2
+    exit 1
+fi
+ASAN_OPTIONS=detect_leaks=1 "$tmp/ldr-index" >"$tmp/ldr-index.out"
+cat "$tmp/ldr-index.out"
+echo "encoder_sanitizers=OK (span-deque + LDR-index: ASan + UBSan)"
