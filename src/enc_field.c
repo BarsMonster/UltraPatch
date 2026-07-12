@@ -55,41 +55,39 @@ int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, u
     return hit;
 }
 
-static int preserve_needed_at(const EncCtx *ctx, const int32_t *readarr, uint32_t from_size, int32_t tpw) {
+static int preserve_needed_at(const uint8_t *hazard, uint32_t from_size, int32_t tpw) {
     if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
-    return ctx->fwd ? (readarr[tpw] > tpw) : (readarr[tpw] >= 0 && readarr[tpw] < tpw);
+    return hazard[tpw] != 0;
 }
 
-static int32_t *preserve_readarr(const EncCtx *ctx, const OpWalkEnt *walk,
+/* Mark source addresses whose pristine byte must survive until a later source read. Output is
+ * monotonic, so the exact latest/earliest read frontier is unnecessary: one behind-frontier,
+ * page-uncovered read is enough to require a journal entry when that address is overwritten. */
+static uint8_t *preserve_hazards(const EncCtx *ctx, const OpWalkEnt *walk,
                                  size_t nwalk, uint32_t from_size) {
     int FWD = ctx->fwd;
-    int32_t *readarr = (int32_t *)xmalloc((size_t)from_size * sizeof(int32_t));
-    for (uint32_t i = 0; i < from_size; i++) readarr[i] = FWD ? -1 : INT_MAX;
+    uint8_t *hazard = (uint8_t *)xcalloc(from_size ? from_size : 1u, 1);
     for (size_t oi = 0; oi < nwalk; oi++) {
         const OpWalkEnt *we = &walk[oi];
         for (int32_t k = 0; k < we->o->diff_len; k++) {
             int32_t a = we->fp + k;
             if (0 <= a && (uint32_t)a < from_size) {
                 int32_t t = we->tp + k;
-                /* a read behind the frontier that the page window covers reads OLD flash
-                 * directly — it must not force a journal entry. */
-                if ((FWD ? a < t : a > t) && row_covered(ctx, a, t)) continue;
-                if (FWD) { if (readarr[a] < t) readarr[a] = t; }
-                else { if (readarr[a] > t) readarr[a] = t; }
+                int behind = FWD ? a < t : a > t;
+                if (behind && !row_covered(ctx, a, t)) hazard[a] = 1;
             }
         }
     }
-    return readarr;
+    return hazard;
 }
 
 typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } PreserveFieldCursor;
 
 typedef struct {
     const EncCtx *ctx;
-    const int32_t *readarr;
+    const uint8_t *hazard;
     const uint8_t *payload, *frm, *true_to;
-    uint8_t *buf, *jhas;
-    uint32_t from_size;
+    uint32_t from_size, to_size;
     PlanCaps *caps;
 } PreserveCorrWalk;
 
@@ -127,7 +125,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
                                const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
     int32_t tp = we->tp + off;
     int32_t fp = is_diff ? we->fp + off : -1;
-    int preserve = preserve_needed_at(pw->ctx, pw->readarr, pw->from_size, tp);
+    int preserve = preserve_needed_at(pw->hazard, pw->from_size, tp);
     if (preserve) {
         ivec_push(&pc->pres, off);
         pw->caps->pres_total++;
@@ -143,7 +141,6 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
                               : pw->caps->pres_cutoff < 0))
                 pw->caps->pres_cutoff = tp;
         }
-        pw->jhas[tp] = 1;
     }
     uint8_t produced;
     const PreserveFieldCursor *ev = is_diff ? preserve_corr_event(pw->ctx, fc, off) : NULL;
@@ -153,7 +150,13 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         uint8_t src = 0;
         if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
             int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
-            src = (pw->jhas[fp] || (behind && row_covered(pw->ctx, fp, tp))) ? pw->frm[fp] : pw->buf[fp];
+            /* Ahead/current addresses are still pristine. A behind address is also pristine
+             * when journaled or resident in the decoder's uncommitted page window; otherwise
+             * monotonic output has replaced it with its final target byte. Addresses beyond a
+             * shorter target are never overwritten. */
+            int pristine = !behind || pw->hazard[fp] || row_covered(pw->ctx, fp, tp) ||
+                           (uint32_t)fp >= pw->to_size;
+            src = pristine ? pw->frm[fp] : pw->true_to[fp];
         }
         produced = (uint8_t)(byte + src);
     }
@@ -164,7 +167,6 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > OPC_CAP)
             pw->caps->ok = 0;
     }
-    pw->buf[tp] = want;
 }
 
 static void preserve_corr_op(PreserveCorrWalk *cw, PreserveFieldCursor *fc, OpPC *pc,
@@ -590,7 +592,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
                               const LdrTargetIndex *ldr, PlanCaps *caps) {
     int FWD = ctx->fwd;
-    size_t span = from_size > to_size ? from_size : to_size;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
     *caps = (PlanCaps){ 1, fp_start,
         FWD ? (int32_t)RC_PACKED_POS_LIMIT : -1, 0, 0 };
@@ -598,12 +599,10 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
         const OpWalkEnt *last = &m[ops->n - 1u];
         caps->fp_end = last->fp + last->o->diff_len + last->o->adj;
     }
-    int32_t *readarr = preserve_readarr(ctx, m, ops->n, from_size);
-    uint8_t *buf = (uint8_t *)xcalloc(span ? span : 1, 1);
-    memcpy(buf, frm, from_size);
-    uint8_t *jhas = (uint8_t *)xcalloc(from_size ? from_size : 1, 1);
+    uint8_t *hazard = preserve_hazards(ctx, m, ops->n, from_size);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, readarr, ops->payload, frm, true_to, buf, jhas, from_size, caps };
+    PreserveCorrWalk cw = { ctx, hazard, ops->payload, frm, true_to,
+                            from_size, to_size, caps };
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &m[opwalk_apply_index(ops->n, FWD, step)];
@@ -618,6 +617,6 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
             if (pc->corr.n > 1) sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(buf); free(jhas); free(m); free(readarr);
+    free(hazard); free(m);
     return out;
 }
