@@ -46,6 +46,18 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     fi
     echo "decoder_private_namespace_audit=OK (static + macro-prefixed declarations)"
 
+    # Exercise the installed-header contract without a repository include path. Integrators
+    # include only patch_apply.h, while patch_config.h and rc_models.h live beside it so the
+    # entrypoint's normal local includes resolve.
+    header_dir="$tmp/public-headers"
+    mkdir "$header_dir"
+    cp $DECODER_PUBLIC_HDRS "$header_dir/"
+    cp test-bench/decoder-compiled-contract.c "$header_dir/consumer.c"
+    ( cd "$header_dir" && "$CC" -std=c11 -Wall -Wextra -Werror \
+        -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u \
+        -c consumer.c -o consumer.o )
+    echo "decoder_header_install=OK (patch_apply.h + local support headers)"
+
     # A 256-byte prefix reaches a second de-relocation dictionary value in the first
     # output page. With a test-only cap of one this rejects before any buffered page is
     # committed; the full update reaches the same cap only after physical writes.

@@ -52,6 +52,7 @@ jobs:
           make check-build-profile
           make gate
           make check-decoder-sanitize
+          make check-encoder-sanitize
           make check-clang
 
       - name: Static analyzer

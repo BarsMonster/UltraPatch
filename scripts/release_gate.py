@@ -33,6 +33,8 @@ RELEASE_COMMANDS = (
                    "RESULT                   : ALL GATES PASS"),
     ReleaseCommand(("/usr/bin/make", "--no-print-directory", "check-decoder-sanitize"),
                    "decoder_sanitizers=OK"),
+    ReleaseCommand(("/usr/bin/make", "--no-print-directory", "check-encoder-sanitize"),
+                   "encoder_sanitizers=OK"),
     ReleaseCommand(("/usr/bin/make", "--no-print-directory", "check-clang"),
                    "clang_contract=OK"),
 )
@@ -142,7 +144,7 @@ def run_release() -> str:
             raise ReleaseError("release repository changed during verification")
         print(
             f"release_preflight=OK (clean main archive at {commit}; selected profile + "
-            "gate + sanitizers + clang evidence)", flush=True
+            "gate + decoder/encoder sanitizers + clang evidence)", flush=True
         )
         return commit
 

@@ -291,13 +291,17 @@ ultrapatch: profile-check $(HOST_TOOL)
 $(PROFILE_MANIFEST): scripts/build_profile.py
 	@python3 scripts/build_profile.py ensure-host "$@" >/dev/null
 
-check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
+check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK) \
+                                .github/workflows/gate.yml
 	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"
+	@container=$$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["container"])' \
+	  "$(RELEASE_PROFILE_LOCK)"); \
+	grep -Fqx "      image: $$container" .github/workflows/gate.yml || { \
+	  echo "release workflow container does not match $(RELEASE_PROFILE_LOCK)" >&2; exit 1; }
 
 check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profile.py
 	@MAKE="$(MAKE)" CLANG="$(CLANG)" ARM_OBJCOPY="$(ARM_OBJCOPY)" \
-	  RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" \
-	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" scripts/check_build_profile.sh
+	  scripts/check_build_profile.sh
 
 # Required second-compiler leg. It remains outside `make gate`, but is a capped public target
 # and uses the exact CLANG command pinned in the release descriptor.
