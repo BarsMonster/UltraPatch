@@ -32,19 +32,27 @@ jobs:
             clang
 
       - uses: actions/checkout@v4
+        with:
+          # Always test the event's immutable commit. Never resolve a moving branch ref here.
+          ref: ${{ github.sha }}
 
-      - name: Verify build-profile isolation
-        run: make check-build-profile
+      - name: Prepare pinned main branch
+        if: github.event_name == 'push'
+        run: |
+          git switch -C main "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Run release gate
-        run: make gate
+      - name: Run authoritative main release verification
+        if: github.event_name == 'push'
+        run: /usr/bin/python3 -I -S scripts/release_gate.py
+
+      - name: Verify pull request
+        if: github.event_name == 'pull_request'
+        run: |
+          make check-build-profile
+          make gate
+          make check-decoder-sanitize
+          make check-clang
 
       - name: Static analyzer
         run: make check-analyze
-
-      # Second-compiler leg: clang must build warning-free and its encoder must match
-      # the frozen golden wire. This is not an executable-binary reproducibility claim.
-      - name: Clang build + host checks
-        run: |
-          make CC=clang -B all
-          make CC=clang check check-malformed check-golden

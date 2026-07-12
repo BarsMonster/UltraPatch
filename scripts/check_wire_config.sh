@@ -23,7 +23,8 @@ set -eu
 : "${ARM_OBJECT_OPT:?check_wire_config.sh: ARM_OBJECT_OPT not set - invoke through make check-wire-config}"
 : "${ARM_BSS_HARD_CAP:?check_wire_config.sh: ARM_BSS_HARD_CAP not set - invoke through make check-wire-config}"
 : "${ARM_LINK_STUBS:?check_wire_config.sh: ARM_LINK_STUBS not set - invoke through make check-wire-config}"
-: "${ARM_LINK_LAYOUT:?check_wire_config.sh: ARM_LINK_LAYOUT not set - invoke through make check-wire-config}"
+: "${ARM_LINK_FLAGS:?check_wire_config.sh: ARM_LINK_FLAGS not set - invoke through make check-wire-config}"
+: "${ARM_LINK_LIBS:?check_wire_config.sh: ARM_LINK_LIBS not set - invoke through make check-wire-config}"
 : "${DECODER_INTEGRATION_TU:?check_wire_config.sh: DECODER_INTEGRATION_TU not set - invoke through make check-wire-config}"
 : "${DEFAULT_ULTRAPATCH:?check_wire_config.sh: DEFAULT_ULTRAPATCH not set - invoke through make check-wire-config}"
 : "${ULTRAPATCH:?check_wire_config.sh: ULTRAPATCH not set - invoke through make check-wire-config}"
@@ -163,9 +164,9 @@ EOF
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -c "$ARM_LINK_STUBS" -o "$tmp/arm_link_stubs.o"
 for form in source single; do
-    "$ARM_CC" -mcpu=cortex-m0plus -mthumb -nostdlib \
-        -Wl,--gc-sections,--orphan-handling=error,-T,"$ARM_LINK_LAYOUT" \
-        "$tmp/arm_$form.o" "$tmp/arm_link_stubs.o" -lc -lgcc -o "$tmp/arm_$form.elf"
+    # shellcheck disable=SC2086
+    "$ARM_CC" $ARM_LINK_FLAGS "$tmp/arm_$form.o" "$tmp/arm_link_stubs.o" \
+        $ARM_LINK_LIBS -o "$tmp/arm_$form.elf"
 done
 arm_size_triplet(){ "$ARM_SIZE" "$1" | awk 'NR==2 { print $1 "/" $2 "/" $3 }'; }
 arm_obj_source=$(arm_size_triplet "$tmp/arm_source.o")

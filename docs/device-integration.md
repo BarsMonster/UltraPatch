@@ -310,15 +310,20 @@ host tool. Use `make host-tool-path` when a repository-built encoder path is
 needed; do not assume `./ultrapatch` or guess a profile directory.
 
 `make check-build-profile` is a separate collision regression for this output
-isolation. Release builds additionally require the exact default GCC, required
-Clang, GNU Arm GCC/binutils, `libc.a`/`libgcc.a` content hashes, and effective
-flags recorded in `toolchains/release-profile.json`. `make gate` validates that
-descriptor before forking its verification legs and reports `release_profile`
-in its consolidated output. An accepted identity, archive, or flag update is a
-deliberate release change and must be reviewed with all footprint, wire, and
-round-trip evidence. The descriptor identifies controlled build inputs; it is
-not a claim that compiler executables or output binaries are byte-for-byte
-reproducible across hosts.
+isolation. Release builds additionally require the selected host and Arm GCC
+drivers plus their named `cc1`, `collect2`, assembler, and linker programs;
+required Clang and named binutils; `libc.a`/`libgcc.a` content hashes; clean
+compiler environment; effective compile/link flags; and the configured CI
+container digest recorded in `toolchains/release-profile.json`. `make gate`
+validates that descriptor before forking its verification legs and reports
+`release_profile` in its consolidated output. The local release driver verifies
+a fresh archive of one clean `main` commit; only successful push CI at the exact
+commit runs authoritatively inside the pinned container. An accepted identity,
+archive, environment policy, or flag update is a deliberate release change and
+must be reviewed with all footprint, wire, and round-trip evidence. The profile
+scope is the selected drivers/subtools/binutils and named runtime archives, not
+a recursive dynamic-library closure or a claim of byte-for-byte reproducibility
+across hosts.
 
 **Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
 build and the decoder TU — the build fails with a clear `#error` without it (the

@@ -78,14 +78,26 @@ filesystem semantics after a successful rename; UltraPatch does not add a
 second portability or durability protocol around them. This is a host CLI
 policy and is separate from the embedded decoder's full-reflash recovery rule.
 
-Full release gate:
+Full development gate:
 
 ```sh
 make check-build-profile
 make gate
 ```
 
-For release notes and artifact provenance, use `docs/release-checklist.md`.
+The matching local release preflight additionally binds those checks,
+sanitizers, and the required Clang leg to a fresh archive of one clean `main`
+commit and requires explicit evidence from every child command:
+
+```sh
+/usr/bin/python3 -I -S scripts/release_gate.py
+```
+
+This local command validates the selected tool/archive hashes and flags but does
+not attest the OCI runtime. A successful push job for the exact `github.sha`,
+inside the digest-pinned CI container, is the authoritative release run. For
+the atomic full-profile refresh workflow, release notes, and artifact
+provenance, use `docs/release-checklist.md`.
 
 The binary corpora used by the release gate are tracked under `test-bench/`.
 `test-bench/images` and `test-bench/fixtures` provide the 16 home matrix images
@@ -126,8 +138,9 @@ and only then publishes the archive and checksum through same-directory
 renames. A failure before publication preserves both existing outputs; an
 interruption between the two renames is detected by the checksum mismatch.
 
-CI verifies the tracked corpus via the `check-assets` leg of the same
-`make gate` command.
+CI verifies pull requests with the development checks. Pushes to `main` run the
+commit-bound driver in the pinned container and are the authoritative release
+verification.
 
 Device integration contract:
 

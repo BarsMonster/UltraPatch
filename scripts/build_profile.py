@@ -13,15 +13,35 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any
 
 
-SCHEMA = 2
+SCHEMA = 3
+CANONICAL_RELEASE_PATH = "/usr/bin:/bin"
 IMMUTABLE_OCI_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 ABSOLUTE_PATH_RE = re.compile(r"(?:^|[\s=,:;(])/(?!/)[^\s,;)]*")
+COMPILER_ENV_UNSET = (
+    "COMPILER_PATH",
+    "CPATH",
+    "CPLUS_INCLUDE_PATH",
+    "C_INCLUDE_PATH",
+    "DEPENDENCIES_OUTPUT",
+    "GCC_COMPARE_DEBUG",
+    "GCC_EXEC_PREFIX",
+    "GCC_SPECS",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LIBRARY_PATH",
+    "OBJC_INCLUDE_PATH",
+    "SOURCE_DATE_EPOCH",
+    "SUNPRO_DEPENDENCIES",
+    "ZERO_AR_DATE",
+)
 
 
 class ProfileError(RuntimeError):
@@ -66,6 +86,37 @@ def command_words(name: str) -> tuple[list[str], list[str]]:
     return actual, display
 
 
+def compiler_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    for name in COMPILER_ENV_UNSET:
+        environment.pop(name, None)
+    environment.update({"LANG": "C", "LC_ALL": "C", "LANGUAGE": "C"})
+    return environment
+
+
+def canonicalize_release_environment() -> None:
+    os.environ.update(
+        {
+            "LANG": "C",
+            "LANGUAGE": "C",
+            "LC_ALL": "C",
+            "PATH": CANONICAL_RELEASE_PATH,
+        }
+    )
+
+
+def environment_policy() -> dict[str, Any]:
+    declared = tuple(env_words("UP_PROFILE_ENV_UNSET", reject_paths=False))
+    if declared != COMPILER_ENV_UNSET:
+        raise ProfileError(
+            "UP_PROFILE_ENV_UNSET differs from build_profile.py compiler environment policy"
+        )
+    return {
+        "locale": {"LANG": "C", "LANGUAGE": "C", "LC_ALL": "C"},
+        "unset": list(COMPILER_ENV_UNSET),
+    }
+
+
 def run(argv: list[str], purpose: str) -> str:
     try:
         result = subprocess.run(
@@ -76,7 +127,7 @@ def run(argv: list[str], purpose: str) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env={**os.environ, "LC_ALL": "C"},
+            env=compiler_environment(),
         )
     except OSError as exc:
         raise ProfileError(f"cannot run {purpose}: {exc}") from exc
@@ -87,15 +138,43 @@ def run(argv: list[str], purpose: str) -> str:
     return result.stdout
 
 
-def tool_identity(name: str) -> dict[str, Any]:
-    actual, display = command_words(name)
-    output = run(actual + ["--version"], f"{name} --version")
+def resolve_executable(command: str, label: str) -> Path:
+    resolved = shutil.which(command, path=compiler_environment().get("PATH"))
+    if resolved is None:
+        raise ProfileError(f"cannot resolve {label} executable: {command}")
+    try:
+        path = Path(resolved).resolve(strict=True)
+    except OSError as exc:
+        raise ProfileError(f"cannot resolve {label} executable: {exc}") from exc
+    if not path.is_file():
+        raise ProfileError(f"{label} executable is not a regular file: {path}")
+    return path
+
+
+def command_identity(actual: list[str], display: list[str], label: str) -> dict[str, Any]:
+    identity = executable_identity(actual, display, label)
+    output = run(actual + ["--version"], f"{label} --version")
     lines = output.splitlines()
     if not lines or not lines[0].strip():
-        raise ProfileError(f"{name} --version produced no version line")
+        raise ProfileError(f"{label} --version produced no version line")
     version = lines[0].strip()
-    reject_absolute_paths([version], f"{name} version line")
-    return {"command": display, "version": version}
+    reject_absolute_paths([version], f"{label} version line")
+    return {**identity, "version": version}
+
+
+def executable_identity(
+    actual: list[str], display: list[str], label: str
+) -> dict[str, Any]:
+    executable = resolve_executable(actual[0], label)
+    return {
+        "command": display,
+        "executable_sha256": sha256_file(executable, f"{label} executable"),
+    }
+
+
+def tool_identity(name: str) -> dict[str, Any]:
+    actual, display = command_words(name)
+    return command_identity(actual, display, name)
 
 
 def host_payload() -> dict[str, Any]:
@@ -113,7 +192,7 @@ def host_payload() -> dict[str, Any]:
 
 
 def host_descriptor() -> dict[str, Any]:
-    return {"schema": SCHEMA, **host_payload()}
+    return {"schema": SCHEMA, "environment": environment_policy(), **host_payload()}
 
 
 def sha256_file(path: Path, label: str) -> str:
@@ -140,16 +219,51 @@ def arm_library_hash(cc: list[str], flags: list[str], option: str, label: str) -
     return sha256_file(Path(value), label)
 
 
+def gcc_program_identity(
+    cc: list[str], scope: str, program: str, *, with_version: bool = True
+) -> dict[str, Any]:
+    option = f"-print-prog-name={program}"
+    output = run(cc + [option], f"{scope} compiler {option}")
+    lines = output.splitlines()
+    if len(lines) != 1 or not lines[0].strip():
+        raise ProfileError(f"{scope} compiler {option} did not return one program")
+    command = lines[0].strip()
+    label = f"{scope} {program}"
+    if with_version:
+        return command_identity([command], [Path(command).name], label)
+    return executable_identity([command], [Path(command).name], label)
+
+
 def release_descriptor() -> dict[str, Any]:
+    host_cc, _ = command_words("UP_PROFILE_CC")
     arm_cc, _ = command_words("UP_PROFILE_ARM_CC")
-    arm_flags = env_words("UP_PROFILE_ARM_FLAGS")
+    arm_source_flags = env_words("UP_PROFILE_ARM_SOURCE_FLAGS")
     return {
         "schema": SCHEMA,
-        "host": host_payload(),
+        "environment": environment_policy(),
+        "host": {
+            **host_payload(),
+            "assembler": gcc_program_identity(host_cc, "Host", "as"),
+            "cc1": gcc_program_identity(host_cc, "Host", "cc1", with_version=False),
+            "collect2": gcc_program_identity(host_cc, "Host", "collect2"),
+            "linker": gcc_program_identity(host_cc, "Host", "ld"),
+            "nm": tool_identity("UP_PROFILE_NM"),
+        },
         "clang": tool_identity("UP_PROFILE_CLANG"),
         "arm": {
+            "assembler": gcc_program_identity(arm_cc, "Arm", "as"),
             "cc": tool_identity("UP_PROFILE_ARM_CC"),
-            "flags": arm_flags,
+            "cc1": gcc_program_identity(arm_cc, "Arm", "cc1", with_version=False),
+            "collect2": gcc_program_identity(arm_cc, "Arm", "collect2"),
+            "compile_flags": {
+                "single_header": env_words("UP_PROFILE_ARM_SINGLE_FLAGS"),
+                "source_headers": arm_source_flags,
+            },
+            "link": {
+                "flags": env_words("UP_PROFILE_ARM_LINK_FLAGS"),
+                "libraries": env_words("UP_PROFILE_ARM_LINK_LIBS"),
+            },
+            "linker": gcc_program_identity(arm_cc, "Arm", "ld"),
             "optimization": {
                 "object": env_words("UP_PROFILE_ARM_OBJECT_OPT"),
                 "stack": env_words("UP_PROFILE_ARM_STACK_OPT"),
@@ -157,12 +271,12 @@ def release_descriptor() -> dict[str, Any]:
             "libraries": {
                 "libc.a": {
                     "sha256": arm_library_hash(
-                        arm_cc, arm_flags, "-print-file-name=libc.a", "libc.a"
+                        arm_cc, arm_source_flags, "-print-file-name=libc.a", "libc.a"
                     )
                 },
                 "libgcc.a": {
                     "sha256": arm_library_hash(
-                        arm_cc, arm_flags, "-print-libgcc-file-name", "libgcc.a"
+                        arm_cc, arm_source_flags, "-print-libgcc-file-name", "libgcc.a"
                     )
                 },
             },
@@ -229,11 +343,41 @@ def ensure_host(path: Path, descriptor: dict[str, Any]) -> None:
             pass
 
 
-def load_lock(path: Path) -> dict[str, Any]:
+def read_regular_file(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        fd = os.open(path, flags)
     except OSError as exc:
-        raise ProfileError(f"cannot read release profile lock {path}: {exc}") from exc
+        raise ProfileError(f"cannot open {label} {path}: {exc}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ProfileError(f"{label} must be a regular, non-symlink file: {path}")
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise ProfileError(f"cannot inspect {label} {path}: {exc}") from exc
+        if stat.S_ISLNK(current.st_mode) or (
+            current.st_dev,
+            current.st_ino,
+        ) != (metadata.st_dev, metadata.st_ino):
+            raise ProfileError(f"{label} must be a regular, non-symlink file: {path}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            raw = stream.read()
+    except OSError as exc:
+        raise ProfileError(f"cannot read {label} {path}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return raw, metadata
+
+
+def parse_lock(raw: bytes, path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ProfileError(f"release profile lock {path} is not UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ProfileError(f"invalid JSON in release profile lock {path}: {exc}") from exc
     if not isinstance(value, dict):
@@ -250,6 +394,85 @@ def load_lock(path: Path) -> dict[str, Any]:
     return value
 
 
+def load_lock(path: Path) -> dict[str, Any]:
+    raw, _ = read_regular_file(path, "release profile lock")
+    return parse_lock(raw, path)
+
+
+def release_lock_candidate(path: Path) -> dict[str, Any]:
+    lock = load_lock(path)
+    return {
+        "schema": SCHEMA,
+        "container": lock["container"],
+        "profile": release_descriptor(),
+    }
+
+
+def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+    )
+
+
+def refresh_release_lock(path: Path) -> tuple[dict[str, Any], bool]:
+    raw, original = read_regular_file(path, "release profile lock")
+    lock = parse_lock(raw, path)
+    candidate = {
+        "schema": SCHEMA,
+        "container": lock["container"],
+        "profile": release_descriptor(),
+    }
+    expected = display_text(candidate).encode("ascii")
+    if raw == expected:
+        return candidate, False
+
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            # Set the preserved mode while the temporary inode is still open, then include that
+            # metadata in the same fsync that makes its contents durable before publication.
+            os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode))
+            stream.write(expected)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise ProfileError(f"cannot recheck release profile lock {path}: {exc}") from exc
+        if stat.S_ISLNK(current.st_mode) or not same_file_state(original, current):
+            raise ProfileError(f"release profile lock changed during refresh: {path}")
+
+        try:
+            os.replace(temporary, path)
+            temporary = ""
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(path.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise ProfileError(f"cannot publish release profile lock {path}: {exc}") from exc
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    return candidate, True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -257,11 +480,27 @@ def main() -> int:
     ensure = sub.add_parser("ensure-host", help="atomically create or compare a host manifest")
     ensure.add_argument("path", type=Path)
     sub.add_parser("release-json", help="print the current canonical release descriptor")
+    lock_json = sub.add_parser(
+        "release-lock-json",
+        help="print a full release lock while preserving its immutable container",
+    )
+    lock_json.add_argument("lock", type=Path)
+    refresh = sub.add_parser(
+        "refresh-release", help="atomically refresh a full release profile lock"
+    )
+    refresh.add_argument("lock", type=Path)
     verify = sub.add_parser("verify-release", help="verify an immutable release profile lock")
     verify.add_argument("lock", type=Path)
     args = parser.parse_args()
 
     try:
+        if args.command in {
+            "release-json",
+            "release-lock-json",
+            "refresh-release",
+            "verify-release",
+        }:
+            canonicalize_release_environment()
         if args.command == "host-id":
             print(profile_id(host_descriptor()))
         elif args.command == "ensure-host":
@@ -270,6 +509,13 @@ def main() -> int:
             print(f"host_profile={profile_id(descriptor)}")
         elif args.command == "release-json":
             print(display_text(release_descriptor()), end="")
+        elif args.command == "release-lock-json":
+            print(display_text(release_lock_candidate(args.lock)), end="")
+        elif args.command == "refresh-release":
+            lock, changed = refresh_release_lock(args.lock)
+            state = "updated" if changed else "unchanged"
+            print(f"release_profile_update={state} (full schema-{SCHEMA} lock)")
+            print(f"release_profile={profile_id(lock)}")
         elif args.command == "verify-release":
             expected = release_descriptor()
             lock = load_lock(args.lock)
@@ -278,7 +524,7 @@ def main() -> int:
                     lock["profile"], expected, str(args.lock), "current release profile"
                 )
                 raise ProfileError(f"release profile mismatch\n{detail.rstrip()}")
-            print(f"release_profile={profile_id(expected)}")
+            print(f"release_profile={profile_id(lock)}")
     except ProfileError as exc:
         print(f"build_profile.py: {exc}", file=sys.stderr)
         return 2

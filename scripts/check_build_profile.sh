@@ -12,9 +12,10 @@ if [ "$#" -gt 2 ]; then
 fi
 make_command="${1:-${MAKE:-make}}"
 host_tool_target="${2:-${HOST_TOOL_TARGET:-host-tool-path}}"
+clang_command="${CLANG:-clang}"
 read -r -a make_argv <<<"$make_command"
-if [ "${#make_argv[@]}" -eq 0 ] || [ -z "$host_tool_target" ]; then
-  echo "check_build_profile.sh: empty MAKE or host-tool target" >&2
+if [ "${#make_argv[@]}" -eq 0 ] || [ -z "$host_tool_target" ] || [ -z "$clang_command" ]; then
+  echo "check_build_profile.sh: empty MAKE, CLANG, or host-tool target" >&2
   exit 2
 fi
 
@@ -65,7 +66,7 @@ tool_path() {
 }
 
 gcc_tool=$(tool_path CC=gcc)
-clang_tool=$(tool_path CC=clang)
+clang_tool=$(tool_path CC="$clang_command")
 alternate_tool=$(tool_path CC=gcc CFLAGS_EXTRA=-DUP_BUILD_PROFILE_ALTERNATE=1)
 
 if [ "$gcc_tool" = "$clang_tool" ] || [ "$gcc_tool" = "$alternate_tool" ] || \
@@ -76,7 +77,7 @@ fi
 
 run_make BUILD_ROOT="$build_root" CC=gcc ultrapatch >"$tmp/gcc.log" 2>&1 &
 gcc_pid=$!
-run_make BUILD_ROOT="$build_root" CC=clang ultrapatch >"$tmp/clang.log" 2>&1 &
+run_make BUILD_ROOT="$build_root" CC="$clang_command" ultrapatch >"$tmp/clang.log" 2>&1 &
 clang_pid=$!
 run_make BUILD_ROOT="$build_root" CC=gcc CFLAGS_EXTRA=-DUP_BUILD_PROFILE_ALTERNATE=1 \
   ultrapatch >"$tmp/alternate.log" 2>&1 &
@@ -101,6 +102,20 @@ for tool in "$gcc_tool" "$clang_tool" "$alternate_tool"; do
   }
   "$tool" --help >/dev/null
 done
+
+# Ambient compiler search paths are deliberately removed at the Make boundary.  A poison
+# standard header must neither select another host profile nor reach a real compilation.
+poison="$tmp/compiler-search-poison"
+mkdir "$poison"
+printf '%s\n' '#error "CPATH reached the compiler"' >"$poison/stdint.h"
+poison_tool=$(tool_path CC=gcc CPATH="$poison")
+require_unchanged "$gcc_tool" "$poison_tool" "CPATH host profile"
+run_make -B BUILD_ROOT="$build_root" CC=gcc CPATH="$poison" all-internal \
+  >"$tmp/cpath.log" 2>&1 || {
+    echo "check_build_profile.sh: sanitized CPATH affected compilation" >&2
+    cat "$tmp/cpath.log" >&2
+    exit 1
+  }
 
 gcc_dir=$(dirname "$gcc_tool")
 gcc_recipe="$gcc_dir/host-build.recipe.json"
@@ -428,7 +443,7 @@ shared_tool=$(run_make -s BUILD_DIR="$shared" CC=gcc "$host_tool_target")
 shared_before=$(find "$shared" -type f -printf '%P\t%i\t%s\t%T@\n' | LC_ALL=C sort | sha256sum)
 shared_before=${shared_before%% *}
 status=0
-run_make -j2 BUILD_DIR="$shared" CC=clang ultrapatch \
+run_make -j2 BUILD_DIR="$shared" CC="$clang_command" ultrapatch \
   >"$tmp/shared-clang.log" 2>&1 || status=$?
 if [ "$status" -eq 0 ]; then
   echo "check_build_profile.sh: a shared BUILD_DIR accepted a different profile" >&2

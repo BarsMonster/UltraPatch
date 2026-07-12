@@ -7,6 +7,7 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+release_lock="${RELEASE_PROFILE_LOCK:-toolchains/release-profile.json}"
 read -r -a make_argv <<<"${MAKE:-make}"
 [ "${#make_argv[@]}" -gt 0 ] || {
   echo "check_release_gate_contract.sh: empty MAKE command" >&2
@@ -26,7 +27,24 @@ run_make() {
       -u BASE_ARM_TEXT -u BASE_ARM_DATA -u BASE_ARM_BSS \
       -u BASE_ARM_LINKED_TEXT -u BASE_ARM_LINKED_DATA -u BASE_ARM_LINKED_BSS \
       -u BASE_ARM_SOFT_DIV -u BASE_STACK_STATIC_CEIL_O2 -u BASE_STACK_GENERIC_CEIL_O2 \
+      -u RELEASE_PROFILE_LOCK \
       "${make_argv[@]}" --no-print-directory "$@"
+}
+
+run_authority_make() {
+  # The documented authority starts the system Make directly. The parent Make exports MAKE for
+  # ordinary recursive probes; remove that bookkeeping value so the public parse guard sees the
+  # same clean entry environment as a user invoking /usr/bin/make.
+  env -u BASE_FULL_TOTAL -u BASE_FOREIGN_TOTAL \
+      -u BASE_ONEFACE_GROW -u BASE_ONEFACE_REVERT \
+      -u BASE_RELEASE_FIXTURES -u BASE_RELEASE_HOME_IMAGES \
+      -u BASE_RELEASE_FOREIGN_IMAGES -u BASE_RELEASE_FOREIGN_EDGES \
+      -u BASE_RELEASE_GOLDEN_BLOBS \
+      -u BASE_ARM_TEXT -u BASE_ARM_DATA -u BASE_ARM_BSS \
+      -u BASE_ARM_LINKED_TEXT -u BASE_ARM_LINKED_DATA -u BASE_ARM_LINKED_BSS \
+      -u BASE_ARM_SOFT_DIV -u BASE_STACK_STATIC_CEIL_O2 -u BASE_STACK_GENERIC_CEIL_O2 \
+      -u RELEASE_PROFILE_LOCK -u MAKE \
+      /usr/bin/make --no-print-directory "$@"
 }
 
 expect_reject() {
@@ -59,6 +77,54 @@ expect_update_reject() {
   fi
 }
 
+expect_profile_update_reject() {
+  local label=$1
+  shift
+  if run_make "$@" >"$tmp/profile-update-$label.out" 2>&1; then
+    echo "release profile update accepted runtime override: $label" >&2
+    exit 1
+  fi
+  if ! grep -Eq '^release gate (rejects runtime override|requires unset mode): ' \
+      "$tmp/profile-update-$label.out"; then
+    echo "release profile update rejected $label without its contract diagnostic" >&2
+    cat "$tmp/profile-update-$label.out" >&2
+    exit 1
+  fi
+}
+
+expect_public_update_env_reject() {
+  local label=$1 control=$2 value=$3 diagnostic=$4
+  local candidate="$tmp/public-$label.json"
+  cp "$tmp/stale-release-lock.json" "$candidate"
+  if (
+    export "$control=$value"
+    run_authority_make RELEASE_PROFILE_LOCK="$candidate" \
+      WIRE_BASELINE_LOCK="$tmp/public-update.lock" release-profile-update
+  ) >"$tmp/public-$label.out" 2>&1; then
+    echo "release profile update accepted launch control: $label" >&2
+    exit 1
+  fi
+  grep -Fq "release-profile-update rejects launch control: $diagnostic" \
+    "$tmp/public-$label.out"
+  cmp "$candidate" "$tmp/stale-release-lock.json"
+}
+
+expect_public_update_arg_reject() {
+  local label=$1 diagnostic=$2
+  shift 2
+  local candidate="$tmp/public-$label.json"
+  cp "$tmp/stale-release-lock.json" "$candidate"
+  if run_authority_make "$@" RELEASE_PROFILE_LOCK="$candidate" \
+      WIRE_BASELINE_LOCK="$tmp/public-update.lock" release-profile-update \
+      >"$tmp/public-$label.out" 2>&1; then
+    echo "release profile update accepted launch control: $label" >&2
+    exit 1
+  fi
+  grep -Fq "release-profile-update rejects launch control: $diagnostic" \
+    "$tmp/public-$label.out"
+  cmp "$candidate" "$tmp/stale-release-lock.json"
+}
+
 cd "$ROOT"
 run_make release-gate-origin-probe-internal
 run_make golden-update-origin-probe-internal
@@ -70,6 +136,55 @@ grep -q '^corpus_assets=verified ' "$tmp/update-inputs.out"
 grep -q '^foreign_assets=verified ' "$tmp/update-inputs.out"
 grep -Fxq 'golden_update_canonical_inputs=OK (inventory + corpus/foreign asset hashes)' \
   "$tmp/update-inputs.out"
+
+# The public release identity binds the immutable OCI image as well as the inner tool profile.
+# Changing only the container digest must therefore produce a distinct certificate hash.
+canonical_profile=$(python3 scripts/build_profile.py verify-release "$release_lock")
+python3 - "$release_lock" "$tmp/container-only.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+digest = source["container"][-64:]
+replacement = ("0" if digest[0] != "0" else "1") + digest[1:]
+source["container"] = source["container"][:-64] + replacement
+Path(sys.argv[2]).write_text(json.dumps(source, sort_keys=True, indent=2) + "\n",
+                             encoding="utf-8")
+PY
+container_profile=$(python3 scripts/build_profile.py verify-release "$tmp/container-only.json")
+if [ "$canonical_profile" = "$container_profile" ]; then
+  echo "release profile identity ignored the OCI container digest" >&2
+  exit 1
+fi
+
+# Required tools and ARM link policy are descriptor inputs, not merely Make gate variables.
+# The proxy reports the exact locked version and retains the same display name; only its bytes
+# differ. Acceptance would prove the profile compared labels rather than executable content.
+clang_version=$(python3 - "$release_lock" <<'PY'
+import json
+from pathlib import Path
+import sys
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["profile"]["clang"]["version"])
+PY
+)
+clang_proxy="$tmp/clang"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$LOCKED_CLANG_VERSION"' >"$clang_proxy"
+chmod +x "$clang_proxy"
+if LOCKED_CLANG_VERSION="$clang_version" run_make CLANG="$clang_proxy" \
+    check-release-profile-internal >"$tmp/clang-profile.out" \
+    2>"$tmp/clang-profile.err"; then
+  echo "release profile accepted a byte-different Clang with the locked version" >&2
+  exit 1
+fi
+grep -Fq 'executable_sha256' "$tmp/clang-profile.err"
+if run_make ARM_LINK_FLAGS='-mcpu=cortex-m0plus -mthumb -nostdlib' \
+    check-release-profile-internal >"$tmp/arm-link-profile.out" \
+    2>"$tmp/arm-link-profile.err"; then
+  echo "release profile accepted substituted ARM link flags" >&2
+  exit 1
+fi
+grep -Fq 'release profile mismatch' "$tmp/arm-link-profile.err"
 
 # One representative for each independently meaningful release input class. The probe is
 # parse/build-free, so this catches regressions without multiplying full gate runs.
@@ -106,6 +221,64 @@ expect_update_reject bypass_dump CORPUS_WIRE_DUMP="$tmp/wire.tsv" \
   golden-update-origin-probe-internal
 expect_update_reject timeout GATE_TIMEOUT=81 golden-update-origin-probe-internal
 run_make JOBS=1 golden-update-origin-probe-internal
+
+# A canonical lock refresh is just as sensitive as verification: runtime compiler, tool, flag,
+# archive, or policy substitutions must fail before the atomic updater can publish anything.
+cp "$release_lock" "$tmp/release-lock-before.json"
+expect_profile_update_reject clang_tool CLANG=false release-profile-update-internal
+expect_profile_update_reject arm_link ARM_LINK_FLAGS=-mthumb \
+  release-profile-update-internal
+cmp "$release_lock" "$tmp/release-lock-before.json"
+
+# Make launch controls act before recipes, so recipe failures cannot guard a mutation: -i can
+# ignore them, -n/-t can false-success, and injected makefiles/shells can neutralize them. Use a
+# stale private lock and private flock path to prove each public invocation exits nonzero without
+# changing one byte. These parse-time failures never acquire the gate's canonical shared lock.
+python3 - "$release_lock" "$tmp/stale-release-lock.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+lock["profile"] = {"stale": True}
+Path(sys.argv[2]).write_text(json.dumps(lock, sort_keys=True, indent=2) + "\n",
+                             encoding="utf-8")
+PY
+expect_public_update_env_reject makeflags_i MAKEFLAGS -i MAKEFLAGS
+expect_public_update_env_reject makeflags_n MAKEFLAGS -n MAKEFLAGS
+expect_public_update_env_reject makeflags_t MAKEFLAGS -t MAKEFLAGS
+expect_public_update_env_reject gnumakeflags GNUMAKEFLAGS -i GNUMAKEFLAGS
+printf '%s\n' '.IGNORE: release-gate-origin-probe-internal' >"$tmp/injected.mk"
+expect_public_update_env_reject makefiles MAKEFILES "$tmp/injected.mk" MAKEFILES
+expect_public_update_arg_reject make MAKE MAKE=/bin/true
+expect_public_update_arg_reject shell SHELL SHELL=/bin/true
+expect_public_update_arg_reject shellflags .SHELLFLAGS .SHELLFLAGS=-c
+
+# Candidate inspection and publication share the same early canonical PATH. PATH proxies for all
+# selected drivers and launch tools must stay untouched, and the full candidate must equal the
+# checked lock byte-for-byte.
+mkdir "$tmp/poison-path"
+for tool in gcc clang arm-none-eabi-gcc nm arm-none-eabi-nm arm-none-eabi-objdump \
+            arm-none-eabi-size python3 timeout flock; do
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" poison >>"$PROXY_MARKER"' 'exit 97' \
+    >"$tmp/poison-path/$tool"
+  chmod +x "$tmp/poison-path/$tool"
+done
+PATH="$tmp/poison-path:/usr/bin:/bin" PROXY_MARKER="$tmp/proxy-executed" \
+  run_authority_make release-profile-json >"$tmp/canonical-candidate.json"
+cmp "$release_lock" "$tmp/canonical-candidate.json"
+test ! -e "$tmp/proxy-executed"
+
+# A direct authority Make under the release driver's exact env -i policy gives GNU Make's
+# built-in /bin/sh the `default` origin (recursive Make commonly reports `file`). Both canonical
+# origins must produce the identical full candidate without admitting any caller-controlled one.
+env -i GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  HOME=/nonexistent/ultrapatch-release-home \
+  XDG_CONFIG_HOME=/nonexistent/ultrapatch-release-xdg \
+  LANG=C LANGUAGE=C LC_ALL=C PATH=/usr/bin:/bin TZ=UTC \
+  /usr/bin/make --no-print-directory release-profile-json \
+  >"$tmp/minimal-environment-candidate.json"
+cmp "$release_lock" "$tmp/minimal-environment-candidate.json"
 
 # The outer public gate takes the canonical shared lock before starting an inner Make, so the
 # inner invocation reparses a coherent Makefile/manifests generation.  MAKE=true prevents GNU
@@ -151,4 +324,4 @@ if grep -q '^RESULT[[:space:]]*: ALL GATES PASS$' "$tmp/evidence.out"; then
   exit 1
 fi
 
-echo "release_gate_contract=OK (gate/update overrides rejected; complete evidence required)"
+echo "release_gate_contract=OK (parse-time updater controls + canonical PATH; gate overrides rejected; complete evidence required)"

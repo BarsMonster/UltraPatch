@@ -193,6 +193,8 @@ require_prefix wire_config.txt wire_config_override "OK ("
 require_prefix wire_config.txt wire_config_low_memory "OK ("
 require_prefix ab.txt ab_wire_change "OK ("
 require_prefix release_gate.txt release_gate_contract "OK ("
+require_prefix release_gate.txt release_driver_contract "OK ("
+require_prefix release_gate.txt release_profile_update_contract "OK ("
 
 for key in degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow \
            degrade_bigspan; do
@@ -265,6 +267,8 @@ awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wa
 kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : ' 'wire_config.txt|wire_config_low_memory|low-memory config     : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 kvs 'release_gate.txt|release_gate_contract|release gate contract   : '
+kvs 'release_gate.txt|release_driver_contract|release driver contract : '
+kvs 'release_gate.txt|release_profile_update_contract|profile update contract : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
 awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" \

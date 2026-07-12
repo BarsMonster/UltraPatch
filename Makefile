@@ -2,6 +2,36 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
+# The canonical profile candidate/updater is an authority, not a configurable build. Establish
+# its executable search path before BUILD_PROFILE_ID invokes Python during Makefile parsing.
+# The recursive internal target has a different goal and simply inherits this exported value.
+override RELEASE_PROFILE_AUTHORITY_GOAL := $(firstword $(filter release-profile-json release-profile-update,$(MAKECMDGOALS)))
+ifneq ($(RELEASE_PROFILE_AUTHORITY_GOAL),)
+override PATH := /usr/bin:/bin
+export PATH
+ifneq ($(filter default undefined,$(origin GNUMAKEFLAGS)),$(origin GNUMAKEFLAGS))
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: GNUMAKEFLAGS (origin $(origin GNUMAKEFLAGS)))
+endif
+ifneq ($(filter default undefined,$(origin MAKEFILES)),$(origin MAKEFILES))
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKEFILES (origin $(origin MAKEFILES)))
+endif
+ifneq ($(origin MAKE),default)
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKE (origin $(origin MAKE)))
+endif
+ifneq ($(filter default file,$(origin SHELL)),$(origin SHELL))
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: SHELL (origin $(origin SHELL)))
+endif
+ifneq ($(SHELL),/bin/sh)
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: SHELL ($(SHELL)))
+endif
+ifneq ($(origin .SHELLFLAGS),default)
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: .SHELLFLAGS (origin $(origin .SHELLFLAGS)))
+endif
+ifneq ($(strip $(filter-out --no-print-directory,$(MAKEFLAGS))),)
+$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects launch control: MAKEFLAGS ($(MAKEFLAGS)))
+endif
+endif
+
 CC = $(CROSS_COMPILE)gcc
 CLANG ?= clang
 NM ?= nm
@@ -12,6 +42,18 @@ ARM_OBJDUMP ?= $(ARM_PREFIX)objdump
 ARM_NM ?= $(ARM_PREFIX)nm
 ARM_OBJECT_OPT ?= -Os
 ARM_STACK_OPT ?= -O2
+
+# Release builds and profile probes never inherit compiler search/injection state. The direct
+# release driver starts from an even smaller environment; keeping the Make boundary clean also
+# makes direct development-gate invocations representative of the recorded profile.
+TOOLCHAIN_ENV_UNSET := COMPILER_PATH CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH \
+	DEPENDENCIES_OUTPUT GCC_COMPARE_DEBUG GCC_EXEC_PREFIX GCC_SPECS \
+	LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH OBJC_INCLUDE_PATH SOURCE_DATE_EPOCH \
+	SUNPRO_DEPENDENCIES ZERO_AR_DATE
+unexport $(TOOLCHAIN_ENV_UNSET)
+export LANG := C
+export LANGUAGE := C
+export LC_ALL := C
 
 OPT ?= -O2
 # Every wire-affecting override belongs here, under the exact macro name consumed by
@@ -47,6 +89,8 @@ HOST_BACKEND_DEFINES := -D_POSIX_C_SOURCE=200809L
 # Clang, or alternate-config invocation never executes whichever shared root binary linked last.
 override UP_PROFILE_CC := $(CC)
 override UP_PROFILE_CLANG := $(CLANG)
+override UP_PROFILE_NM := $(NM)
+override UP_PROFILE_ENV_UNSET := $(TOOLCHAIN_ENV_UNSET)
 override UP_PROFILE_ENCODER_CFLAGS := $(CFLAGS)
 override UP_PROFILE_BACKEND_CFLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
 override UP_PROFILE_LINK_CFLAGS := $(CFLAGS)
@@ -57,17 +101,23 @@ override UP_PROFILE_ARM_CC := $(ARM_CC)
 override UP_PROFILE_ARM_SIZE := $(ARM_SIZE)
 override UP_PROFILE_ARM_OBJDUMP := $(ARM_OBJDUMP)
 override UP_PROFILE_ARM_NM := $(ARM_NM)
-override UP_PROFILE_ARM_FLAGS = $(ARM_DEC_FLAGS)
+override UP_PROFILE_ARM_SOURCE_FLAGS = $(ARM_DEC_FLAGS)
+override UP_PROFILE_ARM_SINGLE_FLAGS = $(ARM_SINGLE_DEC_FLAGS)
+override UP_PROFILE_ARM_LINK_FLAGS = $(ARM_LINK_FLAGS)
+override UP_PROFILE_ARM_LINK_LIBS = $(ARM_LINK_LIBS)
 override UP_PROFILE_ARM_OBJECT_OPT := $(ARM_OBJECT_OPT)
 override UP_PROFILE_ARM_STACK_OPT := $(ARM_STACK_OPT)
-export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
+export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_NM UP_PROFILE_ENV_UNSET
+export UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
 export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
 export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
 export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_NM
-export UP_PROFILE_ARM_FLAGS UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
+export UP_PROFILE_ARM_SOURCE_FLAGS UP_PROFILE_ARM_SINGLE_FLAGS
+export UP_PROFILE_ARM_LINK_FLAGS UP_PROFILE_ARM_LINK_LIBS
+export UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
 
 BUILD_ROOT ?= .build
-override BUILD_PROFILE_ID := $(shell python3 scripts/build_profile.py host-id)
+override BUILD_PROFILE_ID := $(shell /usr/bin/python3 -I -S scripts/build_profile.py host-id)
 ifeq ($(strip $(BUILD_PROFILE_ID)),)
 $(error failed to derive the host build profile)
 endif
@@ -170,6 +220,9 @@ ARM_SINGLE_DEC_FLAGS := $(ARM_COMMON_FLAGS)
 SINGLE_DECODER_CFLAGS = $(filter-out -Isrc,$(DECODER_CFLAGS))
 ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
 ARM_LINK_LAYOUT := scripts/arm_link.ld
+ARM_LINK_FLAGS := -mcpu=cortex-m0plus -mthumb -nostdlib \
+	-Wl,--gc-sections,--orphan-handling=error,-T,$(ARM_LINK_LAYOUT)
+ARM_LINK_LIBS := -lc -lgcc
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
 # The production ARM size gate intentionally measures the static-state wrapper integration
 # used by rcv3_run in the tracked integration TU. A generic caller-owned PatchApply * wrapper
@@ -192,7 +245,7 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
-CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-decoder-contract check-decoder-sanitize \
+CAPPED := all decoder-header check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize \
           check-wire-config check-build-profile check-release-profile check-release-gate-contract check-release-inventory check-pack-corpus \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
@@ -212,6 +265,15 @@ gate:
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
+.PHONY: release-profile-update release-profile-update-internal
+release-profile-update:
+	@if [ "$(origin MAKE)" != default ]; then \
+	  echo "release-profile-update rejects runtime override: MAKE (origin $(origin MAKE))" >&2; exit 1; fi
+	@/usr/bin/timeout $(GATE_TIMEOUT) /usr/bin/flock --exclusive "$(WIRE_BASELINE_LOCK)" \
+	  /usr/bin/make --no-print-directory release-profile-update-internal; s=$$?; \
+	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
+	exit $$s
+
 all-internal: ultrapatch
 	$(CC) $(DECODER_CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
 
@@ -220,7 +282,11 @@ host-tool-path:
 	@printf '%s\n' "$(HOST_TOOL)"
 
 release-profile-json:
-	@python3 scripts/build_profile.py release-json
+	@/usr/bin/python3 -I -S scripts/build_profile.py release-lock-json "$(RELEASE_PROFILE_LOCK)"
+
+release-profile-update-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
+	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
+	@/usr/bin/python3 -I -S scripts/build_profile.py refresh-release "$(RELEASE_PROFILE_LOCK)"
 
 # Validate on every public use, including when an explicit BUILD_DIR points at a manifest created
 # by another compiler/config. Identical concurrent checks are safe because ensure-host publishes
@@ -237,7 +303,21 @@ check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
 	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"
 
 check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profile.py
-	@MAKE="$(MAKE)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" scripts/check_build_profile.sh
+	@MAKE="$(MAKE)" CLANG="$(CLANG)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" \
+	  scripts/check_build_profile.sh
+
+# Required second-compiler leg. It remains outside `make gate`, but is a capped public target
+# and uses the exact CLANG command pinned in the release descriptor.
+check-clang-internal: check-release-profile-internal
+	@$(MAKE) --no-print-directory CC="$(CLANG)" -B all-internal
+	@$(MAKE) --no-print-directory CC="$(CLANG)" \
+	  check-internal check-malformed-internal check-clang-golden-internal
+	@echo "clang_contract=OK (descriptor-pinned build + checks + golden wire)"
+
+.PHONY: check-clang-golden-internal
+check-clang-golden-internal: ultrapatch
+	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$(GOLDEN_MANIFEST)" \
+	  scripts/check_golden.sh check
 
 decoder-header-internal: $(DECODER_PUBLIC_HDRS) scripts/gen_single_header.py
 	@python3 scripts/gen_single_header.py "$(DECODER_CANONICAL_HDR)" $(DECODER_PUBLIC_HDRS)
@@ -267,19 +347,24 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
-	CC CLANG ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
+	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS SINGLE_DECODER_CFLAGS \
-	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_SINGLE_DEC_FLAGS \
+	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_SINGLE_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS DECODER_SINGLE_HDR NVM_EMU ENC_MODULE_SRCS \
 	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
 	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
-	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS LOW_MEMORY_WIRE_CONFIG_FLAGS \
+	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS LOW_MEMORY_WIRE_CONFIG_FLAGS TOOLCHAIN_ENV_UNSET \
 	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_DUMP CORPUS_WIRE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE CRASH_DISPATCH_MODE CRASH_DISPATCH_MARKER \
 	DECODER_INTEGRATION_PROBE_FLAGS REAL_ULTRAPATCH ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
 
+# A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
+# substituted shell/make commands can false-success. For the public mutation goal, reject all
+# launch controls and release-input substitutions while Make is still parsing; $(error) cannot
+# be suppressed by ignore-errors mode. The recursive publisher uses the distinct *-internal
+# goal, so its normal MAKEFLAGS/MAKELEVEL state is unaffected.
 .PHONY: release-gate-origin-probe-internal release-gate-inputs-internal
 release-gate-origin-probe-internal:
 	@set -eu; bad=0; \
@@ -313,9 +398,15 @@ golden-update-inputs-internal:
 	  $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null
 	@echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
 
-check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh \
-                                      scripts/corpus_topology.py $(CORPUS_INVENTORY)
-	@MAKE="$(MAKE)" scripts/check_release_gate_contract.sh
+check-release-gate-contract-internal: scripts/check_release_gate_contract.sh \
+                                      scripts/check_release_driver.py scripts/release_gate.py \
+                                      scripts/check_release_profile_update.py \
+                                      scripts/run_gate.sh scripts/corpus_topology.py \
+                                      $(CORPUS_INVENTORY)
+	@MAKE="$(MAKE)" RELEASE_PROFILE_LOCK="$(RELEASE_PROFILE_LOCK)" \
+	  scripts/check_release_gate_contract.sh
+	@/usr/bin/python3 scripts/check_release_driver.py
+	@/usr/bin/python3 scripts/check_release_profile_update.py
 
 check-release-inventory-internal: scripts/check_release_inventory.py scripts/corpus_topology.py \
                                   $(CORPUS_INVENTORY) \
@@ -357,7 +448,8 @@ check-wire-config-probe-internal: ultrapatch $(DECODER_CANONICAL_HDR) scripts/ch
 	  ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
 	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" ARM_SINGLE_DEC_FLAGS="$(ARM_SINGLE_DEC_FLAGS)" \
 	  ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" ARM_BSS_HARD_CAP="$(ARM_BSS_HARD_CAP)" \
-	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_LAYOUT="$(ARM_LINK_LAYOUT)" \
+	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_FLAGS="$(ARM_LINK_FLAGS)" \
+	  ARM_LINK_LIBS="$(ARM_LINK_LIBS)" \
 	  DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \
 	  DEFAULT_ULTRAPATCH="$(DEFAULT_ULTRAPATCH)" ULTRAPATCH="$(HOST_TOOL)" \
 	  FIXTURES="$(FIXTURES)" scripts/check_wire_config.sh
@@ -468,12 +560,10 @@ check-arm-measure-internal: $(DECODER_CANONICAL_HDR) $(ARM_LINK_STUBS) $(ARM_LIN
 	echo "soft_div_calls=$$soft"; \
 	test "$$soft" -eq "$(BASE_ARM_SOFT_DIV)"; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -c "$(ARM_LINK_STUBS)" -o "$$tmp/arm_link_stubs.o"; \
-	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
-		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm.map" \
-		"$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm.elf"; \
-	$(ARM_CC) -mcpu=cortex-m0plus -mthumb -nostdlib \
-		-Wl,--gc-sections,--orphan-handling=error,-T,"$(ARM_LINK_LAYOUT)",-Map,"$$tmp/patch_apply_arm_single.map" \
-		"$$tmp/patch_apply_arm_single.o" "$$tmp/arm_link_stubs.o" -lc -lgcc -o "$$tmp/patch_apply_arm_single.elf"; \
+	$(ARM_CC) $(ARM_LINK_FLAGS) "$$tmp/patch_apply_arm.o" "$$tmp/arm_link_stubs.o" \
+		$(ARM_LINK_LIBS) -o "$$tmp/patch_apply_arm.elf"; \
+	$(ARM_CC) $(ARM_LINK_FLAGS) "$$tmp/patch_apply_arm_single.o" "$$tmp/arm_link_stubs.o" \
+		$(ARM_LINK_LIBS) -o "$$tmp/patch_apply_arm_single.elf"; \
 	linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm.elf"); \
 	single_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_single.elf"); \
 	printf '%s\n' "$$linked_size_out"; \
@@ -867,3 +957,10 @@ clean-internal:
 clean-all-internal:
 	rm -rf .build
 	rm -f ultrapatch artifacts/patch_apply_single.h
+
+# This parse-time authority check must follow every release variable definition. It still runs
+# before any recipe and therefore cannot be suppressed by MAKEFLAGS=-i/-n/-t.
+ifneq ($(RELEASE_PROFILE_AUTHORITY_GOAL),)
+$(foreach v,$(RELEASE_GATE_FIXED_VARS),$(if $(filter file,$(origin $(v))),,$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) rejects runtime override: $(v) (origin $(origin $(v))))))
+$(foreach v,$(RELEASE_GATE_UNSET_VARS),$(if $(filter undefined,$(origin $(v))),,$(error $(RELEASE_PROFILE_AUTHORITY_GOAL) requires unset mode: $(v) (origin $(origin $(v))))))
+endif

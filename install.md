@@ -9,6 +9,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   gcc \
   gcc-arm-none-eabi \
   binutils-arm-none-eabi \
+  git \
   libnewlib-arm-none-eabi \
   make \
   python3 \
@@ -56,24 +57,45 @@ correct host tools:
 make check-build-profile
 ```
 
-Release verification has a stricter provenance contract. The default GCC,
-required Clang, GNU Arm GCC/binutils, `libc.a`/`libgcc.a` content hashes, and
-effective release flags are pinned in `toolchains/release-profile.json`.
-`make gate` validates those exact inputs before forking any verification leg and
-prints the validated `release_profile` in its consolidated summary. A mismatch
-is a failed release gate, even when the local tools happen to compile the
-sources successfully. Updating an accepted tool identity, archive, or flag is a
-deliberate release-profile change: update the descriptor, review the resulting
-code, footprint, wire, and corpus evidence, and land those changes together.
-This contract establishes traceable inputs; it does not claim that compiler
-executables or output binaries are byte-for-byte reproducible across machines.
+Release verification has a stricter provenance contract. The selected host GCC
+driver and its `cc1`, `collect2`, assembler, and linker; required Clang; host
+`nm`; selected GNU Arm GCC driver and its `cc1`, `collect2`, assembler, and
+linker; the other named Arm binutils; `libc.a`/`libgcc.a` content hashes; clean
+compiler environment; and effective compile/link flags are pinned in
+`toolchains/release-profile.json`. The full schema-3 lock also records the
+immutable OCI digest configured for authoritative push CI. `make gate` validates
+those inputs before forking any verification leg and prints the validated
+`release_profile` in its consolidated summary. A mismatch is a failed release
+gate, even when the local tools happen to compile the sources successfully.
+
+Refresh the complete lock with the repository workflow:
+
+```sh
+/usr/bin/make release-profile-json   # inspect the complete candidate wrapper
+/usr/bin/make release-profile-update # atomic, mode-preserving publication
+git diff -- toolchains/release-profile.json
+make check-release-profile check-release-gate-contract
+```
+
+The updater takes the exclusive release-input lock, validates and preserves the
+existing immutable `container` value;
+changing that digest is a separate deliberate edit that must also update the CI
+workflow. A second identical refresh is an exact inode/mtime/mode-preserving
+no-op. Review and land the new lock with the resulting footprint, wire, corpus,
+and full release evidence. Both authority targets force `PATH=/usr/bin:/bin`,
+the C locale, isolated `/usr/bin/python3`, and absolute Make/coreutils launchers;
+they reject Make launch controls and runtime tool/flag overrides at parse time.
+
+This profile deliberately covers the selected compiler drivers, named GCC
+subtools, named binutils, runtime archives, environment policy, and flags. It is
+not a recursive dynamic-library closure and does not claim byte-for-byte binary
+reproducibility; the behavioral gates are part of the release evidence.
 
 Optional but useful for local inspection:
 
 ```sh
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   file \
-  git \
   ripgrep
 ```
 
@@ -88,6 +110,17 @@ make check-assets
 make check-arm
 make gate
 ```
+
+For a local release preflight, run `/usr/bin/python3 -I -S scripts/release_gate.py`
+from a clean `main` checkout with Python/Make launch controls unset. The driver
+requires this isolated, no-site Python startup so import search paths cannot be
+injected before its own environment checks. It
+rejects non-normal index flags, exports the captured commit into a fresh
+temporary tree, and requires explicit evidence from the build-profile, gate,
+sanitizer, and Clang commands. It proves that the selected local inputs match the
+lock, but it does not attest that the local process is running in the recorded
+OCI image. The successful push workflow at the exact `github.sha`, inside the
+pinned container digest, is the authoritative release run.
 
 `make check-arm` cross-builds the Cortex-M0+ decoder object and prints and
 gates both its relocatable and no-startup linked ARM `text`/`data`/`bss` sizes

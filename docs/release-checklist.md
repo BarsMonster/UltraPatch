@@ -16,25 +16,58 @@ hardware flash validation are external integration work.
 - `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
   release, with the size/wire/golden baselines validated against the same
   inventory by `make check-release-inventory`.
-- The exact default GCC, required Clang, GNU Arm GCC/binutils,
-  `libc.a`/`libgcc.a` content hashes, and effective flags recorded in
+- The selected host/Arm GCC drivers and named subtools (`cc1`, `collect2`,
+  assembler, linker), required Clang and named binutils, `libc.a`/`libgcc.a`
+  content hashes, compiler environment policy, effective compile/link flags,
+  and authoritative CI container digest recorded in
   `toolchains/release-profile.json`, with packages installed as documented in
   `install.md`.
 
-## Gate
-
-Run:
+For an intentional tool/archive/flag update, refresh and review the complete
+schema-3 lock:
 
 ```sh
-make check-build-profile
-make gate
+/usr/bin/make release-profile-json
+/usr/bin/make release-profile-update
+git diff -- toolchains/release-profile.json
+make check-release-profile check-release-gate-contract
 ```
 
-`make check-build-profile` is the build-isolation regression: it must prove that
-colliding compiler/configuration builds select and execute their own host tools.
-The gate independently validates the release descriptor before forking its
-verification legs. Record the complete output in the release notes. The gate
-must report:
+The atomic updater takes the exclusive release-input lock, rejects runtime
+Make/tool/flag overrides, validates and preserves the existing immutable
+container wrapper, preserves the file mode,
+and makes an identical second update a true no-op. Change the container digest
+only by an explicit reviewed edit, mirror it in `.github/workflows/gate.yml`,
+then refresh and run the full evidence suite. Candidate inspection and update
+both use the canonical `/usr/bin:/bin` path, C locale, isolated system Python,
+and absolute launchers, and reject Make launch controls before any recipe runs.
+
+## Gate
+
+Run the matching local preflight from a clean checkout on `main`:
+
+```sh
+/usr/bin/python3 -I -S scripts/release_gate.py
+```
+
+The driver rejects inherited Make/Python launch controls, global/system Git
+configuration, non-normal index flags, and a mismatched `GITHUB_SHA`; `-I -S`
+also prevents environment or site-package import injection before those checks. It holds
+the release-input lock, captures one clean `main` commit, and runs from a fresh
+temporary `git archive` export so ignored `.build` state and working-tree bytes
+cannot enter the verification. It streams and captures the build-isolation,
+`make gate`, ASan/UBSan, and required Clang commands, requiring each command's
+explicit success evidence, and rechecks the original branch, commit, index, and
+working tree after every command. Every public Make target retains its hard
+80-second cap. Record the complete output.
+
+This local run verifies that its selected tools and archives match the lock; it
+does not attest its runtime OCI container. The authoritative release result is
+the successful push workflow for the exact `github.sha`, executed inside the
+container digest pinned in both the workflow and the full release lock.
+
+`make gate` remains the development correctness gate and independently validates the
+release descriptor before forking its verification legs. It must report:
 
 - `release_profile`: the validated profile identifier from
   `toolchains/release-profile.json`
@@ -62,16 +95,12 @@ must report:
 - journal peak slots
 - final `RESULT: ALL GATES PASS`
 
-Also run before release (not part of `make gate`):
-
-- A clang leg
-  (`make CC=clang -B all && make CC=clang check check-malformed check-golden`)
-  — CI runs this on every push; keeping `CC=clang` on both commands selects the
-  same profile-scoped host binary, and the golden check proves that encoder emits
-  the frozen wire blobs.
-- `make decoder-header` if explicitly refreshing the one-file device decoder
-  artifact outside `make gate` (the gate refreshes the same canonical path before
-  its parallel checks).
+The driver also runs `make check-clang`, which uses the descriptor-pinned `CLANG`
+command for a warning-clean build, proves that its encoder emits the frozen wire,
+and emits `clang_contract=OK`; it also runs `make check-decoder-sanitize`. Run
+`make decoder-header` only if explicitly
+refreshing the one-file device decoder artifact outside `make gate` (the gate
+refreshes the same canonical path before its parallel checks).
 
 Do not ship from a build that requires deployment-only CFLAGS or relaxed baseline
 thresholds.
@@ -127,6 +156,8 @@ release contract.
 For traceability, release notes should include:
 
 - Git commit SHA.
+- The `release_commit`, `release_source`, and `release_preflight` lines from the
+  matching local driver, plus the URL/status of the authoritative push CI job.
 - `sha256sum test-bench/corpus.sha256`.
 - `sha256sum test-bench/foreign.sha256`.
 - `sha256sum test-bench/release-inventory.tsv`.
@@ -136,8 +167,11 @@ For traceability, release notes should include:
 - `sha256sum toolchains/release-profile.json`.
 - The `release_profile` line from `make gate`.
 - `make gate` output.
-- Exact tool identities, runtime archive hashes, and effective flags validated
-  against `toolchains/release-profile.json` by `make gate`.
+- Selected driver/subtool/binutil identities and executable hashes, named runtime
+  archive hashes, compiler environment policy, effective compile/link flags, and
+  configured CI container digest validated against
+  `toolchains/release-profile.json` by `make gate` and push CI. This scope is not
+  a recursive dynamic-library closure; the behavioral gates remain required.
 - License statement: project MIT except vendored libdivsufsort, which retains
   its upstream notice; `src/enc_bsdiff.c` includes an attribution note for
   the detools Python implementation that informed the ARM Cortex-M scanner
