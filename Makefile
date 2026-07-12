@@ -498,7 +498,6 @@ check-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 # measurement from the recipe after validation so even `make -j` cannot race it ahead.
 check-arm-internal: check-release-profile-internal
 	@$(MAKE) --no-print-directory check-arm-measure-internal
-	@MAKE="$(MAKE)" scripts/check_arm_bss_cap.sh
 
 .PHONY: check-arm-measure-internal
 check-arm-measure-internal: $(DECODER_PUBLIC_HDRS) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT) \

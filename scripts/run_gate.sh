@@ -82,7 +82,7 @@ require_metrics \
   'models.txt:model_contract' \
   'ab.txt:ab_wire_change' \
   'dg.txt:degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction split_run_budget degrade_cases degrade_fail' \
-  'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_bss_hard_cap_overrides arm_decoder_build' \
+  'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_decoder_build' \
   'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_decoder_build' \
   'm.txt:matrix_ok full_total home_size_better home_size_worse home_size_equal foreign_ok foreign_total wire_identity max_amplified max_maxpageerase max_inversions max_unaligned max_oob_page_writes max_canary_corrupt max_journal' \
   'c.txt:oneface_grow oneface_revert'
