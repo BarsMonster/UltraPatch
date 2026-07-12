@@ -162,6 +162,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     printf '%s\n' '#include "patch_apply.h"' >> "$tmp/macro-after.c"
     {
         printf '%s\n' DR_KCAP_BL DR_KCAP_EX JSLOTS MAX_IMAGE OPC_CAP OUTROW OUTROW_DEPTH
+        printf '%s\n' PATCH_WIRE_VERSION
         printf '%s\n' UP_PATCH_APPLY_H UP_PATCH_CONFIG_H UP_RC_MODELS_H WINDOW_LOG
     } | LC_ALL=C sort > "$tmp/public-macro-allowlist"
 

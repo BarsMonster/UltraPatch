@@ -172,6 +172,9 @@ static int check_shared_models(void){
     up_IdxUnary idx;
     up_DRStream ds;
     int32_t dic[4] = { 123, 456, 789, 111 };
+    CHECK(sizeof(PATCH_WIRE_VERSION) == sizeof(uint8_t));
+    CHECK(PATCH_WIRE_VERSION != 0u);
+    CHECK(rc_wire_from_crc(rc_wire_from_crc(0x12345678u)) == 0x12345678u);
     CHECK(PROBE_RC_PROB_BITS == 12);
     CHECK(PROBE_RC_PBIT == (1 << PROBE_RC_PROB_BITS));
     CHECK((uint32_t)PROBE_RC_PROB_BOUND == (0xffffffffu >> 12) * (uint32_t)PROBE_RC_PHALF);

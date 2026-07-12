@@ -502,6 +502,27 @@ static int early_crc_case(PatchApply *pa, const Bytes *from, const Bytes *to, co
     return 0;
 }
 
+/* Retag the current envelope as legacy revision zero. A decoder from this revision must reject
+ * that otherwise-valid patch at the source CRC gate, before the first physical write. */
+static int wire_revision_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob){
+    Bytes before = {0};
+    uint32_t span = image_span(from, to);
+    uint8_t *legacy = (uint8_t *)malloc(blob->n);
+    CHECK(blob->n >= 8u && legacy != NULL);
+    CHECK(sizeof(PATCH_WIRE_VERSION) == sizeof(uint8_t) && PATCH_WIRE_VERSION != 0u);
+    memcpy(legacy, blob->d, blob->n);
+    legacy[0] ^= PATCH_WIRE_VERSION;
+    CHECK(load_flash(from, span, &before) == 0);
+    Result r = run_blob(pa, legacy, blob->n);
+    CHECK(r.rc == PATCH_APPLY_ERROR && r.reject == REJ_CORRUPT);
+    CHECK(r.consumed >= 12u && r.consumed < blob->n && r.calls == r.consumed);
+    CHECK(r.touched == 0 && r.writes == 0u && r.oob_writes == 0u && r.unaligned_writes == 0u);
+    CHECK(before.n == 0u || memcmp(test_flash, before.d, before.n) == 0);
+    free(legacy);
+    free(before.d);
+    return 0;
+}
+
 static int late_crc_case(PatchApply *pa, const Bytes *from, const Bytes *to, const Bytes *blob){
     Bytes before = {0};
     uint32_t span = image_span(from, to);
@@ -611,12 +632,13 @@ int main(int argc, char **argv){
     if(body_abort_case(&pa, &from, &to, &blob)) goto out;
     if(success_case(&pa, &from2, &to2, &blob2, &forward2)) goto out;
     if(forward1 == forward2){ rc = fail(__LINE__, "grow/revert directions differ"); goto out; }
+    if(wire_revision_case(&pa, &from, &to, &blob)) goto out;
     if(early_crc_case(&pa, &from, &to, &blob)) goto out;
     if(late_crc_case(&pa, &from, &to, &blob)) goto out;
     if(nvm_failure_case(&pa, &from2, &to2, &blob2)) goto out;
     printf("decoder_nvm_readback=OK (corrupt final-page write rejected)\n");
     printf("decoder_page_contract=OK (aligned full-page calls + trailing canary preserved)\n");
-    printf("decoder_api_contract=OK (state reuse + counted framing + early-clean/late-touched rejects)\n");
+    printf("decoder_api_contract=OK (state reuse + wire-version/early-clean/late-touched rejects)\n");
     printf("decoder_result_contract=OK (DONE=0 ERROR!=0; pull END=0 BYTE=1 exact)\n");
     printf("decoder_pull_abort=OK (envelope + body END/non-BYTE; callback once)\n");
     rc = 0;

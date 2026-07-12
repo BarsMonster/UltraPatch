@@ -66,7 +66,7 @@ expect_reject_unchanged() {
 }
 
 # Synthesize a header blob with a chosen from_size / zigzag size-delta, borrowing the real blob's
-# CRC32(from)|CRC32(to) pair. (16 zero pad bytes follow, per wire_envelope.py header.)
+# tagged-source-CRC|CRC32(to) pair. (16 zero pad bytes follow, per wire_envelope.py header.)
 mk_header_blob() { wire header "$1" "$tmp/grow.blob" "$2" "$3"; }
 
 base_bin="$base/watch.bin"
@@ -79,13 +79,13 @@ head -c 11 "$tmp/grow.blob" > "$tmp/short.blob"
 expect_reject_unchanged short "$tmp/short.blob" "$base_bin"
 
 : > "$tmp/unterminated_from_size.blob"
-head -c 8 "$tmp/grow.blob" >> "$tmp/unterminated_from_size.blob"   # CRC32(from)[4] | CRC32(to)[4]
+head -c 8 "$tmp/grow.blob" >> "$tmp/unterminated_from_size.blob"   # tagged source CRC[4] | CRC32(to)[4]
 printf '\200\200\200\200\200\200' >> "$tmp/unterminated_from_size.blob"
 zeros 8 >> "$tmp/unterminated_from_size.blob"
 expect_reject_unchanged unterminated_from_size "$tmp/unterminated_from_size.blob" "$base_bin"
 
 : > "$tmp/overflow5_from_size.blob"
-head -c 8 "$tmp/grow.blob" >> "$tmp/overflow5_from_size.blob"   # CRC32(from)[4] | CRC32(to)[4]
+head -c 8 "$tmp/grow.blob" >> "$tmp/overflow5_from_size.blob"   # tagged source CRC[4] | CRC32(to)[4]
 printf '\200\200\200\200\020' >> "$tmp/overflow5_from_size.blob"
 zeros 8 >> "$tmp/overflow5_from_size.blob"
 expect_reject_unchanged overflow5_from_size "$tmp/overflow5_from_size.blob" "$base_bin"

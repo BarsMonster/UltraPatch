@@ -18,10 +18,12 @@
  *
  * The patch arrives BYTE-BY-BYTE over a slow link. The integrator supplies a byte-source
  * callback (which may block internally — e.g. poll a UART ring) and passes the blob —
- * envelope (both CRCs and the compressed body length in the header) followed by the range-coded body — through one
+ * envelope (revision-tagged source CRC, target CRC, and compressed body length in the header)
+ * followed by the range-coded body — through one
  * patch_apply_run(state, callback, ctx) call whose return is the DONE/ERROR verdict; the whole decode
  * runs synchronously on the CALLER's stack (no coroutine, no fiber, no private decode stack).
- * The decoder itself parses the envelope (sizes, direction, span) and gates on CRC32(from)
+ * The decoder itself parses the envelope (sizes, direction, span) and gates on the
+ * wire-version-tagged CRC32(from)
  * BEFORE the first flash write and CRC32(to) after the apply. The body is the last thing on the
  * wire and the decoder zero-pads the range coder after the header's compressed byte count, so there
  * is no trailer or withhold ring. A single divide-free binary range coder (LZMA bound; no
@@ -992,10 +994,11 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
 /* stack (plain calls, no coroutine/fiber). Shared state lives in the caller-owned PatchApply */
 /* object that patch_apply_run primes before invoking up_decode_body.                            */
 /* ===================================================================================== */
-/* ---- envelope header (strict reads): CRC32(from)[4] | CRC32(to)[4] | from_size uLEB |
+/* ---- envelope header (strict reads): (CRC32(from)^PATCH_WIRE_VERSION)[4] | CRC32(to)[4] | from_size uLEB |
  * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | [zz(fp_start) iff ascending] |
  * compressed_body_len. The decoder derives the apply direction and the image span itself
- * and verifies CRC32(from) over flash BEFORE the first flash write — a truncated header,
+ * and verifies the revision-tagged CRC32(from) over flash BEFORE the first flash write — a
+ * mismatched wire revision, truncated header,
  * implausible sizes, or a wrong/dirty current image all reject cleanly with flash untouched.
  * CRC32(to) is stashed in g_want_to here and checked over the final image after apply
  * (patch_apply_run). Then the literal bit-trees are seeded from flash parity histograms
@@ -1034,7 +1037,7 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     pa->g_body_left=bl;
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
-      if(up_crc32_flash_hist(pa,fs,hist0,hist1)!=want_from) return 0;
+      if(rc_wire_from_crc(up_crc32_flash_hist(pa,fs,hist0,hist1))!=want_from) return 0;
       up_lit_tree_from_hist(&pa->M_lit0[0],hist0,w);
       for(int c=1;c<UP_LIT0_CTX;c++) pa->M_lit0[c]=pa->M_lit0[0];
       up_lit_tree_from_hist(&pa->M_lit1,hist1,w); }

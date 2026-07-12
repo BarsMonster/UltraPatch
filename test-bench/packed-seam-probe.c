@@ -39,7 +39,7 @@ static Buf wire_blob(uint32_t from_crc, uint32_t to_crc,
     Buf blob = {0};
     uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
     if (body->n < 5u || body->d[0] != 0) die("bad seam-probe body");
-    buf_put_u32le(&blob, from_crc); buf_put_u32le(&blob, to_crc);
+    buf_put_u32le(&blob, rc_wire_from_crc(from_crc)); buf_put_u32le(&blob, to_crc);
     put_uleb(&blob, from_size);
     if (rc_dir_is_natural(from_size, to_size, desc)) put_uleb(&blob, zd);
     else put_uleb_overlong(&blob, zd);

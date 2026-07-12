@@ -7,7 +7,7 @@
 # (src/patch_apply.h decode_header); this mirrors ONLY the header uLEB walk those gates need to
 # synthesize malformed fixtures and to detect the direction-flip overlong marker.
 #
-# Envelope: CRC32(from)[4] | CRC32(to)[4] | <uLEB fields...>
+# Envelope: (CRC32(from)^PATCH_WIRE_VERSION)[4] | CRC32(to)[4] | <uLEB fields...>
 #   Header uLEB fields (0-based, after the 8-byte CRC pair) for a DESCENDING grow patch are:
 #     0 from_size | 1 zz(size-delta) | 2 zz(fp_end) | 3 body_len
 #   fp_end ships iff DESCENDING, fp_start iff ASCENDING (mutually exclusive), so a descending
@@ -17,7 +17,8 @@
 #
 # Subcommands (path/index args first so the shell wrappers stay one-liners):
 #   header   <out> <crc_src> <from_size> <size_delta_zz>
-#       synthesize a header: the 8-byte CRC pair copied from <crc_src>, then uLEB(from_size),
+#       synthesize a header: the tagged-source/target CRC pair copied from <crc_src>, then
+#       uLEB(from_size),
 #       uLEB(size_delta_zz), then 16 zero pad bytes.
 #   overlong <in> <field> <out>
 #       copy <in> with header uLEB #<field> re-encoded overlong (one extra 0x00 byte).

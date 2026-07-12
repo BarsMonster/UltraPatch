@@ -13,7 +13,9 @@ lives in that object and its calls use the caller's stack. Do not run two
 decodes concurrently against one flash image.
 
 `patch_config.h` fixes the shared encoder/decoder wire, page, and resource
-constants. Production builds must not override them. `PATCH_IMAGE_BASE` and
+constants, including the unsigned 8-bit `PATCH_WIRE_VERSION`. Its nonzero value
+domain-separates incompatible revisions at the pre-write source CRC check.
+Production builds must not override these constants. `PATCH_IMAGE_BASE` and
 `PATCH_IMAGE_CAPACITY` are the decoder-only deployment exceptions. The header
 set targets the Cortex-M0/ARMv6-M wire; Cortex-M4/Thumb-2 is unsupported and
 rejected.

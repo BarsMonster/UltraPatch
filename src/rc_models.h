@@ -67,6 +67,12 @@ static inline int rc_rice_feasible(uint32_t v,uint32_t k){
     return k<32u && (v>>k)<=RC_RICE_UNARY_MAX;
 }
 
+/* Domain-separate otherwise identical envelopes from incompatible wire revisions. Because the
+ * source CRC is checked before apply, a revision mismatch rejects before any flash write. */
+static inline uint32_t rc_wire_from_crc(uint32_t crc){
+    return crc^(uint32_t)PATCH_WIRE_VERSION;
+}
+
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
  * 12 bits/node instead of a full uint16_t; this struct + accessors are the ONE byte-tree
