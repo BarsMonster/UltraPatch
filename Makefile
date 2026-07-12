@@ -145,6 +145,7 @@ GOLDEN_MANIFEST ?= test-bench/golden.sha256
 BASE_RELEASE_FIXTURES ?= 2
 BASE_RELEASE_HOME_IMAGES ?= 16
 BASE_RELEASE_FOREIGN_IMAGES ?= 18
+BASE_RELEASE_FOREIGN_EDGES ?= 17
 BASE_RELEASE_GOLDEN_BLOBS ?= 8
 BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
@@ -260,7 +261,8 @@ LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9 -DJSLOTS=600u
 override RELEASE_GATE_FIXED_VARS := \
 	FIXTURES IMAGES FOREIGN CORPUS_MANIFEST FOREIGN_MANIFEST \
 	CORPUS_INVENTORY CORPUS_SIZE_BASELINE CORPUS_WIRE_MANIFEST GOLDEN_MANIFEST \
-	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES BASE_RELEASE_GOLDEN_BLOBS \
+	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES \
+	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
@@ -285,7 +287,7 @@ release-gate-origin-probe-internal:
 	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "release gate requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
 	test "$$bad" -eq 0
 
-release-gate-inputs-internal: scripts/publish_wire_baselines.py
+release-gate-inputs-internal: scripts/publish_wire_baselines.py scripts/corpus_topology.py
 	@$(MAKE) --no-print-directory release-gate-origin-probe-internal
 	@python3 scripts/publish_wire_baselines.py assert-clean --root test-bench
 	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null
@@ -311,12 +313,15 @@ golden-update-inputs-internal:
 	  $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null
 	@echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
 
-check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh
+check-release-gate-contract-internal: scripts/check_release_gate_contract.sh scripts/run_gate.sh \
+                                      scripts/corpus_topology.py $(CORPUS_INVENTORY)
 	@MAKE="$(MAKE)" scripts/check_release_gate_contract.sh
 
-check-release-inventory-internal: scripts/check_release_inventory.py $(CORPUS_INVENTORY) \
+check-release-inventory-internal: scripts/check_release_inventory.py scripts/corpus_topology.py \
+                                  $(CORPUS_INVENTORY) \
                                   $(CORPUS_MANIFEST) $(FOREIGN_MANIFEST) \
                                   $(CORPUS_SIZE_BASELINE) $(CORPUS_WIRE_MANIFEST) $(GOLDEN_MANIFEST)
+	@python3 scripts/corpus_topology.py test
 	@python3 scripts/check_release_inventory.py \
 	  --inventory "$(CORPUS_INVENTORY)" \
 	  --corpus-assets "$(CORPUS_MANIFEST)" --foreign-assets "$(FOREIGN_MANIFEST)" \
@@ -325,10 +330,12 @@ check-release-inventory-internal: scripts/check_release_inventory.py $(CORPUS_IN
 	  --oneface-grow "$(BASE_ONEFACE_GROW)" --oneface-revert "$(BASE_ONEFACE_REVERT)" \
 	  --fixtures "$(BASE_RELEASE_FIXTURES)" --home-images "$(BASE_RELEASE_HOME_IMAGES)" \
 	  --foreign-images "$(BASE_RELEASE_FOREIGN_IMAGES)" \
+	  --foreign-edges "$(BASE_RELEASE_FOREIGN_EDGES)" \
 	  --golden-blobs "$(BASE_RELEASE_GOLDEN_BLOBS)"
 
 check-pack-corpus-internal: scripts/pack_corpus.sh scripts/check_pack_corpus.sh \
-                            scripts/check_release_inventory.py $(CORPUS_INVENTORY)
+                            scripts/check_release_inventory.py scripts/corpus_topology.py \
+                            $(CORPUS_INVENTORY)
 	@scripts/check_pack_corpus.sh
 
 .PHONY: check-wire-config-probe-internal check-low-memory-wire-config-probe-internal
@@ -690,7 +697,7 @@ check-degrade-internal: ultrapatch
 # policy, then transactionally publishes the manifests and their four Makefile ratchets as one
 # recoverable generation. Commit all resulting changes in the SAME commit.
 check-golden-internal: ultrapatch scripts/check_wire_baseline_update.py \
-                       scripts/publish_wire_baselines.py
+                       scripts/publish_wire_baselines.py scripts/corpus_topology.py
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$(GOLDEN_MANIFEST)" \
 	  scripts/check_golden.sh check
 	@python3 scripts/check_wire_baseline_update.py --host-tool "$(HOST_TOOL)" \
@@ -701,7 +708,7 @@ check-golden-internal: ultrapatch scripts/check_wire_baseline_update.py \
 check-ab-matrix-internal: ultrapatch
 	@scripts/check_ab_matrix.sh
 
-golden-update-internal: scripts/publish_wire_baselines.py
+golden-update-internal: scripts/publish_wire_baselines.py scripts/corpus_topology.py
 	@python3 scripts/publish_wire_baselines.py recover --root test-bench
 	@$(MAKE) --no-print-directory golden-update-after-recovery-internal
 
@@ -711,7 +718,8 @@ golden-update-after-recovery-internal:
 	@$(MAKE) --no-print-directory golden-update-measure-internal
 
 .PHONY: golden-update-measure-internal
-golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py
+golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py \
+                                scripts/corpus_topology.py $(CORPUS_INVENTORY)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
 	release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
@@ -725,12 +733,14 @@ golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py
 	cp test-bench/golden.sha256 "$$tmp/golden.sha256"; flock --unlock 9; exec 9>&-; \
 	FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_MANIFEST="$$tmp/golden.sha256" \
 	  scripts/check_golden.sh update >"$$tmp/golden.out"; \
-	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="" \
+	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_INVENTORY="$(CORPUS_INVENTORY)" \
+	  CORPUS_SIZE_BASELINE="" \
 	  CORPUS_SIZE_DUMP="$$tmp/home-size-baseline.tsv" CORPUS_WIRE_MANIFEST="" \
 	  CORPUS_WIRE_DUMP="$$tmp/corpus-wire.sha256" BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" \
 	  ./check_corpus.sh $(JOBS) >"$$tmp/corpus.out"; \
-	home_pairs=$$(( $(BASE_RELEASE_HOME_IMAGES) * $(BASE_RELEASE_HOME_IMAGES) )); \
-	foreign_pairs=$$(( ($(BASE_RELEASE_FOREIGN_IMAGES) - 1) * 2 )); \
+	eval "$$(python3 scripts/corpus_topology.py counts --inventory '$(CORPUS_INVENTORY)')"; \
+	home_pairs=$$CORPUS_TOPOLOGY_HOME_PAIRS; \
+	foreign_pairs=$$CORPUS_TOPOLOGY_FOREIGN_PAIRS; \
 	test "$$(wc -l <"$$tmp/golden.sha256")" -eq "$(BASE_RELEASE_GOLDEN_BLOBS)"; \
 	test "$$(wc -l <"$$tmp/home-size-baseline.tsv")" -eq "$$home_pairs"; \
 	test "$$(wc -l <"$$tmp/corpus-wire.sha256")" -eq "$$((home_pairs + foreign_pairs))"; \
@@ -761,7 +771,8 @@ golden-update-measure-internal: ultrapatch scripts/publish_wire_baselines.py
 	     $$3=="oneface_revert.blob"{print "oneface_revert=" $$2}' test-bench/golden.sha256; \
 	echo "wire manifests and Makefile BASE_* ratchets published as one recoverable generation"
 
-# The 256 home (from,to) pairs PLUS 34 foreign pair-directions (a second, unrelated Cortex-M0+
+# The 256 derived home (from,to) pairs PLUS 34 explicitly inventoried foreign pair-directions
+# (a second, unrelated Cortex-M0+
 # lineage — CircuitPython feather_m0_express; see docs/foreign-firmware-study.md) are independent,
 # so they run in ONE parallel pool across all cores via check_corpus.sh (each worker gets its own
 # mktemp dir — no shared blob path, contamination-safe). The foreign set's cross-major pair is the
@@ -793,7 +804,7 @@ check-corpus-internal: ultrapatch
 	exit "$$rc"
 
 .PHONY: check-corpus-matrix-internal
-check-corpus-matrix-internal: ultrapatch
+check-corpus-matrix-internal: ultrapatch scripts/corpus_topology.py $(CORPUS_INVENTORY)
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_SIZE_BASELINE="$(CORPUS_SIZE_BASELINE)" \
 	CORPUS_INVENTORY="$(CORPUS_INVENTORY)" CORPUS_WIRE_MANIFEST="$(CORPUS_WIRE_MANIFEST)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
@@ -828,7 +839,9 @@ gate-internal:
 	BASE_RELEASE_FIXTURES="$(BASE_RELEASE_FIXTURES)" \
 	BASE_RELEASE_HOME_IMAGES="$(BASE_RELEASE_HOME_IMAGES)" \
 	BASE_RELEASE_FOREIGN_IMAGES="$(BASE_RELEASE_FOREIGN_IMAGES)" \
+	BASE_RELEASE_FOREIGN_EDGES="$(BASE_RELEASE_FOREIGN_EDGES)" \
 	BASE_RELEASE_GOLDEN_BLOBS="$(BASE_RELEASE_GOLDEN_BLOBS)" \
+	RELEASE_CORPUS_INVENTORY="$(CORPUS_INVENTORY)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	BASE_ONEFACE_GROW="$(BASE_ONEFACE_GROW)" BASE_ONEFACE_REVERT="$(BASE_ONEFACE_REVERT)" \
 	BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \

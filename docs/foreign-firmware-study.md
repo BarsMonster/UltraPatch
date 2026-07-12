@@ -161,7 +161,9 @@ reversing the earlier "keep it out of the repo" call: a second lineage that the
 encoder was never tuned on is worth a standing regression guard, and the cost
 turned out to be small enough to fold into the existing budget.
 
-**Pinned set (18 images, 34 pair-directions).** Two contiguous release families
+**Pinned set (18 images, 34 pair-directions).** The 17 undirected edges are listed
+explicitly, in scheduling order, in `test-bench/release-inventory.tsv`; both
+directions of every edge are measured. The current topology covers two contiguous release families
 joined by one cross-major jump, under `test-bench/foreign/<ver>/watch.bin`:
 
 - old family, raw `.bin` (app already at 0x2000): `2.2.0 2.2.1 2.2.2 2.2.3

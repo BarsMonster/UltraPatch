@@ -8,6 +8,7 @@ MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
 : "${DECODER_CANONICAL_HDR:?run_gate.sh: DECODER_CANONICAL_HDR not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
+: "${RELEASE_CORPUS_INVENTORY:?run_gate.sh: release inventory not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
 [ -r "$DECODER_CANONICAL_HDR" ] || {
   echo "run_gate.sh: canonical decoder header is not readable: $DECODER_CANONICAL_HDR" >&2
@@ -133,17 +134,31 @@ esac
 release_fixtures=${BASE_RELEASE_FIXTURES:?}
 release_home_images=${BASE_RELEASE_HOME_IMAGES:?}
 release_foreign_images=${BASE_RELEASE_FOREIGN_IMAGES:?}
+release_foreign_edges=${BASE_RELEASE_FOREIGN_EDGES:?}
 release_golden_blobs=${BASE_RELEASE_GOLDEN_BLOBS:?}
-release_home_pairs=$((release_home_images * release_home_images))
-release_foreign_pairs=$(((release_foreign_images - 1) * 2))
-release_wire_pairs=$((release_home_pairs + release_foreign_pairs))
+topology_counts=$(python3 scripts/corpus_topology.py counts \
+  --inventory "$RELEASE_CORPUS_INVENTORY") || {
+  evidence_error "cannot load release corpus topology counts"
+  topology_counts='CORPUS_TOPOLOGY_HOME_PAIRS=0
+CORPUS_TOPOLOGY_FOREIGN_EDGES=0
+CORPUS_TOPOLOGY_FOREIGN_PAIRS=0
+CORPUS_TOPOLOGY_WIRE_PAIRS=0'
+}
+eval "$topology_counts"
+release_home_pairs=$CORPUS_TOPOLOGY_HOME_PAIRS
+release_foreign_pairs=$CORPUS_TOPOLOGY_FOREIGN_PAIRS
+release_wire_pairs=$CORPUS_TOPOLOGY_WIRE_PAIRS
+[ "$CORPUS_TOPOLOGY_FOREIGN_EDGES" = "$release_foreign_edges" ] || \
+  evidence_error "release topology has $CORPUS_TOPOLOGY_FOREIGN_EDGES foreign edges, expected $release_foreign_edges"
 release_corpus_assets=$((2 * (release_fixtures + release_home_images)))
 
+require_prefix inventory.txt corpus_topology_contract "OK ("
 require_prefix inventory.txt release_inventory "OK ("
 require_exact inventory.txt release_fixture_count "$release_fixtures"
 require_exact inventory.txt release_home_images "$release_home_images"
 require_exact inventory.txt release_foreign_images "$release_foreign_images"
 require_exact inventory.txt release_home_pairs "$release_home_pairs"
+require_exact inventory.txt release_foreign_edges "$release_foreign_edges"
 require_exact inventory.txt release_foreign_pairs "$release_foreign_pairs"
 require_exact inventory.txt release_wire_pairs "$release_wire_pairs"
 require_exact inventory.txt release_golden_blobs "$release_golden_blobs"

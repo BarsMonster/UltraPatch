@@ -57,6 +57,7 @@ home img_00_a
 home img_01_b
 foreign 1.0
 foreign 2.0
+foreign-edge 1.0 2.0
 """)
     home = [("img_00_a", "img_00_a"), ("img_00_a", "img_01_b"),
             ("img_01_b", "img_00_a"), ("img_01_b", "img_01_b")]

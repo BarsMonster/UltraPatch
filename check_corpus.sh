@@ -11,7 +11,7 @@
 # Two independent pair sets share ONE parallel pool so the whole leg costs one wall-clock, not
 # the sum of two:
 #   * home matrix : all 256 (from,to) pairs over the 16 SensorWatch images.
-#   * foreign     : 17 adjacent CircuitPython releases, both directions = 34 pair-directions
+#   * foreign     : 17 explicitly pinned CircuitPython edges, both directions = 34 pair-directions
 #                   (a second, unrelated Cortex-M0+ lineage; see docs/foreign-firmware-study.md).
 # The single slowest job by far is the foreign cross-major pair (3.0.x <-> 10.x, effectively
 # unrelated programs, ~13 s, 150-175 KB blob). It is emitted FIRST so it starts in the opening
@@ -45,6 +45,7 @@ JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
 IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
 INVENTORY="${CORPUS_INVENTORY-test-bench/release-inventory.tsv}"
+TOPOLOGY_HELPER="scripts/corpus_topology.py"
 SIZE_BASE="${CORPUS_SIZE_BASELINE-test-bench/home-size-baseline.tsv}"
 WIRE_BASE="${CORPUS_WIRE_MANIFEST-test-bench/corpus-wire.sha256}"
 : "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set; invoke through make check-corpus}"
@@ -57,27 +58,28 @@ export UP UPD
 [ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
 [ -x "$UPD" ] || { echo "check_corpus.sh: decoder is missing or not executable: $UPD" >&2; exit 3; }
 
-# Release checks take their ordered home/foreign membership from one inventory. Bare A/B or
-# custom measurements set CORPUS_INVENTORY="" and retain the old directory-discovery behavior.
+# Release checks take their ordered home membership and explicit foreign edges from one parsed
+# inventory. Bare A/B or custom measurements set CORPUS_INVENTORY="" and retain directory
+# discovery plus adjacent foreign pairs for their synthetic subsets.
+USE_TOPOLOGY=0
 if [ -n "$INVENTORY" ]; then
   if [ ! -f "$INVENTORY" ]; then
     echo "check_corpus.sh: missing release inventory: $INVENTORY" >&2
     exit 3
   fi
-  if ! awk 'NF && $1 !~ /^#/ { if(NF!=2 || ($1!="fixture" && $1!="home" && $1!="foreign")) bad=1 }
-            END { exit bad }' "$INVENTORY"; then
+  if [ ! -f "$TOPOLOGY_HELPER" ] || \
+     ! python3 "$TOPOLOGY_HELPER" counts --inventory "$INVENTORY" >/dev/null; then
     echo "check_corpus.sh: malformed release inventory: $INVENTORY" >&2
     exit 3
   fi
-  HOME_IDS=$(awk '$1=="home" { print $2 }' "$INVENTORY")
-  FOREIGN_IDS=$(awk '$1=="foreign" { print $2 }' "$INVENTORY")
+  USE_TOPOLOGY=1
 else
   HOME_IDS=$(for path in "$IMG"/img_*; do [ -d "$path" ] && basename "$path"; done | sort)
   FOREIGN_IDS=$(for path in "$FGN"/*; do [ -d "$path" ] && basename "$path"; done | sort -V)
-fi
-if [ -z "$HOME_IDS" ] || [ -z "$FOREIGN_IDS" ]; then
-  echo "check_corpus.sh: empty home or foreign inventory" >&2
-  exit 3
+  if [ -z "$HOME_IDS" ] || [ -z "$FOREIGN_IDS" ]; then
+    echo "check_corpus.sh: empty home or foreign inventory" >&2
+    exit 3
+  fi
 fi
 
 # One pair: encode -> blob, decode a fresh copy of `from` in place, compare to `to`, emit one line
@@ -109,9 +111,8 @@ cm_work() {
 }
 export -f cm_work
 
-# Foreign job stream: cross-major boundary pair (both directions) first, then every other
-# adjacent pair (both directions). Boundary detected as major<=3 on one side, major>=10 on the
-# other, so it stays correct if the pinned list is retuned.
+# Custom-measurement fallback: cross-major boundary pair (both directions) first, then every
+# other adjacent discovered pair. Release scheduling uses the inventory's explicit ordered edges.
 foreign_jobs() {
   prev=""; cross=""; rest=""
   for v in $FOREIGN_IDS; do
@@ -144,14 +145,22 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-{
-  foreign_jobs
-  for from_id in $HOME_IDS; do
-    for to_id in $HOME_IDS; do
-      printf 'C\t%s\t%s\n' "$IMG/$from_id" "$IMG/$to_id"
+if [ "$USE_TOPOLOGY" -eq 1 ]; then
+  if ! python3 "$TOPOLOGY_HELPER" jobs --inventory "$INVENTORY" \
+       --images-root "$IMG" --foreign-root "$FGN" > "$tmp/jobs.txt"; then
+    echo "check_corpus.sh: cannot construct release topology jobs" >&2
+    exit 3
+  fi
+else
+  {
+    foreign_jobs
+    for from_id in $HOME_IDS; do
+      for to_id in $HOME_IDS; do
+        printf 'C\t%s\t%s\n' "$IMG/$from_id" "$IMG/$to_id"
+      done
     done
-  done
-} > "$tmp/jobs.txt"
+  } > "$tmp/jobs.txt"
+fi
 # Expected counts come from the scheduled jobs, so a reduced subset still catches a dropped worker.
 EXP_HOME=$(grep -c '^C' "$tmp/jobs.txt")
 EXP_FGN=$(grep -c '^F' "$tmp/jobs.txt")

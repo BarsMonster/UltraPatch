@@ -26,6 +26,8 @@ import time
 import uuid
 from pathlib import Path
 
+from corpus_topology import TopologyError, parse_inventory as parse_corpus_inventory
+
 
 MANIFEST_FILES = ("golden.sha256", "home-size-baseline.tsv", "corpus-wire.sha256")
 FILES = MANIFEST_FILES + ("Makefile",)
@@ -114,20 +116,12 @@ def rows(path, fields):
     return result
 
 
-def parse_inventory(path):
-    by_role = {"fixture": [], "home": [], "foreign": []}
-    seen = set()
-    for lineno, values in rows(path, 2):
-        role, ident = values
-        if role not in by_role:
-            fail("%s:%d: unknown inventory role %r" % (path, lineno, role))
-        if not ID_RE.fullmatch(ident) or ident in seen:
-            fail("%s:%d: invalid or duplicate inventory id %r" % (path, lineno, ident))
-        seen.add(ident)
-        by_role[role].append(ident)
-    if not by_role["home"] or len(by_role["foreign"]) < 2:
-        fail("release inventory must contain home images and at least two foreign images")
-    return by_role
+def load_topology(path):
+    regular_file(path, "release inventory")
+    try:
+        return parse_corpus_inventory(path)
+    except (OSError, UnicodeError, TopologyError) as exc:
+        fail(str(exc))
 
 
 def parse_home_sizes(path):
@@ -250,14 +244,9 @@ def exact_keys(label, actual, expected):
         fail("%s key mismatch (missing=%r extra=%r)" % (label, missing, extra))
 
 
-def expected_sets(inventory):
-    home = inventory["home"]
-    foreign = inventory["foreign"]
-    home_pairs = {(source, target) for source in home for target in home}
-    foreign_pairs = set()
-    for source, target in zip(foreign, foreign[1:]):
-        foreign_pairs.add((source, target))
-        foreign_pairs.add((target, source))
+def expected_sets(topology):
+    home_pairs = set(topology.home_pairs)
+    foreign_pairs = set(topology.foreign_pairs)
     wire = {("C", source, target) for source, target in home_pairs}
     wire.update(("F", source, target) for source, target in foreign_pairs)
     return home_pairs, foreign_pairs, wire
@@ -283,8 +272,8 @@ def check_golden_links(label, golden, home_sizes, wire, home_ids):
             fail("%s golden/wire hash mismatch for %s" % (label, name))
 
 
-def load_snapshot(label, paths, inventory, golden_keys=None):
-    home_pairs, foreign_pairs, wire_keys = expected_sets(inventory)
+def load_snapshot(label, paths, topology, golden_keys=None):
+    home_pairs, foreign_pairs, wire_keys = expected_sets(topology)
     home = parse_home_sizes(paths["home-size-baseline.tsv"])
     wire = parse_wire(paths["corpus-wire.sha256"])
     golden = parse_golden(paths["golden.sha256"])
@@ -295,7 +284,7 @@ def load_snapshot(label, paths, inventory, golden_keys=None):
     for required in ("oneface_grow.blob", "oneface_revert.blob"):
         if required not in golden:
             fail("%s golden manifest lacks %s" % (label, required))
-    check_golden_links(label, golden, home, wire, inventory["home"])
+    check_golden_links(label, golden, home, wire, topology.home)
     return {
         "home": home,
         "wire": wire,
@@ -316,7 +305,7 @@ def uint_limit(value, label):
 
 
 def validate_policy(args, root):
-    inventory = parse_inventory(Path(args.inventory))
+    topology = load_topology(Path(args.inventory))
     canonical_paths = {name: canonical_path(root, name) for name in MANIFEST_FILES}
     candidate_paths = {
         "golden.sha256": Path(args.candidate_golden),
@@ -343,8 +332,8 @@ def validate_policy(args, root):
                 row_order(candidate_paths[name], fields, indexes):
             fail("candidate %s row order differs from the canonical manifest" % name)
 
-    old = load_snapshot("canonical", canonical_paths, inventory)
-    new = load_snapshot("candidate", candidate_paths, inventory, old["golden"].keys())
+    old = load_snapshot("canonical", canonical_paths, topology)
+    new = load_snapshot("candidate", candidate_paths, topology, old["golden"].keys())
     metrics = parse_metrics(Path(args.metrics))
     preimage_keys = {
         "golden.sha256": "measurement_preimage_golden_sha256",

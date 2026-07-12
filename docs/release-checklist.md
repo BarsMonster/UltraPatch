@@ -11,7 +11,8 @@ hardware flash validation are external integration work.
 - Clean working tree.
 - Pinned corpus assets committed under `test-bench/images`,
   `test-bench/fixtures`, and `test-bench/foreign`.
-- Canonical ordered membership committed in `test-bench/release-inventory.tsv`.
+- Canonical ordered membership and the 17 undirected foreign edges committed in
+  `test-bench/release-inventory.tsv`.
 - `test-bench/corpus.sha256` and `test-bench/foreign.sha256` committed with the
   release, with the size/wire/golden baselines validated against the same
   inventory by `make check-release-inventory`.

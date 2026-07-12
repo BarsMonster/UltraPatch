@@ -1,4 +1,4 @@
-# role	id
+# role	id [foreign-edge-target]
 fixture	v0_base
 fixture	v1_one_face
 home	img_00_n3
@@ -35,3 +35,20 @@ foreign	10.0.3
 foreign	10.1.1
 foreign	10.1.2
 foreign	10.1.3
+foreign-edge	3.0.3	10.0.0
+foreign-edge	2.2.0	2.2.1
+foreign-edge	2.2.1	2.2.2
+foreign-edge	2.2.2	2.2.3
+foreign-edge	2.2.3	2.2.4
+foreign-edge	2.2.4	2.3.0
+foreign-edge	2.3.0	2.3.1
+foreign-edge	2.3.1	3.0.0
+foreign-edge	3.0.0	3.0.1
+foreign-edge	3.0.1	3.0.2
+foreign-edge	3.0.2	3.0.3
+foreign-edge	10.0.0	10.0.1
+foreign-edge	10.0.1	10.0.2
+foreign-edge	10.0.2	10.0.3
+foreign-edge	10.0.3	10.1.1
+foreign-edge	10.1.1	10.1.2
+foreign-edge	10.1.2	10.1.3
