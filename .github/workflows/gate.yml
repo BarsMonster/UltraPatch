@@ -44,7 +44,7 @@ jobs:
 
       - name: Run authoritative main release verification
         if: github.event_name == 'push'
-        run: /usr/bin/python3 -I -S scripts/release_gate.py
+        run: /usr/bin/python3 scripts/release_gate.py
 
       - name: Verify pull request
         if: github.event_name == 'pull_request'

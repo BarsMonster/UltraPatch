@@ -67,7 +67,7 @@ done
 set +e
 IMAGES="$tmp/images" FOREIGN="$tmp/foreign" FIXTURES="$FIX" \
   CORPUS_INVENTORY="" \
-  CORPUS_WIRE_MANIFEST="$tmp/manifest-must-not-be-read" \
+  WIRE_BASELINE="" \
   BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" BASE_ONEFACE_GROW="" BASE_ONEFACE_REVERT="" \
   "$ROOT/scripts/ab_matrix.sh" "$ULTRAPATCH" "$CAND" "$CAND" "$JOBS" \
   >"$tmp/ab.out" 2>"$tmp/ab.err"

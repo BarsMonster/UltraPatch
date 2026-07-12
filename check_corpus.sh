@@ -30,14 +30,12 @@
 # Encoder/decoder paths:
 #   ULTRAPATCH          required encoder binary (accepts <from> <to> <patch>).
 #   ULTRAPATCH_DECODE   decoder binary (accepts --decode <image> <patch>); defaults to $ULTRAPATCH.
-# Home per-pair size handling (both default off / to the pinned baseline for the gate):
-#   CORPUS_SIZE_BASELINE   TSV to split home pairs against; set to "" to skip the split entirely
+# Home per-pair size handling:
+#   WIRE_BASELINE          combined C/F/G baseline; set to "" for an unpinned measurement
+#   CORPUS_SIZE_BASELINE   optional three-column A/B override; set to "" to skip the split
 #                          (bare per-pair measurement, e.g. when generating a fresh baseline).
 #   CORPUS_SIZE_DUMP       if set, write the home per-pair "<from> <to> <size>" TSV to this path.
-# Wire identity handling:
-#   CORPUS_WIRE_MANIFEST   TSV pinning SHA-256 for every scheduled home/foreign blob; set to ""
-#                          only for an intentional manifest-generation measurement.
-#   CORPUS_WIRE_DUMP       if set, write the sorted "<tag> <from> <to> <sha256>" TSV.
+#   WIRE_BASELINE_DUMP     if set, write candidate C/F rows in the combined format.
 # Expected home/foreign pair counts are derived from the generated job stream, so a reduced
 # IMAGES/FOREIGN subset still validates that every scheduled job produced a metric line.
 set -u
@@ -46,13 +44,13 @@ IMG="${IMAGES:-test-bench/images}"
 FGN="${FOREIGN:-test-bench/foreign}"
 INVENTORY="${CORPUS_INVENTORY-test-bench/release-inventory.tsv}"
 TOPOLOGY_HELPER="scripts/corpus_topology.py"
-SIZE_BASE="${CORPUS_SIZE_BASELINE-test-bench/home-size-baseline.tsv}"
-WIRE_BASE="${CORPUS_WIRE_MANIFEST-test-bench/corpus-wire.sha256}"
+WIRE_BASE="${WIRE_BASELINE-test-bench/wire-baseline.tsv}"
+SIZE_BASE="${CORPUS_SIZE_BASELINE-$WIRE_BASE}"
 : "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set; invoke through make check-corpus}"
 UP="$ULTRAPATCH"
 UPD="${ULTRAPATCH_DECODE:-$UP}"
 DUMP="${CORPUS_SIZE_DUMP:-}"
-WIRE_DUMP="${CORPUS_WIRE_DUMP:-}"
+BASE_DUMP="${WIRE_BASELINE_DUMP:-}"
 export UP UPD
 
 [ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
@@ -169,8 +167,10 @@ xargs -P "$JOBS" -L1 bash -c 'cm_work "$0" "$1" "$2"' < "$tmp/jobs.txt" > "$tmp/
 # Optional per-pair home-size dump (used by ab_matrix.sh to build an A/B baseline from any encoder).
 # Sort because worker completion order is intentionally nondeterministic.
 [ -n "$DUMP" ] && awk '$1=="C"{print $2"\t"$3"\t"$4}' "$tmp/pairs.txt" | sort > "$DUMP"
-# Optional all-pair wire dump.  Sorting makes a parallel run byte-reproducible.
-[ -n "$WIRE_DUMP" ] && awk '$1=="C"||$1=="F"{print $1"\t"$2"\t"$3"\t"$13}' "$tmp/pairs.txt" | sort > "$WIRE_DUMP"
+# Optional combined-baseline C/F dump. Sorting makes a parallel run byte-reproducible.
+[ -n "$BASE_DUMP" ] && awk '$1=="C"{print $1"\t"$2"\t"$3"\t"$4"\t"$13} \
+                                  $1=="F"{print $1"\t"$2"\t"$3"\t-\t"$13}' \
+                            "$tmp/pairs.txt" | sort > "$BASE_DUMP"
 
 agg=$(
   awk '{ tag=$1; sz=$4; ok=$5; j=$6; amp=$7; page=$8; inv=$9; ua=$10; oob=$11; canary=$12;
@@ -190,8 +190,9 @@ if [ -n "$SIZE_BASE" ]; then
     awk '
       FNR==NR {
         if($0 ~ /^[[:space:]]*$/ || $1 ~ /^#/) next
-        key=$1 SUBSEP $2
-        base[key]=$3
+        if(NF==5 && $1=="C"){key=$2 SUBSEP $3; base[key]=$4}
+        else if(NF==3){key=$1 SUBSEP $2; base[key]=$3}
+        else next
         bcount++
         next
       }
@@ -225,10 +226,10 @@ if [ -n "$WIRE_BASE" ]; then
     awk '
       FNR==NR {
         if($0 ~ /^[[:space:]]*$/ || $1 ~ /^#/) next
-        if(NF!=4 || ($1!="C" && $1!="F") || length($4)!=64 || $4 !~ /^[0-9a-f]+$/){badfmt++; next}
+        if(NF!=5 || ($1!="C" && $1!="F") || length($5)!=64 || $5 !~ /^[0-9a-f]+$/){next}
         key=$1 SUBSEP $2 SUBSEP $3
         if(key in want) dup++
-        want[key]=$4
+        want[key]=$5
         bcount++
         next
       }

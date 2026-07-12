@@ -38,7 +38,7 @@ d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 # --- home matrix, two runs over the shared pool ---------------------------------------------
 # Run 1 (baseline): bare per-pair measurement (no split baseline), dump its sizes as our A/B
 # reference. Round-trips through ENC_A, so ENC_A must be a working decoder (ultrapatch is).
-if ! CORPUS_SIZE_BASELINE="" CORPUS_SIZE_DUMP="$d/a.tsv" CORPUS_WIRE_MANIFEST="" \
+if ! CORPUS_SIZE_BASELINE="" CORPUS_SIZE_DUMP="$d/a.tsv" WIRE_BASELINE="" \
      ULTRAPATCH="$ENC_A" \
      "$CC" "$JOBS" > "$d/a.txt" 2> "$d/a.err"; then
   echo "ab_matrix.sh: baseline corpus run failed (enc=$ENC_A)" >&2
@@ -48,7 +48,7 @@ fi
 # Run 2 (candidate): split its sizes against the baseline dump; round-trip through DEC_B. No
 # ratchet pins passed, so a nonzero exit here is a structural / round-trip / write-safety fault.
 if ! CORPUS_SIZE_BASELINE="$d/a.tsv" CORPUS_SIZE_DUMP="$d/b.tsv" \
-     CORPUS_WIRE_MANIFEST="" ULTRAPATCH="$ENC_B" ULTRAPATCH_DECODE="$DEC_B" \
+     WIRE_BASELINE="" ULTRAPATCH="$ENC_B" ULTRAPATCH_DECODE="$DEC_B" \
      "$CC" "$JOBS" > "$d/b.txt" 2> "$d/b.err"; then
   echo "ab_matrix.sh: candidate corpus run failed (structural / round-trip; enc=$ENC_B dec=$DEC_B)" >&2
   cat "$d/b.err" >&2
