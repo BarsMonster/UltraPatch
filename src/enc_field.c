@@ -2,13 +2,13 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- A1 field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, proxy pricing, split runs, preserve/corrections.
+ * Host encoder module -- field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, proxy pricing, split runs, preserve/corrections.
  * Compiled as a normal internal encoder translation unit.
  */
 
 #include "enc_internal.h"
 /* ------------------------------------------------------------------------------------- */
-/* A1 field and apply planning.                                                            */
+/* Field and apply planning.                                                               */
 /* ------------------------------------------------------------------------------------- */
 static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
     if (fpk & 1u) return 0;

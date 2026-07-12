@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
+ * Host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
  * Compiled as a normal internal encoder translation unit.
  */
 

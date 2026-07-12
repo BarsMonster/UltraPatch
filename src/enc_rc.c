@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl, raw bits, gamma).
+ * Host encoder module -- binary range encoder (REnc) + entropy models (bt/ug/idx/fl, raw bits, gamma).
  * Compiled as a normal internal encoder translation unit.
  */
 

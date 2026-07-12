@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder CLI entry point.
+ * Host encoder CLI entry point.
  */
 #include <errno.h>
 
@@ -65,7 +65,7 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
     buf_write(blob, body->d + 1, body->n - 1);
 }
 
-void encode_a1(const char *from_image, const char *to_image, const char *patch_out) {
+void encode_patch(const char *from_image, const char *to_image, const char *patch_out) {
     char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
     int felf_present = optional_sidecar_present(felf);
     int telf_present = optional_sidecar_present(telf);
@@ -186,12 +186,12 @@ int main(int argc, char **argv) {
     }
     if (decode) {
         if (npos != 2) { usage(stderr, argv[0]); return 2; }
-        return decode_a1(pos[0], pos[1]);
+        return decode_patch(pos[0], pos[1]);
     }
     if (npos != 3) {
         usage(stderr, argv[0]);
         return 2;
     }
-    encode_a1(pos[0], pos[1], pos[2]);
+    encode_patch(pos[0], pos[1], pos[2]);
     return 0;
 }

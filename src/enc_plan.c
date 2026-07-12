@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- plan/degrade: degrade_ops_to_journal_budget, plan_encode.
+ * Host encoder module -- plan/degrade: degrade_ops_to_journal_budget, plan_encode.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -259,7 +259,7 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
 
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
- * of the bsdiff inputs (copies extend through recompiled code). encode_a1 emits whichever
+ * of the bsdiff inputs (copies extend through recompiled code). encode_patch emits whichever
  * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
@@ -291,7 +291,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
      * and the sweep tries the remaining configs — different bsdiff alignments need different
      * preserve/correction budgets, so another variant may fit the decoder caps (measured on
-     * foreign firmware: config 0 over-journal while fuzz variants fit). encode_a1 dies only
+     * foreign firmware: config 0 over-journal while fuzz variants fit). encode_patch dies only
      * when EVERY config is infeasible. */
     free(fd.v);
     oppc_array_free(pc, ops.n);

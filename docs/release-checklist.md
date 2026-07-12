@@ -1,6 +1,6 @@
 # Release Checklist
 
-This checklist covers the in-repository A1 patcher release scope: encoder,
+This checklist covers the in-repository patcher release scope: encoder,
 decoder source, host verification, corpus reproducibility, and release
 provenance. Product OTA signing, bootloader integration, power-fail recovery, and
 hardware flash validation are external integration work.
@@ -123,12 +123,9 @@ cross-platform transaction or filesystem durability layer is not a release
 requirement; reported I/O failures must still return nonzero and preserve an
 existing destination. This policy applies only to host files, not device flash.
 
-Record the release `WIRE_CONFIG_FLAGS` value. The encoder and decoder **MUST**
-use the exact same wire macro names with the exact same values; the target
-family, `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`,
-`DR_KCAP_BL`, `DR_KCAP_EX`, and any wire-model override belong in that shared
-value. `PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are decoder-only integration
-configuration and must stay separate from the wire flags.
+Verify the release uses the committed `patch_config.h`; it is the sole production
+definition of the encoder/decoder wire and resource constants. `PATCH_IMAGE_BASE`
+and `PATCH_IMAGE_CAPACITY` remain decoder-only integration configuration.
 
 ## Artifacts
 

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- LZSS DP parse + entropy pricing (out_candidates, measure_prices, lz_parse_priced, lz_candidates_c).
+ * Host encoder module -- LZSS DP parse + entropy pricing (out_candidates, measure_prices, lz_parse_priced, lz_candidates_c).
  * Compiled as a normal internal encoder translation unit.
  */
 

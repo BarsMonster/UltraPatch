@@ -124,8 +124,7 @@ fail=0
 note() { echo "check_degrade: $*" >&2; }
 bad()  { echo "DEGRADE FAILURE: $*" >&2; fail=$((fail+1)); }
 
-# Derive the journal-degradation budget through the same preprocessor flags as the encoder and
-# decoder, so an explicit WIRE_CONFIG_FLAGS override reaches this probe too.
+# Derive the journal-degradation budget through the same header as the encoder and decoder.
 JBUDGET=$(printf '%s\n' '#include "patch_config.h"' 'JSLOTS' | \
   $CC_HOST $CFLAGS -E -P -x c - | sed -n 's/^\([0-9][0-9]*\)u\{0,1\}$/\1/p' | tail -1)
 [ -n "$JBUDGET" ] || { echo "check_degrade: JSLOTS did not preprocess to an integer" >&2; exit 2; }
@@ -134,7 +133,10 @@ JBUDGET=$(printf '%s\n' '#include "patch_config.h"' 'JSLOTS' | \
 # production D=2 build. Same source as the host backend, its own binary. Used only to prove
 # row-window reliance rejects safely (monotone-compatibility contract). ----
 D1="$tmp/ultrapatch_d1_decode"
-if ! $CC_HOST $CFLAGS $DEC_DEMO_DEFINES -UOUTROW_DEPTH -DOUTROW_DEPTH=1 $DEC_STANDALONE_SRCS \
+cp -R src "$tmp/d1-src"
+sed -i 's/^#define OUTROW_DEPTH 2u$/#define OUTROW_DEPTH 1u/' "$tmp/d1-src/patch_config.h"
+if ! $CC_HOST $CFLAGS $DEC_DEMO_DEFINES \
+    "$tmp/d1-src/patch_host_backend.c" "$tmp/d1-src/enc_util.c" \
       -o "$D1" 2>"$tmp/d1build.log"; then
   note "could not build the D=1 variant decoder:"; sed 's/^/    /' "$tmp/d1build.log" >&2
   echo "degrade_cases=0"; echo "degrade_fail=1"; exit 1

@@ -33,7 +33,6 @@
         "decoder_headers": [
           "-mcpu=cortex-m0plus",
           "-mthumb",
-          "-DCORTEX_M0",
           "-DPATCH_IMAGE_BASE=0u",
           "-DPATCH_IMAGE_CAPACITY=67108864u",
           "-I",
@@ -202,7 +201,6 @@
           "-I.",
           "-Isrc",
           "-Ivendor/libdivsufsort",
-          "-DCORTEX_M0",
           "-g",
           "-Wall",
           "-Wextra",
@@ -227,7 +225,6 @@
           "-I.",
           "-Isrc",
           "-Ivendor/libdivsufsort",
-          "-DCORTEX_M0",
           "-g",
           "-Wall",
           "-Wextra",
@@ -248,7 +245,6 @@
           "-I.",
           "-Isrc",
           "-Ivendor/libdivsufsort",
-          "-DCORTEX_M0",
           "-g",
           "-Wall",
           "-Wextra",
@@ -260,9 +256,6 @@
           "-O2",
           "-ffunction-sections",
           "-fdata-sections"
-        ],
-        "wire_config": [
-          "-DCORTEX_M0"
         ]
       },
       "linker": {

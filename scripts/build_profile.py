@@ -202,7 +202,6 @@ def host_payload() -> dict[str, Any]:
             "link_driver_flags": env_words("UP_PROFILE_LINK_CFLAGS"),
             "decoder_config": env_words("UP_PROFILE_DECODER_FLAGS"),
             "ldflags": env_words("UP_PROFILE_LDFLAGS"),
-            "wire_config": env_words("UP_PROFILE_WIRE_FLAGS"),
         },
     }
 

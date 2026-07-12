@@ -103,7 +103,7 @@ Both addresses are absolute device addresses, not image-relative offsets.
 `flash_write_page` call must synchronously erase and fully program exactly one
 aligned `OUTROW` page from the complete supplied buffer. No byte-write decoder
 API exists. The decoder writes pages monotonically through its resident page
-buffers, so each page is erased and programmed at most once for valid A1
+buffers, so each page is erased and programmed at most once for valid
 patches.
 
 Beyond that, the decoder relies on three contract properties of the pair:
@@ -179,9 +179,8 @@ delivery manifest and patch blob before any flash write is attempted.
 carries no format-version or magic field, per requirements: the envelope stays
 minimal, and a blob in any future wire revision is rejected by the CRC/decode
 gates as `REJ_CORRUPT`, which is the accepted behavior. Target-family wire
-variants are governed at BUILD time by the `CORTEX_M0`/`CORTEX_M4` define
-contract (see Build-Time Contract), not by an in-band version field. Do not
-add one.
+variants require a future header-set revision; the Cortex-M0 contract is fixed
+in `patch_config.h`, not selected by the build or an in-band version field. Do not add one.
 
 ## Integration
 
@@ -322,32 +321,18 @@ scope is the selected drivers/subtools/binutils and named runtime archives, not
 a recursive dynamic-library closure or a claim of byte-for-byte reproducibility
 across hosts.
 
-**Target family define (mandatory).** Define `CORTEX_M0` for BOTH the encoder
-build and the decoder TU — the build fails with a clear `#error` without it (the
-guard is in `patch_config.h`, reached transitively from `patch_apply.h` via
-`rc_models.h`), so an encoder/decoder pair can never silently disagree about the
-target family. The define is a build-time wire-contract ASSERTION only: nothing
-is conditionally compiled on it. There is no Thumb-2 code path to select — the
+**Target family.** `patch_config.h` fixes the wire to Cortex-M0 for both encoder and
+decoder. There is no Thumb-2 code path to select — the
 encoder's ARM field scanner recognizes only the Thumb-1/ARMv6-M BL long-branch
 and LDR-literal encodings, unconditionally, and the decoder derives exactly those
 fields. `CORTEX_M4` is reserved for a future Thumb-2 wire revision that would
 change the wire format; it is currently rejected at compile time by a second
 `#error` in `patch_config.h`.
 
-**Shared override rule (mandatory).** Encoder and decoder builds **MUST** use
-the exact same wire macro names with the exact same values. In the repository,
-put every explicit wire override in the one `WIRE_CONFIG_FLAGS` value, for
-example:
-
-```sh
-make WIRE_CONFIG_FLAGS='-DCORTEX_M0 -DWINDOW_LOG=10 -DJSLOTS=768u'
-```
-
-This rule covers `WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`,
-`OUTROW_DEPTH`, `DR_KCAP_BL`, `DR_KCAP_EX`, the target family, and any
-wire-affecting model override. Do not create encoder/decoder aliases or pass an
-override to only one side. `src/patch_config.h` remains the single source of
-defaults.
+**Shared constants.** `patch_config.h` is the only production definition of
+`WINDOW_LOG`, `JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`, `DR_KCAP_BL`, and
+`DR_KCAP_EX`. Both sides include it transitively, and production builds reject
+predefined values rather than permitting independently configured wires.
 
 `PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are the explicit exceptions: they
 are decoder-only partition configuration and are not wire macros. Set them for
@@ -366,7 +351,7 @@ model/golden gates continue to enforce encoder/decoder bit-exactness.
 The LZ window `WINDOW_LOG` is a single shared define in `src/patch_config.h`, used by
 both the decoder and the encoder's distance coding; matching builds therefore use the
 same name and value.
-The production default is `WINDOW_LOG=10`, and `make gate` verifies it.
+The fixed value is `WINDOW_LOG=10`.
 
 **NVM page window (encoding-affecting).** The decoder keeps its last
 `OUTROW_DEPTH` output pages (of `OUTROW` bytes) uncommitted in RAM, and the
@@ -374,7 +359,7 @@ encoder's plans exploit the fact that the OLD flash content of uncommitted
 pages is still physically readable (journal-free reads behind the write
 frontier). `OUTROW` is also the public flash-program page size.
 `OUTROW` and `OUTROW_DEPTH` are shared defines used by both
-the encoder's `row_covered` oracle and the decoder — production default
+the encoder's `row_covered` oracle and the decoder — the implementation uses
 256 x 2 (512 B of page buffers in `.bss`) — so the window assumption matches by
 construction. A hardware page-size change therefore requires matching encoder
 and decoder builds. A deeper page ring remains a monotone-safe superset; a
@@ -383,13 +368,12 @@ wrong image.
 
 Resource caps such as `JSLOTS`, `DR_KCAP_BL`, `DR_KCAP_EX`, and `OPC_CAP` are
 intentional reject limits on the decoder. Each is a shared define in
-`src/patch_config.h`, so the encoder plans against the exact same cap (retune
-through `WIRE_CONFIG_FLAGS` to move both sides together)
+`src/patch_config.h`, so the encoder plans against the exact same cap
 and degrades gracefully instead of refusing where the plan allows it: reads
 that would overflow the journal budget ship as plain extra bytes, and ops
 whose per-op corrections exceed `OPC_CAP` are split — worse compression, never
 a bad blob. A pair is refused only when no plan variant fits any cap. Raising
-a cap costs SRAM and must be followed by the plain release gate:
+a cap costs SRAM, requires editing the shared contract, and must be followed by the plain release gate:
 
 ```sh
 make gate
@@ -400,7 +384,7 @@ remain representative of the shipping decoder.
 
 ## Flash And Reflash Policy
 
-A1 provides no power-fail rollback or resume. It deliberately has no persistent
+The decoder provides no power-fail rollback or resume. It deliberately has no persistent
 in-progress marker, checkpoint, journal replay, or boot-time interruption
 detection protocol. The decode state is volatile: preserved source bytes,
 adaptive entropy models, and output page buffers live only in RAM, while the

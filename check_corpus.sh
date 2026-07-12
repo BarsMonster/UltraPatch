@@ -3,7 +3,7 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# Fast parallel corpus-matrix + foreign-lineage metrics for the A1 gate.
+# Fast parallel corpus-matrix + foreign-lineage metrics for the release gate.
 #
 # Run from the repository root through Make, or set ULTRAPATCH explicitly. Prints the gate
 # metric lines so the Makefile (or a measurement run) can parse them.

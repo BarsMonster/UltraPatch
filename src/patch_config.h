@@ -7,51 +7,31 @@
 #ifndef UP_PATCH_CONFIG_H
 #define UP_PATCH_CONFIG_H
 
-/* ---- target-family wire contract ----
- * The A1 wire is target-family-specific. CORTEX_M0 (Thumb-1/ARMv6-M, the implemented
- * family) must be defined for BOTH the encoder and the decoder TU. CORTEX_M4 is RESERVED
- * for a future Thumb-2 wire revision and may change the wire format. */
-#if !defined(CORTEX_M0) && !defined(CORTEX_M4)
-#error "define CORTEX_M0 for both the encoder and the decoder build (CORTEX_M4 is reserved)"
-#endif
-#ifdef CORTEX_M4
+/* The installed header set is the Cortex-M0 wire contract. Encoder and decoder include this
+ * same file, so production builds have no independently selectable wire configuration. */
+#if defined(CORTEX_M4)
 #error "CORTEX_M4 is reserved for a future wire revision; only CORTEX_M0 is implemented"
 #endif
 
-/* Plausibility cap on envelope image sizes. A deployment may tighten this to its real
- * flash size; keep it <2^31 because decoder cursors are signed 32-bit. */
-#ifndef MAX_IMAGE
-#define MAX_IMAGE (64u<<20)
+#if defined(MAX_IMAGE) || defined(WINDOW_LOG) || defined(JSLOTS) || defined(OPC_CAP) || \
+    defined(DR_KCAP_BL) || defined(DR_KCAP_EX) || defined(OUTROW) || defined(OUTROW_DEPTH)
+#error "wire constants are owned by patch_config.h and cannot be overridden"
 #endif
 
-/* Wire-affecting knobs. These defaults are shared by the decoder and host encoder (encoder TUs
- * reach them via rc_models.h -> patch_config.h). An explicit override MUST use the exact SAME
- * macro name with the exact SAME value in both builds; the repository Makefile provides the one
- * WIRE_CONFIG_FLAGS path for that purpose. PATCH_IMAGE_BASE and PATCH_IMAGE_CAPACITY are
- * deliberately absent: they are decoder/device integration configuration, not wire macros.
- * WINDOW_LOG is the LZ window log;
+/* Plausibility cap on envelope image sizes; decoder cursors are signed 32-bit. */
+#define MAX_IMAGE (64u<<20)
+
+/* Canonical constants, shared by decoder and encoder through rc_models.h. PATCH_IMAGE_BASE and
+ * PATCH_IMAGE_CAPACITY remain decoder/device integration settings because they are not wire
+ * properties. WINDOW_LOG is the LZ window log;
  * JSLOTS/OPC_CAP/DR_KCAP_* are decoder reject caps the encoder plans against; OUTROW x
  * OUTROW_DEPTH is the uncommitted NVM page window. */
-#ifndef WINDOW_LOG
 #define WINDOW_LOG 10
-#endif
-#ifndef JSLOTS
 #define JSLOTS 768u
-#endif
-#ifndef OPC_CAP
 #define OPC_CAP 80
-#endif
-#ifndef DR_KCAP_BL
 #define DR_KCAP_BL 208
-#endif
-#ifndef DR_KCAP_EX
 #define DR_KCAP_EX 128
-#endif
-#ifndef OUTROW
 #define OUTROW 256u
-#endif
-#ifndef OUTROW_DEPTH
 #define OUTROW_DEPTH 2u
-#endif
 
 #endif /* UP_PATCH_CONFIG_H */

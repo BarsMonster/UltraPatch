@@ -28,9 +28,9 @@ else
 fi
 ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-wire-config + check-arm + check-stack + check-ab-matrix + check-corpus..."
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-ab-matrix + check-corpus..."
 
-LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-wire-config-internal:wire_config.txt:check-wire-config check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -80,7 +80,6 @@ require_metrics \
   'g.txt:golden_wire wire_baseline_update_contract' \
   'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
   'models.txt:model_contract' \
-  'wire_config.txt:wire_config_override wire_config_low_memory' \
   'ab.txt:ab_wire_change' \
   'dg.txt:degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction split_run_budget degrade_cases degrade_fail' \
   'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_bss_hard_cap_overrides arm_decoder_build' \
@@ -98,14 +97,14 @@ kvs() {
   done
 }
 
-echo "==================== A1 GATE ========================="
+echo "================ ULTRAPATCH GATE ====================="
 printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
 kvs 'inventory.txt|release_inventory|release inventory        : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
-kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : ' 'wire_config.txt|wire_config_override|wire config override    : ' 'wire_config.txt|wire_config_low_memory|low-memory config     : '
+kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '

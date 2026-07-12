@@ -72,7 +72,7 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
     return err;
 }
 
-int decode_a1(const char *image_path, const char *patch_path){
+int decode_patch(const char *image_path, const char *patch_path){
     Buf blob = {0}, image = {0};
     int rc = 2;
     int alias = file_alias(image_path, patch_path);
@@ -135,7 +135,7 @@ static void decode_usage(const char *prog){
 
 int main(int argc,char**argv){
     if(argc==2 && (strcmp(argv[1],"-h")==0 || strcmp(argv[1],"--help")==0)){ decode_usage(argv[0]); return 0; }
-    if(argc==4 && strcmp(argv[1],"--decode")==0) return decode_a1(argv[2],argv[3]);
+    if(argc==4 && strcmp(argv[1],"--decode")==0) return decode_patch(argv[2],argv[3]);
     decode_usage(argv[0]);
     return 2;
 }

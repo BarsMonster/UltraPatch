@@ -1,6 +1,6 @@
 # Install Requirements
 
-Packages needed to build and inspect the final A1 C encoder/decoder on a
+Packages needed to build and inspect the C encoder/decoder on a
 Debian/Ubuntu system:
 
 ```sh
@@ -125,8 +125,8 @@ inside the pinned container digest, is the authoritative release run.
 gates both its relocatable and no-startup linked ARM `text`/`data`/`bss` sizes
 against the Makefile pins. The link uses an explicit FLASH/RAM layout, minimal
 platform stubs, and only the runtime-library members pulled by the decoder; it
-does not include CRT/startup or board code. A decoder compile needs
-`-DCORTEX_M0`, an aligned `PATCH_IMAGE_BASE`, and a positive, page-aligned
+does not include CRT/startup or board code. A decoder compile needs an aligned
+`PATCH_IMAGE_BASE` and a positive, page-aligned
 `PATCH_IMAGE_CAPACITY` covering the complete physical patch partition from that
 base. Repository host/ARM harnesses explicitly use
 `-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u`. Missing, negative,

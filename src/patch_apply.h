@@ -11,7 +11,7 @@
 #ifndef UP_PATCH_APPLY_H
 #define UP_PATCH_APPLY_H
 /*
- * ultrapatch v3-on-flash (A1) — streaming, in-place, real-NVM firmware decoder (C).
+ * ultrapatch v3-on-flash — streaming, in-place, real-NVM firmware decoder (C).
  * Production solution; integration and release gates are documented under docs/.
  * This is the only header application code includes. Install it beside the companion
  * patch_config.h and rc_models.h headers; the public entrypoint is intentionally not amalgamated.
@@ -28,7 +28,7 @@
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
  *
- * Reconstruction is NO-BAKE (A1): NO source writes. The [A] copy reads RAW from[fp]; the new image
+ * Reconstruction is NO-BAKE: NO source writes. The [A] copy reads RAW from[fp]; the new image
  * is corrected at the monotonic output frontier by the to-ordered additive corrections [C]
  * (out[tp] = db + raw_from[fp] + corr[tp]). Relocation fields are de-relocated on the fly: bl
  * positions are DERIVED by a local halfword pattern; ldr positions are DERIVED per op (a field is
@@ -584,7 +584,7 @@ static void up_out_write(PatchApply *pa, uint32_t a, uint8_t v){
 /* repeated relocation offsets keep tiny MTF indices) + a repeat-last bit keyed by previous repeat   */
 /* and last-is-zero + a dict-hit bit.                                                                */
 /* ===================================================================================== */
-/* A1 derives bl/ldr positions on-device, so there is no on-device disassembler
+/* BL/LDR positions are derived on-device, so there is no on-device disassembler
  * and no ranges side table. */
 
 /* pull the next delta of a stream (bl/ex), inline:
@@ -638,14 +638,14 @@ static int32_t up_corr_take(up_ApplyState*s, up_CorrCur*c, int32_t off){
     }
     return 0;
 }
-/* A1 ldr-derive: a 256-bit ring records future 4-aligned literal-pool targets of Thumb
+/* LDR derivation: a 256-bit ring records future 4-aligned literal-pool targets of Thumb
  * LDR-literal halfwords. The target span is <=1024 B, so target>>2 modulo 256 is collision-free
  * while every consumed target stays in the current 1 KiB window. FWD records halfwords as their
  * copy bytes are read. Grow walks the window backward: an initial <=1 KiB fill followed by only
  * the newly admitted low halfwords at each descending query. */
 #define UP_PSRC_TGT_MASK 255u
 static uint8_t up_hy_src_peek(PatchApply *pa, int32_t fp); /* fwd decl: journal-aware pristine source read */
-/* A1 ldr-derive (SAME-OP): is the 4-aligned from-addr fpk an ldr literal target of an instruction
+/* Same-op LDR derivation: is the 4-aligned from-addr fpk an LDR literal target of an instruction
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
  * fpk+4<=fp0+dl. Reads PRISTINE source: FWD consumes packed metadata recorded at copy-read time;
@@ -818,7 +818,7 @@ static int up_field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint32_t w, uint
         up_hy_word4_rec(pa,fpk,w);                             /* record the 4 BL bytes into the ring */
         return 1;
     }
-    /* A1: ex (ldr) DERIVED, gated by `pure` (no literal patch in the 4 bytes) — mirrors the
+    /* EX (LDR) is derived, gated by `pure` (no literal patch in the 4 bytes) — mirrors the
      * encoder's pure(k) + op_ldr_set; positions are derived, not shipped. */
     if(pure && ldr_hit){
         int32_t res=up_pull_delta(pa,&pa->DR_EX, &pa->MDL_pre.diex, pa->DR_DIC_EX, DR_KCAP_EX); /* residual from the single stream */
@@ -939,7 +939,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
         if(corr) break;
         corr=1; n=up_s_ug_gamma(pa,&pa->MDL_pre.pgn);
     }
-    /* A1: no BL/LDR offsets on the wire. BL suppression is inferred from !pure, and ldr positions
+    /* No BL/LDR offsets are on the wire. BL suppression is inferred from !pure, and LDR positions
      * are derived per op (ldr_targets). */
     /* ---- CONTENT decode + streaming write with inline field detection ----
      * Both directions process the same 4-byte ascending field windows over [0,dl); they differ only

@@ -1,6 +1,6 @@
 # Test Bench
 
-This directory contains the tracked corpus sources used by the A1 verification
+This directory contains the tracked corpus sources used by verification
 checks. The gate uses 16 matrix ELFs (`images/`) plus the `v0_base` and
 `v1_one_face` fixture ELFs, and a second, unrelated Cortex-M0+ binary lineage under
 `foreign/` (18 CircuitPython feather_m0_express release images, 34 pair-

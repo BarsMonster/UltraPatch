@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 #
-# stack_bound.py -- static worst-case caller-stack bound for the A1 decoder.
+# stack_bound.py -- static worst-case caller-stack bound for the decoder.
 #
 # Since the coroutine fiber was deleted (commit 44eee88) patch_apply_run() runs the
 # ENTIRE decode synchronously on the CALLER's stack. The decoder has no recursion and

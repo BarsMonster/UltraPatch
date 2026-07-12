@@ -3,7 +3,7 @@
  * Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- diff core: ARM Cortex-M relocation field scanner
+ * Host encoder module -- diff core: ARM Cortex-M relocation field scanner
  * (disassemble/create_patch_block/data_format_encode) + SequenceMatcher field
  * deltas + suffix-sort bsdiff ops (emit_bsdiff_op, bsdiff_ops).
  * Compiled as a normal internal encoder translation unit.

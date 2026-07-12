@@ -14,10 +14,8 @@
 
 #include "rc_models.h"
 
-/* The encoder uses the shared wire knobs directly from patch_config.h. Explicit overrides MUST
- * use the same macro names and values in encoder and decoder builds (WIRE_CONFIG_FLAGS in the
- * repository Makefile); PATCH_IMAGE_BASE and PATCH_IMAGE_CAPACITY are decoder-only and are not
- * part of this contract. */
+/* The encoder uses the canonical constants directly from patch_config.h;
+ * PATCH_IMAGE_BASE and PATCH_IMAGE_CAPACITY are decoder-only. */
 
 /* Encoder-only wire helpers. The decoder never reads a little-endian u16/u32, so these host-only
  * readers stay out of the shipped decoder headers (rc_u32le_put IS decoder-used and remains in
@@ -360,7 +358,7 @@ void plan_prepare_free(PlanPrep *prep);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec);
 
-void encode_a1(const char *from_image, const char *to_image, const char *patch_out);
-int decode_a1(const char *image_path, const char *patch_path);
+void encode_patch(const char *from_image, const char *to_image, const char *patch_out);
+int decode_patch(const char *image_path, const char *patch_path);
 
 #endif /* ENC_INTERNAL_H */

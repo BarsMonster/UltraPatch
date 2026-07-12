@@ -54,7 +54,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     cp $DECODER_PUBLIC_HDRS "$header_dir/"
     cp test-bench/decoder-compiled-contract.c "$header_dir/consumer.c"
     ( cd "$header_dir" && "$CC" -std=c11 -Wall -Wextra -Werror \
-        -DCORTEX_M0 -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u \
+        -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u \
         -c consumer.c -o consumer.o )
     echo "decoder_header_install=OK (patch_apply.h + local support headers)"
 
@@ -182,6 +182,14 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     fi
     echo "decoder_compiled_contract=OK (O0: automatic state, symbols + macros)"
 
+    if "$CC" $common -DWINDOW_LOG=9 -c test-bench/decoder-compiled-contract.c \
+         -o "$tmp/override.o" >"$tmp/override.out" 2>"$tmp/override.err"; then
+        echo "decoder accepted a production wire-constant override" >&2
+        exit 1
+    fi
+    grep -q 'wire constants are owned by patch_config.h' "$tmp/override.err"
+    echo "decoder_wire_constants=OK (shared config; production overrides rejected)"
+
     "$CC" $common -c test-bench/decoder-collision.c -o "$tmp/collision.o"
     echo "decoder_namespace_contract=OK"
     "$CC" $common test-bench/nvm-geometry-probe.c -o "$tmp/nvm-geometry-probe"
@@ -189,8 +197,12 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract"
     "$tmp/contract" $args >"$tmp/contract.out"
 
-    capflags="-UDR_KCAP_BL -UDR_KCAP_EX -DDR_KCAP_BL=1 -DDR_KCAP_EX=1"
-    "$CC" $common $capflags test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap"
+    cap_headers="$tmp/cap-headers"
+    mkdir "$cap_headers"
+    cp $DECODER_PUBLIC_HDRS "$cap_headers/"
+    sed -i 's/^#define DR_KCAP_BL 208$/#define DR_KCAP_BL 1/' "$cap_headers/patch_config.h"
+    sed -i 's/^#define DR_KCAP_EX 128$/#define DR_KCAP_EX 1/' "$cap_headers/patch_config.h"
+    "$CC" -I"$cap_headers" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/cap"
     "$tmp/cap" resource-clean "$tmp/prefix.from" "$tmp/prefix.to" "$tmp/prefix.blob" >/dev/null
     "$tmp/cap" resource-touched "$base" "$one" "$tmp/grow.blob" >/dev/null
 

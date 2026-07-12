@@ -1,6 +1,6 @@
 # Ultrapatcher
 
-Final A1 firmware patcher for the Sensor Watch target.
+Firmware patcher for the Sensor Watch target.
 
 Production code lives under `src/`, with third-party code under `vendor/`:
 
@@ -36,12 +36,9 @@ To integrate the decoder, install `patch_apply.h`, `rc_models.h`, and
 #include "patch_apply.h"
 ```
 
-`WIRE_CONFIG_FLAGS` is the single repository build path for wire-affecting
-overrides and defaults to `-DCORTEX_M0`. Encoder and decoder builds **MUST** use
-the exact same macro names with the exact same values for `WINDOW_LOG`,
-`JSLOTS`, `OPC_CAP`, `OUTROW`, `OUTROW_DEPTH`, `DR_KCAP_BL`, `DR_KCAP_EX`, the
-target family, and any wire-model override. `PATCH_IMAGE_BASE` and
-`PATCH_IMAGE_CAPACITY` are separate, decoder-only partition configuration;
+`patch_config.h` is the single source of the fixed wire and resource constants
+used by both encoder and decoder. Production builds reject command-line overrides.
+`PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are separate, decoder-only partition configuration;
 repository decoder harnesses use
 `DECODER_CONFIG_FLAGS='-DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u'`.
 

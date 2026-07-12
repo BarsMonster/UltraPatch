@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* A1 divide-free range-coder model definitions (shared by decoder + host encoder).
+/* Divide-free range-coder model definitions (shared by decoder + host encoder).
  * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
  * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both
  * src/patch_apply.h (device decoder) and src/patch_generate.c

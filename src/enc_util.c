@@ -6,7 +6,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, transactional file IO, crc32, varints, vector + compare helpers.
+ * Host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, transactional file IO, crc32, varints, vector + compare helpers.
  * Compiled as a normal internal encoder translation unit.
  */
 

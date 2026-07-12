@@ -21,14 +21,13 @@ set -u
 
 : "${CC:?check_analyze.sh: CC not set — run 'make check-analyze' (it supplies the build flags)}"
 : "${CONTRACT_FLAGS:?check_analyze.sh: CONTRACT_FLAGS not set — run 'make check-analyze'}"
-: "${WIRE_CONFIG_FLAGS:?check_analyze.sh: WIRE_CONFIG_FLAGS not set — run 'make check-analyze'}"
 : "${DECODER_CONFIG_FLAGS:?check_analyze.sh: DECODER_CONFIG_FLAGS not set — run 'make check-analyze'}"
 if ! "$CC" -fanalyzer -x c -c /dev/null -o /dev/null >/dev/null 2>&1; then
     echo "analyze=SKIPPED (no working '$CC -fanalyzer')"
     exit 0
 fi
 
-COMMON="$CONTRACT_FLAGS $WIRE_CONFIG_FLAGS -fanalyzer -Wno-analyzer-tainted-assertion -c -o /dev/null"
+COMMON="$CONTRACT_FLAGS -fanalyzer -Wno-analyzer-tainted-assertion -c -o /dev/null"
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 rc=0

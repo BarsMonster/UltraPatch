@@ -64,9 +64,7 @@ export LANGUAGE := C
 export LC_ALL := C
 
 OPT ?= -O2
-# Every wire-affecting override belongs here, under the exact macro name consumed by
-# patch_config.h/rc_models.h. Encoder and decoder builds MUST use this same value.
-WIRE_CONFIG_FLAGS ?= -DCORTEX_M0
+# Wire/resource constants live only in patch_config.h and are not build variables.
 # Decoder/device integration only: these partition values are not part of the patch wire.
 # Repository host/ARM harnesses intentionally model a 64 MiB image partition based at zero.
 DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u
@@ -74,7 +72,6 @@ DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u
 # stays leg-local; decoder-containing commands append DECODER_CONFIG_FLAGS explicitly.
 CONTRACT_FLAGS := -std=c99 -I. -Isrc -Ivendor/libdivsufsort
 CFLAGS += $(CONTRACT_FLAGS)
-CFLAGS += $(WIRE_CONFIG_FLAGS)
 CFLAGS += -g
 CFLAGS += -Wall
 CFLAGS += -Wextra
@@ -118,7 +115,6 @@ override UP_PROFILE_ENCODER_CFLAGS := $(CFLAGS)
 override UP_PROFILE_BACKEND_CFLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
 override UP_PROFILE_LINK_CFLAGS := $(CFLAGS)
 override UP_PROFILE_LDFLAGS := $(LDFLAGS)
-override UP_PROFILE_WIRE_FLAGS := $(WIRE_CONFIG_FLAGS)
 override UP_PROFILE_DECODER_FLAGS := $(DECODER_CONFIG_FLAGS)
 override UP_PROFILE_RECIPE_REVISION := $(HOST_BUILD_RECIPE_TAG)
 override UP_PROFILE_ENCODER_SOURCES := $(HOST_ENCODER_SRCS)
@@ -137,7 +133,7 @@ override UP_PROFILE_ARM_STACK_OPT := $(ARM_STACK_OPT)
 export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_NM UP_PROFILE_ENV_UNSET
 export UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
 export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
-export UP_PROFILE_WIRE_FLAGS UP_PROFILE_DECODER_FLAGS
+export UP_PROFILE_DECODER_FLAGS
 export UP_PROFILE_RECIPE_REVISION UP_PROFILE_ENCODER_SOURCES
 export UP_PROFILE_BACKEND_SOURCES UP_PROFILE_LINK_OBJECTS
 export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_OBJCOPY
@@ -201,7 +197,7 @@ BASE_RELEASE_FOREIGN_EDGES ?= 17
 BASE_RELEASE_GOLDEN_BLOBS ?= 4
 BASE_FULL_TOTAL ?= 4151373
 # Foreign lineage (CircuitPython feather_m0_express, 34 pair-directions): summed blob bytes.
-# Ratchets like BASE_FULL_TOTAL — a wire regression on firmware A1 was NOT tuned on fails here.
+# Ratchets like BASE_FULL_TOTAL — a wire regression on the product firmware was NOT tuned on fails here.
 # Re-pin on intentional wire changes. See docs/foreign-firmware-study.md.
 BASE_FOREIGN_TOTAL ?= 1333390
 BASE_ONEFACE_GROW ?= 573
@@ -216,7 +212,7 @@ BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
 override ARM_BSS_HARD_CAP := 12288
-ARM_COMMON_FLAGS := -mcpu=cortex-m0plus -mthumb $(WIRE_CONFIG_FLAGS) $(DECODER_CONFIG_FLAGS)
+ARM_COMMON_FLAGS := -mcpu=cortex-m0plus -mthumb $(DECODER_CONFIG_FLAGS)
 ARM_DEC_FLAGS := $(ARM_COMMON_FLAGS) -I src
 ARM_LINK_STUBS ?= scripts/arm_link_stubs.c
 ARM_LINK_LAYOUT := scripts/arm_link.ld
@@ -247,7 +243,7 @@ override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
 ENCODER_KERNEL_BASELINE_LOCK := test-bench/.encoder-kernel-baseline-update.lock
 CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
-	      check-wire-config check-build-profile check-release-profile check-release-inventory \
+	      check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
@@ -347,11 +343,6 @@ check-clang-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
 
-WIRE_CONFIG_PROBE_FLAGS := -DCORTEX_M0 -DMAX_IMAGE=1048576u \
-                           -DWINDOW_LOG=11 -DJSLOTS=769u -DOPC_CAP=81 \
-                           -DOUTROW=128u -DOUTROW_DEPTH=4u -DDR_KCAP_BL=209u -DDR_KCAP_EX=129u
-LOW_MEMORY_WIRE_CONFIG_FLAGS := -DCORTEX_M0 -DWINDOW_LOG=9 -DJSLOTS=600u
-
 # `make gate` is a release certification, not a configurable measurement. These variables may
 # still be overridden on their individual measurement targets and A/B runs; the release gate and
 # canonical updater reject any runtime origin so they cannot accidentally certify/publish a
@@ -369,12 +360,12 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK ENCODER_KERNEL_BASELINE_LOCK \
 	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
-	WIRE_CONFIG_FLAGS DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
+	DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
 	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
 	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS NVM_EMU ENC_MODULE_SRCS \
 	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
 	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
-	PORTABLE_FALLBACK_FLAGS WIRE_CONFIG_PROBE_FLAGS LOW_MEMORY_WIRE_CONFIG_FLAGS TOOLCHAIN_ENV_UNSET \
+	PORTABLE_FALLBACK_FLAGS TOOLCHAIN_ENV_UNSET \
 	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP ENCODER_KERNEL_BASELINE_DUMP \
@@ -443,38 +434,6 @@ $(CORPUS_ASSET_STAMP): scripts/corpus_topology.py $(CORPUS_INVENTORY) \
 	  --objcopy "$(ARM_OBJCOPY)"
 	@set -e; tmp="$@.$$$$.tmp"; trap 'rm -f "$$tmp"' EXIT; \
 	  printf '%s\n' 'corpus_assets=ready' >"$$tmp"; mv -f "$$tmp" "$@"; trap - EXIT
-
-.PHONY: check-wire-config-probe-internal check-low-memory-wire-config-probe-internal
-check-wire-config-internal: ultrapatch
-	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(WIRE_CONFIG_PROBE_FLAGS)' \
-		DEFAULT_ULTRAPATCH='$(HOST_TOOL)' \
-		check-wire-config-probe-internal
-	@$(MAKE) --no-print-directory WIRE_CONFIG_FLAGS='$(LOW_MEMORY_WIRE_CONFIG_FLAGS)' \
-		check-low-memory-wire-config-probe-internal
-
-check-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSET_PREREQ) \
-                                scripts/check_wire_config.sh \
-                                scripts/synth_gen.py test-bench/decoder-contract.c \
-                                $(DECODER_INTEGRATION_TU) \
-                                $(DEC_STANDALONE_SRCS) $(NVM_EMU) $(ARM_LINK_STUBS) $(ARM_LINK_LAYOUT)
-	@CC="$(CC)" CFLAGS="$(CFLAGS)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
-	  DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
-	  ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
-	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" \
-	  ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" ARM_BSS_HARD_CAP="$(ARM_BSS_HARD_CAP)" \
-	  ARM_LINK_STUBS="$(ARM_LINK_STUBS)" ARM_LINK_FLAGS="$(ARM_LINK_FLAGS)" \
-	  ARM_LINK_LIBS="$(ARM_LINK_LIBS)" \
-	  DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \
-	  DEFAULT_ULTRAPATCH="$(DEFAULT_ULTRAPATCH)" ULTRAPATCH="$(HOST_TOOL)" \
-	  FIXTURES="$(FIXTURES)" scripts/check_wire_config.sh
-
-check-low-memory-wire-config-probe-internal: ultrapatch $(DECODER_PUBLIC_HDRS) \
-                                               $(CORPUS_ASSET_PREREQ) \
-                                               scripts/check_low_memory_config.sh \
-                                               test-bench/decoder-contract.c
-	@CC="$(CC)" DECODER_CFLAGS="$(DECODER_CFLAGS)" \
-	  ULTRAPATCH="$(HOST_TOOL)" \
-	  FIXTURES="$(FIXTURES)" scripts/check_low_memory_config.sh
 
 $(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
                                      $(PROFILE_MANIFEST) | profile-check
@@ -870,7 +829,7 @@ check-corpus-matrix-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_t
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
 # check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
 # check-ab-matrix,
-# check-models, check-wire-config, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
+# check-models, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
 # matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, home per-pair better/worse/equal
 # split vs WIRE_BASELINE with zero worse pairs allowed, foreign_total vs
@@ -901,7 +860,7 @@ gate-internal:
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
 # fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
-	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" WIRE_CONFIG_FLAGS="$(WIRE_CONFIG_FLAGS)" \
+	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" \
 	  DECODER_CONFIG_FLAGS="$(DECODER_CONFIG_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh
 
 clean-internal:

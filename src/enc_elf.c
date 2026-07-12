@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * A1 host encoder module -- minimal ELF32 range extraction (elf_ranges).
+ * Host encoder module -- minimal ELF32 range extraction (elf_ranges).
  * Compiled as a normal internal encoder translation unit.
  */
 
