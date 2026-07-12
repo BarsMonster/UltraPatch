@@ -7,17 +7,17 @@ set -eu
 MAKE_CMD="${MAKE:-make}"
 . "$(dirname "$0")/tempdir.sh"
 
-harness="printf '%s\\n' '#include \"patch_apply.h\"' 'static PatchApply g_patch_apply_state;' 'uint8_t arm_bss_limit_probe[12289];' 'PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }' > \"\$\$tmp/patch_apply_arm.c\""
+probe_flags=-DDECODER_INTEGRATION_BSS_PROBE_BYTES=12289
 
 if "$MAKE_CMD" --no-print-directory \
-    ARM_BSS_HARD_CAP=999999 BASE_ARM_BSS=999999 ARM_APPLY_HARNESS="$harness" \
+    ARM_BSS_HARD_CAP=999999 BASE_ARM_BSS=999999 DECODER_INTEGRATION_PROBE_FLAGS="$probe_flags" \
     check-arm-measure-internal >"$tmp/command-line.out" 2>&1; then
   echo "command-line override disabled the ARM .bss hard cap" >&2
   exit 1
 fi
 grep -q '^ARM \.bss hard cap exceeded: [0-9][0-9]* > 12288$' "$tmp/command-line.out"
 
-if ARM_BSS_HARD_CAP= BASE_ARM_BSS=999999 ARM_APPLY_HARNESS="$harness" \
+if ARM_BSS_HARD_CAP= BASE_ARM_BSS=999999 DECODER_INTEGRATION_PROBE_FLAGS="$probe_flags" \
     "$MAKE_CMD" -e --no-print-directory check-arm-measure-internal \
     >"$tmp/environment.out" 2>&1; then
   echo "environment override disabled the ARM .bss hard cap" >&2

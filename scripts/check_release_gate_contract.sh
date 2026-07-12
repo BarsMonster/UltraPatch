@@ -88,7 +88,8 @@ expect_reject build_dir BUILD_DIR="$tmp/build" release-gate-origin-probe-interna
 expect_reject source_set TOOL_SRCS=src/patch_generate.c release-gate-origin-probe-internal
 expect_reject decoder_headers DECODER_PUBLIC_HDRS=src/patch_apply.h \
   release-gate-origin-probe-internal
-expect_reject arm_harness ARM_APPLY_HARNESS=: release-gate-origin-probe-internal
+expect_reject integration_tu DECODER_INTEGRATION_TU=/dev/null \
+  release-gate-origin-probe-internal
 expect_reject decoder_mode DECODER_API_REGULAR=0 release-gate-origin-probe-internal
 expect_reject golden_manifest GOLDEN_MANIFEST="$tmp/golden.sha256" \
   release-gate-origin-probe-internal

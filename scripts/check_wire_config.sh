@@ -24,6 +24,7 @@ set -eu
 : "${ARM_BSS_HARD_CAP:?check_wire_config.sh: ARM_BSS_HARD_CAP not set - invoke through make check-wire-config}"
 : "${ARM_LINK_STUBS:?check_wire_config.sh: ARM_LINK_STUBS not set - invoke through make check-wire-config}"
 : "${ARM_LINK_LAYOUT:?check_wire_config.sh: ARM_LINK_LAYOUT not set - invoke through make check-wire-config}"
+: "${DECODER_INTEGRATION_TU:?check_wire_config.sh: DECODER_INTEGRATION_TU not set - invoke through make check-wire-config}"
 : "${DEFAULT_ULTRAPATCH:?check_wire_config.sh: DEFAULT_ULTRAPATCH not set - invoke through make check-wire-config}"
 : "${ULTRAPATCH:?check_wire_config.sh: ULTRAPATCH not set - invoke through make check-wire-config}"
 
@@ -149,29 +150,16 @@ EOF
 "$CC" $SINGLE_DECODER_CFLAGS "$single_header_define" "$tmp/single_wire_config.c" \
     -Wl,--gc-sections -o "$tmp/single_wire_config"
 
-# Cross-compile and link the actual product integration shape for both packaging forms. Static
-# PatchApply storage makes the alternate SRAM cost visible; source/single equality proves the
-# generated artifact is semantically identical. The unoverrideable product cap comes from Make.
-cat > "$tmp/arm_source.c" <<'EOF'
-#include "patch_apply.h"
-static PatchApply g_patch_apply_state;
-PatchApplyResult rcv3_run(PatchPull next, void *ctx){
-    return patch_apply_run(&g_patch_apply_state, next, ctx);
-}
-EOF
-cat > "$tmp/arm_single.c" <<'EOF'
-#include DECODER_SINGLE_HEADER
-static PatchApply g_patch_apply_state;
-PatchApplyResult rcv3_run(PatchPull next, void *ctx){
-    return patch_apply_run(&g_patch_apply_state, next, ctx);
-}
-EOF
+# Cross-compile and link the actual product integration shape for both packaging forms through
+# the same tracked TU as check-arm/check-stack. Static PatchApply storage makes the alternate
+# SRAM cost visible; source/single equality proves the generated artifact is identical.
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -I"$tmp" -include "$tmp/wire_config_assert.h" \
-    -c "$tmp/arm_source.c" -o "$tmp/arm_source.o"
+    -DDECODER_INTEGRATION_STATIC -c "$DECODER_INTEGRATION_TU" -o "$tmp/arm_source.o"
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_SINGLE_DEC_FLAGS $ARM_OBJECT_OPT "$single_header_define" \
-    -include "$tmp/wire_config_assert.h" -c "$tmp/arm_single.c" -o "$tmp/arm_single.o"
+    -include "$tmp/wire_config_assert.h" -DDECODER_INTEGRATION_STATIC \
+    -c "$DECODER_INTEGRATION_TU" -o "$tmp/arm_single.o"
 # shellcheck disable=SC2086
 "$ARM_CC" $ARM_DEC_FLAGS $ARM_OBJECT_OPT -c "$ARM_LINK_STUBS" -o "$tmp/arm_link_stubs.o"
 for form in source single; do
