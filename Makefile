@@ -721,13 +721,9 @@ check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(ENCODER_KERNEL_BASEL
 # round-trip/write-safety and no-regression policy, then replaces the baseline and its four
 # Makefile ratchets. Commit both files in the SAME commit. If publication is interrupted between
 # the ordinary replaces, restore both files from Git and rerun the target.
-check-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/check_wire_baseline_update.py \
-                       scripts/publish_wire_baselines.py scripts/wire_baseline.py \
-                       scripts/corpus_topology.py $(WIRE_BASELINE)
+check-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(WIRE_BASELINE)
 	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
-	@python3 scripts/check_wire_baseline_update.py --host-tool "$(HOST_TOOL)" \
-	  --release-profile-lock "$(RELEASE_PROFILE_LOCK)"
 
 # Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
 # measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.

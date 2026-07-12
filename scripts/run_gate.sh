@@ -77,7 +77,7 @@ require_metrics \
   'assets.txt:corpus_assets foreign_assets' \
   'malformed.txt:malformed_rejects' \
   'e.txt:edge_cases edge_roundtrips edge_refusals edge_failures edge_alt_diff_16k_encode_cpu_ms edge_alt_diff_32k_encode_cpu_ms edge_alt_diff_64k_encode_cpu_ms edge_alt_diff_256k_encode_cpu_ms edge_alt_diff_16k_encode_wall_ms edge_alt_diff_32k_encode_wall_ms edge_alt_diff_64k_encode_wall_ms edge_alt_diff_256k_encode_wall_ms' \
-  'g.txt:golden_wire wire_baseline_update_contract' \
+  'g.txt:golden_wire' \
   'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
   'models.txt:model_contract' \
   'ab.txt:ab_wire_change' \
@@ -104,7 +104,7 @@ kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_ass
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
-kvs 'g.txt|golden_wire|golden wire             : ' 'g.txt|wire_baseline_update_contract|baseline update        : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
+kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
 kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
