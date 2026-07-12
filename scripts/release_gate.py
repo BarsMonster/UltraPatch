@@ -44,8 +44,11 @@ class ReleaseError(RuntimeError):
 
 def release_environment() -> dict[str, str]:
     return {
+        "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_KEY_0": "safe.directory",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_VALUE_0": str(ROOT),
         "HOME": "/nonexistent/ultrapatch-release-home",
         "LANG": "C",
         "LANGUAGE": "C",
