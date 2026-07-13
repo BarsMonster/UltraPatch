@@ -37,7 +37,7 @@
 #              - a dynamic/VLA stack frame (.su qualifier != "static").
 #
 # BOUND = longest root-to-leaf weighted path from the selected harness entry (the repository
-#         uses rcv3_run wrappers for both static PatchApply storage and a caller-owned
+#         uses decoder_run wrappers for both static PatchApply storage and a caller-owned
 #         PatchApply pointer), summing internal frames only. Externs are EXCLUDED and reported
 #         separately:
 #           - integrator externs  : flash_read, flash_write_page, and the byte callback. Their
@@ -173,8 +173,8 @@ def main():
     ap.add_argument("--su", help="the .su file (default: <obj> with .su extension)")
     ap.add_argument("--objdump", default=os.environ.get(
         "OBJDUMP", "arm-none-eabi-objdump"))
-    ap.add_argument("--entry", default="rcv3_run",
-                    help="entry symbol (default rcv3_run == patch_apply_run)")
+    ap.add_argument("--entry", default="decoder_run",
+                    help="entry symbol (default decoder_run == patch_apply_run)")
     ap.add_argument("--quiet", action="store_true",
                     help="print only 'stack_bound_bytes=N'")
     args = ap.parse_args()

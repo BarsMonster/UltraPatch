@@ -7,7 +7,7 @@ override SHELL := /bin/sh
 # A release gate must actually execute and propagate failures; dry-run, touch, and ignore-error
 # modes would otherwise let Make report success without establishing the release outcome.
 override CANONICAL_GOAL := $(firstword $(filter gate,$(MAKECMDGOALS)))
-override CANONICAL_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
+override CANONICAL_SHORT_FLAGS := $(filter-out -%,$(firstword $(MAKEFLAGS)))
 ifneq ($(CANONICAL_GOAL),)
 ifneq ($(strip $(foreach f,n t i,$(if $(findstring $(f),$(CANONICAL_SHORT_FLAGS)),$(f)))),)
 $(error gate rejects Make launch mode: $(CANONICAL_SHORT_FLAGS))

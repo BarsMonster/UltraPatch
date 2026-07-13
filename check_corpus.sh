@@ -69,6 +69,17 @@ done
 tmp=$(mktemp -d) || { echo "check_corpus.sh: cannot create temporary directory" >&2; exit 3; }
 trap 'rm -rf "$tmp"' EXIT
 
+# Exercise the shortest valid range stream. Its counted body is empty after the encoder drops
+# the leading cache byte; the production decoder must supply the omitted zero bootstrap bytes.
+: > "$tmp/empty.bin"
+if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
+     >"$tmp/empty.stdout" 2>"$tmp/empty.stderr"; then
+  echo "check_corpus.sh: empty-image self-verifying encode failed" >&2
+  sed -n '1,20p' "$tmp/empty.stderr" >&2
+  exit 4
+fi
+echo "short_body_regression=OK"
+
 append_foreign_pair() {
   local from=$1 to=$2 from_id to_id
   from_id=${from##*/}; to_id=${to##*/}

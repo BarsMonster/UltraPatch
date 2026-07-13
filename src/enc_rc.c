@@ -72,6 +72,10 @@ Buf re_flush_opt(REnc *r) {
     } else {
         while (r->out.n > base && r->out.d[r->out.n - 1] == 0) r->out.n--;
     }
+    /* Keep the implicit leading cache byte so an empty material body remains distinct from the
+     * encoder's infeasible-plan sentinel. It is dropped from the envelope; the decoder supplies
+     * any missing code bytes as the range coder's normal zero padding. */
+    if (r->out.n == 0) re_put(r, 0);
     Buf b = r->out;
     r->out = (Buf){0};
     return b;

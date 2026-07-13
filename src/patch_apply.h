@@ -1031,7 +1031,10 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
     if(pa->g_FWD){ uint32_t z2; if(!up_env_uleb(pa,&z2,0)) return 0;
       fp_start=rc_unzz32_value(z2); }
-    if(!up_env_uleb(pa,&bl,0) || bl<4u) return 0;  /* dropped leading cache byte leaves at least 4 code bytes */
+    /* The encoder drops its leading cache byte and may trim any zero suffix, including part or
+     * all of the four-byte code bootstrap. up_rc_init supplies those omitted bytes through the
+     * counted body's normal zero padding. */
+    if(!up_env_uleb(pa,&bl,0)) return 0;
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;

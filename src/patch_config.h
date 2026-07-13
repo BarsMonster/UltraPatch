@@ -22,7 +22,7 @@
 
 /* Unsigned 8-bit wire revision. A nonzero value is folded into the source CRC so mismatched
  * encoder/decoder revisions reject before the first flash write without growing the envelope. */
-#define PATCH_WIRE_VERSION ((uint8_t)3u)
+#define PATCH_WIRE_VERSION ((uint8_t)4u)
 
 /* Plausibility cap on envelope image sizes; decoder cursors are signed 32-bit. */
 #define MAX_IMAGE (64u<<20)

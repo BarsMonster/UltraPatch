@@ -251,8 +251,8 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size,
                            const LdrTargetIndex *ldr, int fwd) {
     /* Append op-derived entries after the already-finalized block-matched entries, then a single
-     * fd_finalize: its stable sort keeps the appended op-derived entry after the same-key block
-     * entry, and its last-wins dedup makes op-derived override block-matched (and, among op-derived
+     * fd_finalize: its ordinal keeps the appended op-derived entry after the same-key block entry,
+     * and its last-wins dedup makes op-derived override block-matched (and, among op-derived
      * duplicates, the last fd_put win) -- bit-identical to the former add/out rebuild. */
     static const FieldDeltaVec empty_fd = {0};
     OpWalkEnt *walk = opwalk_build(ops, 0);
@@ -288,11 +288,12 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
 /* ---- piecewise shift map (D1): lookups on both sides use the single rc_smap_at definition in
  * rc_models.h. ---- */
 
-typedef struct { uint32_t b; int32_t v; uint32_t w; } SegCand;
+typedef struct { uint32_t b; int32_t v; uint32_t w, ord; } SegCand;
 typedef struct { uint32_t w; size_t ord; } SegRank;
 static int cmp_seg(const void *a, const void *b) {
     const SegCand *x = (const SegCand *)a, *y = (const SegCand *)b;
-    return (x->b > y->b) - (x->b < y->b);
+    if (x->b != y->b) return (x->b > y->b) - (x->b < y->b);
+    return (x->ord > y->ord) - (x->ord < y->ord);
 }
 static int cmp_seg_rank(const void *a, const void *b) {
     const SegRank *x = (const SegRank *)a, *y = (const SegRank *)b;
@@ -304,7 +305,7 @@ static size_t smap_pretrim(SegCand *pool, size_t pn) {
     if (pn <= SMAP_POOL_MAX) return pn;
     SegRank *rank = (SegRank *)xmalloc(pn * sizeof(*rank));
     for (size_t i = 0; i < pn; i++) rank[i] = (SegRank){pool[i].w, i};
-    sort(rank, pn, sizeof(*rank), cmp_seg_rank);
+    qsort(rank, pn, sizeof(*rank), cmp_seg_rank);
     for (size_t i = 0; i < pn - SMAP_POOL_MAX; i++) pool[rank[i].ord].w = UINT32_MAX;
     free(rank);
     size_t out = 0;
@@ -333,12 +334,12 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
       for (size_t i = 0; i < ops->n; i++) {
           if (walk[i].o->diff_len > 0 && walk[i].fp >= 0) {
               pool[pn].b = (uint32_t)walk[i].fp; pool[pn].v = walk[i].tp - walk[i].fp;
-              pool[pn].w = (uint32_t)walk[i].o->diff_len; pn++;
+              pool[pn].w = (uint32_t)walk[i].o->diff_len; pool[pn].ord = (uint32_t)pn; pn++;
           }
       }
       free(walk);
       pool[pn].b = from_size > to_size ? from_size : to_size; pool[pn].v = 0;
-      pool[pn].w = 0x7fffffffu; pn++; }                  /* terminator: never pre-trimmed */
+      pool[pn].w = 0x7fffffffu; pool[pn].ord = (uint32_t)pn; pn++; } /* terminator: never pre-trimmed */
     if (nex) {
         SegCand *ex = (SegCand *)xmalloc(nex * sizeof(*ex));
         size_t en = 0;
@@ -347,14 +348,16 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
             if (fk->kind == EV_EX && fk->need != INT32_MIN) {
                 ex[en].b = fk->k2;
                 ex[en].v = rc_i32_from_u32(0u - (uint32_t)fk->need);
+                ex[en].ord = (uint32_t)en;
                 en++;
             }
         }
-        sort(ex, en, sizeof(*ex), cmp_seg);
+        qsort(ex, en, sizeof(*ex), cmp_seg);
         for (size_t i = 0; i < en;) {
             size_t j = i;
             while (j < en && ex[j].v == ex[i].v) j++;
-            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pool[pn].w = (uint32_t)(j - i); pn++;
+            pool[pn].b = ex[i].b; pool[pn].v = ex[i].v; pool[pn].w = (uint32_t)(j - i);
+            pool[pn].ord = (uint32_t)pn; pn++;
             i = j;
         }
         free(ex);
@@ -363,7 +366,7 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
      * original order. UINT32_MAX is outside every real weight (all are <= INT32_MAX). */
     pn = smap_pretrim(pool, pn);
     /* sorted union map (dedupe same boundary: keep the later, i.e. EX value-derived, entry) */
-    sort(pool, pn, sizeof(*pool), cmp_seg);
+    qsort(pool, pn, sizeof(*pool), cmp_seg);
     int mn = 0;
     for (size_t i = 0; i < pn; i++) {
         if (mn && tb[mn - 1] == pool[i].b) { tv[mn - 1] = pool[i].v; continue; }
@@ -610,8 +613,8 @@ OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_st
         OpPC *pc = &out[step];
         preserve_corr_op(&cw, &fc, pc, we);
         if (!FWD) {
-            if (pc->pres.n > 1) sort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
-            if (pc->corr.n > 1) sort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
+            if (pc->pres.n > 1) qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
+            if (pc->corr.n > 1) qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
     free(hazard); free(m);

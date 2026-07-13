@@ -11,8 +11,8 @@
 #endif
 
 #ifdef DECODER_INTEGRATION_GENERIC
-PatchApplyResult rcv3_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }
+PatchApplyResult decoder_run(PatchApply *state, PatchPull next, void *ctx){ return patch_apply_run(state, next, ctx); }
 #else
 static PatchApply g_patch_apply_state;
-PatchApplyResult rcv3_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }
+PatchApplyResult decoder_run(PatchPull next, void *ctx){ return patch_apply_run(&g_patch_apply_state, next, ctx); }
 #endif

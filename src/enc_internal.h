@@ -71,7 +71,7 @@ typedef struct { uint8_t *d; size_t n, cap; } Buf;
 typedef struct { int32_t diff_len, extra_len, adj; } Op;
 typedef struct { Op *v; size_t n, cap; uint8_t *payload; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
-typedef struct { uint32_t addr; int kind; int32_t delta; } FieldDelta;
+typedef struct { uint32_t addr; int kind; int32_t delta; uint32_t ord; } FieldDelta;
 typedef struct { FieldDelta *v; size_t n, cap; } FieldDeltaVec;
 /* One entry per aligned source word: distance to its nearest preceding LDR halfword (0 = none). */
 typedef struct {
@@ -221,7 +221,6 @@ void die(const char *msg) RC_NORETURN;
 void *xmalloc(size_t n);
 void *xcalloc(size_t n, size_t s);
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap);
-void sort(void *base, size_t n, size_t esz, int (*cmp)(const void *, const void *));
 void buf_put(Buf *b, uint8_t v);
 void buf_write(Buf *b, const void *p, size_t n);
 void buf_put_u32le(Buf *b, uint32_t v);

@@ -46,12 +46,12 @@ static uint32_t checked_image_size(const Buf *b, const char *name) {
 }
 
 /* Emit the full patch envelope into a fresh `blob`. The body's leading range-coder cache
- * byte is dropped on the wire. The validity guard is an encoder-bug-only path (a well-formed
- * plan_encode body always begins with a 0 tag and is >= 5 bytes). */
+ * byte is dropped on the wire. A short body is valid: the decoder zero-pads after the counted
+ * bytes while initializing and consuming the range stream. */
 static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
                            uint32_t from_size, uint32_t to_size, int desc,
                            int32_t fp_end, int32_t fp_start, const Buf *body) {
-    if (body->n < 5u || body->d[0] != 0 || body->n - 1u > UINT32_MAX)
+    if (body->n == 0 || body->d[0] != 0 || body->n - 1u > UINT32_MAX)
         die("encoder produced a malformed range-coder body");
     uint32_t zd = rc_zz32((int32_t)to_size - (int32_t)from_size);
     buf_put_u32le(blob, rc_wire_from_crc(from_crc));

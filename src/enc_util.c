@@ -6,7 +6,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Host encoder module -- util/IO: die/allocators, sort stable mergesort, Buf, transactional file IO, crc32, varints, vector + compare helpers.
+ * Host encoder module -- util/IO: die/allocators, Buf, transactional file IO, crc32, varints, vector + compare helpers.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -33,39 +33,6 @@ void *xcalloc(size_t n, size_t s) {
     void *p = calloc(n ? n : 1, s ? s : 1);
     if (!p) die("out of memory");
     return p;
-}
-
-/* Deterministic STABLE bottom-up merge sort — replaces libc qsort everywhere in the
- * encoder so the emitted wire can never depend on the host libc's tie ordering (glibc
- * qsort is an unstable introsort since 2.37; musl uses smoothsort; BSDs differ). Several
- * comparators legitimately compare equal on distinct elements (same-address ELF symbols,
- * equal-value b2j entries, equal-boundary map segments); stability pins those ties to
- * insertion order, which every producer in the encoder generates deterministically. */
-void sort(void *base, size_t n, size_t esz,
-                    int (*cmp)(const void *, const void *)) {
-    unsigned char *src = (unsigned char *)base, *tmp;
-    if (n < 2) return;
-    tmp = (unsigned char *)xmalloc(n * esz);
-    memcpy(tmp, src, n * esz);
-    for (size_t w = 1; w < n; w *= 2) {
-        for (size_t lo = 0; lo < n; lo += 2 * w) {
-            size_t mid = lo + w < n ? lo + w : n;
-            size_t hi = lo + 2 * w < n ? lo + 2 * w : n;
-            size_t i = lo, j = mid, k = lo;
-            while (i < mid && j < hi) {
-                if (cmp(src + j * esz, src + i * esz) < 0) {   /* strict <: ties keep LEFT */
-                    memcpy(tmp + k * esz, src + j * esz, esz); j++;
-                } else {
-                    memcpy(tmp + k * esz, src + i * esz, esz); i++;
-                }
-                k++;
-            }
-            if (i < mid) { memcpy(tmp + k * esz, src + i * esz, (mid - i) * esz); k += mid - i; }
-            if (j < hi) memcpy(tmp + k * esz, src + j * esz, (hi - j) * esz);
-        }
-        memcpy(src, tmp, n * esz);
-    }
-    free(tmp);
 }
 
 void *vec_reserve(void *p, size_t *cap, size_t need, size_t elem_size, size_t init_cap) {
@@ -337,7 +304,8 @@ void opvec_push(OpVec *v, Op o) {
 static int cmp_fd(const void *a, const void *b) {
     const FieldDelta *x = (const FieldDelta *)a, *y = (const FieldDelta *)b;
     if (x->addr != y->addr) return (x->addr > y->addr) - (x->addr < y->addr);
-    return (x->kind > y->kind) - (x->kind < y->kind);
+    if (x->kind != y->kind) return (x->kind > y->kind) - (x->kind < y->kind);
+    return (x->ord > y->ord) - (x->ord < y->ord);
 }
 
 void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta) {
@@ -345,16 +313,23 @@ void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta) {
     v->v[v->n].addr = addr;
     v->v[v->n].kind = kind;
     v->v[v->n].delta = delta;
+    v->v[v->n].ord = (uint32_t)v->n;
     v->n++;
 }
 
 void fd_finalize(FieldDeltaVec *v) {
     if (!v->n) return;
-    sort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
+    qsort(v->v, v->n, sizeof(v->v[0]), cmp_fd);
     size_t w = 0;
     for (size_t i = 0; i < v->n; i++) {
-        if (w && v->v[w - 1].addr == v->v[i].addr && v->v[w - 1].kind == v->v[i].kind) v->v[w - 1] = v->v[i];
-        else v->v[w++] = v->v[i];
+        if (w && v->v[w - 1].addr == v->v[i].addr && v->v[w - 1].kind == v->v[i].kind) {
+            v->v[w - 1] = v->v[i];
+            v->v[w - 1].ord = (uint32_t)(w - 1);
+        } else {
+            v->v[w] = v->v[i];
+            v->v[w].ord = (uint32_t)w;
+            w++;
+        }
     }
     v->n = w;
 }
