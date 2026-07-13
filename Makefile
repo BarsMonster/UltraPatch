@@ -217,12 +217,12 @@ BASE_FULL_TOTAL ?= 4148576
 BASE_FOREIGN_TOTAL ?= 1299431
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6297
+BASE_ARM_TEXT ?= 6221
 BASE_ARM_DATA ?= 0
-BASE_ARM_BSS ?= 9368
-BASE_ARM_LINKED_TEXT ?= 6877
+BASE_ARM_BSS ?= 9356
+BASE_ARM_LINKED_TEXT ?= 6801
 BASE_ARM_LINKED_DATA ?= 0
-BASE_ARM_LINKED_BSS ?= 9368
+BASE_ARM_LINKED_BSS ?= 9356
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.

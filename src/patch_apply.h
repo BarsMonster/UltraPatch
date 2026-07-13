@@ -133,7 +133,7 @@ typedef struct {
     uint8_t ring[UP_RING]; uint32_t ototal;       /* content history (masked) + total produced */
     uint32_t tok_left, tok_src;                   /* token replay count + ring/output source */
     int32_t tp, fp;                               /* running accumulators (apply order) */
-    uint32_t op_corr[OPC_CAP]; int32_t op_nc;     /* high 24 bits = offset, low 8 = correction */
+    uint32_t op_corr[OPC_CAP]; uint8_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } up_ApplyState;
@@ -155,13 +155,12 @@ typedef struct PatchApply {
     uint32_t g_image_span;
     uint32_t g_from_size, g_to_size, g_body_left;
     uint32_t g_want_to;
-    int      g_FWD;
 
     PatchPull g_pull_fn;
     void *g_pull_ctx;
-    /* HOT-FLAG PLACEMENT INVARIANT: these decode error/reject latches are touched on nearly
-     * every range-coder step, so they are packed into the low alignment hole right after the two
-     * pointers (offsets ~32..34) instead of being sunk to the struct tail. Thumb-1 ldrb/strb take
+    /* HOT-FLAG PLACEMENT INVARIANT: these decode flags are touched on nearly every range-coder
+     * step, so they fill the low word right after the two pointers (offsets ~28..31) instead of
+     * being sunk to the struct tail. Thumb-1 ldrb/strb take
      * only a 5-bit immediate offset, so a flag byte at a LOW struct offset stays reachable cheaply,
      * whereas a tail byte forces an extra address add. Keep any future hot flag byte HERE (low), not
      * appended at the end: a naive "all loose bytes at the tail" layout was measured at +72 B .text. */
@@ -169,6 +168,7 @@ typedef struct PatchApply {
     uint8_t g_reject;   /* only REJ_RESOURCE cap sites set this during decode; REJ_CORRUPT is
                          * assigned once at the patch_apply_run boundary for every other failure */
     uint8_t g_flash_touched;
+    uint8_t g_FWD;
 
     up_RangeDec RC;
     /* g_jcount + g_smap_n pair fills RC's 4-byte tail up to the ARENA boundary (both uint16). */
@@ -188,7 +188,6 @@ typedef struct PatchApply {
 
     up_TokModels   MDL_tok;    /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     uint32_t g_oexp;
-    int g_rep0h;
     uint32_t g_lastdist;
     up_PreKdModels MDL_pre;    /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
     up_BitTree M_lit0[UP_LIT0_CTX], M_lit1;
@@ -196,11 +195,11 @@ typedef struct PatchApply {
     up_DRStream DR_BL, DR_EX;
 
     uint32_t g_psrc_ldr[8];
-    uint32_t g_psrc_even;     /* aligned word leads; the 3 loose flag bytes below pack into the
-                               * struct's final tail (only 1 byte of end padding then remains). */
+    uint32_t g_psrc_even;     /* aligned word leads; the 4 loose flag bytes fill the final word. */
     uint8_t  g_psrc_lo;
     uint8_t  g_out_en;
     uint8_t  g_litprev;
+    uint8_t  g_rep0h;
 } PatchApply;
 
 _Static_assert(sizeof(up_Arena) == UP_ARENA_BYTES, "arena union size drifted from UP_ARENA_BYTES (.bss would change)");
@@ -210,6 +209,7 @@ _Static_assert(RC_PACKED_POS_BITS==24u && UP_JHIGH_VALUES==256u,
                "succinct journal requires the 24-bit packed-position contract");
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
 _Static_assert(JSLOTS <= 65535u, "JSLOTS must fit the uint16 journal counters");
+_Static_assert(OPC_CAP <= UINT8_MAX, "OPC_CAP must fit the uint8 correction count");
 _Static_assert(DR_KCAP_BL > 0u && DR_KCAP_EX > 0u && DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u,
                "DR_KCAP_* must be nonzero and fit uint16 up_DRStream.K");
 /* Integration geometry is part of the public type/configuration contract, so every build applies
@@ -714,7 +714,7 @@ static uint8_t up_next_content(PatchApply *pa, up_ApplyState*s, int tag){
             s->tok_mode=1; s->tok_left=ln; s->last_span=1;
         } else {
             uint32_t d;
-            int rb=up_s_bit(pa,&pa->MDL_tok.rep0[pa->g_rep0h]); pa->g_rep0h=rb;
+            int rb=up_s_bit(pa,&pa->MDL_tok.rep0[pa->g_rep0h]); pa->g_rep0h=(uint8_t)rb;
             if(rb){ d=pa->g_lastdist; }                         /* rep0: reuse last distance */
             else if(pa->g_out_en && up_s_bit(pa,&pa->MDL_tok.outb)){         /* fresh + out-bit: long-range OUTPUT match */
                 int32_t dpos=rc_unzz32_value(up_s_ug_rice(pa,&pa->MDL_tok.go)); /* position as zigzag delta vs expected */
@@ -920,7 +920,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
         if(corr && n>(uint32_t)OPC_CAP){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
         if(!corr && n>(uint32_t)JSLOTS-pa->g_jcount){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
         if(n>nwu){ pa->g_rcerr=1; return; }
-        if(corr) s->op_nc=(int32_t)n;
+        if(corr) s->op_nc=(uint8_t)n;
         for(uint32_t i=0;i<n && !pa->g_rcerr;i++){
             if(!up_op_next_offset(pa,&off,i,nwu)) return;
             if(corr){
@@ -1025,7 +1025,7 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     fpe=fs;
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !up_env_zz_abs(pa,fs,&fpe)) return 0;
-      pa->g_FWD=!desc; }
+      pa->g_FWD=(uint8_t)!desc; }
     /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
     if(pa->g_FWD){ uint32_t z2; if(!up_env_uleb(pa,&z2,0)) return 0;
