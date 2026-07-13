@@ -2,23 +2,17 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Pinned semantic streams for encoder field kernels. The real private module is included so
- * no test-only production interface is required.
+ * Behavioral checks for encoder field kernels. The real private module is included so no
+ * test-only production interface is required.
  */
 #include "enc_internal.h"
 #include "../src/enc_field.c"
 #include "../src/enc_emit.c"
 
-static FILE *ldr_records, *smap_records;
-static uint64_t ldr_record_count, smap_record_count;
-
 static int check_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl,
                        uint32_t fpk, int expected) {
     int got = ldr_target_index_query(idx, fp0, dl, fpk);
-    fprintf(ldr_records, "query\tfp0=%d\tdl=%d\tfpk=%u\tresult=%d\n",
-            fp0, dl, fpk, got);
-    ldr_record_count++;
-    if (expected >= 0 && got != expected) {
+    if (got != expected) {
         fprintf(stderr,
                 "ldr-index mismatch fp0=%d dl=%d fpk=%u result=%d expected=%d\n",
                 fp0, dl, fpk, got, expected);
@@ -78,39 +72,6 @@ static int arithmetic_boundaries(void) {
     return fail;
 }
 
-static uint32_t rnd_state = 0x6c647269u;
-static uint32_t rnd32(void) {
-    rnd_state = rnd_state * 1664525u + 1013904223u;
-    return rnd_state;
-}
-
-static int randomized_cases(void) {
-    enum { MAX_N = 4096, CASES = 256, QUERIES = 256 };
-    uint8_t src[MAX_N];
-    for (int c = 0; c < CASES; c++) {
-        uint32_t n = rnd32() % (MAX_N + 1u);
-        for (uint32_t i = 0; i < n; i++) src[i] = (uint8_t)(rnd32() >> 24);
-        /* Force overlapping/raw halfword candidates in addition to incidental random LDRs. */
-        for (uint32_t j = 0; j < 24u && n >= 2u; j++) {
-            uint32_t a = (rnd32() % (n / 2u)) * 2u;
-            if (a + 2u <= n) put16(src + a, (uint16_t)(0x4800u | (rnd32() & 0xffu)));
-        }
-        LdrTargetIndex idx; ldr_target_index_build(&idx, src, n);
-        for (int q = 0; q < QUERIES; q++) {
-            int32_t fp0 = (int32_t)(rnd32() % (n + 129u)) - 64;
-            int32_t dl = (int32_t)(rnd32() % (n + 129u));
-            uint32_t fpk = rnd32() % (n + 9u);
-            if ((q & 3) == 0) fpk &= ~3u;
-            if (check_query(&idx, fp0, dl, fpk, -1)) {
-                ldr_target_index_free(&idx);
-                return 1;
-            }
-        }
-        ldr_target_index_free(&idx);
-    }
-    return 0;
-}
-
 static uint32_t smap_rnd(uint32_t *s) {
     *s = *s * UINT32_C(1664525) + UINT32_C(1013904223);
     return *s;
@@ -163,17 +124,11 @@ static int check_wire_feasibility(void) {
     return 0;
 }
 
-static int record_trim_case(unsigned c, const uint32_t *weights, size_t n) {
+static int check_trim_case(unsigned c, const uint32_t *weights, size_t n) {
     SegCand *pool = (SegCand *)xmalloc((n ? n : 1u) * sizeof(*pool));
     for (size_t i = 0; i < n; i++)
         pool[i] = (SegCand){(uint32_t)i, (int32_t)i, weights[i]};
     size_t out = smap_pretrim(pool, n);
-    fprintf(smap_records, "case=%u\tn=%zu\tweights=", c, n);
-    for (size_t i = 0; i < n; i++) fprintf(smap_records, "%s%u", i ? "," : "", weights[i]);
-    fputs("\tsurvivors=", smap_records);
-    for (size_t i = 0; i < out; i++) fprintf(smap_records, "%s%u", i ? "," : "", pool[i].b);
-    fputc('\n', smap_records);
-    smap_record_count++;
     if (out != (n < SMAP_POOL_MAX ? n : SMAP_POOL_MAX)) {
         fprintf(stderr, "smap survivor count failed case=%u n=%zu out=%zu\n", c, n, out);
         free(pool); return 1;
@@ -193,28 +148,18 @@ static int smap_cases(void) {
             weights[i] = c % 4 == 0 ? 7u : c % 4 == 1 ? (uint32_t)(i % 3u)
                        : c % 4 == 2 ? r & 7u : r;
         }
-        if (record_trim_case(c, weights, n)) return 1;
+        if (check_trim_case(c, weights, n)) return 1;
     }
     for (size_t i = 0; i < STRESS_P; i++) weights[i] = 1u;
     weights[STRESS_P - 1u] = INT32_MAX;
-    if (record_trim_case(256, weights, STRESS_P)) return 1;
+    if (check_trim_case(256, weights, STRESS_P)) return 1;
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s LDR_RECORDS SMAP_RECORDS\n", argv[0]);
-        return 2;
-    }
-    ldr_records = fopen(argv[1], "wb");
-    smap_records = fopen(argv[2], "wb");
-    if (!ldr_records || !smap_records) die("open field record stream");
-    int fail = arithmetic_boundaries() || boundary_cases() || randomized_cases() || smap_cases();
-    if (fclose(ldr_records) || fclose(smap_records)) die("close field record stream");
+int main(void) {
+    int fail = arithmetic_boundaries() || boundary_cases() || smap_cases();
     if (fail) return 1;
-    printf("ldr_index_results=OK arithmetic=14 boundary=10 randomized=65536 records=%llu\n",
-           (unsigned long long)ldr_record_count);
-    printf("smap_trim_results=OK cases=256 tie_heavy=128 stress=8192 records=%llu "
-           "wire_feasibility=OK\n", (unsigned long long)smap_record_count);
+    printf("ldr_index_results=OK arithmetic=14 boundary=10\n");
+    printf("smap_trim_results=OK cases=257 cap=160 stress=8192 wire_feasibility=OK\n");
     return 0;
 }

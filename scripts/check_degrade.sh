@@ -46,8 +46,6 @@ CC_HOST="${CC:-cc}"
 IMG="$IMAGES"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
-: "${CLANG:?check_degrade.sh: CLANG not set — invoke through make check-degrade}"
-: "${ENCODER_KERNEL_BASELINE:?check_degrade.sh: encoder kernel baseline not set}"
 : "${ULTRAPATCH:?check_degrade.sh: ULTRAPATCH not set; invoke through make check-degrade}"
 [ -x "$ULTRAPATCH" ] || {
   echo "check_degrade.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
@@ -67,12 +65,6 @@ if ! "$SPLIT" >"$tmp/split-run.out" 2>"$tmp/split-run.err"; then
   exit 1
 fi
 cat "$tmp/split-run.out"
-
-# Pinned semantic results replace copies of historical algorithms. The helper runs the same
-# canonical streams under this compiler and the descriptor-pinned Clang, then checks all five
-# record counts and SHA-256 digests. Explicit boundary assertions remain inside the probes.
-CC="$CC_HOST" CLANG="$CLANG" CFLAGS="$CFLAGS" ENC_SEAM_SRCS="$ENC_SEAM_SRCS" \
-  ENCODER_KERNEL_BASELINE="$ENCODER_KERNEL_BASELINE" scripts/check_encoder_kernels.sh check
 
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.

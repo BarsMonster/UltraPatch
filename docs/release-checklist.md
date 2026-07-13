@@ -11,8 +11,7 @@ flash-driver validation remain integration responsibilities.
   `test-bench/fixtures`, and foreign binaries under `test-bench/foreign`.
 - Keep ordered corpus membership, asset hashes, and foreign edges in
   `test-bench/corpus-inventory.tsv`.
-- Keep corpus sizes and frozen wire hashes in `test-bench/wire-baseline.tsv`,
-  and encoder-kernel digests in `test-bench/encoder-kernel-baseline.tsv`.
+- Keep corpus sizes and frozen wire hashes in `test-bench/wire-baseline.tsv`.
 - Install the packages in [install.md](../install.md), and use the toolchain,
   archive, flag, environment, and CI-container identities recorded in
   `toolchains/release-profile.json`.
@@ -68,10 +67,6 @@ Review every per-pair result and the real one-face grow/revert sizes. Do not
 accept a worse home pair or a one-face regression. Commit the updated
 `test-bench/wire-baseline.tsv` and Makefile size pins with the implementation in
 the same commit.
-
-For an intended encoder-kernel semantic change, run
-`make encoder-kernel-baseline-update`, inspect the changed digests, and commit
-`test-bench/encoder-kernel-baseline.tsv` with the implementation.
 
 ## Artifacts and evidence
 

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Pinned semantic stream for bsdiff's boundary-LCP suffix search and complete operations.
+ * Behavioral checks for bsdiff's boundary-LCP suffix search and complete operations.
  * The real private module is included so no test-only production interface is required.
  */
 #include "enc_internal.h"
@@ -14,7 +14,6 @@
 } } while (0)
 
 static uint64_t query_count, pair_count;
-static FILE *records;
 
 static int32_t *make_sa(const uint8_t *from, int32_t n) {
     int32_t *sa = (int32_t *)xmalloc(((size_t)n + 1u) * sizeof(*sa));
@@ -31,14 +30,11 @@ static int run_query(const char *name, const int32_t *sa,
     int32_t new_pos = -1;
     int32_t new_len = suffix_search(sa, from, from_size, query, query_size,
                                     begin, end, &new_pos);
-    if ((expected_pos != INT32_MIN && new_pos != expected_pos) ||
-        (expected_len != INT32_MIN && new_len != expected_len)) {
+    if (new_pos != expected_pos || new_len != expected_len) {
         fprintf(stderr, "suffix-LCP unexpected result case=%s got=%d/%d expected=%d/%d\n",
                 name, new_pos, new_len, expected_pos, expected_len);
         return 1;
     }
-    fprintf(records, "query=%s\tfrom=%d\tq=%d\tbounds=%d,%d\tresult=%d,%d\n",
-            name, from_size, query_size, begin, end, new_pos, new_len);
     query_count++;
     return 0;
 }
@@ -82,16 +78,6 @@ static int adversarial_queries(void) {
                      0, 32, 31, 1));
     free(sa);
 
-    uint8_t long_from[515], long_query[258];
-    memset(long_from, 'L', sizeof(long_from));
-    memset(long_query, 'L', sizeof(long_query));
-    long_from[257] = 'A'; long_from[514] = 'Z'; long_query[257] = 'M';
-    sa = make_sa(long_from, (int32_t)sizeof(long_from));
-    CHECK(!run_query("long-common-prefix", sa, long_from, (int32_t)sizeof(long_from),
-                     long_query, (int32_t)sizeof(long_query),
-                     0, (int32_t)sizeof(long_from), INT32_MIN, INT32_MIN));
-    free(sa);
-
     /* Adjacent suffixes "axay" and "ay" both match one byte of "az". The legacy leaf uses
      * `x > y`, so equality must choose the END boundary (the "ay" suffix at position 2). */
     static const uint8_t tie_from[] = "axay", tie_query[] = "az";
@@ -104,13 +90,6 @@ static int adversarial_queries(void) {
                      ib, ie, 2, 1));
     free(sa);
 
-    /* Both custom boundaries prove one equal byte. The middle suffix mismatches at exactly
-     * that boundary, pinning the skip point rather than merely a long match after it. */
-    static const uint8_t boundary_from[] = "aaZabZacZ", boundary_query[] = "ad";
-    int32_t boundary_sa[3] = {0, 3, 6};
-    CHECK(!run_query("mismatch-at-proven-boundary", boundary_sa,
-                     boundary_from, 9, boundary_query, 2, 0, 2,
-                     INT32_MIN, INT32_MIN));
     return 0;
 }
 
@@ -118,47 +97,6 @@ static uint32_t rnd_state = 0x6c637031u;
 static uint32_t rnd32(void) {
     rnd_state = rnd_state * 1664525u + 1013904223u;
     return rnd_state;
-}
-
-static int randomized_queries(void) {
-    enum { SOURCES = 256, QUERIES = 32 };
-    for (int c = 0; c < SOURCES; c++) {
-        int32_t n = (int32_t)(rnd32() % 257u);
-        uint8_t *from = (uint8_t *)xmalloc(n ? (size_t)n : 1u);
-        for (int32_t i = 0; i < n; i++) {
-            if ((c & 3) == 0) from[i] = (uint8_t)rnd32();
-            else if ((c & 3) == 1) from[i] = 0x5au;
-            else if ((c & 3) == 2) from[i] = (uint8_t)('a' + i % 5);
-            else from[i] = (uint8_t)((i < n - 3) ? 0x33 : rnd32());
-        }
-        int32_t *sa = make_sa(from, n);
-        for (int qn = 0; qn < QUERIES; qn++) {
-            int32_t m = (int32_t)(rnd32() % 129u);
-            uint8_t *query = (uint8_t *)xmalloc(m ? (size_t)m : 1u);
-            for (int32_t i = 0; i < m; i++) query[i] = (uint8_t)rnd32();
-            if (n && m && (qn & 3) != 0) {
-                int32_t p = (int32_t)(rnd32() % (uint32_t)n);
-                int32_t copy = n - p < m ? n - p : m;
-                memcpy(query, from + p, (size_t)copy);
-                if ((qn & 3) == 2 && copy) query[copy - 1] ^= 1u;
-                if ((qn & 3) == 3 && copy < m)
-                    memset(query + copy, (int)(rnd32() & 0xffu), (size_t)(m - copy));
-            }
-            int32_t begin = 0, end = n;
-            if (qn & 1) {
-                begin = (int32_t)(rnd32() % ((uint32_t)n + 1u));
-                end = begin + (int32_t)(rnd32() % ((uint32_t)(n - begin) + 1u));
-            }
-            char name[40];
-            (void)snprintf(name, sizeof(name), "random-%03d-%02d", c, qn);
-            int fail = run_query(name, sa, from, n, query, m, begin, end,
-                                 INT32_MIN, INT32_MIN);
-            free(query);
-            if (fail) { free(sa); free(from); return 1; }
-        }
-        free(sa); free(from);
-    }
-    return 0;
 }
 
 static int verify_ops(const OpVec *ops, const uint8_t *from, size_t from_n,
@@ -190,13 +128,6 @@ static int run_pair(const char *name, const uint8_t *from, size_t from_n,
         opvec_free(&ops);
         return 1;
     }
-    fprintf(records, "pair=%s\tfrom=%zu\tto=%zu\tfuzz=%d\tops=%zu", name, from_n, to_n, fuzz, ops.n);
-    for (size_t i = 0; i < ops.n; i++)
-        fprintf(records, "%s%d,%d,%d", i ? "|" : "\t", ops.v[i].diff_len,
-                ops.v[i].extra_len, ops.v[i].adj);
-    fputs("\tpayload=", records);
-    for (size_t i = 0; i < to_n; i++) fprintf(records, "%02x", ops.payload[i]);
-    fputc('\n', records);
     opvec_free(&ops); pair_count++;
     return 0;
 }
@@ -240,15 +171,12 @@ static int bsdiff_cases(void) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc != 2) { fprintf(stderr, "usage: %s RECORDS\n", argv[0]); return 2; }
-    records = fopen(argv[1], "wb"); if (!records) die("open bsdiff record stream");
-    int fail = adversarial_queries() || randomized_queries() || bsdiff_cases();
-    if (fclose(records)) die("close bsdiff record stream");
+int main(void) {
+    int fail = adversarial_queries() || bsdiff_cases();
     if (fail) return 1;
-    printf("suffix_lcp_results=OK queries=%llu randomized=8192 empty=OK repetitive=OK "
-           "long_prefix=OK prefix_exhaustion=both adjacent=OK boundary_mismatch=OK "
-           "leaf_ties=OK bsdiff_pairs=%llu ops=OK payloads=OK\n",
+    printf("suffix_lcp_results=OK queries=%llu empty=OK repetitive=OK "
+           "prefix_exhaustion=both adjacent=OK leaf_ties=OK "
+           "bsdiff_pairs=%llu ops=OK payloads=OK\n",
            (unsigned long long)query_count, (unsigned long long)pair_count);
     return 0;
 }

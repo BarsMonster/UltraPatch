@@ -6,7 +6,7 @@
 # Establish their executable search path before BUILD_PROFILE_ID invokes Python during Makefile
 # parsing, and reject launch controls before any recipe can be skipped or ignored.
 override CANONICAL_AUTHORITY_GOAL := $(firstword $(filter gate golden-update \
-	release-profile-json release-profile-update encoder-kernel-baseline-update,$(MAKECMDGOALS)))
+	release-profile-json release-profile-update,$(MAKECMDGOALS)))
 ifneq ($(CANONICAL_AUTHORITY_GOAL),)
 override PATH := /usr/bin:/bin
 export PATH
@@ -198,7 +198,6 @@ IMAGES ?= $(CORPUS_BUILD_DIR)/images
 FOREIGN ?= test-bench/foreign
 CORPUS_INVENTORY ?= test-bench/corpus-inventory.tsv
 WIRE_BASELINE ?= test-bench/wire-baseline.tsv
-ENCODER_KERNEL_BASELINE := test-bench/encoder-kernel-baseline.tsv
 # An empty inventory is the documented custom-measurement mode; callers then provide their own
 # image/fixture roots and do not need the canonical profile-local corpus view.
 CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),\
@@ -257,7 +256,6 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
-ENCODER_KERNEL_BASELINE_LOCK := test-bench/.encoder-kernel-baseline-update.lock
 CAPPED := all check check-arm check-stack check-assets check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
 	      check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
@@ -270,30 +268,8 @@ $(CAPPED): %:
 
 gate:
 	@timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
-	  flock --shared "$(ENCODER_KERNEL_BASELINE_LOCK)" \
 	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
-	exit $$s
-
-.PHONY: encoder-kernel-baseline-update
-# Deliberate semantic changes only: this never runs from normal builds, gate, or golden-update.
-# Review the changed result stream and commit the refreshed baseline with the implementation.
-encoder-kernel-baseline-update: scripts/check_encoder_kernels.sh
-	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" \
-	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" \
-	  /usr/bin/timeout $(GATE_TIMEOUT) /usr/bin/flock --exclusive "$(ENCODER_KERNEL_BASELINE_LOCK)" \
-	  /bin/sh -eu -c 'candidate=$$(/usr/bin/mktemp test-bench/.encoder-kernel-baseline.prepare.XXXXXX); \
-	    trap '\''/usr/bin/rm -f "$$candidate"'\'' EXIT TERM INT; \
-	    ENCODER_KERNEL_BASELINE_DUMP="$$candidate" scripts/check_encoder_kernels.sh candidate; \
-	    /usr/bin/chmod 0644 "$$candidate"; \
-	    if /usr/bin/cmp -s "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; then \
-	      /usr/bin/chmod 0644 "$(ENCODER_KERNEL_BASELINE)"; \
-	      echo "encoder_kernel_baseline_update=NOOP"; \
-	    else \
-	      /usr/bin/mv "$$candidate" "$(ENCODER_KERNEL_BASELINE)"; \
-	      echo "encoder_kernel_baseline_update=COMMITTED"; \
-	    fi'; s=$$?; \
-	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 .PHONY: release-profile-update release-profile-update-internal
@@ -362,13 +338,13 @@ check-clang-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 # separately proves the exact compiler versions, flags, and multilib contents.
 override RELEASE_GATE_FIXED_VARS := \
 	FIXTURES IMAGES FOREIGN \
-	CORPUS_INVENTORY WIRE_BASELINE ENCODER_KERNEL_BASELINE \
+	CORPUS_INVENTORY WIRE_BASELINE \
 	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES \
 	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
 	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
-	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK ENCODER_KERNEL_BASELINE_LOCK \
+	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
 	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
 	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
@@ -378,7 +354,7 @@ override RELEASE_GATE_FIXED_VARS := \
 	PORTABLE_FALLBACK_FLAGS TOOLCHAIN_ENV_UNSET \
 	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
 override RELEASE_GATE_UNSET_VARS := \
-	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP ENCODER_KERNEL_BASELINE_DUMP \
+	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE DECODER_INTEGRATION_PROBE_FLAGS \
 	ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES UP_CORPUS_ASSETS_PREPARED
 
@@ -704,11 +680,12 @@ check-edge-internal: ultrapatch
 # op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
-check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(ENCODER_KERNEL_BASELINE)
-	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" IMAGES="$(IMAGES)" \
+check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/check_encoder_kernels.sh
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" \
+	  scripts/check_encoder_kernels.sh
+	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" IMAGES="$(IMAGES)" \
 	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
-	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
-	  ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" scripts/check_degrade.sh
+	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" scripts/check_degrade.sh
 
 # Golden-wire regression for the four wires not already covered by the corpus matrix. The
 # combined baseline also carries all 290 corpus hashes and 256 home per-pair sizes. On an

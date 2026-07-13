@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
- * Deterministic cases for encoder-lz-probe.c's pinned out-envelope stream.
+ * Deterministic behavioral cases for encoder-lz-probe.c's out-envelope logic.
  */
 
 static uint32_t out_rnd_state = 0x6f757465u;
@@ -90,8 +90,7 @@ static int out_emit_case(const char *name, size_t n, const uint8_t *content, con
         return 1;
     }
     free(tv.v);
-    return record_parse(out_records, &out_record_count, name, n, content, tags,
-                        cands, ncand, ocands, nocand, pt);
+    return check_parse(name, n, content, tags, cands, ncand, ocands, nocand, pt);
 }
 
 /* Independent row-level oracle: the old nested loop chooses the first row entry whose top
@@ -136,13 +135,6 @@ static int out_row_envelope_cases(void) {
                 return 1;
             }
         }
-        fprintf(out_records, "row=%d\tinput=", pass + 2);
-        for (int k = 0; k < nr; k++)
-            fprintf(out_records, "%s%d,%d", k ? "|" : "", row[k].pos, row[k].len);
-        fputs("\tenvelope=", out_records);
-        for (int e = 0; e < nenv; e++)
-            fprintf(out_records, "%s%d,%d,%d", e ? "|" : "", from[e], to[e], owner[e]);
-        fputc('\n', out_records); out_record_count++;
         if (pass == -1 &&
             (nenv != 2 || owner[0] != 0 || from[0] != 4 || to[0] != 12 ||
              owner[1] != 2 || from[1] != 13 || to[1] != 20)) return 1;

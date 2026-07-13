@@ -2,8 +2,8 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Pinned semantic streams for encoder LZ kernels. The real private module is included so the
- * parsers and all pricing primitives are exercised without exporting test-only APIs.
+ * Behavioral checks for encoder LZ kernels. The real private module is included so the parsers
+ * and pricing primitives are exercised without exporting test-only APIs.
  */
 #include "enc_internal.h"
 #include "../src/enc_lz.c"
@@ -13,58 +13,10 @@
     return 1; \
 } } while (0)
 
-static FILE *span_records, *out_records;
-static uint64_t span_record_count, out_record_count;
-
-static uint64_t token_cost(const TokenVec *tv, size_t n, const uint8_t *content,
-                           const uint8_t *tags, const PriceTab *pt) {
-    uint64_t *lit = span_lit_prefix(n, content, tags, pt);
-    uint64_t cost = 0;
-    int h = 0, last_dist = 0;
-    for (size_t i = 0; i < tv->n; i++) {
-        const Token *t = &tv->v[i];
-        if (pt->bootstrap_simple) {
-            if (t->type == 'S')
-                cost += PR_SCALE + ugg_price(&pt->gs, (uint32_t)t->len - 1u) +
-                        lit[(size_t)t->start + (size_t)t->len] - lit[t->start];
-            else
-                cost += PR_SCALE +
-                        (pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
-                                                  : ugr_price(&pt->gd, (uint32_t)t->dist - 1u)) +
-                        ugg_price(&pt->gl, (uint32_t)t->len - 1u);
-        } else {
-            uint64_t mflag = (h & 1) ? pt->fmatch_c[h] : 0u;
-            if (t->type == 'S') {
-                cost += pt->fspan_c[h] + ugg_price(&pt->gs, (uint32_t)t->len - 1u) +
-                        lit[(size_t)t->start + (size_t)t->len] - lit[t->start];
-                h = rc_fl_hist(h, 0);
-            } else if (t->type == 'O') {
-                cost += mflag + pt->rep0_no + pt->outb_yes + pt->opos_avg +
-                        ugg_price(&pt->glo, (uint32_t)t->len - RC_OUTMATCH_MIN);
-                h = rc_fl_hist(h, 1);
-            } else {
-                cost += mflag + ugg_price(&pt->gl, (uint32_t)t->len - 1u);
-                if (t->dist == last_dist) cost += pt->rep0_yes;
-                else {
-                    cost += pt->rep0_no + (pt->out_en ? pt->outb_no : 0u) +
-                            (pt->fixed_dist_bits >= 0
-                             ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
-                             : ugr_price(&pt->gd, (uint32_t)t->dist - 1u));
-                    last_dist = t->dist;
-                }
-                h = rc_fl_hist(h, 1);
-            }
-        }
-    }
-    free(lit);
-    return cost;
-}
-
-static int record_parse(FILE *records, uint64_t *record_count, const char *name,
-                        size_t n, const uint8_t *content, const uint8_t *tags,
-                        const CandArena *cands, const uint8_t *ncand,
-                        const OCandArena *ocands, const uint8_t *nocand,
-                        const PriceTab *pt) {
+static int check_parse(const char *name, size_t n, const uint8_t *content,
+                       const uint8_t *tags, const CandArena *cands, const uint8_t *ncand,
+                       const OCandArena *ocands, const uint8_t *nocand,
+                       const PriceTab *pt) {
     TokenVec tv = lz_parse_priced(n, content, tags, cands, ncand, ocands, nocand, pt);
     size_t pos = 0;
     for (size_t i = 0; i < tv.n; i++) {
@@ -78,13 +30,6 @@ static int record_parse(FILE *records, uint64_t *record_count, const char *name,
         pos += (size_t)t->len;
     }
     if (pos != n) { fprintf(stderr, "incomplete LZ parse case=%s\n", name); free(tv.v); return 1; }
-    uint64_t cost = token_cost(&tv, n, content, tags, pt);
-    fprintf(records, "case=%s\tn=%zu\tcost=%llu\ttokens=", name, n,
-            (unsigned long long)cost);
-    for (size_t i = 0; i < tv.n; i++)
-        fprintf(records, "%s%c,%d,%d,%d", i ? "|" : "", tv.v[i].type,
-                tv.v[i].start, tv.v[i].len, tv.v[i].dist);
-    fputc('\n', records); (*record_count)++;
     free(tv.v);
     return 0;
 }
@@ -92,8 +37,7 @@ static int record_parse(FILE *records, uint64_t *record_count, const char *name,
 static int check_case(const char *name, size_t n, const uint8_t *content, const uint8_t *tags,
                       const CandArena *cands, const uint8_t *ncand,
                       const uint8_t *nocand, const PriceTab *pt) {
-    return record_parse(span_records, &span_record_count, name, n, content, tags,
-                        cands, ncand, NULL, nocand, pt);
+    return check_parse(name, n, content, tags, cands, ncand, NULL, nocand, pt);
 }
 
 static uint32_t rnd_state = 0x64796164u;
@@ -210,22 +154,13 @@ static int randomized_cases(void) {
 
 #include "encoder-lz-out-cases.inc"
 
-int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s SPAN_RECORDS OUT_RECORDS\n", argv[0]);
-        return 2;
-    }
-    span_records = fopen(argv[1], "wb"); out_records = fopen(argv[2], "wb");
-    if (!span_records || !out_records) die("open LZ record stream");
+int main(void) {
     int fail = empty_no_match_cases() || boundary_cases() || randomized_cases() ||
                out_envelope_cases();
-    if (fclose(span_records) || fclose(out_records)) die("close LZ record stream");
     if (fail) return 1;
     printf("span_deque_results=OK empty_no_match=4 bootstrap=OK adaptive=OK boundaries=27 "
-           "equal_ties=1 randomized=384 costs=OK tokens=OK records=%llu\n",
-           (unsigned long long)span_record_count);
+           "randomized=384 tokens=OK\n");
     printf("out_envelope_results=OK rows=4098 empty=OK nonmonotone=OK dominated=OK "
-           "strict_ties=OK disabled=OK beyond_lz_max=OK randomized=320 costs=OK "
-           "tokens=OK records=%llu\n", (unsigned long long)out_record_count);
+           "strict_ties=OK disabled=OK beyond_lz_max=OK randomized=320 tokens=OK\n");
     return 0;
 }

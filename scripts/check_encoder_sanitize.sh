@@ -20,8 +20,7 @@ if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
     sed 's/^/    /' "$tmp/encoder-lz-build.log" >&2
     exit 1
 fi
-ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-lz" \
-  "$tmp/span-deque.tsv" "$tmp/out-envelope.tsv" >"$tmp/encoder-lz.out"
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-lz" >"$tmp/encoder-lz.out"
 cat "$tmp/encoder-lz.out"
 
 field_srcs=${ENC_SEAM_SRCS//src\/enc_field.c/}
@@ -33,8 +32,7 @@ if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
     sed 's/^/    /' "$tmp/encoder-field-build.log" >&2
     exit 1
 fi
-ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-field" \
-  "$tmp/ldr-index.tsv" "$tmp/smap-trim.tsv" >"$tmp/encoder-field.out"
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-field" >"$tmp/encoder-field.out"
 cat "$tmp/encoder-field.out"
 
 bsdiff_srcs=${ENC_SEAM_SRCS//src\/enc_bsdiff.c/}
@@ -45,7 +43,6 @@ if ! $CC $CFLAGS $san_flags -D_POSIX_C_SOURCE=200809L \
     sed 's/^/    /' "$tmp/encoder-bsdiff-build.log" >&2
     exit 1
 fi
-ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-bsdiff" \
-  "$tmp/suffix-lcp.tsv" >"$tmp/encoder-bsdiff.out"
+ASAN_OPTIONS=detect_leaks=1 "$tmp/encoder-bsdiff" >"$tmp/encoder-bsdiff.out"
 cat "$tmp/encoder-bsdiff.out"
 echo "encoder_sanitizers=OK (field + LZ + suffix/LCP kernels: ASan + UBSan)"
