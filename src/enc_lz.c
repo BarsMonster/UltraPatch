@@ -342,7 +342,6 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)bt_price_static(&M.lit1, (uint8_t)b);
     pt->gs = M.tok.gs; pt->gl = M.tok.gl; pt->gd = M.tok.gd;
     pt->fixed_dist_bits = -1;
-    pt->bootstrap_simple = 0;
 }
 
 /* DP parse using measured fractional prices (PR_SCALE-ths of a bit), made rep0-aware:
@@ -381,11 +380,6 @@ static uint64_t *span_lit_prefix(size_t n, const uint8_t *content, const uint8_t
     return sum;
 }
 
-typedef struct {
-    size_t lo, hi, off, cap, head, count;
-    uint32_t price;
-} SpanMinQ;
-
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                 const CandArena *cands, const uint8_t *ncand,
                                 const OCandArena *ocands, const uint8_t *nocand,
@@ -407,89 +401,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         dpr[D] = pt->fixed_dist_bits >= 0 ? (uint32_t)pt->fixed_dist_bits * PR_SCALE
                                           : ugr_price(&pt->gd, D - 1u);
     const uint64_t INF = UINT64_MAX / 4;
-    if (pt->bootstrap_simple) {
-        size_t cand_off = cands->n / sizeof(Cand);
-        uint64_t *cost = (uint64_t *)xmalloc((n + 1) * sizeof(uint64_t));
-        Token *nxt = (Token *)xcalloc(n + 1, sizeof(Token));
-        size_t longmax = n < maxrun ? n : maxrun;
-        size_t longn = longmax > 8u ? longmax - 8u : 0;
-        SpanMinQ *sq = (SpanMinQ *)xmalloc((longn ? longn : 1u) * sizeof(*sq));
-        size_t *sq_pos = (size_t *)xmalloc((longn ? longn : 1u) * sizeof(*sq_pos));
-        /* With the neutral bootstrap gamma model, slen is constant on each dyadic length
-         * bucket. Build from the actual frozen prices anyway: consecutive equal-price runs
-         * preserve exactness if bootstrap seeding changes, degenerating safely to singletons. */
-        size_t nsq = 0, pool_n = 0;
-        for (size_t lo = 9; lo <= longmax;) {
-            size_t hi = lo;
-            while (hi < longmax && slen[hi + 1u] == slen[lo]) hi++;
-            size_t cap = hi - lo + 1u;
-            sq[nsq++] = (SpanMinQ){ lo, hi, pool_n, cap, 0, 0, slen[lo] };
-            pool_n += cap;
-            lo = hi + 1u;
-        }
-        cost[n] = 0;
-        for (size_t ri = n; ri-- > 0;) {
-            int nc = ncand[ri];
-            cand_off -= (size_t)nc;
-            const Cand *row = NULL;
-            if (nc) row = (const Cand *)cands->d + cand_off;
-            uint64_t best = INF;
-            Token bt = {0};
-            size_t lim = n < ri + maxrun ? n : ri + maxrun;
-            size_t dense_end = ri + 8 < lim ? ri + 8 : lim;
-            for (size_t j = ri + 1; j <= dense_end; j++) {
-                uint64_t c = PR_SCALE + (uint64_t)slen[j - ri] + (span_lit[j] - span_lit[ri]) + cost[j];
-                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-            }
-            for (size_t qi = 0; qi < nsq; qi++) {
-                SpanMinQ *q = &sq[qi];
-                size_t upper = ri + q->hi < n ? ri + q->hi : n;
-                while (q->count && sq_pos[q->off + q->head] > upper) {
-                    q->head = (q->head + 1u) % q->cap; q->count--;
-                }
-                size_t j = ri + q->lo;
-                if (j <= n && (j == n || ncand[j] || (nocand && nocand[j])) && cost[j] < INF) {
-                    uint64_t base = cost[j] + span_lit[j];
-                    /* ri descends, so endpoint indexes enter in descending order. Replacing an
-                     * equal-base older endpoint keeps the smaller j, matching the old ascending-j
-                     * traversal with its strict `c < best` tie. */
-                    while (q->count) {
-                        size_t bi = (q->head + q->count - 1u) % q->cap;
-                        size_t bj = sq_pos[q->off + bi];
-                        if (cost[bj] + span_lit[bj] < base) break;
-                        q->count--;
-                    }
-                    size_t at = (q->head + q->count) % q->cap;
-                    sq_pos[q->off + at] = j; q->count++;
-                }
-                if (!q->count) continue;
-                j = sq_pos[q->off + q->head];
-                uint64_t c = PR_SCALE + (uint64_t)q->price +
-                             (span_lit[j] - span_lit[ri]) + cost[j];
-                if (c < best) { best = c; bt = (Token){ 'S', (int32_t)ri, (int32_t)(j - ri), 0 }; }
-            }
-            for (int ci = 0; ci < nc; ci++) {
-                int32_t bd = row[ci].dist, bl = row[ci].len;
-                for (int32_t l = 3; l <= bl; l++) {
-                    uint64_t c = PR_SCALE + dpr[bd] + (uint64_t)mlen[l] + cost[ri + (size_t)l];
-                    if (c < best) { best = c; bt = (Token){ 'R', (int32_t)ri, l, bd }; }
-                }
-            }
-            cost[ri] = best;
-            nxt[ri] = bt;
-        }
-        TokenVec tv = {0};
-        for (size_t i = 0; i < n;) {
-            Token t = nxt[i];
-            tok_push(&tv, t);
-            i += (size_t)t.len;
-        }
-        free(cost); free(nxt); free(sq); free(sq_pos); free(dpr); free(span_lit);
-        return tv;
-    }
-    /* Measured/adaptive gs mantissa prices generally vary inside a dyadic bucket, so the
-     * history/rep DP below keeps its exact predecessor scan; the bootstrap deque separation
-     * must not be generalized here by treating gamma length as a bit-length-only price. */
     uint32_t *glo_price = NULL;
     int32_t max_out_len = 0;
     if (pt->out_en && ocands && nocand && ocands->n) {
@@ -749,7 +660,6 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     ugg_init_e(&pt->gl);
     ugr_init_e(&pt->gd, WINDOW_LOG);
     pt->fixed_dist_bits = -1;
-    pt->bootstrap_simple = 1;
 }
 
 /* Build the LZ match-candidate set (hash-chain over 3-byte keys, full chain within the window)
