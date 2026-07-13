@@ -82,10 +82,8 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     Ranges fr = {0}, tr = {0};
     if (felf_present) fr = elf_ranges(felf, &from, "from");
     if (telf_present) tr = elf_ranges(telf, &to, "to");
-    PairAnalysis pa;
-    pair_analysis_init(&pa, &from, &to, &fr, &tr);
     PlanPrep prep;
-    plan_prepare(&prep, &from, &to, &pa);
+    plan_prepare(&prep, &from, &to, &fr, &tr);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the
      * smallest complete envelope ships and ties keep the earliest entry. A config whose plan
      * exceeds a decoder resource cap (journal/corrections) returns an empty body and
@@ -144,7 +142,6 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(patch_out, best_blob.d, best_blob.n);
     buf_free(&best_blob); buf_free(&from); buf_free(&to);
-    pair_analysis_free(&pa);
     free(felf); free(telf);
 }
 

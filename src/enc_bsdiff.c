@@ -14,6 +14,12 @@
  */
 
 #include "enc_internal.h"
+
+/* Sorted (addr, val) field list for one relocation stream.
+ * val = unpacked bl imm, or the s32 literal-pool word for ldr. */
+typedef struct { uint32_t addr; int32_t val; } m4_field_t;
+typedef struct { m4_field_t *a; size_t n; } m4_stream_t;
+
 /* ------------------------------------------------------------------------------------- */
 /* ARM Cortex-M relocation field scanner (bl/ldr streams).                                  */
 /* ------------------------------------------------------------------------------------- */
@@ -264,29 +270,21 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
     free(ao); free(bo); free(m.v);
 }
 
-void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
-                        const Ranges *fr, const Ranges *tr) {
-    memset(pa, 0, sizeof(*pa));
-    disassemble(from->d, from->n, fr->data_off_begin, fr->data_off_end, pa->from_st);
-    disassemble(to->d, to->n, tr->data_off_begin, tr->data_off_end, pa->to_st);
-}
-
-void pair_analysis_free(PairAnalysis *pa) {
-    if (!pa) return;
-    free_streams(pa->from_st);
-    free_streams(pa->to_st);
-}
-
-void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
+void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                         Buf *from_mut, Buf *to_mut, FieldDeltaVec *fd, int mask_bl) {
+    m4_stream_t from_st[STREAM_NSTREAMS] = {{0}}, to_st[STREAM_NSTREAMS] = {{0}};
+    disassemble(from->d, from->n, fr->data_off_begin, fr->data_off_end, from_st);
+    disassemble(to->d, to->n, tr->data_off_begin, tr->data_off_end, to_st);
     from_mut->d = (uint8_t *)xmalloc(from->n); from_mut->n = from_mut->cap = from->n;
     if (from->n) memcpy(from_mut->d, from->d, from->n);   /* from->d is NULL for an empty image (memcpy nonnull UB) */
     to_mut->d = (uint8_t *)xmalloc(to->n); to_mut->n = to_mut->cap = to->n;
     if (to->n) memcpy(to_mut->d, to->d, to->n);
-    create_patch_block(from_mut, to_mut, &pa->from_st[STREAM_BL], &pa->to_st[STREAM_BL],
+    create_patch_block(from_mut, to_mut, &from_st[STREAM_BL], &to_st[STREAM_BL],
                        STREAM_BL, fd);
-    create_patch_block(from_mut, to_mut, &pa->from_st[STREAM_LDR], &pa->to_st[STREAM_LDR],
+    create_patch_block(from_mut, to_mut, &from_st[STREAM_LDR], &to_st[STREAM_LDR],
                        STREAM_LDR, fd);
+    free_streams(from_st);
+    free_streams(to_st);
     fd_finalize(fd);
     if (mask_bl) {
         mask_bl_imms(from->d, from_mut->d, from->n);

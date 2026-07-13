@@ -89,15 +89,7 @@ typedef struct { IVec pres; CorrVec corr; } OpPC;
 /* File-offset window of the .data-style segment inside the load image (from elf_ranges);
  * a zero-initialized Ranges is an empty (0,0) window: the raw-binary path with no ELF sidecar. */
 typedef struct { uint32_t data_off_begin, data_off_end; } Ranges;
-/* Sorted (addr, val) field list for one relocation stream.
- * val = unpacked bl imm, or the s32 literal-pool word for ldr. */
-typedef struct { uint32_t addr; int32_t val; } m4_field_t;
-typedef struct { m4_field_t *a; size_t n; } m4_stream_t;
 enum { STREAM_BL, STREAM_LDR, STREAM_NSTREAMS };
-typedef struct {
-    m4_stream_t from_st[STREAM_NSTREAMS];
-    m4_stream_t to_st[STREAM_NSTREAMS];
-} PairAnalysis;
 typedef struct {
     int    deg_engaged;
     size_t deg_pres_needed, deg_converted, opc_splits;
@@ -265,10 +257,7 @@ void fd_finalize(FieldDeltaVec *v);
 const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
 
 Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which);
-void pair_analysis_init(PairAnalysis *pa, const Buf *from, const Buf *to,
-                        const Ranges *fr, const Ranges *tr);
-void pair_analysis_free(PairAnalysis *pa);
-void data_format_encode(const Buf *from, const Buf *to, const PairAnalysis *pa,
+void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
                         Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
@@ -353,7 +342,8 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
-void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa);
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to,
+                  const Ranges *fr, const Ranges *tr);
 void plan_prepare_free(PlanPrep *prep);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec);

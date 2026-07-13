@@ -123,12 +123,13 @@ static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
     return out;
 }
 
-void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to, const PairAnalysis *pa) {
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to,
+                  const Ranges *fr, const Ranges *tr) {
     memset(prep, 0, sizeof(*prep));
     ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
     /* Both normalizations share the relocation pass. Derive the masked pair from that immutable
      * base, then prepare the four bsdiff inputs named by PLAN_SPECS. */
-    data_format_encode(from, to, pa, &prep->from_df[PLAN_DF_UNMASK],
+    data_format_encode(from, to, fr, tr, &prep->from_df[PLAN_DF_UNMASK],
                        &prep->to_df[PLAN_DF_UNMASK], &prep->fd, 0);
     prep->from_df[PLAN_DF_MASK] = prep_buf_clone(&prep->from_df[PLAN_DF_UNMASK]);
     prep->to_df[PLAN_DF_MASK] = prep_buf_clone(&prep->to_df[PLAN_DF_UNMASK]);
