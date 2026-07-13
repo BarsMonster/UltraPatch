@@ -159,7 +159,8 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
     if (spec->variant >= 1)
-        merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size, &prep->ldr);
+        merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size,
+                              &prep->ldr, ctx->fwd);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd, &prep->ldr);
     return ops;
 }

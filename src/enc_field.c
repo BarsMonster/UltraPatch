@@ -249,20 +249,25 @@ void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
  * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size,
-                           const LdrTargetIndex *ldr) {
+                           const LdrTargetIndex *ldr, int fwd) {
     /* Append op-derived entries after the already-finalized block-matched entries, then a single
      * fd_finalize: its stable sort keeps the appended op-derived entry after the same-key block
      * entry, and its last-wins dedup makes op-derived override block-matched (and, among op-derived
      * duplicates, the last fd_put win) -- bit-identical to the former add/out rebuild. */
+    static const FieldDeltaVec empty_fd = {0};
     OpWalkEnt *walk = opwalk_build(ops, 0);
     for (size_t oi = 0; oi < ops->n; oi++) {
         const OpWalkEnt *we = &walk[oi];
-        for (int32_t k = 0; k + 4 <= we->o->diff_len; k += 2) {
-            uint32_t fpk;
-            if (!field_addr(we->fp, k, from_size, &fpk)) continue;
+        FieldWalk w;
+        fw_init(&w, fwd, frm, from_size, &empty_fd, ldr, NULL,
+                we->fp, we->o->diff_len);
+        while (fw_next(&w)) {
+            if (!w.is_field) continue;
+            int32_t k = w.pos;
+            uint32_t fpk = (uint32_t)(we->fp + k);
             int64_t tpk = (int64_t)we->tp + k;
             if (tpk < 0 || tpk + 4 > (int64_t)to_size) continue;
-            if (is_local_bl(frm, from_size, fpk)) {
+            if (w.ev.type == EV_BL) {
                 uint16_t tu = rc_u16le(tob + (size_t)tpk), tl = rc_u16le(tob + (size_t)tpk + 2);
                 if (rc_bl_pattern(tu, tl)) {
                     uint16_t fu = rc_u16le(frm + fpk), fl2 = rc_u16le(frm + fpk + 2);
@@ -270,7 +275,7 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
                            rc_i32_from_u32((uint32_t)rc_bl_imm24s(fu, fl2) -
                                            (uint32_t)rc_bl_imm24s(tu, tl)));
                 }
-            } else if (ldr_target_index_query(ldr, we->fp, we->o->diff_len, fpk)) {
+            } else if (w.ev.type == EV_EX) {
                 fd_put(fd, fpk, STREAM_LDR,
                        rc_i32_from_u32(rc_u32le(frm + fpk) - rc_u32le(tob + (size_t)tpk)));
             }
