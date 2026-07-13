@@ -179,6 +179,7 @@ typedef struct {
     up_UGRice gd;
     up_UGGamma glo;
     int fixed_dist_bits;
+    int bootstrap_simple;
     int out_en;
 } PriceTab;
 
