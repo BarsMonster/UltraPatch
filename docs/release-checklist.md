@@ -16,8 +16,6 @@ flash-driver validation remain integration responsibilities.
 - Install the packages in [install.md](../install.md). The project does not pin
   exact compiler, binutils, system-library, or archive identities; the behavior,
   wire, compression, ARM-size, and stack ratchets are the release criteria.
-- Treat a CI container-digest change as a deliberate, reviewed workflow edit and
-  run the full evidence suite afterward.
 
 ## Verification
 
@@ -39,10 +37,10 @@ the real one-face grow and revert patch sizes, ARM memory and stack results, and
 NVM write-safety results. Do not ship a build that needs deployment-only flags
 or relaxed baselines.
 
-The authoritative release result is the successful push workflow for the exact
-release commit, inside the base container digest pinned by the workflow. Package
-installation is intentionally not an exact toolchain-identity contract; any
-resulting output change must still pass the release ratchets.
+The authoritative release result is the retained output from the verification
+sequence above, run from the exact release commit. Package installation is
+intentionally not an exact toolchain-identity contract; any resulting output
+change must still pass the release ratchets.
 
 ## Intentional baseline changes
 
@@ -66,7 +64,7 @@ host artifact is the `ultrapatch` path printed by `make -s host-tool-path`.
 
 Release notes must include:
 
-- the Git commit SHA and authoritative push-CI URL/status;
+- the Git commit SHA;
 - SHA-256 hashes of `test-bench/corpus-inventory.tsv` and
   `test-bench/wire-baseline.tsv`;
 - the complete gate output, including the real one-face grow/revert metrics;
