@@ -142,7 +142,6 @@ typedef Buf CandArena;
 enum { LZ_MAX_RUN = 1024, LZ_MAX_MATCH = 2048 };
 typedef struct { int32_t pos, len; } OCand;
 typedef Buf OCandArena;
-#define OC_MAX 4
 enum { PR_SCALE = 64 };
 enum { PRICE_LIT_MAX = 255 * PR_SCALE };
 _Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit uint16_t");

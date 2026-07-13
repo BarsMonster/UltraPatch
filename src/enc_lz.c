@@ -75,19 +75,16 @@ static uint32_t hash3_key_rev(const uint8_t *p) {
 /* ---- out-match candidates (D2): matches of the content stream against the ALREADY-PRODUCED
  * output image. Each token inherits a conservative window from the op that consumes its first
  * content byte: FWD [0, tp0), reverse [tp_end, to_size). ---- */
-static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
-    int w = -1;                                   /* legacy first-shorter replacement, not strict top-K */
-    for (int q = 0; q < *nc; q++) if (row[q].len < len) { w = q; break; }
-    if (*nc < OC_MAX) { row[*nc].pos = pos; row[*nc].len = len; (*nc)++; }
-    else if (w >= 0) { row[w].pos = pos; row[w].len = len; }
+static void oc_keep(OCand *row, int32_t pos, int32_t len) {
+    if (len > row->len) { row->pos = pos; row->len = len; }
 }
 
-static void oc_match(OCand *row, uint8_t *nc, const uint8_t *src, int FWD,
+static void oc_match(OCand *row, const uint8_t *src, int FWD,
                      int32_t pj, const uint8_t *content, size_t i, size_t maxl) {
     size_t l = 0, p = (size_t)pj;
     if (FWD) while (l < maxl && src[p + l] == content[i + l]) l++;
     else     while (l < maxl && src[p - l] == content[i + l]) l++;
-    if (l >= RC_OUTMATCH_MIN) oc_keep(row, nc, pj, (int32_t)l);
+    if (l >= RC_OUTMATCH_MIN) oc_keep(row, pj, (int32_t)l);
 }
 
 /* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for the
@@ -133,8 +130,7 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
             uint32_t lim = FWD ? tp0 : tpe;
             uint32_t lim2 = FWD ? tpe : (tp0 < from_n ? tp0 : (uint32_t)from_n);
             uint32_t cap = (uint32_t)(rows[step].content_end - i);
-            OCand row[OC_MAX];
-            uint8_t nr = 0;
+            OCand row = {0};
             uint32_t key = hash3_key_fwd(content + i);
             int visits = 0;
             for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
@@ -147,7 +143,7 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                     maxl = (size_t)((uint32_t)pj - lim + 1u);
                 }
                 if (maxl > n - i) maxl = n - i;
-                oc_match(row, &nr, to, FWD, pj, content, i, maxl);
+                oc_match(&row, to, FWD, pj, content, i, maxl);
             }
             if (cap >= RC_OUTMATCH_MIN) {
                 visits = 0;
@@ -162,11 +158,13 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                     }
                     if (maxl > n - i) maxl = n - i;
                     if (maxl > cap) maxl = cap;                /* OLD tokens end inside their op */
-                    oc_match(row, &nr, frm, FWD, pj, content, i, maxl);
+                    oc_match(&row, frm, FWD, pj, content, i, maxl);
                 }
             }
-            noc[i] = nr;
-            if (nr) buf_write(&oc, row, (size_t)nr * sizeof(*row));
+            if (row.len) {
+                noc[i] = 1;
+                buf_write(&oc, &row, sizeof(row));
+            }
         }
         free(head); free(prev); free(fhead); free(fprev);
     }
@@ -609,22 +607,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             if (k + 1 < nc && ord_dpr[k + 1] < dp2) { ord_dpr[k] = ord_dpr[k + 1]; ord_dist[k] = ord_dist[k + 1]; }
             else ord_dpr[k] = dp2;
         }
-        /* At a fixed length every out candidate has identical price, next history, and rep.
-         * Preserve legacy row order by assigning each length only to the first candidate that
-         * reaches it; later candidates own only their extension beyond the earlier maximum. */
-        int out_nenv = 0, out_covered = (int)RC_OUTMATCH_MIN - 1;
-        int32_t out_from[OC_MAX], out_to[OC_MAX], out_pos[OC_MAX];
-        for (int cix = 0, nout = pt->out_en && orow ? no : 0; cix < nout; cix++) {
-            int32_t top = orow[cix].len;
-            if (top <= out_covered) continue;
-            int32_t begin = out_covered + 1;
-            if (begin < (int32_t)RC_OUTMATCH_MIN) begin = (int32_t)RC_OUTMATCH_MIN;
-            if (begin <= top) {
-                out_from[out_nenv] = begin; out_to[out_nenv] = top;
-                out_pos[out_nenv] = orow[cix].pos; out_nenv++;
-                out_covered = top;
-            }
-        }
+        int32_t out_len = pt->out_en && orow && no ? orow->len : 0;
+        int32_t out_pos = out_len ? orow->pos : 0;
         int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
         size_t match_lim = n < i + maxrun ? n : i + maxrun;
         for (int hr = 0; hr < 4; hr++) {
@@ -654,15 +638,12 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
              * The rep distance is carried through unchanged (out-matches do not set last_dist). */
             uint64_t obase = ci + out_extra[h] + pt->opos_avg;
-            for (int oe = 0; oe < out_nenv; oe++) {
-                int32_t opos = out_pos[oe];
-                for (int32_t l = out_from[oe]; l <= out_to[oe]; l++) {
-                    size_t j = i + (size_t)l;
-                    uint64_t c = obase + glo_price[l];
-                    size_t jb = j * 4 + (size_t)hm;
-                    relax2(cost, rep, via, vh, jb, c, ri,
-                           (Token){ 'O', (int32_t)i, l, opos }, (uint8_t)hr);
-                }
+            for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= out_len; l++) {
+                size_t j = i + (size_t)l;
+                uint64_t c = obase + glo_price[l];
+                size_t jb = j * 4 + (size_t)hm;
+                relax2(cost, rep, via, vh, jb, c, ri,
+                       (Token){ 'O', (int32_t)i, l, out_pos }, (uint8_t)hr);
             }
             /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
              * distance == ri (the incoming rep distance) because it is not on the (dist,len) frontier,
