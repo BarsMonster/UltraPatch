@@ -5,7 +5,7 @@
 
 # Edge-input gate: synthetic pairs the 256-pair firmware corpus never exercises —
 # empty/tiny/equal images, all-0xFF/all-0x00, incompressible random data, text, page-boundary
-# sizes, and a >384 KiB span (well past the home-corpus 216 KiB maximum).
+# sizes, and a >384 KiB span (well past the home-corpus image range).
 #
 # Acceptance model: ultrapatch SELF-VERIFIES every emitted patch on the reference decoder, so for
 # each pair either (a) encode succeeds -> the host decoder MUST round-trip the blob
@@ -47,7 +47,7 @@ controlled_encoder_refusal() {
   err=$2
   [ "$status" -eq 2 ] || return 1
   [ "$(wc -l < "$err")" -eq 1 ] || return 1
-  grep -Fxq 'patch_generate: no feasible plan: every config exceeds a decoder resource cap for this pair' "$err"
+  grep -Fxq 'ultrapatch: no feasible plan: every config exceeds a decoder resource cap for this pair' "$err"
 }
 
 run_case() { # run_case <name> [cpu-limit-ms] [wall-deadline-seconds]  (dirs contain watch.bin)
@@ -135,9 +135,8 @@ run_case equal
 mkpair fills; gen "$tmp/fills_from/watch.bin" 8192 const 0xFF; gen "$tmp/fills_to/watch.bin" 8192 const 0x00
 run_case fills
 
-# --- constant fill, 0x00 -> 0xFF: regression-locks the exact-equivalent LZ chain pruning
-# (this shape was ~18 s before the fix, ~2 s after; a quadratic regression would threaten the
-# gate's 80 s execution cap) ---
+# --- constant fill, 0x00 -> 0xFF: regression-locks the exact-equivalent LZ chain pruning;
+# quadratic behavior on this shape would threaten the gate's execution cap. ---
 mkpair fills_grow; gen "$tmp/fills_grow_from/watch.bin" 8192 const 0x00; gen "$tmp/fills_grow_to/watch.bin" 8192 const 0xFF
 run_case fills_grow
 
@@ -174,7 +173,7 @@ mkpair text; gen "$tmp/text_from/watch.bin" 40000 text
 gen "$tmp/text_to/watch.bin" 0 mutate "$tmp/text_from/watch.bin" 66 5
 run_case text
 
-# --- journal page-table boundary sizes (64 KiB pages) ---
+# --- succinct-journal 64-KiB high-byte boundary ---
 mkpair page64; gen "$tmp/page64_from/watch.bin" 65535 rand 77
 gen "$tmp/page64_to/watch.bin" 65537 insert "$tmp/page64_from/watch.bin" 2 78
 run_case page64

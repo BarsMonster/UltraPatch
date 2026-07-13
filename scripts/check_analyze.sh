@@ -3,8 +3,8 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 #
-# Static-analysis leg: gcc -fanalyzer over first-party translation units
-# (host encoder CLI/modules + device decoder wrapper + helpers).
+# Static-analysis leg: gcc -fanalyzer over the host encoder CLI/modules and the host decoder
+# backend in library and standalone-demo shapes.
 #
 # Curated flag set:
 #   -Wno-analyzer-tainted-assertion : a batch host tool that BY DESIGN validates

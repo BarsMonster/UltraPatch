@@ -4,9 +4,8 @@
 #
 # stack_bound.py -- static worst-case caller-stack bound for the decoder.
 #
-# Since the coroutine fiber was deleted (commit 44eee88) patch_apply_run() runs the
-# ENTIRE decode synchronously on the CALLER's stack. The decoder has no recursion and
-# no indirect calls except the integrator's byte callback (blx through g_pull_fn) and
+# patch_apply_run() runs the entire decode synchronously on the caller's stack. The decoder has
+# no recursion and no indirect calls except the integrator's byte callback (blx through g_pull_fn) and
 # the two flash primitives (flash_read/flash_write_page, direct bl to extern symbols), so an
 # exact static worst-case stack depth is derivable from per-function frame sizes plus the
 # call graph.
@@ -43,10 +42,10 @@
 #         separately:
 #           - integrator externs  : flash_read, flash_write_page, and the byte callback. Their
 #                                   stack is the integrator's own cost, by contract.
-#           - toolchain externs   : __aeabi_uidiv / memmove / memset (libgcc/builtins).
-#                                   Leaves, small bounded non-recursive frames; not in the
-#                                   .su, so excluded here and absorbed by the gate ceiling
-#                                   headroom.
+#           - toolchain externs   : bounded compiler helpers such as memmove / memset.
+#                                   Leaves, small bounded non-recursive frames; not in the .su,
+#                                   so excluded here and absorbed by the gate ceiling headroom.
+#                                   The separate ARM gate rejects divide helpers.
 #
 # Deterministic: no wall-clock, no randomness; output is a pure function of the object.
 

@@ -6,12 +6,13 @@ flash-driver validation remain integration responsibilities.
 
 ## Required inputs
 
-- Use one clean commit on `main`.
+- Use a clean `main` checkout at the exact release commit.
 - Commit the home and fixture ELFs under `test-bench/images` and
   `test-bench/fixtures`, and foreign binaries under `test-bench/foreign`.
 - Keep ordered corpus membership, asset hashes, and foreign edges in
   `test-bench/corpus-inventory.tsv`.
-- Keep corpus sizes and frozen wire hashes in `test-bench/wire-baseline.tsv`.
+- Keep home per-pair sizes, golden-blob sizes, and frozen hashes for every corpus
+  and golden wire in `test-bench/wire-baseline.tsv`.
 - Install the packages in [install.md](../install.md), and use the toolchain,
   archive, flag, environment, and CI-container identities recorded in
   `toolchains/release-profile.json`.
@@ -43,8 +44,8 @@ make check-clang
 
 This sequence verifies build-profile isolation, the complete release gate,
 sanitizers, and the required Clang leg. Do
-not release unless every command succeeds and `make gate` ends with
-`RESULT: ALL GATES PASS`.
+not release unless every command succeeds and `make gate` reports
+`ALL GATES PASS`.
 
 Review the complete output, including the validated release profile, home and
 foreign round trips and totals, the real one-face grow and revert patch sizes,
@@ -64,9 +65,9 @@ make golden-update
 ```
 
 Review every per-pair result and the real one-face grow/revert sizes. Do not
-accept a worse home pair or a one-face regression. Commit the updated
-`test-bench/wire-baseline.tsv` and Makefile size pins with the implementation in
-the same commit.
+accept a worse home pair, a foreign-total regression, or either one-face
+regression. Commit the updated `test-bench/wire-baseline.tsv` and four Makefile
+size pins with the implementation in the same commit.
 
 ## Artifacts and evidence
 

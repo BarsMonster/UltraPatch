@@ -2,7 +2,8 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Host encoder module -- field/delta model + apply planning: classify_field, merge_op_field_deltas, fit_shift_map, proxy pricing, split runs, preserve/corrections.
+ * Host encoder module -- field/delta model + apply planning: classify_field,
+ * merge_op_field_deltas, proxy pricing, split runs, preserve/corrections.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -134,7 +135,7 @@ static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, Op
         } else {
             pw->caps->ok = 0;
             /* Preserves arrive in actual apply order. FWD's first unkept position starts
-             * its high suffix; grow skips the unrepresentable >=16 MiB prefix, then the
+             * its high suffix; reverse skips the unrepresentable >=16 MiB prefix, then the
              * first over-budget representable position starts its low suffix. */
             if ((uint32_t)tp < RC_PACKED_POS_LIMIT &&
                 (pw->ctx->fwd ? pw->caps->pres_cutoff == (int32_t)RC_PACKED_POS_LIMIT
@@ -205,7 +206,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
 /* The single encoder mirror of the decoder's apply_op 4-byte-window skeleton (patch_apply.h).
  * fw_next yields, in wire consume order, either a classified field window (is_field=1, pos=window
  * anchor, ev) or one copy position (is_field=0, pos). Direction-parametrized: FWD ascends from 0
- * with anchor==cursor; grow descends from dl-1 with anchor==cursor-3. Every encoder field walk
+ * with anchor==cursor; reverse descends from dl-1 with anchor==cursor-3. Every encoder field walk
  * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
              const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
@@ -279,8 +280,8 @@ void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *f
     fd_finalize(fd);
 }
 
-/* ---- piecewise shift map (D1): lookups go through rc_smap_at (rc_models.h), the single-sourced
- * mirror of patch_apply smap_at. ---- */
+/* ---- piecewise shift map (D1): lookups on both sides use the single rc_smap_at definition in
+ * rc_models.h. ---- */
 
 typedef struct { uint32_t b; int32_t v; uint32_t w; } SegCand;
 typedef struct { uint32_t w; size_t ord; } SegRank;
@@ -508,7 +509,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
          * nonzero-count prefix. diff_proxy_bits(seg_p, end) over runs p..e-1 is then
          *   uleb(CNT[e]-CNT[p]) [+ boundary-gap uleb + (W[e]-W[p]) + (GP[e-1]-GP[p]) if e>p]
          * where the boundary gap is the only direction-dependent term: FWD prices the gap
-         * from seg_p to the first run, grow prices the gap from `end` back to the last. */
+         * from seg_p to the first run, reverse prices the gap from `end` back to the last. */
         SplitScratch *sc = (SplitScratch *)xmalloc((nr + 1) * sizeof(*sc));
         const uint64_t uleb1 = uleb_proxy_bits(1u, L0);
         sc[0].w = 0; sc[0].cnt = 0; sc[0].gp = 0;

@@ -13,10 +13,9 @@
 #   * home matrix : all 256 (from,to) pairs over the 16 SensorWatch images.
 #   * foreign     : 17 explicitly pinned CircuitPython edges, both directions = 34 pair-directions
 #                   (a second, unrelated Cortex-M0+ lineage; see docs/foreign-firmware-study.md).
-# The single slowest job by far is the foreign cross-major pair (3.0.x <-> 10.x, effectively
-# unrelated programs, ~13 s, 150-175 KB blob). It is emitted FIRST so it starts in the opening
-# scheduling wave and overlaps every other pair — longest-processing-time-first, so adding the
-# foreign set barely moves the leg's wall time even though it is CPU-heavy.
+# The slowest jobs are foreign cross-major pairs (effectively unrelated programs). They are emitted
+# FIRST so they start in the opening scheduling wave and overlap every other pair —
+# longest-processing-time-first minimizes their added wall time.
 #
 # Each worker uses its OWN mktemp dir, which keeps the deterministic encoder free of cross-run
 # contamination from shared output paths.

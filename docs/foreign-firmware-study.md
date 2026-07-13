@@ -6,8 +6,9 @@ It contains official CircuitPython `feather_m0_express` release images.
 
 CircuitPython source is published at
 <https://github.com/adafruit/circuitpython> under the MIT license. The release
-artifacts were obtained from
-<https://adafruit-circuit-python.s3.amazonaws.com/bin/feather_m0_express/en_US/>.
+artifacts came from the official S3 listings for
+[older raw binaries](https://adafruit-circuit-python.s3.amazonaws.com/index.html?prefix=bin/feather_m0_express/en_US/OLD/)
+and [current UF2 releases](https://adafruit-circuit-python.s3.amazonaws.com/index.html?prefix=bin/feather_m0_express/en_US/).
 
 The committed raw-bin releases are:
 
@@ -25,12 +26,12 @@ ordered undirected edges. Both directions of every edge run in the common
 corpus worker pool, giving 34 foreign cases. See
 [`test-bench/README.md`](../test-bench/README.md) for the verification contract.
 
-Live patch-size ratchets are defined only in the
-[`Makefile`](../Makefile); pinned wire hashes and sizes are defined only in
+Aggregate size ratchets are defined in the [`Makefile`](../Makefile). Home
+per-pair and golden-blob size baselines, plus all frozen wire hashes, are in
 [`test-bench/wire-baseline.tsv`](../test-bench/wire-baseline.tsv). Do not copy
 those changing measurements into this provenance note.
 
 Whole-relink cases can require much more literal data than adjacent releases.
-The host encoder handles them by degrading compression while keeping every
-plan inside the decoder's fixed journal and correction caps. This fallback is
-encoder-side; it does not enlarge or complicate the device decoder.
+The host encoder degrades or skips candidates so the emitted patch stays within
+the decoder's fixed journal and correction caps. This fallback is encoder-side;
+it does not enlarge or complicate the device decoder.

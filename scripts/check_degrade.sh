@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 # Degradation / direction / row-window / big-span gate: synthetic firmware-like pairs that
-# deterministically FORCE each encoder path the 6-blob golden set and the home corpus never
+# deterministically FORCE each encoder path the four-wire golden set and the home corpus never
 # exercise, and ASSERT the path was actually taken (not merely that the blob round-trips):
 #
 #   (a) journal-budget degradation  — over-budget read-after-overwrite converted to plain
@@ -27,7 +27,8 @@
 #   (f,g) packed-position seam       — real >16 MiB plan geometry proves descending journal
 #       planning skips an unrepresentable high preserve before keeping JSLOTS lower entries,
 #       and that a correction at local offset 2^24 is split/rebased. Both plans emit real
-#       bodies and pass production selfcheck; direct construction avoids a >60 s suffix sort.
+#       bodies and pass production selfcheck; direct construction avoids an unnecessary full
+#       suffix sort.
 #
 # ultrapatch self-verifies every emitted blob on the reference decoder, so a round-trip failure is
 # already impossible for an accepted blob; this gate additionally pins that the SPECIFIC path

@@ -20,7 +20,7 @@
  * process, so the `if (!p) die(...); return p;` allocator wrappers below provably never return
  * NULL (without this the analyzer models a NULL return and reports spurious null-arg/OOB). */
 void die(const char *msg) {
-    fprintf(stderr, "patch_generate: %s\n", msg);
+    fprintf(stderr, "ultrapatch: %s\n", msg);
     exit(2);
 }
 
@@ -41,7 +41,7 @@ void *xcalloc(size_t n, size_t s) {
  * qsort is an unstable introsort since 2.37; musl uses smoothsort; BSDs differ). Several
  * comparators legitimately compare equal on distinct elements (same-address ELF symbols,
  * equal-value b2j entries, equal-boundary map segments); stability pins those ties to
- * insertion order, which every producer in this file generates deterministically. */
+ * insertion order, which every producer in the encoder generates deterministically. */
 void sort(void *base, size_t n, size_t esz,
                     int (*cmp)(const void *, const void *)) {
     unsigned char *src = (unsigned char *)base, *tmp;

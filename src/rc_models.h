@@ -5,11 +5,10 @@
  */
 
 /* Divide-free range-coder model definitions (shared by decoder + host encoder).
- * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — NO division anywhere,
- * required for Cortex-M0+/ARMv6-M (no hardware divide). Header-only; both
- * src/patch_apply.h (device decoder) and src/patch_generate.c
- * (host encoder) carry their own range-coder bit I/O and only share the model
- * struct/constants below, so the wire stays bit-exact between the two. */
+ * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — no runtime division
+ * instructions or helpers, as required for Cortex-M0+/ARMv6-M. Header-only; both
+ * src/patch_apply.h (device decoder) and the host encoder modules carry their own range-coder
+ * bit I/O and share the model structs/constants below, so the wire stays bit-exact. */
 #ifndef UP_RC_MODELS_H
 #define UP_RC_MODELS_H
 #include <stdint.h>
@@ -23,9 +22,6 @@
  * plain-C fallbacks even when __GNUC__ is visible (for compilers that define it for
  * compatibility without full attribute support); the check-decoder-contract gate leg builds
  * and round-trips that variant and asserts its preprocessed first-party code is GNU-free. */
-/* Single portability shim for the whole project (decoder + host encoder). GNU attributes are
- * codegen/warning hints only, so the #else keeps everything standard C; -DNO_GNU_EXTENSIONS
- * forces the plain-C path uniformly across all three (decoder, shared models, encoder). */
 #if !defined(NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define RC_NOINLINE __attribute__((noinline))
@@ -76,7 +72,7 @@ static inline uint32_t rc_wire_from_crc(uint32_t crc){
 /* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
  * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
  * 12 bits/node instead of a full uint16_t; this struct + accessors are the ONE byte-tree
- * implementation, used by both patch_apply and patch_generate. The adaptation-shift rate is NOT
+ * implementation, used by both the device decoder and host encoder modules. The adaptation-shift rate is NOT
  * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (RC_LIT0_RATE,
  * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
 #define UP_BT_PROBS 255u
@@ -100,7 +96,7 @@ static inline void up_bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int
  * UP_UG_CTX = context clamp. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table because any quotient
  * row can use k columns. Gamma only reaches triangular rows 1..UP_UG_CTX-1 plus the full clamped
  * row UP_UG_CTX; row 0 has no mantissa bits.
- * ENCODING-AFFECTING: patch_apply and patch_generate must use the same value. */
+ * ENCODING-AFFECTING: decoder and encoder must use the same value. */
 #define UP_UG_CTX 6
 #define UP_UG_C(x) ((x)<UP_UG_CTX?(x):UP_UG_CTX)
 #define UP_UG_GAMMA_MANT (((UP_UG_CTX) * ((UP_UG_CTX) - 1)) / 2 + ((UP_UG_CTX) + 1))
@@ -120,8 +116,8 @@ static inline int rc_ugg_mant_idx(int row,int pos){
  * RC_LIT0_RATE in wire order -- over the surviving tag0 span literals of the full home + foreign
  * corpora, accepting a row move only when it strictly cuts home bits and never raises foreign bits.
  * Supersedes the static agglomerative-clustering map (a measured dead end: a static-entropy objective
- * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: patch_apply and
- * patch_generate share this table (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
+ * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: device decoder and
+ * host encoder modules share this table (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
 #define UP_LIT0_CTX 5
 static inline uint8_t rc_lit0_sel(uint8_t p){
     uint8_t v=(uint8_t)(
@@ -146,8 +142,8 @@ static inline int rc_fl_hist(int h,int b){ return ((h<<1)|b)&3; }
  * decoder-direction mirrors kept here (rc_unzz32_value, rc_zz_abs, rc_uleb_overlong,
  * rc_outmatch_pos) are decoder-only — their encoder-side twins (rc_zz32, rc_uleb_len,
  * rc_natural_desc/rc_dir_is_natural, rc_outmatch_delta) live in src/enc_internal.h. All
- * are 64-bit-free and (the one-time literal-seed rounding divide aside) divide-free, and preserve
- * the exact dataflow so the Cortex-M0+ decoder codegen does not shift.
+ * are 64-bit-free and division-helper-free; the literal-seed ratio below uses fixed-width
+ * shift/subtract long division. They preserve the exact dataflow so Cortex-M0+ codegen does not shift.
  * ===================================================================================== */
 
 /* adaptive-bit probability update: nudge p toward 0 (bit=1) or RC_PBIT (bit=0) by 1/2^rate.
@@ -337,9 +333,9 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 
 /* =====================================================================================
  * Shared wire constants — single-sourced so the COMPILER (not a "must match" comment)
- * enforces the encoder/decoder mirror. Each macro below is used verbatim by BOTH
- * src/patch_apply.h (device decoder) and src/patch_generate.c (host encoder); changing a
- * value here moves both sides at once, keeping the range-coded wire bit-exact.
+ * enforces the encoder/decoder mirror. Each macro below is used verbatim by the device decoder
+ * and host encoder modules; changing a value here moves both sides at once, keeping the
+ * range-coded wire bit-exact.
  * ===================================================================================== */
 
 /* Adaptive-bit rate (probability-update shift) for the Golomb (unary+mantissa), order-2 flag,
@@ -362,22 +358,22 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * exact distance reuse is the minority case: a low prior keeps the dominant =0 flag near-free on
  * small patches while corpus-scale streams adapt up. 3072 = RC_PBIT - RC_PBIT/4; corpus tuning
  * (paired min-over-N sweep) puts the optimum that does NOT regress the one-face product patch at
- * ~1/4 (3/8 helps corpus more but regresses the real one-face update by +1/+1). Mirrors the
- * decoder M_rep0 and the encoder Models.rep0/last_dist. */
+ * ~1/4 (3/8 helps corpus more but regresses the real one-face update by +1/+1). Both sides store
+ * the prior in up_TokModels.rep0 and initialize it through rc_init_tok. */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
 
 /* MTF cache-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF cache makes the hit-bit==1 likely, so seed
- * the adaptive hit model high. 576 = tuned corpus optimum. (Decoder dr_init / encoder dr_init_e.) */
+ * the adaptive hit model high. 576 = tuned corpus optimum. Shared rc_dr_init seeds both sides. */
 #define UP_DR_HIT_INIT 576u
 
-/* MTF cache-index UGolomb seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
+/* MTF cache-index unary seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
  * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
  * corpus optimum. (Shared up_idx_init seeds both sides.) */
 #define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"
  * (bit 1). Structural priors (format invariants), NOT corpus caps — they make the very first op as
- * cheap as the warmed-up state. Mirrored by decoder ugg_seed_cont / encoder ugg_seed_cont_e.
+ * cheap as the warmed-up state. Shared rc_ugg_seed_cont and rc_init_* seed both sides.
  *   GDL  = per-op diff_len gamma; op magnitudes are essentially never tiny.
  *   GADJ = per-op adj gamma.
  *   PG2  = rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1.
@@ -387,8 +383,8 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 #define RC_SEED_DEPTH_PG2  1
 #define RC_SEED_DEPTH_GL   1
 
-/* Out-match minimum length: out-match lengths ship as (len - RC_OUTMATCH_MIN) via the M_glo gamma,
- * so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
+/* Out-match minimum length: out-match lengths ship as (len - RC_OUTMATCH_MIN) via
+ * up_TokModels.glo, so the smallest representable out-match is RC_OUTMATCH_MIN bytes. */
 #define RC_OUTMATCH_MIN 4u
 
 static inline uint32_t rc_outmatch_pos(uint32_t expected, int32_t delta){

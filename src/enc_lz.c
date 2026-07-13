@@ -74,7 +74,7 @@ static uint32_t hash3_key_rev(const uint8_t *p) {
 
 /* ---- out-match candidates (D2): matches of the content stream against the ALREADY-PRODUCED
  * output image. Each token inherits a conservative window from the op that consumes its first
- * content byte: FWD [0, tp0), grow [tp_end, to_size). ---- */
+ * content byte: FWD [0, tp0), reverse [tp_end, to_size). ---- */
 static void oc_keep(OCand *row, uint8_t *nc, int32_t pos, int32_t len) {
     int w = -1;                                   /* legacy first-shorter replacement, not strict top-K */
     for (int q = 0; q < *nc; q++) if (row[q].len < len) { w = q; break; }
@@ -90,8 +90,8 @@ static void oc_match(OCand *row, uint8_t *nc, const uint8_t *src, int FWD,
     if (l >= RC_OUTMATCH_MIN) oc_keep(row, nc, pj, (int32_t)l);
 }
 
-/* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for grow —
- * grow content carries extras byte-REVERSED and the decoder replays in write direction). */
+/* Direction-aware trigram hash chains over `src` (forward trigrams for FWD, reversed for the
+ * reverse direction, whose content carries extras byte-REVERSED for write-order replay). */
 static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_out, int32_t **prev_out) {
     int32_t *head = hash3_heads_new();
     int32_t *prev = hash3_prev_new(src_n);
@@ -110,8 +110,8 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
 }
 
 /* Out-match candidates from BOTH decode-time flash states:
- *  NEW window (source `to`): FWD [0, tp0);          grow [tp_end, to_size)         — written output.
- *  OLD window (source `frm`): FWD [tp_end, from_size); grow [0, tp0)               — pristine flash
+ *  NEW window (source `to`): FWD [0, tp0);             reverse [tp_end, to_size) — written output.
+ *  OLD window (source `frm`): FWD [tp_end, from_size); reverse [0, tp0)           — pristine flash
  *    the frontier has not reached (out_read returns it verbatim). OLD regions DECAY as later ops
  *    write, so OLD candidates are clipped to finish inside the op that starts them. */
 void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
@@ -202,7 +202,7 @@ uint32_t bit_price(uint32_t p, int bit) {
     return intbits - fracbits;                 /* (12 - log2(pr)) * PR_SCALE */
 }
 
-/* UP_LIT0_CTX / rc_lit0_sel / LIT0_MAP come from rc_models.h (shared, bit-exact wire). */
+/* UP_LIT0_CTX / rc_lit0_sel come from rc_models.h (shared, bit-exact wire). */
 
 void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
@@ -315,7 +315,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     memset(&M, 0, sizeof(M));
     models_init_content(&M, seeds, dk, ko);
     REnc r; re_init_count(&r);           /* drives adaptation; emitted bytes counted, not stored */
-    /* token count (seq->n) is no longer on the wire (Feature 7A); the old raw count bits touched
+    /* Token count (seq->n) is no longer on the wire; the old raw count bits touched
      * no adaptive model, so dropping them leaves every price unchanged. */
     ContentStats st = {0};
     ContentCursor cc;

@@ -8,14 +8,14 @@
 
 #include "enc_internal.h"
 
-/* Ordered tie priority and every preparation choice live here. Keeping the legacy variant first
- * is wire-significant: equal-size candidates retain the first entry. */
+/* Ordered plan selectors and tie priority live here. Keeping the legacy entry first is
+ * wire-significant: equal-size candidates retain the earliest registry entry. */
 const PlanSpec PLAN_SPECS[PLAN_SPEC_N] = {
-    {0, 11, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-    {1, 11, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-    {2, 11, PLAN_DF_MASK,   PLAN_RAW_MASK_11},
-    {1,  6, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_6},
-    {1, 20, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_20},
+    {0, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
+    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
+    {2, PLAN_DF_MASK,   PLAN_RAW_MASK_11},
+    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_6},
+    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_20},
 };
 /* ---- journal-budget degradation (encoder-only; wire format and decoder untouched) ----
  * The decoder's never-evict journal holds at most JSLOTS overwritten source bytes. When
@@ -23,7 +23,7 @@ const PlanSpec PLAN_SPECS[PLAN_SPEC_N] = {
  * into plain extra bytes (the exact to-image bytes, shipped in the content stream):
  * compression degrades — those bytes code as literals/LZ instead of free copies — but the
  * plan becomes journal-feasible instead of refusing. Preserves are journaled in apply order
- * (strictly ascending output positions for FWD, descending for grow — the NVM gate pins
+ * (strictly ascending output positions for FWD, descending for reverse — the NVM gate pins
  * frontier monotonicity), so the first JSLOTS preserves in that order stay protected and
  * every read of a later (unprotected) overwritten position is converted. A read-behind-
  * frontier within one op sits at the constant offset fp0-tp0, so the conversion range is
@@ -261,7 +261,7 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
 /* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
  * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
  * of the bsdiff inputs (copies extend through recompiled code). encode_patch emits whichever
- * variant's exact body is smallest (ties keep the lowest variant), so this cannot regress. */
+ * plan's exact body is smallest (ties keep the earliest registry entry), so this cannot regress. */
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};
@@ -292,7 +292,8 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
      * and the sweep tries the remaining configs — different bsdiff alignments need different
      * preserve/correction budgets, so another variant may fit the decoder caps (measured on
-     * foreign firmware: config 0 over-journal while fuzz variants fit). encode_patch dies only
+     * foreign firmware: config 0 over-journal while alternate bsdiff preparations fit).
+     * encode_patch dies only
      * when EVERY config is infeasible. */
     free(fd.v);
     oppc_array_free(pc, ops.n);

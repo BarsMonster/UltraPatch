@@ -14,7 +14,9 @@ SHA-256; a foreign row records its tracked binary SHA-256 and `-` for the absent
 ELF. The file also lists the 17 ordered undirected foreign edges explicitly;
 each edge schedules its listed direction followed by the reverse direction.
 `make check-release-inventory` proves that `wire-baseline.tsv` describes that
-topology and agrees with the Makefile release pins.
+topology and agrees with the Makefile cardinality, home-total, one-face, and
+golden-count pins. `make check-corpus` gates the live foreign total because
+foreign baseline rows carry hashes but no per-pair sizes.
 
 The tracked inputs and derived binaries are verified by:
 

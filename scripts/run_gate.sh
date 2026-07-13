@@ -12,8 +12,8 @@ MAKE_CMD="${MAKE:-make}"
 rc=0
 
 # The corpus encoder saturates every core by itself, while several other gate legs also encode
-# nontrivial fixtures. Leave one quarter of the machine to those concurrent legs; otherwise a
-# 32-worker corpus pool oversubscribes the 32-core reference host and reduces the 80 s headroom.
+# nontrivial fixtures. Leave one quarter of the machine to those concurrent legs so the corpus
+# pool does not oversubscribe the host and reduce the gate's time headroom.
 if [ -n "${JOBS:-}" ]; then
   corpus_jobs=$JOBS
 else
@@ -70,7 +70,7 @@ require_metrics \
   'g.txt:golden_wire' \
   'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
   'models.txt:model_contract' \
-  'dg.txt:degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction split_run_budget degrade_cases degrade_fail' \
+  'dg.txt:encoder_kernels split_run_budget degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction degrade_cases degrade_fail' \
   'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_decoder_build' \
   'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_decoder_build' \
   'm.txt:matrix_ok full_total home_size_better home_size_worse home_size_equal foreign_ok foreign_total wire_identity max_amplified max_maxpageerase max_inversions max_unaligned max_oob_page_writes max_canary_corrupt max_journal' \
@@ -94,6 +94,7 @@ awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
+kvs 'dg.txt|encoder_kernels|encoder kernels         : ' 'dg.txt|split_run_budget|split-run budget        : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
 awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" '/^arm_object_text=/{t=$2}/^arm_object_data=/{d=$2}/^arm_object_bss=/{b=$2}END{if(t!="")printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"

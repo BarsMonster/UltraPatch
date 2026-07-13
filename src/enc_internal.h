@@ -100,7 +100,7 @@ enum { PLAN_SPEC_N = 5 };
 /* The ordered plan registry is the sole definition of sweep order. df selects the normalized
  * input pair; raw_key selects one of the four prepared bsdiff results. */
 typedef struct {
-    uint8_t variant, fuzz, df, raw_key;
+    uint8_t variant, df, raw_key;
 } PlanSpec;
 extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
 /* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
@@ -159,7 +159,7 @@ typedef struct {
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
 /* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
- * sees the historical source order by globally reversing this arena for a grow apply. */
+ * sees the historical source order by globally reversing this arena for a reverse apply. */
 typedef struct { uint32_t cc; int kind; uint32_t k1; int32_t need; uint32_t k2; } FieldInj;
 typedef struct { FieldInj *v; size_t n, cap; } FieldInjArena;
 typedef struct { size_t content_end, inj_end; } OpEmitRow;

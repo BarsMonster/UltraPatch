@@ -11,7 +11,7 @@
 #ifndef UP_PATCH_APPLY_H
 #define UP_PATCH_APPLY_H
 /*
- * ultrapatch v3-on-flash — streaming, in-place, real-NVM firmware decoder (C).
+ * UltraPatch — streaming, in-place, real-NVM firmware decoder (C).
  * Production solution; integration and release gates are documented under docs/.
  * This is the only header application code includes. Install it beside the companion
  * patch_config.h and rc_models.h headers; the public entrypoint is intentionally not amalgamated.
@@ -38,15 +38,16 @@
  * never shipped, only the per-field delta VALUES, pulled inline from the single stream (adaptive
  * MTF cache + order-1/zero-context repeat bit). A copy that reads a from-byte already overwritten by
  * the output frontier reads it from the never-evict journal, driven by the preserve events [P]. Output is
- * staged in a monotonic 256 B page write-back cache so each NVM page is erased+programmed exactly
- * once (no write amplification).
+ * staged in a monotonic OUTROW_DEPTH-page write-back cache so each modified NVM page is
+ * erased+programmed at most once (no write amplification).
  *
  * RAM (hard gate <=12 KiB SRAM): entropy models + the never-evict journal + the LZSS history ring
- * + the packed FWD ldr-target metadata; the image lives ONLY in flash (0 image bytes in RAM).
+ * + the packed FWD ldr-target metadata + the bounded output-page cache. Flash is the image backing
+ * store; only bounded dirty output pages are staged in RAM, never a full-image buffer.
  *
  * Embedded target: NO 64-bit integers ANYWHERE in the decoder — all positions/sizes are 32-bit and
  * every bounds/overflow guard is done in 32-bit (headroom tests plus __builtin_add/sub_overflow), so
- * the ARM object emits no libgcc 64-bit (or float) helpers, only one 32-bit divide at init.
+ * the ARM object emits no libgcc 64-bit, floating-point, or division helpers.
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -58,10 +59,10 @@
  * rc_models.h (RC_ALWAYS_INLINE / RC_NOINLINE / RC_ADD_OVERFLOW / RC_SUB_OVERFLOW). */
 
 /* ===================================================================================== */
-/* flash model: the image lives in "flash", accessed ONLY through these. On the host test  */
-/* harness flash is a buffer; on the device these are the real flash page primitives. Both */
-/* receive absolute device addresses. One page write erases and programs the complete page. */
-/* The decoder keeps 0 logical image bytes in RAM.                                          */
+/* Flash is the image backing store, accessed ONLY through these. On the host harness it is a */
+/* buffer; on the device these are the real flash page primitives. Both receive absolute      */
+/* addresses. One page write erases and programs the complete page. The cache may hold bounded */
+/* dirty output pages in RAM, never a full image copy.                                         */
 /* ===================================================================================== */
 #ifndef PATCH_IMAGE_BASE
 #error "define PATCH_IMAGE_BASE as the absolute device address of the patchable image"
@@ -95,8 +96,8 @@ typedef struct { uint32_t range, code; } up_RangeDec;
 /* STREAMED-DELTA per-stream state up_DRStream (bl, ex) is single-sourced in rc_models.h: a
  * bounded MOVE-TO-FRONT cache + an adaptive "repeat-last" bit + an adaptive
  * "cache-hit" bit. Each delta on the wire: rep-bit (==last?) | else hit-bit (cached? -> MTF index
- * via the index UGolomb | else escape value as zigzag uLEB via M_dval, MTF-inserted at front). The
- * via the index UGolomb | else escape value as zigzag uLEB via M_dval, inserted at front). The
+ * via the adaptive cache-index unary | else escape value as zigzag uLEB via MDL_pre.dval,
+ * inserted at front). The
  * cache array is outside the struct so bl/ex get separate capacities. */
 
 /* JSLOTS is configured above. Encoder and decoder builds MUST use the same macro name/value; the
@@ -104,7 +105,7 @@ typedef struct { uint32_t range, code; } up_RangeDec;
  * ship as extra bytes), so a valid blob never exceeds it; an over-cap stream still refuses cleanly
  * here (REJ_RESOURCE).
  *
- * Preserve positions become a strictly ascending 24-bit key sequence after grow positions are
+ * Preserve positions become a strictly ascending 24-bit key sequence after reverse positions are
  * complemented. Store its low 16 bits directly and its high 8 bits as an Elias-Fano unary bitmap;
  * a high-byte sample every eight entries bounds lookup reconstruction to one short group. Values
  * stay byte-addressable and all JSLOTS entries remain available. */
@@ -159,7 +160,7 @@ typedef struct PatchApply {
     PatchPull g_pull_fn;
     void *g_pull_ctx;
     /* HOT-FLAG PLACEMENT INVARIANT: these decode flags are touched on nearly every range-coder
-     * step, so they fill the low word right after the two pointers (offsets ~28..31) instead of
+     * step, so they fill the low word right after the two pointers (ARM offsets 28..31) instead of
      * being sunk to the struct tail. Thumb-1 ldrb/strb take
      * only a 5-bit immediate offset, so a flag byte at a LOW struct offset stays reachable cheaply,
      * whereas a tail byte forces an extra address add. Keep any future hot flag byte HERE (low), not
@@ -238,11 +239,11 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa,
 
 /* Patch geometry — decoder-OWNED. up_decode_body parses it from the blob envelope; the
  * integrator no longer supplies sizes/direction/span (footguns removed), it only provides
- * the two flash primitives above and pushes blob bytes. g_image_span = max(from,to) size
- * bounds every flash access. */
-/* Feature 7B initial source seek: the source position where the ascending op walk BEGINS. Seeds
- * s->fp for FWD (was implicitly 0) and is the exact grow LANDING point (grow's final s->fp must
- * equal it). Carries a leading zero-output op's seek that was folded off the wire; almost always 0. */
+ * the two flash primitives above and pushes blob bytes. g_image_span = max(from,to) bounds
+ * logical accesses; complete-page cache preloads are bounded by PATCH_IMAGE_CAPACITY. */
+/* Initial source seek: the source position where the ascending op walk BEGINS. Seeds
+ * s->fp for FWD (was implicitly 0) and is the corresponding reverse walk's exact landing point.
+ * Carries a leading zero-output op's seek that was folded off the wire; almost always 0. */
 /* MAX_IMAGE is configured above. */
 
 /* ===================================================================================== */
@@ -264,10 +265,10 @@ static void up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w);
 static int up_pull_raw(PatchApply *pa, uint8_t*out){
     return pa->g_pull_fn(pa->g_pull_ctx,out)==PATCH_PULL_BYTE;
 }
-/* rob-1: distinguishable reject reason (read by the host main after a reject). 1 =
- * RESOURCE: a bounded resident structure was exceeded (journal / per-op corrections) — this
- * firmware is bigger than the build was sized for. 2 = CORRUPT: malformed/truncated
- * stream (bounds, underrun, range-coder overflow). 0 = none. Pure diagnostic; never affects decoding. */
+/* Distinguishable reject reason (exposed through patch_apply_reject()). 1 = RESOURCE: the
+ * configured partition or a decoder resource/wire cap was exceeded. 2 = CORRUPT:
+ * malformed/truncated stream (bounds, underrun, range-coder overflow). 0 = none. Pure
+ * diagnostic; never affects decoding. */
 static uint8_t up_next_byte(PatchApply *pa){
     uint8_t b;
     if(pa->g_body_left==0) return 0;
@@ -348,7 +349,7 @@ static int up_s_bt(PatchApply *pa, up_BitTree*t,int rate){
     }
     return m-256;
 }
-/* ---- MTF escape value: zigzag uLEB, each byte through the adaptive M_dval bit-tree ---- */
+/* ---- MTF escape value: zigzag uLEB, each byte through the adaptive MDL_pre.dval bit-tree ---- */
 static int32_t up_s_bv(PatchApply *pa, up_BitTree*t,int rate){
     uint32_t acc=0; int sh=0, b;
     do{
@@ -400,8 +401,8 @@ static uint32_t up_s_ug_gamma(PatchApply *pa, up_UGGamma*g){
     int cl=(int)up_s_unary(pa,g->u,UP_UG_CTX,UP_RC_UNARY_MAX);
     return ((1u<<cl) | up_s_ug_mant_gamma(pa,g,cl)) - 1u;
 }
-/* MTF cache-index model: a lean adaptive UNARY code. UP_IDX_CTX / up_IdxUnary / up_idx_init are single-sourced
- * in the encoder mirror. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
+/* MTF cache-index model: a lean adaptive UNARY code. UP_IDX_CTX / up_IdxUnary / up_idx_init are
+ * single-sourced in rc_models.h. The encoded index value v (== dict pos j-1) is ~54% zero, ~22% one,
  * ~10% two, with a thin tail to ~140 worst case: emit v continue-bits then a stop-bit on the per-position
  * prior u[min(pos,UP_IDX_CTX-1)]. `cap` bounds the run on a corrupt stream (up_pull_delta validates j vs K). */
 /* ---- order-2 flag ---- */
@@ -438,7 +439,7 @@ static uint32_t up_crc32_flash_hist(PatchApply *pa, uint32_t n, uint32_t*hist0, 
 
 /* ===================================================================================== */
 /* never-evict journal — succinct monotone 24-bit positions plus byte values. FWD positions */
-/* are already ascending; grow positions are complemented after each ascending wire block is */
+/* are already ascending; reverse positions are complemented after each ascending wire block is */
 /* written into reverse destination indices. Low 16 bits are direct. For entry i, one bit at  */
 /* (high+i) represents the high 8 bits; a high-byte sample every UP_JSTRIDE entries bounds     */
 /* reconstruction. Over-depth is REFUSED before writing the op. Lives in the apply phase only. */
@@ -505,11 +506,11 @@ static int up_jr_get(PatchApply *pa, uint32_t pos, uint8_t*out){
  * decoder already has in hand; only the RESIDUAL (delta - pred) rides the MTF cache streams.
  * rc_smap_at(x) = value of the last segment with boundary <= x, else 0 (also 0 when no map).
  * Values are BYTE shifts; BL predictions divide by 2 (imm24 is in halfwords) with C
- * truncation-toward-zero on both sides (bit-exact vs patch_generate). ---- */
+ * truncation-toward-zero on both sides (bit-exact vs the host encoder). ---- */
 
 /* ===================================================================================== */
 /* HYBRID: monotonic output PAGE write-back cache (real flash = page erase/program).        */
-/* Output writes are monotonic & contiguous (asc shrink / desc grow); SOURCE reads stay raw. */
+/* Output writes are monotonic & contiguous (ascending/FWD or descending/reverse); SOURCE reads stay raw. */
 /* The journal covers read-after-overwrite; reads of dirty buffered pages come from RAM, and */
 /* not-yet-overwritten source bytes come straight from flash. Each resident output page is   */
 /* committed with one full-page call. The page buffers use OUTROW * OUTROW_DEPTH bytes.       */
@@ -590,8 +591,8 @@ static void up_out_write(PatchApply *pa, uint32_t a, uint8_t v){
 
 /* pull the next delta of a stream (bl/ex), inline:
  *   rep-bit: ==1 -> return last; else read hit-bit:
- *     hit==1 -> MTF index via the index UGolomb (gix); v=dic[j]; move dic[j] to front.
- *     hit==0 -> escape value (zigzag uLEB via M_dval); insert v at MTF front.
+ *     hit==1 -> MTF index via the adaptive cache-index unary (gix); v=dic[j]; move dic[j] to front.
+ *     hit==0 -> escape value (zigzag uLEB via MDL_pre.dval); insert v at MTF front.
  *   then last=v. */
 static int32_t up_pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int32_t*dic, uint32_t cap){
     { int ri=rc_dr_rep_ctx(d->rh,dic[0]);
@@ -614,7 +615,7 @@ static int32_t up_pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int
 /* streaming [A] apply: NO split, NO per-op literal/extra buffer.                             */
 /* Per op the decoder reads DIRECT geometry+P+C (outside LZSS), journals preserves EAGERLY,    */
 /* then PULLS the op's CONTENT bytes from the cut whole-stream LZSS token stream and writes     */
-/* each output byte immediately (ascending FWD / descending grow). Literal patches are consumed */
+/* each output byte immediately (ascending/FWD or descending/reverse). Literal patches are consumed */
 /* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
 /* The LZSS ring (size 2^WINDOW_LOG) is the content history; backref distances <= 2^WINDOW_LOG.             */
 /* ===================================================================================== */
@@ -649,7 +650,7 @@ static uint8_t up_hy_src_peek(PatchApply *pa, int32_t fp); /* fwd decl: journal-
  * IN THIS op [fp0,fp0+dl)? Scan even a in [max(fp0,fpk-1024), fpk-2]; an ldr literal
  * `(up&0xf800)==0x4800` targets t=(a&~3)+4*(up&0xff)+4; field iff some a targets fpk and
  * fpk+4<=fp0+dl. Reads PRISTINE source: FWD consumes packed metadata recorded at copy-read time;
- * grow incrementally fills the same ring from journal-aware source reads while descending. */
+ * reverse incrementally fills the same ring from journal-aware source reads while descending. */
 static inline int up_psrc_ldr_take(PatchApply *pa, uint32_t fpk){
     uint32_t i=(fpk>>2)&UP_PSRC_TGT_MASK;
     uint32_t bit=1u<<(i&31u);
@@ -720,8 +721,8 @@ static uint8_t up_next_content(PatchApply *pa, up_ApplyState*s, int tag){
                 int32_t dpos=rc_unzz32_value(up_s_ug_rice(pa,&pa->MDL_tok.go)); /* position as zigzag delta vs expected */
                 uint32_t p=rc_outmatch_pos(pa->g_oexp,dpos);
                 uint32_t ln=up_s_ug_gamma(pa,&pa->MDL_tok.glo)+RC_OUTMATCH_MIN;
-                /* replay walks the output in WRITE direction (ascending FWD, descending grow) so
-                 * grow content (whose extras are byte-reversed) still matches produced output. */
+                /* replay walks the output in WRITE direction (ascending/FWD, descending/reverse) so
+                 * reverse content (whose extras are byte-reversed) still matches produced output. */
                 if(pa->g_rcerr || p>=pa->g_image_span || (pa->g_FWD ? ln>pa->g_image_span-p : ln>p+1u)) goto fail;
                 pa->g_oexp=rc_outmatch_next_expect(pa->g_FWD,p,ln);  /* sequential runs keep deltas tiny */
                 s->tok_mode=3; s->tok_src=p; s->tok_left=ln; s->last_span=0;
@@ -834,7 +835,7 @@ static int up_field_at(PatchApply *pa, int32_t fp0, int32_t ks, uint32_t w, uint
  * wire order regardless of write direction; the copy/extra helpers are plain static functions so the
  * two call sites share one body instead of duplicating the write loops inside up_apply_op. */
 /* Literal-patch cursor. The wire codes nl literal patches as a run of uLEB gaps + a literal byte
- * each, read in wire order. FWD next-positions accumulate forward from 0; grow next-positions step
+ * each, read in wire order. FWD next-positions accumulate forward from 0; reverse next-positions step
  * back from dl (first = dl - gap, then -= gap). The first patch and every later patch share one
  * advance path; nextpos=-1 marks "no more". */
 typedef struct { int32_t nextpos, litb, li, step, lim; } up_LitCur;
@@ -857,7 +858,7 @@ RC_ALWAYS_INLINE void up_litcur_init(PatchApply *pa, up_ApplyState*s, up_LitCur*
     lc->nextpos = fwd ? 0 : dl; lc->litb=0; lc->li=0;
     up_litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
-/* el extra bytes, written in iteration direction (after dl for FWD, before dl for grow) */
+/* el extra bytes, written in iteration direction (after dl for FWD, before dl for reverse) */
 static void up_wr_extras(PatchApply *pa, up_ApplyState*s, up_CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !pa->g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
@@ -876,7 +877,7 @@ static void up_wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur
     up_out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + src + up_corr_take(s,cc,K)));
 }
 /* one streaming op: DIRECT geometry+P+C, journal P eagerly, then INLINE write-order field
- * detection + streaming write via up_out_write (asc FWD / desc grow). No override buffer. */
+ * detection + streaming write via up_out_write (ascending/FWD or descending/reverse). No override buffer. */
 static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
     uint32_t dl_u=up_s_ug_gamma(pa,&pa->MDL_pre.gdl), el_u=up_s_ug_gamma(pa,&pa->MDL_pre.gel), adj_u=up_s_ug_gamma(pa,&pa->MDL_pre.gadj);
     int32_t adj=rc_unzz32_value(adj_u);
@@ -887,7 +888,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
     if(pa->g_rcerr || dl_u>(uint32_t)pa->g_image_span || el_u>(uint32_t)pa->g_image_span-dl_u){ pa->g_rcerr=1; return; }
     int32_t dl=(int32_t)dl_u, el=(int32_t)el_u;
     int32_t nw=(int32_t)(dl_u+el_u);   /* <= g_image_span < 2^31 */
-    /* Feature 7B termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
+    /* Termination safety: the encoder folds out every zero-OUTPUT op, so a valid op always
      * writes >=1 byte. REJECT nw==0 here (do NOT trust the encoder): it is what guarantees the
      * frontier-terminated op loop advances every iteration and cannot spin on a corrupt stream. */
     if(nw==0){ pa->g_rcerr=1; return; }
@@ -944,8 +945,8 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
     /* ---- CONTENT decode + streaming write with inline field detection ----
      * Both directions process the same 4-byte ascending field windows over [0,dl); they differ only
      * in (a) iteration direction (step), (b) when the el extra bytes are consumed relative to the dl
-     * body (FWD: after; grow: before), and (c) the literal-cursor gap encoding (FWD: absolute forward
-     * next-positions; grow: gaps stepping back from dl). The litcur macros hide (c); the el macro is
+     * body (FWD: after; reverse: before), and (c) the literal-cursor gap encoding (FWD: absolute forward
+     * next-positions; reverse: gaps stepping back from dl). The litcur macros hide (c); the el macro is
      * invoked at the direction-correct point to keep the content-stream read order bit-exact. */
     uint32_t nl_u=up_read_uleb(pa,s);
     if(nl_u>(uint32_t)dl){ pa->g_rcerr=1; return; }
@@ -1026,7 +1027,7 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     { int desc=(ts>fs)!=(int)ov;
       if(desc && !up_env_zz_abs(pa,fs,&fpe)) return 0;
       pa->g_FWD=(uint8_t)!desc; }
-    /* Feature 7B initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
+    /* Initial source seek (fp_start): zigzag-uLEB, shipped ONLY when ASCENDING (descending
      * seeds fp from fp_end and CRC32(to) subsumes its landing — one seed field per direction). */
     if(pa->g_FWD){ uint32_t z2; if(!up_env_uleb(pa,&z2,0)) return 0;
       fp_start=rc_unzz32_value(z2); }
@@ -1053,10 +1054,11 @@ static int up_decode_body(PatchApply *pa){
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
      * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
-    /* BORROW two apply-phase gamma statics (not yet live: the map is read before apply-model setup,
-     * and both are re-init'd fresh at rc_ugg_init(&M_gdl)/rc_ugg_init(&M_gadj) below before the token loop).
-     * Coding the skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits
-     * at ZERO extra SRAM. M_gdl carries the count + boundary gaps; M_gadj carries the zz shift values. */
+    /* BORROW two caller-owned apply-phase gamma models (not yet live: the map is read before
+     * apply-model setup, and rc_init_prekd reinitializes both before the token loop). Coding the
+     * skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits at
+     * ZERO extra SRAM. MDL_pre.gdl carries the count + boundary gaps; MDL_pre.gadj carries the
+     * zigzag shift values. */
     rc_ugg_init(&pa->MDL_pre.gdl); rc_ugg_init(&pa->MDL_pre.gadj);
     { uint32_t mn=up_s_ug_gamma(pa,&pa->MDL_pre.gdl);
       if(mn>UP_SMAP_CAP){ pa->g_reject=REJ_RESOURCE; return 0; }
@@ -1073,12 +1075,12 @@ static int up_decode_body(PatchApply *pa){
      * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
     pa->g_out_en=(uint8_t)up_s_raw(pa);
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
-     * INLINE during apply (up_pull_delta in up_field_at). M_dval (escape/correction bytes), the two MTF
-     * dict streams, and the two index UGolombs all persist through apply. ---- */
+     * INLINE during apply (up_pull_delta in up_field_at). MDL_pre.dval (escape/correction bytes), the two MTF
+     * dict streams, and the two cache-index unary models all persist through apply. ---- */
     rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL, UP_DR_HIT_INIT); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX, UP_DR_HIT_INIT);
     /* pre-kd apply-phase models: dval + dict-index seeds + preserve/corr/geometry gammas with their
      * structural seed_cont priors. This RE-INITs the gdl/gadj borrowed for the map header above; the
-     * whole sequence is single-sourced as rc_init_prekd (rc_models.h, mirror of encoder emit_body). */
+     * whole sequence is single-sourced as rc_init_prekd in rc_models.h and shared with encoder emit_body. */
     rc_init_prekd(&pa->MDL_pre);
     /* ---- [A] streaming apply (no bake): per op read DIRECT geom+P+C, journal P eagerly,
      * then PULL the op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
@@ -1089,7 +1091,7 @@ static int up_decode_body(PatchApply *pa){
       rc_init_tok(&pa->MDL_tok,kd,ko);   /* gd/go rice + gl(+seed)/gs/glo + outb + flag + rep0 prior */
       pa->g_oexp=pa->g_FWD?0u:pa->g_to_size;
       if(pa->g_rcerr) return 0;
-      /* Feature 7B: NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, grow
+      /* NO shipped op count. Frontier-terminate — FWD until tp reaches to_size, reverse
        * until tp reaches 0. This is SAFE because up_apply_op REJECTS any zero-output op (nw==0), so
        * every accepted op advances the frontier by >=1 and the overshoot/underrun guards cap it: the
        * loop runs at most to_size times, then rejects (a corrupt stream cannot spin). A truncated
@@ -1119,8 +1121,8 @@ static void RC_NOINLINE up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,u
  * one blob byte, or PATCH_PULL_END when the source aborts/ends early (it may block internally —
  * e.g. poll a UART — before returning; the decoder consumes bytes strictly in order). Any other
  * callback result is also an abort, never a byte. Valid patches terminate at the header's
- * compressed body length and do not require callback EOF. Returns PATCH_APPLY_DONE (zero; image
- * written, both CRCs verified) or PATCH_APPLY_ERROR (nonzero; g_reject holds the reason). */
+ * compressed body length and do not require callback EOF. Returns PATCH_APPLY_DONE (zero; target
+ * image present, both CRCs verified) or PATCH_APPLY_ERROR (nonzero; g_reject holds the reason). */
 static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, PatchPull next,
                                                                void *ctx){
     memset(pa,0,sizeof *pa);
@@ -1130,15 +1132,16 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, Pa
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
 }
-/* After PATCH_APPLY_ERROR, the reject reason: REJ_RESOURCE (a decoder cap was exceeded — this
- * firmware needs a larger build) vs REJ_CORRUPT (malformed/truncated/wrong-image). Prefer this
+/* After PATCH_APPLY_ERROR, the reject reason: REJ_RESOURCE (the configured partition or a decoder
+ * resource/wire cap was exceeded) vs REJ_CORRUPT (malformed/truncated/wrong-image). Prefer this
  * accessor over reading g_reject directly; it is unused-static-inline and compiles out when the
  * integrator does not call it (no ARM .text cost). */
 static inline int patch_apply_reject(const PatchApply *pa){ return pa->g_reject; }
 
 /* After PATCH_APPLY_ERROR, whether any flash_write_page happened this run: 0 = old image intact
- * (still bootable, safe to retry after fixing the cause), 1 = image partially overwritten
- * (bootloader recovery required). Same unused-static-inline compile-out as patch_apply_reject. */
+ * (still bootable, safe to retry after fixing the cause), 1 = image may be partially overwritten
+ * or fully written but unverified (bootloader recovery required). Same unused-static-inline
+ * compile-out as patch_apply_reject. */
 static inline int patch_apply_flash_touched(const PatchApply *pa){ return pa->g_flash_touched; }
 
 /* Parsed patch geometry/state after a completed run. These keep host harnesses and

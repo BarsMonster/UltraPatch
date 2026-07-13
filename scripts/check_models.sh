@@ -261,7 +261,7 @@ static int check_reloc_helpers(void){
     return 0;
 }
 
-/* The flat arena is stored in decoder apply order. FWD fitting consumes it directly; grow
+/* The flat arena is stored in decoder apply order. FWD fitting consumes it directly; reverse
  * fitting globally reverses it, reproducing the old reversal of both op rows and fields/row. */
 static int check_field_inj_order(void){
     FieldInj fwd_v[] = {

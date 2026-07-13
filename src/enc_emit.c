@@ -2,7 +2,8 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Host encoder module -- body assembly / range-coder emit: op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
+ * Host encoder module -- shift-map fitting, body assembly, and range-coder emission:
+ * op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -55,8 +56,8 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
 /* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
  * uLEB-gap+byte + extras) AND record the field-injection cursors in the same pass, so the
  * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
- * mirror of the decoder apply_op window skeleton. FWD/descending asymmetry is preserved exactly:
- * grow writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
+ * mirror of the decoder apply_op window skeleton. FWD/reverse asymmetry is preserved exactly:
+ * reverse writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
  * cc is a READ-AHEAD cursor: like the decoder up_LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
@@ -72,7 +73,7 @@ static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
     buf_write(content, tmp.d, tmp.n);
     for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
     int32_t exstart = tp0 + o->diff_len;
-    if (!FWD)   /* grow: extras precede the dl body, byte-reversed in the content stream */
+    if (!FWD)   /* reverse: extras precede the dl body, byte-reversed in the content stream */
         for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
     EncLitCursor lc = { payload, &lits, &tmp, content, tags, (uint32_t)content->n,
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
@@ -252,11 +253,11 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
           } }
     }
     /* now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj, inits dval/dibl/diex/
-     * pg/pgn/pg2/gel), mirroring rc_init_prekd() in decode_body before its token loop. */
+     * pg/pgn/pg2/gel) through the same shared rc_init_prekd() the decoder calls. */
     rc_init_prekd(&M.pre);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
-     * op loop bounds it (Feature 7, part A). */
+     * op loop bounds it. */
     put_raw_bits(&rc, (uint32_t)kd, RC_KFIELD_BITS);
     if (out_en) put_raw_bits(&rc, (uint32_t)ko, RC_KFIELD_BITS);
     /* true previous content-stream byte (order-1 tag0 context): updated on EVERY content byte --

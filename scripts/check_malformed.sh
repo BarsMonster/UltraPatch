@@ -35,7 +35,7 @@ controlled_decoder_rejection() {
   err=$2
   [ "$status" -eq 1 ] || return 1
   [ "$(wc -l < "$err")" -eq 1 ] || return 1
-  grep -Eq '^(blob too short|decode error - rejected \(reason=[12]: (corrupt/truncated patch|resource cap exceeded - firmware larger than build sizing)\)|decode error - trailing bytes after counted patch body|decode error - patch from_size=[0-9]+ does not match current image size=[0-9]+)$' "$err"
+  grep -Eq '^(blob too short|decode error - rejected \(reason=[12]: (corrupt/truncated patch|configured partition or decoder resource/wire cap exceeded)\)|decode error - trailing bytes after counted patch body|decode error - patch from_size=[0-9]+ does not match current image size=[0-9]+)$' "$err"
 }
 
 expect_reject_unchanged() {

@@ -519,15 +519,15 @@ check-arm-measure-internal: $(DECODER_PUBLIC_HDRS) $(ARM_LINK_STUBS) $(ARM_LINK_
 	echo "arm_linked_runtime_helpers=$$helpers"; \
 	echo "arm_decoder_build=OK (public header set; object + linked)"
 
-# Worst-case caller-stack bounds for both supported wrapper shapes. Since the fiber was deleted
-# (44eee88), the whole decode runs on the CALLER's stack; docs/device-integration.md pins the
-# shape-specific budgets an integrator must reserve. Builds both harnesses with -fstack-usage
+# Worst-case caller-stack bounds for both supported wrapper shapes. The synchronous decoder runs
+# wholly on the CALLER's stack; docs/device-integration.md pins the shape-specific budgets an
+# integrator must reserve. Builds both harnesses with -fstack-usage
 # (gcc -O2, the pessimistic level — deeper than -Os here) and runs scripts/stack_bound.py, which
 # sums the per-function .su frames (each already includes its own pushed LR/regs) along the
 # deepest path of each object's static call graph. It fails loudly on recursion, an indirect call
 # that could reach internal code, or a dynamic/VLA frame — any of which would invalidate the
 # static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write_page/byte-callback)
-# and toolchain leaves (memmove/memset/__aeabi_uidiv); each ceiling's headroom absorbs those +
+# and bounded toolchain leaves (such as memmove/memset); each ceiling's headroom absorbs those +
 # interrupt-frame slack. Same cross-gcc as check-arm.
 check-stack-internal: check-release-profile-internal $(DECODER_PUBLIC_HDRS) \
                       $(DECODER_INTEGRATION_TU)
@@ -644,8 +644,9 @@ check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSE
 	  DECODER_PUBLIC_HDRS="$(DECODER_PUBLIC_HDRS)" FIXTURES="$(FIXTURES)" \
 	  DECODER_API_REGULAR=0 DECODER_API_SANITIZE=1 scripts/check_decoder_api.sh
 
-# Host-encoder algorithm probes under dynamic sanitizers. Standalone so the instrumented
-# builds do not contend with the CPU-saturated corpus workers in `make gate`.
+# ASan/UBSan form of the same field/LZ/suffix-LCP behavioral probes used by check-degrade.
+# Standalone so the instrumented builds do not contend with the CPU-saturated corpus workers
+# in `make gate`.
 check-encoder-sanitize-internal: scripts/check_encoder_kernels.sh
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" \
 	  scripts/check_encoder_kernels.sh sanitize
@@ -657,12 +658,11 @@ check-assets-internal: $(CORPUS_ASSET_PREREQ)
 	@python3 scripts/corpus_topology.py verify --inventory "$(CORPUS_INVENTORY)" \
 	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)"
 
-# qemu-based decode validation REMOVED - permanent decision (owner, 2026-07-03): too slow
-# for its marginal value (the 260-pair matrix re-encoded every corpus pair just to apply it
-# under emulation; ~45 CPU-min per run). Host-vs-ARM divergence is systematic when it exists,
-# not pair-specific; the ARM cross-build + size/divide gate (check-arm) still compiles the
-# real Thumb-1 decoder every cycle, and a one-time 260-pair qemu study (db6d693) found ZERO
-# divergence. Do not reintroduce qemu legs into the gate.
+# qemu-based decode validation was removed as too slow for its marginal value: the historical
+# 256-pair home matrix plus four fixtures re-encoded every case just to apply it under emulation.
+# Host-vs-ARM divergence is systematic when it exists, not pair-specific; check-arm still compiles
+# the real Thumb-1 decoder every cycle, and that one-time 260-case study found zero divergence.
+# Do not reintroduce qemu legs into the gate.
 
 check-malformed-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" scripts/check_malformed.sh
@@ -670,16 +670,16 @@ check-malformed-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@CC="$(CC)" CFLAGS="$(CFLAGS)" scripts/check_elf_ranges.sh
 
 # Synthetic edge inputs the firmware corpus never exercises (empty/tiny/equal/random/text/
-# page-boundary/>384KiB-span pairs). ultrapatch self-verifies every encoded blob, so each case must
-# either round-trip byte-exactly through BOTH host decoders or refuse cleanly.
+# page-boundary/>384KiB-span pairs). ultrapatch self-verifies every emitted blob, then each accepted
+# case must also round-trip byte-exactly through CLI decode; otherwise it must refuse cleanly.
 check-edge-internal: ultrapatch
 	@scripts/check_edge.sh
 
-# Degradation / direction / row-window / big-span gate: synthetic pairs that FORCE each encoder
-# path the golden set and home corpus never exercise (journal-budget degradation, OPC_CAP
-# op-split, unnatural apply direction, row-window-oracle reliance, big-span journal), asserting
-# the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
-# to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
+# The shared field/LZ/suffix-LCP behavioral suite runs first; its field probe owns the split-
+# transition budget contract. Synthetic pairs then FORCE encoder paths the golden set and home
+# corpus never exercise (journal degradation, OPC_CAP splitting, unnatural direction, row-window
+# reliance, and big-span journal), asserting the path was taken rather than merely round-tripping.
+# A D=1 decoder variant proves the monotone larger-window compatibility contract.
 check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/check_encoder_kernels.sh
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" \
 	  scripts/check_encoder_kernels.sh
@@ -769,12 +769,11 @@ check-corpus-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
 	./check_corpus.sh $(JOBS)
 
-# THE gate — one target, everything, hard budget <= 80 s wall on the reference machine
-# (measured 35.1 s warm at 32 cores with resource-pressure direction fallback).
+# THE gate — one target, everything, with a hard <=80 s wall budget.
 # Builds up-front, then runs
 # every leg CONCURRENTLY:
-# check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
-# check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
+# check-release-inventory, check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_*
+# size gates), check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
 # check-models, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
 # matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, home per-pair better/worse/equal
@@ -802,9 +801,9 @@ gate-internal:
 	  BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
 	  JOBS="$(JOBS)" scripts/run_gate.sh
 
-# Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
-# with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
-# fragile + ~16 s), NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
+# Static-analysis leg: gcc -fanalyzer over the encoder entrypoint/modules and decoder backend in
+# library/demo shapes, with a curated flag set; clean baseline (exits nonzero on any NEW finding).
+# STANDALONE and version-fragile, NOT in `make gate`; auto-skips where gcc -fanalyzer is unavailable.
 check-analyze-internal:
 	@CC="$(CC)" CONTRACT_FLAGS="$(CONTRACT_FLAGS)" \
 	  DECODER_CONFIG_FLAGS="$(DECODER_CONFIG_FLAGS)" ENC_MODULES="$(ENC_MODULE_SRCS)" scripts/check_analyze.sh

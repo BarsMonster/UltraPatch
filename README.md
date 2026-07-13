@@ -1,4 +1,4 @@
-# Ultrapatcher
+# UltraPatch
 
 UltraPatch creates and applies compact in-place firmware patches for the Sensor
 Watch target. It ships two artifacts:

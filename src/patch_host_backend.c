@@ -94,7 +94,7 @@ int decode_patch(const char *image_path, const char *patch_path){
         int reject = patch_apply_reject(&ha.pa);
         if(!reject) reject = REJ_CORRUPT;
         fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", reject,
-                reject==REJ_RESOURCE?"resource cap exceeded - firmware larger than build sizing":"corrupt/truncated patch");
+                reject==REJ_RESOURCE?"configured partition or decoder resource/wire cap exceeded":"corrupt/truncated patch");
         rc = 1; goto out;
     }
     if(ha.consumed != blob.n){

@@ -16,9 +16,10 @@ decodes concurrently against one flash image.
 constants, including the unsigned 8-bit `PATCH_WIRE_VERSION`. Its nonzero value
 domain-separates incompatible revisions at the pre-write source CRC check.
 Production builds must not override these constants. `PATCH_IMAGE_BASE` and
-`PATCH_IMAGE_CAPACITY` are the decoder-only deployment exceptions. The header
-set targets the Cortex-M0/ARMv6-M wire; Cortex-M4/Thumb-2 is unsupported and
-rejected.
+`PATCH_IMAGE_CAPACITY` are the decoder-only deployment exceptions. The installed
+wire mode targets Cortex-M0/ARMv6-M. `CORTEX_M4` is a reserved wire-selection
+macro and defining it is rejected; compiling the same C for another CPU does not
+select a different wire.
 
 ## Partition and flash contract
 
@@ -83,8 +84,8 @@ the byte callback.
 CRC32 detects accidental corruption; it does not authenticate an update.
 Authenticate the complete manifest and blob, and enforce target and anti-rollback
 policy, before calling the decoder. The old-image CRC is checked before the
-first write. The final-image CRC is necessarily checked after flash has been
-changed.
+first write. The final-image CRC is necessarily checked after apply, when flash
+may already have been changed.
 
 ## Memory budget
 
@@ -92,11 +93,15 @@ The repository release gate limits the static-wrapper `.bss` to 12,288 bytes
 and each tested first-party decoder call graph to 480 bytes of stack. Current
 measurements are reported by `make gate`, not frozen in this document.
 
-The stack limit excludes the `PatchApply` object and integration functions.
-Place the state object in reserved static/noinit storage if necessary, then add
-the flash functions, callback, library leaves, interrupt nesting, and RTOS
-frames to the product budget. A different wrapper or toolchain must be measured
-in the final firmware build.
+Flash remains the image backing store. `PatchApply` stages at most
+`OUTROW_DEPTH` dirty output pages in RAM and never holds a full-image buffer.
+
+The stack limit includes the repository integration wrapper but excludes
+`PatchApply` storage, the integrator's flash functions and pull callback, and
+bounded toolchain leaves. Place the state object in reserved static/noinit
+storage if necessary, then add those external frames, interrupt nesting, and
+RTOS frames to the product budget. A different wrapper or toolchain must be
+measured in the final firmware build.
 
 ## Failure and recovery
 
@@ -105,7 +110,7 @@ safe:
 
 | Terminal state | Flash state | Required action |
 | --- | --- | --- |
-| `PATCH_APPLY_DONE` | New image written and both CRCs verified | Boot the new image |
+| `PATCH_APPLY_DONE` | Target image present and both CRCs verified | Boot the new image |
 | Error, flash untouched | Original image intact | Correct the cause; a later apply may start from the original image |
 | Error, flash touched | Original image destroyed or result unverified | Full external reflash |
 
