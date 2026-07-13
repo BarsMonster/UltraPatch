@@ -77,8 +77,8 @@ CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 6249
-override BASE_FOOTPRINT_STATE := 9356
+override BASE_FOOTPRINT_FLASH := 6129
+override BASE_FOOTPRINT_STATE := 8460
 override BASE_FOOTPRINT_STACK := 480
 
 GATE_TIMEOUT ?= 80
