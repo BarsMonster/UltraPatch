@@ -6,13 +6,8 @@ set -u
 
 MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
-: "${CORPUS_ASSET_STAMP:?run_gate.sh: CORPUS_ASSET_STAMP not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
-[ -r "$CORPUS_ASSET_STAMP" ] || {
-  echo "run_gate.sh: generated corpus is not ready: $CORPUS_ASSET_STAMP" >&2
-  exit 1
-}
 . "$(dirname "$0")/tempdir.sh"
 rc=0
 
@@ -38,16 +33,16 @@ for spec in $LEGS; do
   # gate-internal published this exact profile-specific tool before forking. `-o` prevents a
   # concurrent leg from rebuilding it after an input mtime changes during the gate.
   if [ "$target" = check-corpus-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
-    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
+    "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-ab-matrix-internal ]; then
-    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
+    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
   else
-    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
+    nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       "$target" >"$tmp/$file" 2>&1 &
   fi
   pids="$pids $!"

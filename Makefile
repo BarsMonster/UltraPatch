@@ -190,7 +190,6 @@ ENC_SEAM_SRCS := $(filter-out src/enc_plan.c,$(ENC_MODULE_SRCS)) $(HOST_BACKEND_
 DEC_STANDALONE_SRCS := $(HOST_BACKEND_SRC) src/enc_util.c
 DEC_DEMO_DEFINES := -DPATCH_APPLY_DEMO_MAIN -D_POSIX_C_SOURCE=200809L
 override CORPUS_BUILD_DIR := $(abspath $(BUILD_DIR))/corpus
-override CORPUS_ASSET_STAMP := $(CORPUS_BUILD_DIR)/.ready
 override CORPUS_SOURCE_ELFS := $(wildcard test-bench/fixtures/*/watch.elf) \
                                $(wildcard test-bench/images/*/watch.elf)
 override CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
@@ -202,7 +201,8 @@ WIRE_BASELINE ?= test-bench/wire-baseline.tsv
 ENCODER_KERNEL_BASELINE := test-bench/encoder-kernel-baseline.tsv
 # An empty inventory is the documented custom-measurement mode; callers then provide their own
 # image/fixture roots and do not need the canonical profile-local corpus view.
-CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),$(CORPUS_ASSET_STAMP))
+CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),\
+                         $(if $(filter 1,$(UP_CORPUS_ASSETS_PREPARED)),,corpus-assets-internal))
 
 # Release scope pins. The inventory names every member in order; these cardinalities make a
 # deletion or reduced release set an explicit policy change rather than a self-consistent shrink.
@@ -380,7 +380,7 @@ override RELEASE_GATE_FIXED_VARS := \
 override RELEASE_GATE_UNSET_VARS := \
 	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP ENCODER_KERNEL_BASELINE_DUMP \
 	DECODER_API_REGULAR DECODER_API_SANITIZE DECODER_INTEGRATION_PROBE_FLAGS \
-	ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES
+	ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES UP_CORPUS_ASSETS_PREPARED
 
 # A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
 # substituted shell/make commands can false-success. For public authority goals, reject all
@@ -432,15 +432,11 @@ check-release-inventory-internal: scripts/check_release_inventory.py scripts/cor
 	  --golden-blobs "$(BASE_RELEASE_GOLDEN_BLOBS)"
 
 .PHONY: corpus-assets-internal
-corpus-assets-internal: $(CORPUS_ASSET_STAMP)
-
-$(CORPUS_ASSET_STAMP): scripts/corpus_topology.py $(CORPUS_INVENTORY) \
-                       $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS) | profile-check
+corpus-assets-internal: scripts/corpus_topology.py $(CORPUS_INVENTORY) \
+                        $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS) | profile-check
 	@python3 scripts/corpus_topology.py materialize --inventory "$(CORPUS_INVENTORY)" \
 	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)" \
 	  --objcopy "$(ARM_OBJCOPY)"
-	@set -e; tmp="$@.$$$$.tmp"; trap 'rm -f "$$tmp"' EXIT; \
-	  printf '%s\n' 'corpus_assets=ready' >"$$tmp"; mv -f "$$tmp" "$@"; trap - EXIT
 
 $(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
                                      $(PROFILE_MANIFEST) | profile-check
@@ -681,7 +677,7 @@ check-encoder-sanitize-internal:
 check-models-internal: $(DECODER_PUBLIC_HDRS)
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh
 
-check-assets-internal: $(CORPUS_ASSET_STAMP)
+check-assets-internal: $(CORPUS_ASSET_PREREQ)
 	@python3 scripts/corpus_topology.py verify --inventory "$(CORPUS_INVENTORY)" \
 	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)"
 
@@ -819,21 +815,21 @@ check-corpus-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology
 # metric is visible. The profile-specific host tool is published atomically BEFORE the legs fork;
 # run_gate.sh invokes each forked leg with make's `-o` (assume-old), so no leg rebuilds it if a
 # source mtime changes at sub-make startup. Same-profile concurrent top-level builds may both
-# publish equivalent bytes.
+# publish equivalent bytes. The parent materializes and verifies the profile-scoped corpus once;
+# UP_CORPUS_ASSETS_PREPARED keeps the forked internal legs from repeating that idempotent work.
 gate-internal:
 	@$(MAKE) --no-print-directory release-gate-inputs-internal
 	@$(MAKE) --no-print-directory all-internal
 	@$(MAKE) --no-print-directory corpus-assets-internal
 	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
-	MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" \
-	CORPUS_ASSET_STAMP="$(CORPUS_ASSET_STAMP)" \
-	RELEASE_PROFILE="$$release_profile" \
-	BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
-	BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
-	BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
-	BASE_STACK_STATIC_CEIL_O2="$(BASE_STACK_STATIC_CEIL_O2)" \
-	BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
-	JOBS="$(JOBS)" scripts/run_gate.sh
+	  MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" \
+	  RELEASE_PROFILE="$$release_profile" \
+	  BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
+	  BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
+	  BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
+	  BASE_STACK_STATIC_CEIL_O2="$(BASE_STACK_STATIC_CEIL_O2)" \
+	  BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
+	  JOBS="$(JOBS)" scripts/run_gate.sh
 
 # Static-analysis leg: gcc -fanalyzer over first-party TUs (encoder modules + decoder + arm + selfcheck)
 # with a curated flag set; clean baseline (exits nonzero on any NEW finding). STANDALONE (version-
