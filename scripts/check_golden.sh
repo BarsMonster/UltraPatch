@@ -7,11 +7,11 @@
 #
 # On an INTENDED wire change, regenerate the manifest in the same commit:  make golden-update
 #
-# Usage: make check-golden (direct runs must set ULTRAPATCH and profile-scoped FIXTURES)
+# Usage: make check-golden (direct runs must set ULTRAPATCH and build-local FIXTURES)
 set -eu
 
 : "${ULTRAPATCH:?check_golden.sh: ULTRAPATCH not set; invoke through make check-golden}"
-: "${FIXTURES:?check_golden.sh: FIXTURES not set to the profile-scoped corpus}"
+: "${FIXTURES:?check_golden.sh: FIXTURES not set to the build-local corpus}"
 [ -x "$ULTRAPATCH" ] || {
   echo "check_golden.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
   exit 2

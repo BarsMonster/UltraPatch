@@ -6,7 +6,6 @@ set -u
 
 MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
-: "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
 : "${BASE_ARM_HAND_ROLLED_LINKED_TEXT:?run_gate.sh: hand-rolled ARM ratchet not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
 . "$(dirname "$0")/tempdir.sh"
@@ -29,7 +28,7 @@ LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory che
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
-  # gate-internal published this exact profile-specific tool before forking. `-o` prevents a
+  # gate-internal published this exact host tool before forking. `-o` prevents a
   # concurrent leg from rebuilding it after an input mtime changes during the gate.
   if [ "$target" = check-corpus-internal ]; then
     "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
@@ -88,7 +87,6 @@ kvs() {
 }
 
 echo "================ ULTRAPATCH GATE ====================="
-printf 'release_profile        : %s\n' "${RELEASE_PROFILE#release_profile=}"
 kvs 'inventory.txt|release_inventory|release inventory        : '
 kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_assets|foreign assets         : ' 'malformed.txt|malformed_rejects|malformed rejects      : '
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"

@@ -26,8 +26,10 @@ tool=$(make -s host-tool-path)
 
 The encoder accepts image files, not directories. If a same-basename `.elf`
 sidecar is present beside an image, the encoder uses it for range extraction.
-Build outputs are profile-scoped under `.build/`; always use
-`make host-tool-path` instead of assuming a root-level `./ultrapatch`.
+The default host executable is `.build/ultrapatch`; always use
+`make host-tool-path` to obtain its exact path instead of assuming a root-level
+`./ultrapatch`. Set `BUILD_DIR` to a private directory when parallel builds or
+measurements need isolation.
 
 See [install.md](install.md) for packages and common commands.
 
@@ -60,7 +62,6 @@ update latency with the intended compiler and firmware.
 ## Verification and release
 
 ```sh
-make check-build-profile
 make gate
 make check-decoder-sanitize
 make check-encoder-sanitize

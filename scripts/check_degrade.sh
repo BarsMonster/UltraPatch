@@ -43,7 +43,7 @@
 set -u
 
 CC_HOST="${CC:-cc}"
-: "${IMAGES:?check_degrade.sh: IMAGES not set to the profile-scoped corpus}"
+: "${IMAGES:?check_degrade.sh: IMAGES not set to the build-local corpus}"
 IMG="$IMAGES"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"

@@ -13,48 +13,36 @@ flash-driver validation remain integration responsibilities.
   `test-bench/corpus-inventory.tsv`.
 - Keep home per-pair sizes, golden-blob sizes, and frozen hashes for every corpus
   and golden wire in `test-bench/wire-baseline.tsv`.
-- Install the packages in [install.md](../install.md), and use the toolchain,
-  archive, flag, environment, and CI-container identities recorded in
-  `toolchains/release-profile.json`.
-
-An intentional toolchain, archive, or flag change requires a reviewed profile
-refresh and the full release evidence:
-
-```sh
-/usr/bin/make release-profile-json
-/usr/bin/make release-profile-update
-git diff -- toolchains/release-profile.json
-make check-release-profile
-```
-
-Changing the container digest is a separate deliberate edit. Mirror it in
-`.github/workflows/gate.yml` before running the full evidence suite.
+- Install the packages in [install.md](../install.md). The project does not pin
+  exact compiler, binutils, system-library, or archive identities; the behavior,
+  wire, compression, ARM-size, and stack ratchets are the release criteria.
+- Treat a CI container-digest change as a deliberate, reviewed workflow edit and
+  run the full evidence suite afterward.
 
 ## Verification
 
 From the clean release checkout, run and retain the complete output:
 
 ```sh
-make check-build-profile
 make gate
 make check-decoder-sanitize
 make check-encoder-sanitize
 make check-clang
 ```
 
-This sequence verifies build-profile isolation, the complete release gate,
-sanitizers, and the required Clang leg. Do
-not release unless every command succeeds and `make gate` reports
+This sequence verifies the complete release gate, sanitizers, and the required
+Clang leg. Do not release unless every command succeeds and `make gate` reports
 `ALL GATES PASS`.
 
-Review the complete output, including the validated release profile, home and
-foreign round trips and totals, the real one-face grow and revert patch sizes,
-ARM memory and stack results, and NVM write-safety results. Do not ship a build
-that needs deployment-only flags or relaxed baselines.
+Review the complete output, including home and foreign round trips and totals,
+the real one-face grow and revert patch sizes, ARM memory and stack results, and
+NVM write-safety results. Do not ship a build that needs deployment-only flags
+or relaxed baselines.
 
 The authoritative release result is the successful push workflow for the exact
-release commit, inside the container digest pinned by the workflow and release
-profile.
+release commit, inside the base container digest pinned by the workflow. Package
+installation is intentionally not an exact toolchain-identity contract; any
+resulting output change must still pass the release ratchets.
 
 ## Intentional baseline changes
 
@@ -79,10 +67,9 @@ host artifact is the `ultrapatch` path printed by `make -s host-tool-path`.
 Release notes must include:
 
 - the Git commit SHA and authoritative push-CI URL/status;
-- SHA-256 hashes of `test-bench/corpus-inventory.tsv`,
-  `test-bench/wire-baseline.tsv`, and `toolchains/release-profile.json`;
-- the complete gate output, including `release_profile` and the real one-face
-  grow/revert metrics;
+- SHA-256 hashes of `test-bench/corpus-inventory.tsv` and
+  `test-bench/wire-baseline.tsv`;
+- the complete gate output, including the real one-face grow/revert metrics;
 - the project and vendored-dependency license statement.
 
 Include [the device integration contract](device-integration.md) in the handoff.

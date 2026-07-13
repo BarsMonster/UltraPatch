@@ -21,24 +21,23 @@ Build and verify from the repository root:
 ```sh
 make
 make check
-make check-build-profile
 make gate
 ```
 
-Host outputs are profile-scoped under `.build/`. Obtain the executable selected
-by the current Make arguments with:
+The default host executable is `.build/ultrapatch`. Obtain the exact executable
+selected by the current Make arguments with:
 
 ```sh
 make -s host-tool-path
 ```
 
-Do not assume a root-level `./ultrapatch` or guess a profile directory.
+Do not assume a root-level `./ultrapatch`. For parallel compiler or measurement
+runs, pass a distinct `BUILD_DIR` to every command in each run.
 
 For a release, run the full sequence below from a clean `main` checkout and follow
 [the release checklist](docs/release-checklist.md):
 
 ```sh
-make check-build-profile
 make gate
 make check-decoder-sanitize
 make check-encoder-sanitize

@@ -2,48 +2,22 @@
 # Author: Mikhail Svarichevsky <mikhail@zeptobars.com>
 # SPDX-License-Identifier: MIT
 
-# Release certification and canonical input publishers are authorities, not configurable builds.
-# Establish their executable search path before BUILD_PROFILE_ID invokes Python during Makefile
-# parsing, and reject launch controls before any recipe can be skipped or ignored.
-override CANONICAL_AUTHORITY_GOAL := $(firstword $(filter gate golden-update \
-	release-profile-json release-profile-update,$(MAKECMDGOALS)))
-ifneq ($(CANONICAL_AUTHORITY_GOAL),)
+override SHELL := /bin/sh
+
+# These two public targets re-exec their implementation under a clean environment. Reject Make
+# modes that could skip that recipe or ignore its result; ordinary build flags remain configurable.
+override CANONICAL_GOAL := $(firstword $(filter gate golden-update,$(MAKECMDGOALS)))
+override CANONICAL_SHORT_FLAGS := $(firstword $(filter-out --%,$(MAKEFLAGS)))
+ifneq ($(CANONICAL_GOAL),)
 override PATH := /usr/bin:/bin
 export PATH
-# Appending below would otherwise retain ambient CFLAGS/LDFLAGS while changing their reported
-# origin to `file`, defeating the later fixed-origin check.
-ifneq ($(filter environment environment\ override command\ line,$(origin CFLAGS)),)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: CFLAGS (origin $(origin CFLAGS)))
-endif
-ifneq ($(filter environment environment\ override command\ line,$(origin LDFLAGS)),)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: LDFLAGS (origin $(origin LDFLAGS)))
-endif
-ifneq ($(filter default undefined,$(origin GNUMAKEFLAGS)),$(origin GNUMAKEFLAGS))
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: GNUMAKEFLAGS (origin $(origin GNUMAKEFLAGS)))
-endif
-ifneq ($(filter default undefined,$(origin MAKEFILES)),$(origin MAKEFILES))
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKEFILES (origin $(origin MAKEFILES)))
-endif
-ifneq ($(origin MAKE),default)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKE (origin $(origin MAKE)))
-endif
-ifneq ($(filter default file,$(origin SHELL)),$(origin SHELL))
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: SHELL (origin $(origin SHELL)))
-endif
-ifneq ($(SHELL),/bin/sh)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: SHELL ($(SHELL)))
-endif
-ifneq ($(origin .SHELLFLAGS),default)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: .SHELLFLAGS (origin $(origin .SHELLFLAGS)))
-endif
-ifneq ($(strip $(filter-out --no-print-directory,$(MAKEFLAGS))),)
-$(error $(CANONICAL_AUTHORITY_GOAL) rejects launch control: MAKEFLAGS ($(MAKEFLAGS)))
+ifneq ($(strip $(foreach f,n t i,$(if $(findstring $(f),$(CANONICAL_SHORT_FLAGS)),$(f)))),)
+$(error $(CANONICAL_GOAL) rejects Make launch mode: $(CANONICAL_SHORT_FLAGS))
 endif
 endif
 
 CC = $(CROSS_COMPILE)gcc
 CLANG ?= clang
-NM ?= nm
 ARM_PREFIX ?= arm-none-eabi-
 ARM_CC ?= $(ARM_PREFIX)gcc
 ARM_SIZE ?= $(ARM_PREFIX)size
@@ -53,14 +27,6 @@ ARM_NM ?= $(ARM_PREFIX)nm
 ARM_OBJECT_OPT ?= -Os
 ARM_STACK_OPT ?= -O2
 
-# Release builds and profile probes never inherit compiler search/injection state. The direct
-# release driver starts from an even smaller environment; keeping the Make boundary clean also
-# makes direct development-gate invocations representative of the recorded profile.
-TOOLCHAIN_ENV_UNSET := COMPILER_PATH CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH \
-	DEPENDENCIES_OUTPUT GCC_COMPARE_DEBUG GCC_EXEC_PREFIX GCC_SPECS \
-	LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH OBJC_INCLUDE_PATH SOURCE_DATE_EPOCH \
-	SUNPRO_DEPENDENCIES ZERO_AR_DATE
-unexport $(TOOLCHAIN_ENV_UNSET)
 export LANG := C
 export LANGUAGE := C
 export LC_ALL := C
@@ -90,89 +56,17 @@ DECODER_CFLAGS = $(CFLAGS) $(DECODER_CONFIG_FLAGS)
 LDFLAGS += -Wl,--gc-sections
 HOST_BACKEND_DEFINES := -D_POSIX_C_SOURCE=200809L
 
-# Host-tool build roles and link order are part of the profile identity. A recipe semantic change,
-# source-list edit, or object reorder therefore selects a fresh profile directory instead of
-# invalidating unrelated artifacts through a second signature file inside an existing profile.
+# Host-tool source order is fixed so every one-shot build uses the same simple command.
 DIVSUF := vendor/libdivsufsort/divsufsort.c
 ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 HOST_BACKEND_SRC := src/patch_host_backend.c
-TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(HOST_BACKEND_SRC) $(DIVSUF)
-HOST_BUILD_RECIPE_TAG ?= per-tu-v1
-override HOST_ENCODER_SRCS := $(filter-out $(HOST_BACKEND_SRC),$(TOOL_SRCS))
-override HOST_BACKEND_SRCS := $(HOST_BACKEND_SRC)
-override HOST_LINK_OBJECTS := $(addprefix obj/,$(HOST_ENCODER_SRCS:.c=.o) \
-                                                   $(HOST_BACKEND_SRCS:.c=.o))
-
-# Host builds and derived corpus binaries are isolated by compiler/objcopy identity and every
-# effective build flag. The profile helper emits canonical JSON without workspace paths; its
-# SHA-256 is both the build-directory
-# key and the provenance identity. Tests receive the exact binary through ULTRAPATCH, so a GCC,
-# Clang, or alternate-config invocation never executes whichever shared root binary linked last.
-override UP_PROFILE_CC := $(CC)
-override UP_PROFILE_CLANG := $(CLANG)
-override UP_PROFILE_NM := $(NM)
-override UP_PROFILE_ENV_UNSET := $(TOOLCHAIN_ENV_UNSET)
-override UP_PROFILE_ENCODER_CFLAGS := $(CFLAGS)
-override UP_PROFILE_BACKEND_CFLAGS := $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES)
-override UP_PROFILE_LINK_CFLAGS := $(CFLAGS)
-override UP_PROFILE_LDFLAGS := $(LDFLAGS)
-override UP_PROFILE_DECODER_FLAGS := $(DECODER_CONFIG_FLAGS)
-override UP_PROFILE_RECIPE_REVISION := $(HOST_BUILD_RECIPE_TAG)
-override UP_PROFILE_ENCODER_SOURCES := $(HOST_ENCODER_SRCS)
-override UP_PROFILE_BACKEND_SOURCES := $(HOST_BACKEND_SRCS)
-override UP_PROFILE_LINK_OBJECTS := $(HOST_LINK_OBJECTS)
-override UP_PROFILE_ARM_CC := $(ARM_CC)
-override UP_PROFILE_ARM_SIZE := $(ARM_SIZE)
-override UP_PROFILE_ARM_OBJDUMP := $(ARM_OBJDUMP)
-override UP_PROFILE_ARM_OBJCOPY := $(ARM_OBJCOPY)
-override UP_PROFILE_ARM_NM := $(ARM_NM)
-override UP_PROFILE_ARM_SOURCE_FLAGS = $(ARM_DEC_FLAGS)
-override UP_PROFILE_ARM_LINK_FLAGS = $(ARM_LINK_FLAGS)
-override UP_PROFILE_ARM_LINK_LIBS = $(ARM_LINK_LIBS)
-override UP_PROFILE_ARM_OBJECT_OPT := $(ARM_OBJECT_OPT)
-override UP_PROFILE_ARM_STACK_OPT := $(ARM_STACK_OPT)
-export UP_PROFILE_CC UP_PROFILE_CLANG UP_PROFILE_NM UP_PROFILE_ENV_UNSET
-export UP_PROFILE_ENCODER_CFLAGS UP_PROFILE_BACKEND_CFLAGS
-export UP_PROFILE_LINK_CFLAGS UP_PROFILE_LDFLAGS
-export UP_PROFILE_DECODER_FLAGS
-export UP_PROFILE_RECIPE_REVISION UP_PROFILE_ENCODER_SOURCES
-export UP_PROFILE_BACKEND_SOURCES UP_PROFILE_LINK_OBJECTS
-export UP_PROFILE_ARM_CC UP_PROFILE_ARM_SIZE UP_PROFILE_ARM_OBJDUMP UP_PROFILE_ARM_OBJCOPY
-export UP_PROFILE_ARM_NM
-export UP_PROFILE_ARM_SOURCE_FLAGS
-export UP_PROFILE_ARM_LINK_FLAGS UP_PROFILE_ARM_LINK_LIBS
-export UP_PROFILE_ARM_OBJECT_OPT UP_PROFILE_ARM_STACK_OPT
-
-BUILD_ROOT ?= .build
-# These maintenance targets neither build nor execute the encoder. Avoid probing every host/ARM
-# tool merely to clean artifacts, inspect the release inventory, or run GCC's standalone analyzer.
-# A mixed invocation remains profile-dependent if any requested goal needs the host tool.
-override PROFILE_INDEPENDENT_GOALS := clean-all clean-all-internal \
-	check-analyze check-analyze-internal \
-	check-release-inventory check-release-inventory-internal
-override PROFILE_INDEPENDENT_INVOCATION := $(and \
-	$(filter default,$(origin MAKECMDGOALS)), \
-	$(strip $(MAKECMDGOALS)), \
-	$(if $(strip $(filter-out $(PROFILE_INDEPENDENT_GOALS),$(MAKECMDGOALS))),,1))
-ifeq ($(strip $(PROFILE_INDEPENDENT_INVOCATION)),1)
-override BUILD_PROFILE_ID := profile-not-required
-else
-override BUILD_PROFILE_ID := $(shell /usr/bin/python3 -I -S scripts/build_profile.py host-id)
-ifeq ($(strip $(BUILD_PROFILE_ID)),)
-$(error failed to derive the host build profile)
-endif
-endif
-BUILD_DIR ?= $(BUILD_ROOT)/$(BUILD_PROFILE_ID)
+TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(DIVSUF) $(HOST_BACKEND_SRC)
+BUILD_DIR ?= .build
 ifeq ($(abspath $(BUILD_DIR)),$(CURDIR))
 $(error BUILD_DIR must not be the repository root)
 endif
-override PROFILE_MANIFEST := $(BUILD_DIR)/profile.json
 override HOST_TOOL := $(abspath $(BUILD_DIR))/ultrapatch
-override HOST_OBJ_DIR := $(abspath $(BUILD_DIR))/obj
-override HOST_TOOL_OBJECTS := $(addprefix $(abspath $(BUILD_DIR))/,$(HOST_LINK_OBJECTS))
-override HOST_TOOL_DEPFILES := $(HOST_TOOL_OBJECTS:.o=.d)
-RELEASE_PROFILE_LOCK ?= toolchains/release-profile.json
 override ULTRAPATCH := $(HOST_TOOL)
 override ULTRAPATCH_DECODE := $(HOST_TOOL)
 export ULTRAPATCH ULTRAPATCH_DECODE
@@ -199,7 +93,7 @@ FOREIGN ?= test-bench/foreign
 CORPUS_INVENTORY ?= test-bench/corpus-inventory.tsv
 WIRE_BASELINE ?= test-bench/wire-baseline.tsv
 # An empty inventory is the documented custom-measurement mode; callers then provide their own
-# image/fixture roots and do not need the canonical profile-local corpus view.
+# image/fixture roots and do not need the canonical build-local corpus view.
 CORPUS_ASSET_PREREQ := $(if $(strip $(CORPUS_INVENTORY)),\
                          $(if $(filter 1,$(UP_CORPUS_ASSETS_PREPARED)),,corpus-assets-internal))
 
@@ -256,11 +150,10 @@ BASE_STACK_GENERIC_CEIL_O2 ?= 480
 # cap and rejects runtime input overrides; use the individual targets for experiments.
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
-WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
+override WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
 CAPPED := all check check-arm check-stack check-assets check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
-	      check-build-profile check-release-profile check-release-inventory \
-          check-models check-malformed check-corpus check-edge check-degrade check-golden \
-          golden-update check-analyze clean clean-all
+	          check-release-inventory check-models check-malformed check-corpus check-edge \
+	          check-degrade check-golden check-analyze clean clean-all
 .PHONY: $(CAPPED) $(addsuffix -internal,$(CAPPED)) gate gate-internal
 $(CAPPED): %:
 	@timeout $(GATE_TIMEOUT) $(MAKE) --no-print-directory $*-internal; s=$$?; \
@@ -268,118 +161,56 @@ $(CAPPED): %:
 	exit $$s
 
 gate:
-	@timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
-	  $(MAKE) --no-print-directory gate-internal; s=$$?; \
+	@mkdir -p .build; build_dir=$$(mktemp -d .build/gate.XXXXXX); \
+	trap 'rm -rf "$$build_dir"' EXIT; \
+	timeout $(RELEASE_GATE_TIMEOUT) flock --shared "$(WIRE_BASELINE_LOCK)" \
+	  /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LANGUAGE=C LC_ALL=C \
+	  /usr/bin/make --no-print-directory BUILD_DIR="$$build_dir" gate-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(RELEASE_GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
-.PHONY: release-profile-update release-profile-update-internal
-release-profile-update:
-	@/usr/bin/timeout $(GATE_TIMEOUT) /usr/bin/flock --exclusive "$(WIRE_BASELINE_LOCK)" \
-	  /usr/bin/make --no-print-directory release-profile-update-internal; s=$$?; \
+.PHONY: golden-update golden-update-internal
+golden-update:
+	@mkdir -p .build; build_dir=$$(mktemp -d .build/golden.XXXXXX); \
+	trap 'rm -rf "$$build_dir"' EXIT; \
+	/usr/bin/timeout $(GATE_TIMEOUT) \
+	  /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LANGUAGE=C LC_ALL=C \
+	  /usr/bin/make --no-print-directory BUILD_DIR="$$build_dir" golden-update-internal; s=$$?; \
 	if [ $$s -eq 124 ]; then echo "Execution timelimit $(GATE_TIMEOUT) exceeded" >&2; fi; \
 	exit $$s
 
 all-internal: ultrapatch
 	$(CC) $(DECODER_CFLAGS) -Wconversion $(DEC_DEMO_DEFINES) -c $(HOST_BACKEND_SRC) -o /dev/null
 
-.PHONY: host-tool-path release-profile-json profile-check ultrapatch
-host-tool-path:
+.PHONY: host-tool-path ultrapatch FORCE
+host-tool-path: $(HOST_TOOL)
 	@printf '%s\n' "$(HOST_TOOL)"
 
-release-profile-json:
-	@/usr/bin/python3 -I -S scripts/build_profile.py release-lock-json "$(RELEASE_PROFILE_LOCK)"
+ultrapatch: $(HOST_TOOL)
 
-release-profile-update-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK)
-	@$(canonical_authority_origin_check) && \
-	  /usr/bin/python3 -I -S scripts/build_profile.py refresh-release "$(RELEASE_PROFILE_LOCK)"
+FORCE:
 
-# Validate on every public use, including when an explicit BUILD_DIR points at a manifest created
-# by another compiler/config. Identical concurrent checks are safe because ensure-host publishes
-# the canonical manifest atomically.
-profile-check: scripts/build_profile.py
-	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
+# The host tool is small enough to rebuild from source on every request. A fresh atomic output
+# makes compiler/flag changes correct by construction, without a persistent profile cache.
+$(HOST_TOOL): FORCE $(TOOL_SRCS) $(GEN_HDR) $(NVM_EMU) Makefile
+	@mkdir -p "$(dir $@)"
+	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
+	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
+	$(CC) $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES) $(TOOL_SRCS) $(LDFLAGS) -o "$$tmp"; \
+	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
 
-ultrapatch: profile-check $(HOST_TOOL)
-
-$(PROFILE_MANIFEST): scripts/build_profile.py
-	@python3 scripts/build_profile.py ensure-host "$@" >/dev/null
-
-check-release-profile-internal: scripts/build_profile.py $(RELEASE_PROFILE_LOCK) \
-                                .github/workflows/gate.yml
-	@python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"
-	@container=$$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["container"])' \
-	  "$(RELEASE_PROFILE_LOCK)"); \
-	grep -Fqx "      image: $$container" .github/workflows/gate.yml || { \
-	  echo "release workflow container does not match $(RELEASE_PROFILE_LOCK)" >&2; exit 1; }
-
-check-build-profile-internal: scripts/check_build_profile.sh scripts/build_profile.py
-	@MAKE="$(MAKE)" CLANG="$(CLANG)" ARM_OBJCOPY="$(ARM_OBJCOPY)" \
-	  scripts/check_build_profile.sh
-
-# Required second-compiler leg. It remains outside `make gate`, but is a capped public target
-# and uses the exact CLANG command pinned in the release descriptor.
-check-clang-internal: check-release-profile-internal
-	@$(MAKE) --no-print-directory CC="$(CLANG)" -B all-internal
-	@$(MAKE) --no-print-directory CC="$(CLANG)" \
-	  check-internal check-malformed-internal check-clang-golden-internal
-	@echo "clang_contract=OK (descriptor-pinned build + checks + golden wire)"
+# Required second-compiler leg. It remains outside `make gate` and rebuilds the host tool with
+# the selected system Clang before running the same behavior and golden-wire checks.
+check-clang-internal:
+	@$(MAKE) --no-print-directory CC="$(CLANG)" all-internal check-internal \
+	  check-malformed-internal check-clang-golden-internal
+	@echo "clang_contract=OK (system Clang build + checks + golden wire)"
 
 .PHONY: check-clang-golden-internal
 check-clang-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@FIXTURES="$(FIXTURES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
-
-# `make gate` is a release certification, not a configurable measurement. These variables may
-# still be overridden on their individual measurement targets and A/B runs; the release gate and
-# canonical updater reject any runtime origin so they cannot accidentally certify/publish a
-# reduced corpus, relaxed ratchet,
-# substituted source/harness, alternate build directory, or disabled contract mode. Repository
-# edits remain the intentional, reviewable way to change a release input. The profile verifier
-# separately proves the exact compiler versions, flags, and multilib contents.
-override RELEASE_GATE_FIXED_VARS := \
-	FIXTURES IMAGES FOREIGN \
-	CORPUS_INVENTORY WIRE_BASELINE \
-	BASE_RELEASE_FIXTURES BASE_RELEASE_HOME_IMAGES BASE_RELEASE_FOREIGN_IMAGES \
-	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
-	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
-	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
-	BASE_ARM_LINKED_BSS BASE_ARM_HAND_ROLLED_LINKED_TEXT BASE_ARM_SOFT_DIV \
-	BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
-	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
-	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
-	DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
-	LDFLAGS ARM_COMMON_FLAGS ARM_DEC_FLAGS ARM_LINK_FLAGS ARM_LINK_LIBS \
-	DIVSUF CONFIG_HDR APPLY_HDR DECODER_PUBLIC_HDRS NVM_EMU ENC_MODULE_SRCS \
-	GEN_HDR HOST_BACKEND_SRC ENC_SEAM_SRCS DEC_STANDALONE_SRCS DEC_DEMO_DEFINES TOOL_SRCS \
-	HOST_BACKEND_DEFINES HOST_BUILD_RECIPE_TAG \
-	PORTABLE_FALLBACK_FLAGS TOOLCHAIN_ENV_UNSET \
-	ARM_LINK_STUBS ARM_LINK_LAYOUT DECODER_INTEGRATION_TU
-override RELEASE_GATE_UNSET_VARS := \
-	CROSS_COMPILE CFLAGS_EXTRA CORPUS_SIZE_BASELINE CORPUS_SIZE_DUMP WIRE_BASELINE_DUMP \
-	DECODER_API_REGULAR DECODER_API_SANITIZE DECODER_INTEGRATION_PROBE_FLAGS \
-	ONEFACE_ROUNDTRIP ONEFACE_WIRE_HASHES UP_CORPUS_ASSETS_PREPARED
-
-# A recipe-level rejection is insufficient: inherited -i can ignore it, while -n/-t and
-# substituted shell/make commands can false-success. For public authority goals, reject all
-# launch controls and release-input substitutions while Make is still parsing; $(error) cannot
-# be suppressed by ignore-errors mode. Keep one internal probe as defense for direct use of the
-# non-public recursive targets.
-.PHONY: canonical-authority-origin-probe-internal release-gate-inputs-internal
-define canonical_authority_origin_check
-set -eu; bad=0; \
-	$(foreach v,$(RELEASE_GATE_FIXED_VARS),if [ "$(origin $(v))" != file ]; then echo "canonical authority rejects runtime override: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
-	$(foreach v,$(RELEASE_GATE_UNSET_VARS),if [ "$(origin $(v))" != undefined ]; then echo "canonical authority requires unset mode: $(v) (origin $(origin $(v)))" >&2; bad=1; fi; ) \
-	test "$$bad" -eq 0
-endef
-
-canonical-authority-origin-probe-internal:
-	@$(canonical_authority_origin_check)
-
-release-gate-inputs-internal: scripts/build_profile.py
-	@$(canonical_authority_origin_check) && \
-	  python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null && \
-	  echo "release_gate_inputs=OK (canonical repository inputs + pinned release profile)"
 
 .PHONY: golden-update-inputs-internal golden-update-validate-canonical-internal
 golden-update-validate-canonical-internal:
@@ -388,11 +219,9 @@ golden-update-validate-canonical-internal:
 	@echo "golden_update_canonical_inputs=OK (inventory + corpus/foreign asset hashes)"
 
 golden-update-inputs-internal:
-	@$(canonical_authority_origin_check) && \
-	  python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)" >/dev/null && \
-	  flock --shared "$(WIRE_BASELINE_LOCK)" \
+	@flock --shared "$(WIRE_BASELINE_LOCK)" \
 	    $(MAKE) --no-print-directory golden-update-validate-canonical-internal >/dev/null && \
-	  echo "golden_update_inputs=OK (canonical repository inputs + pinned release profile)"
+	  echo "golden_update_inputs=OK (canonical inventory + corpus/foreign asset hashes)"
 
 check-release-inventory-internal: scripts/check_release_inventory.py scripts/corpus_topology.py \
                                   $(CORPUS_INVENTORY) \
@@ -411,45 +240,10 @@ check-release-inventory-internal: scripts/check_release_inventory.py scripts/cor
 
 .PHONY: corpus-assets-internal
 corpus-assets-internal: scripts/corpus_topology.py $(CORPUS_INVENTORY) \
-                        $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS) | profile-check
+	                        $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS)
 	@python3 scripts/corpus_topology.py materialize --inventory "$(CORPUS_INVENTORY)" \
 	  --source-root test-bench --output-root "$(CORPUS_BUILD_DIR)" \
 	  --objcopy "$(ARM_OBJCOPY)"
-
-$(HOST_OBJ_DIR)/src/patch_host_backend.o: $(HOST_BACKEND_SRC) Makefile \
-                                     $(PROFILE_MANIFEST) | profile-check
-	@mkdir -p "$(dir $@)"
-	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
-	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	$(CC) $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES) -MMD -MP -MF "$$dep" -MT "$@" \
-		-c "$<" -o "$$obj"; \
-	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
-
-$(HOST_OBJ_DIR)/%.o: %.c Makefile $(PROFILE_MANIFEST) | profile-check
-	@mkdir -p "$(dir $@)"
-	@set -e; obj="$@.$$$$.o.tmp"; dep="$@.$$$$.d.tmp"; \
-	cleanup(){ rm -f "$$obj" "$$dep"; }; trap 'cleanup' EXIT; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	$(CC) $(CFLAGS) -MMD -MP -MF "$$dep" -MT "$@" \
-		-c "$<" -o "$$obj"; \
-	mv -f "$$dep" "$(@:.o=.d)"; mv -f "$$obj" "$@"; trap - EXIT TERM INT
-
-ifneq ($(strip $(PROFILE_INDEPENDENT_INVOCATION)),1)
--include $(HOST_TOOL_DEPFILES)
-endif
-
-$(HOST_TOOL): $(HOST_TOOL_OBJECTS) Makefile $(PROFILE_MANIFEST) | profile-check
-	@python3 scripts/build_profile.py ensure-host "$(PROFILE_MANIFEST)" >/dev/null
-	@mkdir -p "$(dir $(HOST_TOOL))"
-	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
-	trap 'cleanup; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	$(CC) $(CFLAGS) $(HOST_TOOL_OBJECTS) $(LDFLAGS) -o "$$tmp"; \
-	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
-	@echo "host_tool=$(HOST_TOOL)"
 
 check-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	@set -e; \
@@ -468,9 +262,9 @@ check-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
 	  scripts/oneface_metrics.sh "$(HOST_TOOL)" "$(HOST_TOOL)"
 
 
-# The footprint ratchets are meaningful only for the checked release toolchain. Invoke the
-# measurement from the recipe after validation so even `make -j` cannot race it ahead.
-check-arm-internal: check-release-profile-internal
+# The footprint ratchets make a system-toolchain change visible: any larger result fails until the
+# checked limits are deliberately reviewed and updated.
+check-arm-internal:
 	@$(MAKE) --no-print-directory check-arm-measure-internal
 
 .PHONY: check-arm-measure-internal
@@ -558,7 +352,7 @@ check-arm-measure-internal: $(DECODER_PUBLIC_HDRS) $(ARM_LINK_STUBS) $(ARM_LINK_
 # static method. The bounds EXCLUDE the integrator's externs (flash_read/flash_write_page/byte-callback)
 # and bounded toolchain leaves (such as memmove/memset); each ceiling's headroom absorbs those +
 # interrupt-frame slack. Same cross-gcc as check-arm.
-check-stack-internal: check-release-profile-internal $(DECODER_PUBLIC_HDRS) \
+check-stack-internal: $(DECODER_PUBLIC_HDRS) \
                       $(DECODER_INTEGRATION_TU)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
@@ -747,11 +541,9 @@ golden-update-internal: scripts/publish_wire_baselines.py scripts/wire_baseline.
 
 .PHONY: golden-update-measure-internal
 golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publish_wire_baselines.py \
-                                scripts/corpus_topology.py $(CORPUS_INVENTORY)
+	                                scripts/corpus_topology.py $(CORPUS_INVENTORY)
 	@set -e; \
 	. ./scripts/tempdir.sh; \
-	release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
-	release_profile=$${release_profile#release_profile=}; \
 	host_tool_hash=$$(sha256sum "$(HOST_TOOL)"); host_tool_hash=$${host_tool_hash%% *}; \
 	exec 9<>"$(WIRE_BASELINE_LOCK)"; flock --shared 9; \
 	preimage_baseline=$$(sha256sum "$(WIRE_BASELINE)"); preimage_baseline=$${preimage_baseline%% *}; \
@@ -772,10 +564,7 @@ golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publis
 	test "$$(wc -l <"$$tmp/wire-baseline.tsv")" -eq \
 	  "$$((home_pairs + foreign_pairs + $(BASE_RELEASE_GOLDEN_BLOBS)))"; \
 	test "$$(sha256sum "$(HOST_TOOL)" | awk '{print $$1}')" = "$$host_tool_hash"; \
-	test "$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)")" = \
-	  "release_profile=$$release_profile"; \
 	cp "$$tmp/corpus.out" "$$tmp/metrics.out"; \
-	echo "measurement_release_profile=$$release_profile" >>"$$tmp/metrics.out"; \
 	echo "measurement_host_tool_sha256=$$host_tool_hash" >>"$$tmp/metrics.out"; \
 	echo "measurement_preimage_baseline_sha256=$$preimage_baseline" >>"$$tmp/metrics.out"; \
 	echo "measurement_preimage_makefile_sha256=$$preimage_make" >>"$$tmp/metrics.out"; \
@@ -786,7 +575,7 @@ golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publis
 	python3 scripts/publish_wire_baselines.py --root test-bench \
 	  --inventory "$(CORPUS_INVENTORY)" --candidate-baseline "$$tmp/wire-baseline.tsv" \
 	  --metrics "$$tmp/metrics.out" \
-	  --host-tool "$(HOST_TOOL)" --release-profile-lock "$(RELEASE_PROFILE_LOCK)" \
+	  --host-tool "$(HOST_TOOL)" \
 	  --home-limit "$(BASE_FULL_TOTAL)" --foreign-limit "$(BASE_FOREIGN_TOTAL)" \
 	  --oneface-grow-limit "$(BASE_ONEFACE_GROW)" \
 	  --oneface-revert-limit "$(BASE_ONEFACE_REVERT)"; \
@@ -825,18 +614,15 @@ check-corpus-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology
 # check-corpus). Wall time ~= the slowest leg
 # (check-corpus), not the sum. Prints one consolidated summary with every tracked
 # metric; exits nonzero if ANY gate fails and dumps the raw blocks so the offending
-# metric is visible. The profile-specific host tool is published atomically BEFORE the legs fork;
+# metric is visible. The exact one-shot host tool is published atomically BEFORE the legs fork;
 # run_gate.sh invokes each forked leg with make's `-o` (assume-old), so no leg rebuilds it if a
-# source mtime changes at sub-make startup. Same-profile concurrent top-level builds may both
-# publish equivalent bytes. The parent materializes and verifies the profile-scoped corpus once;
+# source mtime changes at sub-make startup. Parallel top-level measurements use separate BUILD_DIR
+# values. The parent materializes and verifies the build-local corpus once;
 # UP_CORPUS_ASSETS_PREPARED keeps the forked internal legs from repeating that idempotent work.
 gate-internal:
-	@$(MAKE) --no-print-directory release-gate-inputs-internal
 	@$(MAKE) --no-print-directory all-internal
 	@$(MAKE) --no-print-directory corpus-assets-internal
-	@set -e; release_profile=$$(python3 scripts/build_profile.py verify-release "$(RELEASE_PROFILE_LOCK)"); \
-	  MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" \
-	  RELEASE_PROFILE="$$release_profile" \
+	@set -e; MAKE="$(MAKE)" HOST_TOOL="$(HOST_TOOL)" \
 	  BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
 	  BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
 	  BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
@@ -854,16 +640,9 @@ check-analyze-internal:
 
 clean-internal:
 	@root=$$(realpath -m .build); dir=$$(realpath -m "$(BUILD_DIR)"); \
-	case "$$dir" in "$$root"/*) rm -rf -- "$$dir" ;; *) echo "refusing to clean noncanonical build dir: $$dir" >&2; exit 1 ;; esac
+	case "$$dir" in "$$root"|"$$root"/*) rm -rf -- "$$dir" ;; *) echo "refusing to clean noncanonical build dir: $$dir" >&2; exit 1 ;; esac
 	rm -f ultrapatch
 
 clean-all-internal:
 	rm -rf .build
 	rm -f ultrapatch
-
-# This parse-time authority check must follow every release variable definition. It still runs
-# before any recipe and therefore cannot be suppressed by MAKEFLAGS=-i/-n/-t.
-ifneq ($(CANONICAL_AUTHORITY_GOAL),)
-$(foreach v,$(RELEASE_GATE_FIXED_VARS),$(if $(filter file,$(origin $(v))),,$(error $(CANONICAL_AUTHORITY_GOAL) rejects runtime override: $(v) (origin $(origin $(v))))))
-$(foreach v,$(RELEASE_GATE_UNSET_VARS),$(if $(filter undefined,$(origin $(v))),,$(error $(CANONICAL_AUTHORITY_GOAL) requires unset mode: $(v) (origin $(origin $(v))))))
-endif

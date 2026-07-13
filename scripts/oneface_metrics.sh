@@ -14,7 +14,7 @@ set -eu
 
 ENC="${1:-${ULTRAPATCH:-}}"
 : "${ENC:?oneface_metrics.sh: pass an encoder or set ULTRAPATCH}"
-: "${FIXTURES:?oneface_metrics.sh: FIXTURES not set to the profile-scoped corpus}"
+: "${FIXTURES:?oneface_metrics.sh: FIXTURES not set to the build-local corpus}"
 DEC="${2:-$ENC}"
 FIX="$FIXTURES"
 

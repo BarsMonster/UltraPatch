@@ -11,7 +11,7 @@ set -eu
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
 : "${DECODER_PUBLIC_HDRS:?check_decoder_api.sh: DECODER_PUBLIC_HDRS not set}"
 : "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
-: "${FIXTURES:?check_decoder_api.sh: FIXTURES not set to the profile-scoped corpus}"
+: "${FIXTURES:?check_decoder_api.sh: FIXTURES not set to the build-local corpus}"
 NM=${NM:-nm}
 [ -x "$ULTRAPATCH" ] || {
     echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2

@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 import sys
 import tempfile
 
@@ -22,7 +21,6 @@ from wire_baseline import BaselineError, WireBaseline, parse_wire_baseline
 
 PIN_NAMES = ("BASE_FULL_TOTAL", "BASE_FOREIGN_TOTAL",
              "BASE_ONEFACE_GROW", "BASE_ONEFACE_REVERT")
-SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class UpdateError(RuntimeError):
@@ -50,32 +48,13 @@ def regular(path: Path, label: str) -> None:
         fail(f"{label} must be a regular non-symlink file: {path}")
 
 
-def verify_release_profile(path: Path) -> str:
-    helper = Path(__file__).resolve().with_name("build_profile.py")
-    result = subprocess.run(
-        [sys.executable, str(helper), "verify-release", str(path)], check=False,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace"
-    )
-    if result.returncode:
-        fail("release profile recheck failed: " +
-             (result.stderr.strip() or result.stdout.strip()))
-    marker = result.stdout.strip()
-    if not marker.startswith("release_profile="):
-        fail("release profile recheck returned malformed evidence")
-    value = marker.removeprefix("release_profile=")
-    if not SHA256_RE.fullmatch(value):
-        fail("release profile recheck returned a malformed hash")
-    return value
-
-
 def parse_metrics(path: Path) -> dict[str, str]:
     wanted = {
         "matrix_ok", "full_total", "home_size_better", "home_size_worse",
         "home_size_equal", "foreign_ok", "foreign_total", "wire_identity",
         "max_journal", "max_amplified", "max_maxpageerase", "max_inversions",
         "max_unaligned", "max_oob_page_writes", "max_canary_corrupt",
-        "measurement_release_profile", "measurement_host_tool_sha256",
+        "measurement_host_tool_sha256",
         "measurement_preimage_baseline_sha256", "measurement_preimage_makefile_sha256",
     }
     values: dict[str, str] = {}
@@ -184,9 +163,6 @@ def validate(args, root: Path):
     if unsigned(metrics["max_maxpageerase"], "max_maxpageerase") > 1:
         fail("candidate max erases per page exceeds one")
 
-    profile = verify_release_profile(Path(args.release_profile_lock))
-    if metrics["measurement_release_profile"] != profile:
-        fail("candidate was measured under a different release profile")
     host_tool = Path(args.host_tool)
     if metrics["measurement_host_tool_sha256"] != digest(host_tool):
         fail("measured host tool changed after measurement")
@@ -280,7 +256,6 @@ def main() -> int:
     parser.add_argument("--candidate-baseline", required=True)
     parser.add_argument("--metrics", required=True)
     parser.add_argument("--host-tool", required=True)
-    parser.add_argument("--release-profile-lock", required=True)
     parser.add_argument("--home-limit", required=True)
     parser.add_argument("--foreign-limit", required=True)
     parser.add_argument("--oneface-grow-limit", required=True)

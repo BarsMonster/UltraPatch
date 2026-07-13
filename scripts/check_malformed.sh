@@ -5,7 +5,7 @@
 
 set -eu
 
-: "${FIXTURES:?check_malformed.sh: FIXTURES not set to the profile-scoped corpus}"
+: "${FIXTURES:?check_malformed.sh: FIXTURES not set to the build-local corpus}"
 FIX="$FIXTURES"
 base="$FIX/v0_base"
 one="$FIX/v1_one_face"

@@ -13,8 +13,8 @@ jobs:
   gate:
     runs-on: ubuntu-24.04
     container:
-      # Official Ubuntu 26.04 amd64 image. Updating this digest and the
-      # release-profile manifest is an explicit toolchain change.
+      # Official Ubuntu 26.04 amd64 base. Updating this digest is deliberate;
+      # installed package versions remain subject to the behavioral gates below.
       image: ubuntu:26.04@sha256:c6c0067e0e45b7a826eaebb193cef957be28045380963a9b1eeb2a5d3c70a1b9
     steps:
       - name: Install toolchain
@@ -44,7 +44,6 @@ jobs:
 
       - name: Verify release commit
         run: |
-          make check-build-profile
           make gate
           make check-decoder-sanitize
           make check-encoder-sanitize

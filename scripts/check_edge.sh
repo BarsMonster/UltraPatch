@@ -7,11 +7,9 @@
 # empty/tiny/equal images, all-0xFF/all-0x00, incompressible random data, text, page-boundary
 # sizes, and a >384 KiB span (well past the home-corpus image range).
 #
-# Acceptance model: ultrapatch SELF-VERIFIES every emitted patch on the reference decoder, so for
-# each pair either (a) encode succeeds -> the host decoder MUST round-trip the blob
-# byte-exactly, or (b) encode refuses
-# cleanly (nonzero exit, no blob) -> logged as a refusal. Crashes, hangs, or wrong output
-# anywhere = failure.
+# Acceptance model: each named pair pins either an accepted byte-exact round-trip or a controlled
+# refusal. Ultrapatch SELF-VERIFIES every emitted patch on the reference decoder; crashes, hangs,
+# unexpected outcomes, or wrong output anywhere are failures.
 #
 # All fixtures are generated deterministically (fixed-seed LCG) — no committed binaries.
 #
@@ -50,10 +48,18 @@ controlled_encoder_refusal() {
   grep -Fxq 'ultrapatch: no feasible plan: every config exceeds a decoder resource cap for this pair' "$err"
 }
 
-run_case() { # run_case <name> [cpu-limit-ms] [wall-deadline-seconds]  (dirs contain watch.bin)
+run_case() { # run_case <name> [accept|refuse] [cpu-limit-ms] [wall-deadline-seconds]
   name=$1
-  cpu_limit_ms=${2:-0}
-  wall_deadline=${3:-0}
+  expected=${2:-accept}
+  cpu_limit_ms=${3:-0}
+  wall_deadline=${4:-0}
+  case "$expected" in
+    accept|refuse) ;;
+    *)
+      echo "edge infrastructure failure: $name has invalid expected outcome '$expected'" >&2
+      exit 2
+      ;;
+  esac
   cases=$((cases + 1))
   from="$tmp/${name}_from/watch.bin"; to="$tmp/${name}_to/watch.bin"
   blob="$tmp/$name.blob"
@@ -94,6 +100,10 @@ run_case() { # run_case <name> [cpu-limit-ms] [wall-deadline-seconds]  (dirs con
     cp "$from" "$tmp/$name.mem"
     if "$ULTRAPATCH" --decode "$tmp/$name.mem" "$blob" >/dev/null 2>&1 && cmp -s "$tmp/$name.mem" "$to"; then
       roundtrips=$((roundtrips + 1))
+      if [ "$expected" != accept ]; then
+        echo "edge FAILURE: $name encoded successfully; expected a controlled refusal" >&2
+        failures=$((failures + 1))
+      fi
     else
       echo "edge FAILURE: $name encoded but did not round-trip" >&2
       failures=$((failures + 1))
@@ -106,6 +116,10 @@ run_case() { # run_case <name> [cpu-limit-ms] [wall-deadline-seconds]  (dirs con
       encerr_tail="$(tail -n 1 "$tmp/$name.encerr" 2>/dev/null || true)"
       echo "edge refusal: $name ($encerr_tail)" >&2
       refusals=$((refusals + 1))
+      if [ "$expected" != refuse ]; then
+        echo "edge FAILURE: $name refused; expected an accepted round-trip" >&2
+        failures=$((failures + 1))
+      fi
     else
       echo "edge FAILURE: $name encoder dispatcher failure (status=$status)" >&2
       cat "$tmp/$name.encerr" >&2
@@ -119,7 +133,7 @@ mkpair empty_to_small; : > "$tmp/empty_to_small_from/watch.bin"; gen "$tmp/empty
 run_case empty_to_small
 
 mkpair small_to_empty; gen "$tmp/small_to_empty_from/watch.bin" 512 rand 11; : > "$tmp/small_to_empty_to/watch.bin"
-run_case small_to_empty
+run_case small_to_empty refuse
 
 mkpair one_byte; printf 'A' > "$tmp/one_byte_from/watch.bin"; printf 'B' > "$tmp/one_byte_to/watch.bin"
 run_case one_byte
@@ -154,19 +168,19 @@ run_case rand_unrel
 # deadlines pin the production targets; the smaller cases make scaling regressions visible.
 mkpair alt_diff_16k; gen "$tmp/alt_diff_16k_from/watch.bin" 16384 rand 901
 gen "$tmp/alt_diff_16k_to/watch.bin" 0 alternate "$tmp/alt_diff_16k_from/watch.bin"
-run_case alt_diff_16k 0 20
+run_case alt_diff_16k accept 0 20
 
 mkpair alt_diff_32k; gen "$tmp/alt_diff_32k_from/watch.bin" 32768 rand 901
 gen "$tmp/alt_diff_32k_to/watch.bin" 0 alternate "$tmp/alt_diff_32k_from/watch.bin"
-run_case alt_diff_32k 0 20
+run_case alt_diff_32k accept 0 20
 
 mkpair alt_diff_64k; gen "$tmp/alt_diff_64k_from/watch.bin" 65536 rand 901
 gen "$tmp/alt_diff_64k_to/watch.bin" 0 alternate "$tmp/alt_diff_64k_from/watch.bin"
-run_case alt_diff_64k 5000 20
+run_case alt_diff_64k accept 5000 20
 
 mkpair alt_diff_256k; gen "$tmp/alt_diff_256k_from/watch.bin" 262144 rand 901
 gen "$tmp/alt_diff_256k_to/watch.bin" 0 alternate "$tmp/alt_diff_256k_from/watch.bin"
-run_case alt_diff_256k 20000 40
+run_case alt_diff_256k accept 20000 40
 
 # --- non-ARM structured data (text) ---
 mkpair text; gen "$tmp/text_from/watch.bin" 40000 text
