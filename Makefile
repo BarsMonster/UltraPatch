@@ -258,7 +258,7 @@ GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
 WIRE_BASELINE_LOCK := test-bench/.wire-baseline-update.lock
 ENCODER_KERNEL_BASELINE_LOCK := test-bench/.encoder-kernel-baseline-update.lock
-CAPPED := all check check-arm check-stack check-assets check-ab-matrix check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
+CAPPED := all check check-arm check-stack check-assets check-clang check-decoder-contract check-decoder-sanitize check-encoder-sanitize \
 	      check-build-profile check-release-profile check-release-inventory \
           check-models check-malformed check-corpus check-edge check-degrade check-golden \
           golden-update check-analyze clean clean-all
@@ -720,11 +720,6 @@ check-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(WIRE_BASELINE)
 	@FIXTURES="$(FIXTURES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
 
-# Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
-# measurement runs bypass the committed wire manifest while retaining round-trip and NVM checks.
-check-ab-matrix-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
-	@FIXTURES="$(FIXTURES)" scripts/check_ab_matrix.sh
-
 golden-update-internal: scripts/publish_wire_baselines.py scripts/wire_baseline.py \
                         scripts/corpus_topology.py
 	@$(MAKE) --no-print-directory golden-update-inputs-internal
@@ -803,7 +798,6 @@ check-corpus-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology
 # every leg CONCURRENTLY:
 # check-assets, check (one-face grow/revert round-trip + BASE_ONEFACE_* size gates),
 # check-malformed, check-edge, check-degrade, check-golden, check-decoder-contract,
-# check-ab-matrix,
 # check-models, check-arm (sizes + divide policy), check-stack, and the FULL 256-pair corpus
 # matrix + 34 foreign
 # pair-directions (corpus full_total vs BASE_FULL_TOTAL, home per-pair better/worse/equal

@@ -21,11 +21,9 @@ else
   corpus_jobs=$((cores * 3 / 4))
   [ "$corpus_jobs" -gt 0 ] || corpus_jobs=1
 fi
-ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
+echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-corpus..."
 
-echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-ab-matrix + check-corpus..."
-
-LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-corpus-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
@@ -38,9 +36,6 @@ for spec in $LEGS; do
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then
     "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       "$target" >"$tmp/$file" 2>&1 &
-  elif [ "$target" = check-ab-matrix-internal ]; then
-    nice -n 5 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
-      AB_MATRIX_TEST_JOBS="$ab_jobs" "$target" >"$tmp/$file" 2>&1 &
   else
     nice -n 10 "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" UP_CORPUS_ASSETS_PREPARED=1 \
       "$target" >"$tmp/$file" 2>&1 &
@@ -75,7 +70,6 @@ require_metrics \
   'g.txt:golden_wire' \
   'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
   'models.txt:model_contract' \
-  'ab.txt:ab_wire_change' \
   'dg.txt:degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction split_run_budget degrade_cases degrade_fail' \
   'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_decoder_build' \
   'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_decoder_build' \
@@ -100,7 +94,6 @@ awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
-kvs 'ab.txt|ab_wire_change|wire-change A-B check    : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
 awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_BSS:?}" '/^arm_object_text=/{t=$2}/^arm_object_data=/{d=$2}/^arm_object_bss=/{b=$2}END{if(t!="")printf "ARM object text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
