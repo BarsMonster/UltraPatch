@@ -5,8 +5,8 @@
  */
 
 /* Divide-free range-coder model definitions (shared by decoder + host encoder).
- * Binary range coder (LZMA bound: bound=(range>>12)*prob; compare) — no runtime division
- * instructions or helpers, as required for Cortex-M0+/ARMv6-M. Header-only; both
+ * Scalar models use the LZMA bound=(range>>12)*prob; byte trees use native 8-bit probabilities.
+ * Neither path needs runtime division instructions or helpers, as required for Cortex-M0+/ARMv6-M. Header-only; both
  * src/patch_apply.h (device decoder) and the host encoder modules carry their own range-coder
  * bit I/O and share the model structs/constants below, so the wire stays bit-exact. */
 #ifndef UP_RC_MODELS_H
@@ -85,28 +85,18 @@ static inline uint32_t rc_wire_from_crc(uint32_t crc){
     return crc^(uint32_t)PATCH_WIRE_VERSION;
 }
 
-/* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are stored as 12-bit
- * range-coder probabilities (p[0..254]). Probabilities are always in 1..4095, so they pack into
- * 12 bits/node instead of a full uint16_t; this struct + accessors are the ONE byte-tree
- * implementation, used by both the device decoder and host encoder modules. The adaptation-shift rate is NOT
+/* ---- 256-symbol byte via 8-level bit-tree; logical probs[1..255] are direct 8-bit
+ * range-coder probabilities (p[0..254], P(0)=p/256). This is the ONE byte-tree implementation,
+ * used by both the device decoder and host encoder modules. The adaptation-shift rate is NOT
  * stored per-tree (saves SRAM): every call site passes its constant rate explicitly (RC_LIT0_RATE,
  * RC_LIT1_RATE, RC_DVAL_RATE — single-sourced below) — kept identical on both sides for wire-exactness. */
 #define UP_BT_PROBS 255u
-#define UP_BT_BYTES (((UP_BT_PROBS * 12u) + 7u) / 8u)
-/* idx*12 has a byte shift of 0 or 4, so every 12-bit entry fits in two bytes. */
-typedef struct { uint8_t p[UP_BT_BYTES]; } up_BitTree;
-static inline uint16_t up_bt_get(const up_BitTree*t,int idx){
-    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
-    return (uint16_t)((v>>sh)&0xfffu);
+typedef struct { uint8_t p[UP_BT_PROBS]; } up_BitTree;
+static inline void up_bt_init(up_BitTree*t){ memset(t->p,128,sizeof t->p); }
+/* Direct-byte adaptation cannot reach either forbidden endpoint: shifts round small moves to zero. */
+static inline uint8_t rc_bt_adapt(uint32_t p,int bit,int rate){
+    return (uint8_t)(bit ? p-(p>>rate) : p+((256u-p)>>rate));
 }
-static inline void up_bt_set(up_BitTree*t,int idx,uint16_t prob){
-    uint32_t bit=(uint32_t)idx*12u, off=bit>>3, sh=bit&7u;
-    uint32_t v=(uint32_t)t->p[off] | ((uint32_t)t->p[off+1u]<<8);
-    v=(v&~(0xfffu<<sh)) | (((uint32_t)prob&0xfffu)<<sh);
-    t->p[off]=(uint8_t)v; t->p[off+1u]=(uint8_t)(v>>8);
-}
-static inline void up_bt_init(up_BitTree*t){ memset(t->p,0,sizeof t->p); for(int i=0;i<(int)UP_BT_PROBS;i++) up_bt_set(t,i,RC_PHALF); }
 
 /* ---- seeded Golomb context clamp (Rice/Gamma length & dist models) ----
  * UP_UG_CTX = context clamp. Rice keeps a full (UP_UG_CTX+1)^2 mantissa table because any quotient
@@ -126,14 +116,10 @@ static inline int rc_ugg_mant_idx(int row,int pos){
  * (REJ_RESOURCE) above UP_SMAP_CAP, and the encoder never emits more entries than this. */
 #define UP_SMAP_CAP 48
 
-/* ---- tag0 literal-tree context map: previous literal byte -> tree id. Re-derived 2026-07 by a
- * coder-faithful greedy coordinate descent that replays the
- * ACTUAL shipped adaptive coder -- 5 even-parity from-image histogram-seeded BitTrees adapting at
- * RC_LIT0_RATE in wire order -- over the surviving tag0 span literals of the full home + foreign
- * corpora, accepting a row move only when it strictly cuts home bits and never raises foreign bits.
- * Supersedes the static agglomerative-clustering map (a measured dead end: a static-entropy objective
- * underperforms the real adaptive coder even home-only). ENCODING-AFFECTING: device decoder and
- * host encoder modules share this table (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
+/* ---- tag0 literal-tree context map: previous literal byte -> tree id. The five context IDs were
+ * derived by coder-faithful coordinate descent over the surviving tag0 span literals of the home
+ * and foreign corpora. ENCODING-AFFECTING: device decoder and host encoder modules share this table
+ * (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
 #define UP_LIT0_CTX 5
 static inline uint8_t rc_lit0_sel(uint8_t p){
     uint8_t v=(uint8_t)(
@@ -171,7 +157,8 @@ static inline uint16_t rc_adapt(uint32_t p, int bit, int rate){
 /* Histogram-seeded literal-tree node prob: round(RC_PBIT*num/den) half-up, then clamp to
  * 1..RC_PBIT-1 (an empty context degenerates to RC_PHALF). Long division emits one rounding bit
  * beyond the 12-bit fraction; num<=den and MAX_IMAGE<=2^26 keep every doubled remainder in u32.
- * The rounded result is 0..RC_PBIT, so subtracting its high bit performs the upper clamp.
+ * The rounded result is 0..RC_PBIT, so subtracting its high bit performs the upper clamp. Byte-tree
+ * seeding below then rounds this value to the direct 8-bit domain and clamps it to 1..255.
  * Shared by decoder lit_tree_from_hist and encoder lit_tree_seed_e. */
 static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
     if(!den) return RC_PHALF;
@@ -245,7 +232,9 @@ static inline void rc_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32
     }
     for(int m=1;m<256;m++){
         uint32_t l=2*m>=256?hist[2*m-256]:w[2*m];
-        up_bt_set(t,m-1,rc_lit_seed_prob(l,w[m]));
+        uint16_t p=rc_lit_seed_prob(l,w[m]);
+        uint16_t q=(uint16_t)((p+8u)>>4);
+        t->p[m-1]=(uint8_t)(q ? (q<256u ? q : 255u) : 1u);
     }
 }
 
@@ -363,9 +352,9 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 /* Per-tree adaptation-shift rates for the literal + dval byte-trees. These bit-trees carry their
  * OWN rate (not stored per-tree — see the up_BitTree note above — but passed at every s_bt/bt_encode
  * call site), single-sourced here so encoder and decoder move together. RC_LIT0_RATE (tag0 span
- * literals, order-1 context) adapts slower (1/32); RC_LIT1_RATE (tag1 literals) + RC_DVAL_RATE
- * (MTF escape + [C] correction bytes) track at 1/16. */
-#define RC_LIT0_RATE 5
+ * literals, order-1 context), RC_LIT1_RATE (tag1 literals), and RC_DVAL_RATE (MTF escape + [C]
+ * correction bytes) all track at 1/16. */
+#define RC_LIT0_RATE 4
 #define RC_LIT1_RATE 4
 #define RC_DVAL_RATE 4
 

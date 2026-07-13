@@ -10,7 +10,7 @@
 /* ------------------------------------------------------------------------------------- */
 /* Binary range encoder and models.                                                        */
 /* ------------------------------------------------------------------------------------- */
-/* byte trees use the shared packed up_BitTree + up_bt_get/up_bt_set/up_bt_init from rc_models.h (decoder-identical) */
+/* byte trees use the shared direct-byte up_BitTree and adaptation from rc_models.h (decoder-identical) */
 
 static void re_put(REnc *r, uint8_t b) {
     if (!r->count_only) {
@@ -88,13 +88,16 @@ static uint64_t bt_xfer(up_BitTree *t, REnc *r, uint8_t byte, int rate, int mode
     uint64_t cost = 0;
     for (int i = 7; i >= 0; i--) {
         int bit = (byte >> i) & 1;
-        uint16_t p = up_bt_get(t, m - 1);
+        uint8_t p = t->p[m - 1];
         if (mode == BT_XFER_ENC) {
-            re_bit(r, &p, bit, rate);
-            up_bt_set(t, m - 1, p);
+            uint32_t bound = (r->range >> 8) * p;
+            if (bit == 0) r->range = bound;
+            else { r->low += bound; r->range -= bound; }
+            t->p[m - 1] = rc_bt_adapt(p, bit, rate);
+            while (r->range < RC_KTOP) { r->range <<= 8; re_shift_low(r); }
         } else {
-            cost += bit_price(p, bit);
-            if (mode == BT_XFER_PRICE_UPDATE) up_bt_set(t, m - 1, rc_adapt(p, bit, rate));
+            cost += bit_price((uint32_t)p << 4, bit);
+            if (mode == BT_XFER_PRICE_UPDATE) t->p[m - 1] = rc_bt_adapt(p, bit, rate);
         }
         m = (m << 1) | bit;
     }
@@ -109,7 +112,6 @@ void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t) {
     uint32_t hist[256], w[256];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
-    memset(t->p, 0, sizeof t->p);
     rc_lit_tree_from_hist(t, hist, w);   /* mirror of decoder lit_tree_from_hist */
 }
 

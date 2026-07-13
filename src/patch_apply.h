@@ -326,7 +326,7 @@ static int up_s_bit_r(PatchApply *pa, uint16_t*prob,int rate){
     return b;
 }
 /* RC_S_BIT_RATE: shared Golomb / order-2 flag / MTF rep+hit adaptation rate.
- * literal/dval bit-trees keep their own per-tree rate via up_s_bit_r. */
+ * Literal/dval bit-trees use their direct-byte coder and per-tree rates in up_s_bt. */
 static int up_s_bit(PatchApply *pa, uint16_t*prob){ return up_s_bit_r(pa,prob,RC_S_BIT_RATE); }
 static int up_s_raw(PatchApply *pa){ return up_rc_decode(pa,pa->RC.range>>1); }
 /* CRASH-HARDENING: a corrupt/truncated stream yields zero-fill past EOF,
@@ -342,9 +342,9 @@ static uint32_t up_s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0
 static int up_s_bt(PatchApply *pa, up_BitTree*t,int rate){
     int m=1;
     for(int i=0;i<8;i++){
-        uint16_t p=up_bt_get(t,m-1);
-        int b=up_s_bit_r(pa,&p,rate);
-        up_bt_set(t,m-1,p);
+        uint8_t p=t->p[m-1];
+        int b=up_rc_decode(pa,(pa->RC.range>>8)*p);
+        t->p[m-1]=rc_bt_adapt(p,b,rate);
         m=(m<<1)|b;
     }
     return m-256;
@@ -1194,7 +1194,6 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 #undef RC_PACKED_POS_BITS
 #undef RC_PACKED_POS_LIMIT
 #undef UP_BT_PROBS
-#undef UP_BT_BYTES
 #undef UP_UG_CTX
 #undef UP_UG_C
 #undef UP_UG_GAMMA_MANT
