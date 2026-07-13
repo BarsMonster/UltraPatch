@@ -217,12 +217,13 @@ BASE_FULL_TOTAL ?= 4148576
 BASE_FOREIGN_TOTAL ?= 1299431
 BASE_ONEFACE_GROW ?= 573
 BASE_ONEFACE_REVERT ?= 287
-BASE_ARM_TEXT ?= 6221
+BASE_ARM_TEXT ?= 6233
 BASE_ARM_DATA ?= 0
 BASE_ARM_BSS ?= 9356
-BASE_ARM_LINKED_TEXT ?= 6801
+BASE_ARM_LINKED_TEXT ?= 6645
 BASE_ARM_LINKED_DATA ?= 0
 BASE_ARM_LINKED_BSS ?= 9356
+BASE_ARM_HAND_ROLLED_LINKED_TEXT ?= 6405
 BASE_ARM_SOFT_DIV ?= 0
 # Product SRAM ceiling: unlike the configurable size ratchet above, command-line and
 # environment overrides must never be able to raise or disable this limit.
@@ -343,7 +344,8 @@ override RELEASE_GATE_FIXED_VARS := \
 	BASE_RELEASE_FOREIGN_EDGES BASE_RELEASE_GOLDEN_BLOBS \
 	BASE_FULL_TOTAL BASE_FOREIGN_TOTAL BASE_ONEFACE_GROW BASE_ONEFACE_REVERT \
 	BASE_ARM_TEXT BASE_ARM_DATA BASE_ARM_BSS BASE_ARM_LINKED_TEXT BASE_ARM_LINKED_DATA \
-	BASE_ARM_LINKED_BSS BASE_ARM_SOFT_DIV BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
+	BASE_ARM_LINKED_BSS BASE_ARM_HAND_ROLLED_LINKED_TEXT BASE_ARM_SOFT_DIV \
+	BASE_STACK_STATIC_CEIL_O2 BASE_STACK_GENERIC_CEIL_O2 \
 	RELEASE_PROFILE_LOCK BUILD_ROOT BUILD_DIR GATE_TIMEOUT WIRE_BASELINE_LOCK \
 	CC CLANG NM ARM_PREFIX ARM_CC ARM_SIZE ARM_OBJDUMP ARM_OBJCOPY ARM_NM ARM_OBJECT_OPT ARM_STACK_OPT OPT \
 	DECODER_CONFIG_FLAGS CONTRACT_FLAGS CFLAGS DECODER_CFLAGS \
@@ -517,7 +519,34 @@ check-arm-measure-internal: $(DECODER_PUBLIC_HDRS) $(ARM_LINK_STUBS) $(ARM_LINK_
 		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
 		sort | paste -sd, -); \
 	echo "arm_linked_runtime_helpers=$$helpers"; \
-	echo "arm_decoder_build=OK (public header set; object + linked)"
+	if ! printf '%s\n' "$$helpers" | grep -Eq '(^|,)memmove(,|$$)' || \
+	   printf '%s\n' "$$helpers" | grep -Eq '(^|,)memcpy(,|$$)'; then \
+		echo "library decoder must consolidate copy calls on memmove: $$helpers" >&2; exit 1; \
+	fi; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_OBJECT_OPT) -DHAND_ROLLED_MEMMOVE \
+		$(DECODER_INTEGRATION_PROBE_FLAGS) -DDECODER_INTEGRATION_STATIC \
+		-c "$(DECODER_INTEGRATION_TU)" -o "$$tmp/patch_apply_arm_hand.o"; \
+	if $(ARM_NM) -u "$$tmp/patch_apply_arm_hand.o" | grep -Eq '\b(memcpy|memmove)$$'; then \
+		echo "hand-rolled decoder object retained a library copy helper" >&2; exit 1; \
+	fi; \
+	$(ARM_CC) $(ARM_LINK_FLAGS) "$$tmp/patch_apply_arm_hand.o" "$$tmp/arm_link_stubs.o" \
+		$(ARM_LINK_LIBS) -o "$$tmp/patch_apply_arm_hand.elf"; \
+	hand_linked_size_out=$$($(ARM_SIZE) "$$tmp/patch_apply_arm_hand.elf"); \
+	set -- $$(printf '%s\n' "$$hand_linked_size_out" | awk 'NR==2 { print $$1, $$2, $$3 }'); \
+	hand_linked_text=$$1; hand_linked_data=$$2; hand_linked_bss=$$3; \
+	echo "arm_hand_rolled_linked_text=$$hand_linked_text"; \
+	test "$$hand_linked_text" -lt "$$linked_text"; \
+	test "$$hand_linked_text" -le "$(BASE_ARM_HAND_ROLLED_LINKED_TEXT)"; \
+	test "$$hand_linked_data" -eq "$$linked_data"; test "$$hand_linked_bss" -eq "$$linked_bss"; \
+	hand_helpers=$$($(ARM_NM) --defined-only "$$tmp/patch_apply_arm_hand.elf" | \
+		awk '$$3 == "memcpy" || $$3 == "memmove" || $$3 == "memset" { print $$3 }' | \
+		sort | paste -sd, -); \
+	echo "arm_hand_rolled_runtime_helpers=$$hand_helpers"; \
+	if printf '%s\n' "$$hand_helpers" | grep -Eq '(^|,)(memcpy|memmove)(,|$$)'; then \
+		echo "hand-rolled decoder retained a copy helper: $$hand_helpers" >&2; exit 1; \
+	fi; \
+	echo "arm_hand_rolled_memmove=OK (no memcpy/memmove; linked text below library mode)"; \
+	echo "arm_decoder_build=OK (public header set; library + hand-rolled object/linked)"
 
 # Worst-case caller-stack bounds for both supported wrapper shapes. The synchronous decoder runs
 # wholly on the CALLER's stack; docs/device-integration.md pins the shape-specific budgets an
@@ -535,8 +564,12 @@ check-stack-internal: check-release-profile-internal $(DECODER_PUBLIC_HDRS) \
 	. ./scripts/tempdir.sh; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -DDECODER_INTEGRATION_STATIC -c "$(DECODER_INTEGRATION_TU)" -o "$$tmp/patch_apply_arm.o" -fstack-usage; \
 	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -DDECODER_INTEGRATION_GENERIC -c "$(DECODER_INTEGRATION_TU)" -o "$$tmp/patch_apply_stack_generic.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -DHAND_ROLLED_MEMMOVE -DDECODER_INTEGRATION_STATIC -c "$(DECODER_INTEGRATION_TU)" -o "$$tmp/patch_apply_arm_hand.o" -fstack-usage; \
+	$(ARM_CC) $(ARM_DEC_FLAGS) $(ARM_STACK_OPT) -DHAND_ROLLED_MEMMOVE -DDECODER_INTEGRATION_GENERIC -c "$(DECODER_INTEGRATION_TU)" -o "$$tmp/patch_apply_stack_generic_hand.o" -fstack-usage; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm.o" > "$$tmp/stack_static.txt"; \
 	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic.o" > "$$tmp/stack_generic.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_arm_hand.o" > "$$tmp/stack_static_hand.txt"; \
+	OBJDUMP="$(ARM_OBJDUMP)" python3 scripts/stack_bound.py "$$tmp/patch_apply_stack_generic_hand.o" > "$$tmp/stack_generic_hand.txt"; \
 	echo "stack_static_integration=static PatchApply wrapper"; \
 	sed 's/^stack_/stack_static_/' "$$tmp/stack_static.txt"; \
 	echo "stack_static_ceiling_o2=$(BASE_STACK_STATIC_CEIL_O2)"; \
@@ -545,15 +578,25 @@ check-stack-internal: check-release-profile-internal $(DECODER_PUBLIC_HDRS) \
 	echo "stack_generic_ceiling_o2=$(BASE_STACK_GENERIC_CEIL_O2)"; \
 	static_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_static.txt"); \
 	generic_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_generic.txt"); \
-	test -n "$$static_bound"; \
-	test -n "$$generic_bound"; \
+	hand_static_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_static_hand.txt"); \
+	hand_generic_bound=$$(sed -n 's/^stack_bound_bytes=//p' "$$tmp/stack_generic_hand.txt"); \
+	test -n "$$static_bound"; test -n "$$generic_bound"; \
+	test -n "$$hand_static_bound"; test -n "$$hand_generic_bound"; \
+	echo "stack_hand_rolled_static_bound_bytes=$$hand_static_bound"; \
+	echo "stack_hand_rolled_generic_bound_bytes=$$hand_generic_bound"; \
 	if [ "$$static_bound" -gt "$(BASE_STACK_STATIC_CEIL_O2)" ]; then \
 		echo "Static PatchApply wrapper stack ceiling exceeded: $$static_bound > $(BASE_STACK_STATIC_CEIL_O2)" >&2; exit 1; \
 	fi; \
 	if [ "$$generic_bound" -gt "$(BASE_STACK_GENERIC_CEIL_O2)" ]; then \
 		echo "Caller-owned PatchApply * wrapper stack ceiling exceeded: $$generic_bound > $(BASE_STACK_GENERIC_CEIL_O2)" >&2; exit 1; \
 	fi; \
-	echo "stack_decoder_build=OK (public header set; static + generic)"
+	if [ "$$hand_static_bound" -gt "$(BASE_STACK_STATIC_CEIL_O2)" ]; then \
+		echo "Hand-rolled static wrapper stack ceiling exceeded: $$hand_static_bound > $(BASE_STACK_STATIC_CEIL_O2)" >&2; exit 1; \
+	fi; \
+	if [ "$$hand_generic_bound" -gt "$(BASE_STACK_GENERIC_CEIL_O2)" ]; then \
+		echo "Hand-rolled generic wrapper stack ceiling exceeded: $$hand_generic_bound > $(BASE_STACK_GENERIC_CEIL_O2)" >&2; exit 1; \
+	fi; \
+	echo "stack_decoder_build=OK (library + hand-rolled; static + generic)"
 
 # Portability contract: the decoder is standard C (C99 + C11 _Static_assert); GNU
 # attributes/builtins are optional codegen hints behind guards with live fallbacks (rc_models.h
@@ -621,7 +664,7 @@ check-decoder-contract-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSE
 	if $(CC) $(CFLAGS) -DPATCH_IMAGE_BASE=0xffffff00u -DPATCH_IMAGE_CAPACITY=512u -c "$$tmp/patch_apply_smoke.c" -o "$$tmp/overflow-base.o" >/dev/null 2>&1; then \
 		echo "decoder accepted PATCH_IMAGE_BASE + PATCH_IMAGE_CAPACITY overflow" >&2; exit 1; \
 	fi; \
-	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -Isrc -E "$$tmp/patch_apply_smoke.c" | \
+	$(CC) $(DECODER_CFLAGS) $(PORTABLE_FALLBACK_FLAGS) -DHAND_ROLLED_MEMMOVE -Isrc -E "$$tmp/patch_apply_smoke.c" | \
 	awk '/^# [0-9]+ "/ { inours = ($$3 ~ /"src\//) } \
 	     inours { line = $$0; gsub(/__builtin_offsetof/, "", line); \
 	              if (line ~ /__attribute__|__builtin_/) { print "GNU construct in portable decoder build: " $$0; bad=1 } } \
@@ -797,6 +840,7 @@ gate-internal:
 	  BASE_ARM_TEXT="$(BASE_ARM_TEXT)" BASE_ARM_DATA="$(BASE_ARM_DATA)" \
 	  BASE_ARM_BSS="$(BASE_ARM_BSS)" BASE_ARM_LINKED_TEXT="$(BASE_ARM_LINKED_TEXT)" \
 	  BASE_ARM_LINKED_DATA="$(BASE_ARM_LINKED_DATA)" BASE_ARM_LINKED_BSS="$(BASE_ARM_LINKED_BSS)" \
+	  BASE_ARM_HAND_ROLLED_LINKED_TEXT="$(BASE_ARM_HAND_ROLLED_LINKED_TEXT)" \
 	  BASE_STACK_STATIC_CEIL_O2="$(BASE_STACK_STATIC_CEIL_O2)" \
 	  BASE_STACK_GENERIC_CEIL_O2="$(BASE_STACK_GENERIC_CEIL_O2)" \
 	  JOBS="$(JOBS)" scripts/run_gate.sh

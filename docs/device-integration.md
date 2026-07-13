@@ -16,9 +16,12 @@ decodes concurrently against one flash image.
 constants, including the unsigned 8-bit `PATCH_WIRE_VERSION`. Its nonzero value
 domain-separates incompatible revisions at the pre-write source CRC check.
 Production builds must not override these constants. `PATCH_IMAGE_BASE` and
-`PATCH_IMAGE_CAPACITY` are the decoder-only deployment exceptions. The installed
-wire mode targets Cortex-M0/ARMv6-M. `CORTEX_M4` is a reserved wire-selection
-macro and defining it is rejected; compiling the same C for another CPU does not
+`PATCH_IMAGE_CAPACITY` are the decoder-only deployment-geometry exceptions.
+`HAND_ROLLED_MEMMOVE` is a separate, non-wire decoder code-generation option;
+the [README configuration guide](../README.md#decoder-configuration) explains
+when to enable it. The installed wire
+mode targets Cortex-M0/ARMv6-M. `CORTEX_M4` is a reserved wire-selection macro
+and defining it is rejected; compiling the same C for another CPU does not
 select a different wire.
 
 ## Partition and flash contract

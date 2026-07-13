@@ -42,6 +42,21 @@ Read [the device integration contract](docs/device-integration.md) before
 integrating it into a bootloader. It defines the flash, memory, callback,
 authentication, watchdog, concurrency, and recovery requirements.
 
+### Decoder configuration
+
+`PATCH_IMAGE_BASE` and `PATCH_IMAGE_CAPACITY` are required and describe the
+physical patch partition. Define them before including `patch_apply.h`.
+
+The decoder uses the C library's `memmove` by default. It deliberately uses
+that same primitive for non-overlapping model copies as well as overlapping
+shifts, avoiding the flash cost of linking both `memcpy` and `memmove`. Leave
+`HAND_ROLLED_MEMMOVE` undefined when the final firmware already links
+`memmove`. If it does not, define `HAND_ROLLED_MEMMOVE` before including
+`patch_apply.h` to select the decoder's smaller private backward-copy loop.
+The option changes code generation only, not the wire format or RAM layout;
+the private byte loop may be slower, so compare the final linked image and
+update latency with the intended compiler and firmware.
+
 ## Verification and release
 
 ```sh

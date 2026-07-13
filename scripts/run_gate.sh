@@ -7,6 +7,7 @@ set -u
 MAKE_CMD="${MAKE:-make}"
 : "${HOST_TOOL:?run_gate.sh: HOST_TOOL not set by make gate}"
 : "${RELEASE_PROFILE:?run_gate.sh: RELEASE_PROFILE not set by make gate}"
+: "${BASE_ARM_HAND_ROLLED_LINKED_TEXT:?run_gate.sh: hand-rolled ARM ratchet not set by make gate}"
 [ -x "$HOST_TOOL" ] || { echo "run_gate.sh: host tool is not executable: $HOST_TOOL" >&2; exit 1; }
 . "$(dirname "$0")/tempdir.sh"
 rc=0
@@ -68,11 +69,11 @@ require_metrics \
   'malformed.txt:malformed_rejects' \
   'e.txt:edge_cases edge_roundtrips edge_refusals edge_failures edge_alt_diff_16k_encode_cpu_ms edge_alt_diff_32k_encode_cpu_ms edge_alt_diff_64k_encode_cpu_ms edge_alt_diff_256k_encode_cpu_ms edge_alt_diff_16k_encode_wall_ms edge_alt_diff_32k_encode_wall_ms edge_alt_diff_64k_encode_wall_ms edge_alt_diff_256k_encode_wall_ms' \
   'g.txt:golden_wire' \
-  'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract' \
+  'dec_contract.txt:decoder_contract decoder_portable decoder_address_contract decoder_resource_contract decoder_linkage_contract decoder_hand_rolled_memmove' \
   'models.txt:model_contract' \
   'dg.txt:encoder_kernels split_run_budget degrade_journal_peak degrade_opc_splits degrade_direction degrade_rowwindow degrade_bigspan degrade_packed_preserve degrade_packed_correction degrade_cases degrade_fail' \
-  'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_decoder_build' \
-  'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_decoder_build' \
+  'a.txt:arm_size_integration arm_object_text arm_object_data arm_object_bss arm_linked_integration arm_linked_text arm_linked_data arm_linked_bss arm_linked_runtime_helpers soft_div_calls arm_hand_rolled_linked_text arm_hand_rolled_runtime_helpers arm_hand_rolled_memmove arm_decoder_build' \
+  'st.txt:stack_static_integration stack_static_bound_bytes stack_static_ceiling_o2 stack_generic_integration stack_generic_bound_bytes stack_generic_ceiling_o2 stack_hand_rolled_static_bound_bytes stack_hand_rolled_generic_bound_bytes stack_decoder_build' \
   'm.txt:matrix_ok full_total home_size_better home_size_worse home_size_equal foreign_ok foreign_total wire_identity max_amplified max_maxpageerase max_inversions max_unaligned max_oob_page_writes max_canary_corrupt max_journal' \
   'c.txt:oneface_grow oneface_revert'
 
@@ -93,7 +94,7 @@ kvs 'assets.txt|corpus_assets|corpus assets          : ' 'assets.txt|foreign_ass
 awk -F= '/^edge_cases=/{c=$2}/^edge_roundtrips=/{r=$2}/^edge_refusals=/{f=$2}END{if(c!="")printf "edge inputs             : %s round-trip + %s refused of %s\n",r,f,c}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_cpu_ms=/{a=$2}/^edge_alt_diff_32k_encode_cpu_ms=/{b=$2}/^edge_alt_diff_64k_encode_cpu_ms=/{c=$2}/^edge_alt_diff_256k_encode_cpu_ms=/{d=$2}END{if(a!="")printf "alternating-diff CPU    : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
 awk -F= '/^edge_alt_diff_16k_encode_wall_ms=/{a=$2}/^edge_alt_diff_32k_encode_wall_ms=/{b=$2}/^edge_alt_diff_64k_encode_wall_ms=/{c=$2}/^edge_alt_diff_256k_encode_wall_ms=/{d=$2}END{if(a!="")printf "alternating-diff wall   : %s / %s / %s / %s ms  (16/32/64/256 KiB)\n",a,b,c,d}' "$tmp/e.txt"
-kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'models.txt|model_contract|model contract          : '
+kvs 'g.txt|golden_wire|golden wire             : ' 'dec_contract.txt|decoder_contract|decoder contract        : ' 'dec_contract.txt|decoder_linkage_contract|decoder linkage policy: ' 'dec_contract.txt|decoder_portable|decoder portability     : ' 'dec_contract.txt|decoder_hand_rolled_memmove|decoder hand-rolled   : ' 'models.txt|model_contract|model contract          : '
 kvs 'dg.txt|encoder_kernels|encoder kernels         : ' 'dg.txt|split_run_budget|split-run budget        : '
 awk -F= '/^degrade_journal_peak=/{j=$2}/^degrade_opc_splits=/{o=$2}/^degrade_direction=/{d=$2}/^degrade_rowwindow=/{w=$2}/^degrade_bigspan=/{f=$2}/^degrade_packed_preserve=/{p=$2}/^degrade_packed_correction=/{x=$2}/^degrade_cases=/{c=$2}END{if(c!="")printf "degradation paths       : journal_peak=%s opc_splits=%s dir=%s rowwin=%s bigspan=%s packed=%s/%s (%s cases)\n",j,o,d,w,f,p,x,c}' "$tmp/dg.txt"
 kvs 'a.txt|arm_size_integration|ARM object integration  : '
@@ -101,9 +102,12 @@ awk -F= -v bt="${BASE_ARM_TEXT:?}" -v bd="${BASE_ARM_DATA:?}" -v bb="${BASE_ARM_
 kvs 'a.txt|arm_linked_integration|ARM linked integration  : '
 awk -F= -v bt="${BASE_ARM_LINKED_TEXT:?}" -v bd="${BASE_ARM_LINKED_DATA:?}" -v bb="${BASE_ARM_LINKED_BSS:?}" '/^arm_linked_text=/{t=$2}/^arm_linked_data=/{d=$2}/^arm_linked_bss=/{b=$2}END{if(t!="")printf "ARM linked text/data/bss : %s / %s / %s   (ratchet %s/%s/%s, .bss cap 12288)\n",t,d,b,bt,bd,bb}' "$tmp/a.txt"
 kvs 'a.txt|arm_linked_runtime_helpers|ARM linked helpers      : ' 'a.txt|soft_div_calls|ARM   soft-divide calls  : ' 'a.txt|arm_decoder_build|ARM decoder build      : '
+awk -F= -v bt="${BASE_ARM_HAND_ROLLED_LINKED_TEXT}" '/^arm_hand_rolled_linked_text=/{printf "ARM hand-rolled linked : %s   (ratchet %s)\n",$2,bt}' "$tmp/a.txt"
+kvs 'a.txt|arm_hand_rolled_runtime_helpers|ARM hand-rolled helpers: ' 'a.txt|arm_hand_rolled_memmove|ARM hand-rolled mode   : '
 awk -F= '/^stack_static_bound_bytes=/{b=$2}/^stack_static_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, static wrapper   : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 awk -F= '/^stack_generic_bound_bytes=/{b=$2}/^stack_generic_ceiling_o2=/{c=$2}END{if(b!="")printf "stack, generic pointer  : %s B  (gcc -O2, ceiling %s, excl. externs)\n",b,c}' "$tmp/st.txt"
 kvs 'st.txt|stack_decoder_build|stack decoder build    : '
+kvs 'st.txt|stack_hand_rolled_static_bound_bytes|stack, hand static     : ' 'st.txt|stack_hand_rolled_generic_bound_bytes|stack, hand generic    : '
 kvs 'm.txt|matrix_ok|matrix round-trips      : ' 'm.txt|full_total|corpus full_total       : '
 awk -F= '/^home_size_better=/{b=$2}/^home_size_worse=/{w=$2}/^home_size_equal=/{e=$2}END{if(b!="")printf "home size split         : %s better / %s worse / %s equal\n",b,w,e}' "$tmp/m.txt"
 kvs 'm.txt|foreign_ok|foreign round-trips     : ' 'm.txt|foreign_total|foreign full_total      : ' 'm.txt|wire_identity|corpus wire identity    : ' 'c.txt|oneface_grow|one-face grow            : ' 'c.txt|oneface_revert|one-face revert          : ' 'm.txt|max_amplified|NVM pages amplified      : ' 'm.txt|max_maxpageerase|NVM max erases-per-page  : ' 'm.txt|max_inversions|NVM frontier inversions  : ' 'm.txt|max_unaligned|NVM unaligned calls      : ' 'm.txt|max_oob_page_writes|NVM out-of-range calls   : ' 'm.txt|max_canary_corrupt|NVM canary corruptions  : ' 'm.txt|max_journal|journal peak slots      : '

@@ -76,6 +76,9 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     # attributes can hide storage or allocator calls from a source grep.
     "$CC" $common -c test-bench/decoder-compiled-contract.c \
         -o "$tmp/compiled-contract.o"
+    "$CC" $common -DNO_GNU_EXTENSIONS -DHAND_ROLLED_MEMMOVE \
+        -c test-bench/decoder-compiled-contract.c \
+        -o "$tmp/compiled-contract-hand.o"
 
     audit_decoder_object(){
         obj=$1
@@ -124,6 +127,12 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
         fi
     }
     audit_decoder_object "$tmp/compiled-contract.o" public-header
+    audit_decoder_object "$tmp/compiled-contract-hand.o" hand-rolled
+    if grep -Eq '^(memcpy|memmove)[[:space:]]' "$tmp/nm-hand-rolled-undefined"; then
+        echo "hand-rolled decoder still refers to a library copy helper:" >&2
+        grep -E '^(memcpy|memmove)[[:space:]]' "$tmp/nm-hand-rolled-undefined" >&2
+        exit 1
+    fi
 
     # The former multi-TU linkage macros are rejected explicitly. Without this contract an old
     # declarations-only caller could silently start compiling a private decoder copy after the
@@ -158,6 +167,7 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
         printf '%s\n' '#define UG_C(x) ((x)+23)' '#define UG_GAMMA_MANT 29'
         printf '%s\n' '#define SMAP_CAP 31' '#define LIT0_CTX 37' '#define IDX_CTX 41'
         printf '%s\n' '#define DR_HIT_INIT 43u'
+        printf '%s\n' '#define HAND_ROLLED_MEMMOVE'
     } > "$tmp/macro-before.c"
     cp "$tmp/macro-before.c" "$tmp/macro-after.c"
     printf '%s\n' '#include "patch_apply.h"' >> "$tmp/macro-after.c"
@@ -205,6 +215,10 @@ if [ "${DECODER_API_REGULAR:-1}" = 1 ]; then
     "$tmp/nvm-geometry-probe"
     "$CC" $common test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract"
     "$tmp/contract" $args >"$tmp/contract.out"
+    "$CC" $common -DNO_GNU_EXTENSIONS -DHAND_ROLLED_MEMMOVE \
+        test-bench/decoder-contract.c -Wl,--gc-sections -o "$tmp/contract-hand"
+    "$tmp/contract-hand" $args >/dev/null
+    echo "decoder_hand_rolled_memmove=OK (portable grow/revert + no library copy helper)"
 
     # A nonzero absolute base plus a one-page partition exercises address translation and the
     # oversized-envelope guard. Before the guard this crafted
@@ -230,5 +244,8 @@ if [ "${DECODER_API_SANITIZE:-0}" = 1 ]; then
     "$CC" $CFLAGS -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
         -fno-sanitize-recover=all test-bench/decoder-contract.c -o "$tmp/contract-sanitize"
     ASAN_OPTIONS=detect_leaks=1 "$tmp/contract-sanitize" $args >/dev/null
-    echo "decoder_sanitizers=OK (ASan + UBSan)"
+    "$CC" $CFLAGS -O1 -DHAND_ROLLED_MEMMOVE -fsanitize=address,undefined -fno-omit-frame-pointer \
+        -fno-sanitize-recover=all test-bench/decoder-contract.c -o "$tmp/contract-sanitize-hand"
+    ASAN_OPTIONS=detect_leaks=1 "$tmp/contract-sanitize-hand" $args >/dev/null
+    echo "decoder_sanitizers=OK (ASan + UBSan; library + hand-rolled)"
 fi

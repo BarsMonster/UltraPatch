@@ -194,6 +194,10 @@ static int check_shared_models(void){
     CHECK(ds.K == 4 && dic[0] == 3 && dic[1] == 2 && dic[2] == 1 && dic[3] == 0);
     rc_mtf_insert_i32(dic, &ds.K, 4, 4);
     CHECK(ds.K == 4 && dic[0] == 4 && dic[1] == 3 && dic[2] == 2 && dic[3] == 1);
+    rc_mtf_promote_i32(dic, 0u);
+    CHECK(dic[0] == 4 && dic[1] == 3 && dic[2] == 2 && dic[3] == 1);
+    rc_mtf_promote_i32(dic, 2u);
+    CHECK(dic[0] == 2 && dic[1] == 4 && dic[2] == 3 && dic[3] == 1);
     CHECK(rc_dr_rep_ctx(0, 0) == 2);
     CHECK(rc_dr_rep_ctx(1, 0) == 3);
     CHECK(rc_dr_rep_ctx(1, 5) == 1);
@@ -304,6 +308,8 @@ EOF
 
 "$CC" $CFLAGS "$tmp/model_probe.c" -o "$tmp/model_probe"
 "$tmp/model_probe"
+"$CC" $CFLAGS -DHAND_ROLLED_MEMMOVE "$tmp/model_probe.c" -o "$tmp/model_probe_hand"
+"$tmp/model_probe_hand"
 
 # Exercise the host contract at all three decision layers: frozen-model pricing and emission stop
 # before an over-cap unary prefix, and both existing k sweeps choose a decoder-feasible alternative

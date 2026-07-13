@@ -48,6 +48,22 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
 #define RC_SUB_OVERFLOW(a,b,out) rc_sub_overflow_i32((a),(b),(out))
 #endif
 
+/* Every model move below shifts bytes toward a higher address. Library mode deliberately uses
+ * one memmove primitive for both overlapping MTF shifts and non-overlapping model copies, so a
+ * decoder does not pull in both memcpy and memmove. Size-constrained integrations that do not
+ * already link memmove may opt into the private backward byte loop. The volatile source access
+ * prevents an optimizing compiler from recognizing the loop and reintroducing a libc call. */
+#ifdef HAND_ROLLED_MEMMOVE
+static RC_NOINLINE void rc_move_high(void*dst,const void*src,size_t n){
+    uint8_t*d=(uint8_t*)dst;
+    const volatile uint8_t*s=(const volatile uint8_t*)src;
+    while(n){ n--; d[n]=s[n]; }
+}
+#define RC_MOVE_HIGH(dst,src,n) rc_move_high((dst),(src),(n))
+#else
+#define RC_MOVE_HIGH(dst,src,n) ((void)memmove((dst),(src),(n)))
+#endif
+
 #define RC_KTOP (1u<<24)
 #define RC_PROB_BITS 12u
 #define RC_PBIT 4096u
@@ -306,13 +322,13 @@ typedef struct { uint16_t u[UP_IDX_CTX]; } up_IdxUnary;
 static inline void up_idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<UP_IDX_CTX;i++) g->u[i]=seed; }
 
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
-    if(j){ int32_t t=dic[j]; memmove(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
+    if(j){ int32_t t=dic[j]; RC_MOVE_HIGH(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
 }
 static inline void rc_mtf_insert_i32(int32_t*dic,uint16_t*K,uint16_t cap,int32_t v){
     uint16_t n=*K;
     if(n<cap) (*K)++;
     else n=(uint16_t)(cap-1u);
-    memmove(&dic[1],&dic[0],(size_t)n*sizeof(dic[0]));
+    RC_MOVE_HIGH(&dic[1],&dic[0],(size_t)n*sizeof(dic[0]));
     dic[0]=v;
 }
 RC_ALWAYS_INLINE uint8_t rc_dr_rep_ctx(uint8_t rh,int32_t last){

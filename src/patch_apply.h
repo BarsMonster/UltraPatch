@@ -1038,7 +1038,7 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       if(rc_wire_from_crc(up_crc32_flash_hist(pa,fs,hist0,hist1))!=want_from) return 0;
       up_lit_tree_from_hist(&pa->M_lit0[0],hist0,w);
-      for(int c=1;c<UP_LIT0_CTX;c++) pa->M_lit0[c]=pa->M_lit0[0];
+      for(int c=1;c<UP_LIT0_CTX;c++) RC_MOVE_HIGH(&pa->M_lit0[c],&pa->M_lit0[0],sizeof pa->M_lit0[c]);
       up_lit_tree_from_hist(&pa->M_lit1,hist1,w); }
     /* Literal seeding occupied the same arena phase. Unary-high insertion uses OR, so clear the
      * bitmap it overlaid before any preserve entry is recorded; samples/lows/values are assigned
@@ -1172,8 +1172,8 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 /* Seal the non-knob model/wire macros that rc_models.h + patch_config.h define and that this
  * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
  * Only the documented integration/configuration macros (PATCH_IMAGE_BASE,
- * PATCH_IMAGE_CAPACITY, JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH, OPC_CAP, DR_KCAP_BL,
- * DR_KCAP_EX, and MAX_IMAGE) stay defined. The
+ * PATCH_IMAGE_CAPACITY, HAND_ROLLED_MEMMOVE, JSLOTS, WINDOW_LOG, OUTROW, OUTROW_DEPTH,
+ * OPC_CAP, DR_KCAP_BL, DR_KCAP_EX, and MAX_IMAGE) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
  * #undefs never reach the encoder side of the mirror.
  *
@@ -1185,6 +1185,7 @@ static inline uint32_t patch_apply_journal_used(const PatchApply *pa){ return pa
 #undef RC_WARN_UNUSED_RESULT
 #undef RC_ADD_OVERFLOW
 #undef RC_SUB_OVERFLOW
+#undef RC_MOVE_HIGH
 #undef RC_KTOP
 #undef RC_PROB_BITS
 #undef RC_PBIT
