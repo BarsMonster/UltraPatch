@@ -5,18 +5,18 @@
 
 # A/B per-pair matrix comparison for compression experiments.
 #
-# Thin driver over the shared gate machinery: it runs check_corpus.sh's 256-pair
-# home pool TWICE (baseline encoder, then candidate encoder) instead of maintaining
-# its own pool/split, names the home pairs the candidate REGRESSED, and applies the
-# integrated one-face accept/reject verdict (via oneface_metrics.sh). The candidate is
-# judged by the project rule (AGENTS.md): corpus total must improve WITHOUT an overfit
-# split and WITHOUT regressing the one-face product patch beyond the tracked gates.
+# Thin driver over the shared gate machinery: it runs check_corpus.sh's home + foreign
+# pools TWICE (baseline encoder, then candidate encoder) instead of maintaining its own
+# pool/split, names the home pairs the candidate REGRESSED, and applies the integrated
+# foreign-total + one-face accept/reject verdict (via oneface_metrics.sh). The candidate
+# is judged by the project rule (AGENTS.md): neither corpus may regress, the home split
+# must not overfit, and the one-face product patch must remain within the tracked gates.
 #
 # Usage: scripts/ab_matrix.sh <enc_baseline> <enc_candidate> <dec_candidate> [jobs]
 # Encoder commands must accept: <from_image> <to_image> <patch>.
 # Decoder commands must accept: --decode <image> <patch>.
-# The home matrix round-trips each encoder's blobs through THAT encoder (ultrapatch is
-# both encoder and decoder); <dec_candidate> is used for the one-face candidate round-trip.
+# The baseline pools round-trip through the baseline tool (ultrapatch is both encoder and
+# decoder); <dec_candidate> applies the candidate home, foreign, and one-face patches.
 # Env:   IMAGES, FOREIGN, FIXTURES (as for check_corpus.sh / oneface_metrics.sh),
 #        BASE_ONEFACE_GROW / BASE_ONEFACE_REVERT (one-face caps; enforced only when set,
 #        skipped for bare measurement when unset — mirroring check_corpus.sh's ratchets).
@@ -37,20 +37,23 @@ GATE_R="${BASE_ONEFACE_REVERT:-}"
 
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 
-# --- home matrix, two runs over the shared pool ---------------------------------------------
+# --- home + foreign matrix, two runs over the shared pool -----------------------------------
 # Run 1 (baseline): bare per-pair measurement (no split baseline), dump its sizes as our A/B
 # reference. Round-trips through ENC_A, so ENC_A must be a working decoder (ultrapatch is).
-if ! CORPUS_SIZE_BASELINE="" CORPUS_SIZE_DUMP="$d/a.tsv" WIRE_BASELINE="" \
-     ULTRAPATCH="$ENC_A" \
+if ! CORPUS_SIZE_BASELINE="" CORPUS_SIZE_DUMP="$d/a.tsv" \
+     WIRE_BASELINE="" WIRE_BASELINE_DUMP="" BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" \
+     ULTRAPATCH="$ENC_A" ULTRAPATCH_DECODE="$ENC_A" \
      "$CC" "$JOBS" > "$d/a.txt" 2> "$d/a.err"; then
   echo "ab_matrix.sh: baseline corpus run failed (enc=$ENC_A)" >&2
   cat "$d/a.err" >&2
   exit 3
 fi
-# Run 2 (candidate): split its sizes against the baseline dump; round-trip through DEC_B. No
-# ratchet pins passed, so a nonzero exit here is a structural / round-trip / write-safety fault.
+# Run 2 (candidate): split its sizes against the baseline dump and round-trip through DEC_B.
+# Ratchet pins are explicitly cleared, so a nonzero exit here is structural, round-trip, or
+# write-safety failure; the A/B verdict below owns compression-regression classification.
 if ! CORPUS_SIZE_BASELINE="$d/a.tsv" CORPUS_SIZE_DUMP="$d/b.tsv" \
-     WIRE_BASELINE="" ULTRAPATCH="$ENC_B" ULTRAPATCH_DECODE="$DEC_B" \
+     WIRE_BASELINE="" WIRE_BASELINE_DUMP="" BASE_FULL_TOTAL="" BASE_FOREIGN_TOTAL="" \
+     ULTRAPATCH="$ENC_B" ULTRAPATCH_DECODE="$DEC_B" \
      "$CC" "$JOBS" > "$d/b.txt" 2> "$d/b.err"; then
   echo "ab_matrix.sh: candidate corpus run failed (structural / round-trip; enc=$ENC_B dec=$DEC_B)" >&2
   cat "$d/b.err" >&2
@@ -63,9 +66,19 @@ worse=$(sed -n 's/^home_size_worse=//p' "$d/b.txt")
 equal=$(sed -n 's/^home_size_equal=//p' "$d/b.txt")
 full_base=$(sed -n 's/^full_total=//p' "$d/a.txt")
 full_cand=$(sed -n 's/^full_total=//p' "$d/b.txt")
+foreign_base=$(sed -n 's/^foreign_total=//p' "$d/a.txt")
+foreign_cand=$(sed -n 's/^foreign_total=//p' "$d/b.txt")
+for metric in better worse equal full_base full_cand foreign_base foreign_cand; do
+  value=${!metric}
+  case "$value" in
+    ''|*[!0-9]*) echo "ab_matrix.sh: missing or invalid corpus metric: $metric" >&2; exit 3 ;;
+  esac
+done
 printf 'split_better=%s\nsplit_worse=%s\nsplit_equal=%s\n' "$better" "$worse" "$equal"
 printf 'full_total_base=%d\nfull_total_cand=%d\nfull_total_delta=%d\n' \
   "$full_base" "$full_cand" "$((full_cand - full_base))"
+printf 'foreign_total_base=%d\nforeign_total_cand=%d\nforeign_total_delta=%d\n' \
+  "$foreign_base" "$foreign_cand" "$((foreign_cand - foreign_base))"
 # Name WHICH home pairs regressed (candidate blob larger than baseline), to stderr.
 awk 'NR==FNR { a[$1 SUBSEP $2]=$3; next }
      { k=$1 SUBSEP $2; if((k in a) && $3+0 > a[k]+0)
@@ -105,10 +118,11 @@ else
   printf 'oneface_gate=SKIPPED (caps unset)\n'
 fi
 
-# --- accept gate (unchanged verdict logic + exit-code contract) ------------------------------
+# --- accept gate (verdict logic + exit-code contract) ----------------------------------------
 reject=""
 [ "$worse" -ne 0 ] && reject="${reject:+$reject,}worse_pairs"
 [ "$full_cand" -gt "$full_base" ] && reject="${reject:+$reject,}full_total"
+[ "$foreign_cand" -gt "$foreign_base" ] && reject="${reject:+$reject,}foreign_total"
 [ "$gb" -gt "$ga" ] && reject="${reject:+$reject,}oneface_grow"
 [ "$rb" -gt "$ra" ] && reject="${reject:+$reject,}oneface_revert"
 [ "$verdict" != OK ] && reject="${reject:+$reject,}oneface_gate"
