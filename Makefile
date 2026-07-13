@@ -646,9 +646,9 @@ check-decoder-sanitize-internal: ultrapatch $(DECODER_PUBLIC_HDRS) $(CORPUS_ASSE
 
 # Host-encoder algorithm probes under dynamic sanitizers. Standalone so the instrumented
 # builds do not contend with the CPU-saturated corpus workers in `make gate`.
-check-encoder-sanitize-internal:
+check-encoder-sanitize-internal: scripts/check_encoder_kernels.sh
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" \
-	  scripts/check_encoder_sanitize.sh
+	  scripts/check_encoder_kernels.sh sanitize
 
 check-models-internal: $(DECODER_PUBLIC_HDRS)
 	@CC="$(CC)" CFLAGS="$(DECODER_CFLAGS)" scripts/check_models.sh

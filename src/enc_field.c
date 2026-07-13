@@ -579,14 +579,6 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
     split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
 }
 
-#ifdef SPLIT_WORK_PROBE
-void split_nonzero_diff_runs_probe(const EncCtx *ctx, OpVec *ops,
-                                   const Buf *from, const Buf *to,
-                                   uint64_t transitions) {
-    split_nonzero_diff_runs_budget(ctx, ops, from, to, transitions);
-}
-#endif
-
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,

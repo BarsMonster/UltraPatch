@@ -53,19 +53,6 @@ IMG="$IMAGES"
 }
 . "$(dirname "$0")/tempdir.sh"
 
-SPLIT="$tmp/split-run-probe"
-if ! $CC_HOST $CFLAGS -D_POSIX_C_SOURCE=200809L -DSPLIT_WORK_PROBE \
-      test-bench/split-run-probe.c $ENC_SEAM_SRCS -Wl,--gc-sections \
-      -o "$SPLIT" 2>"$tmp/split-run-build.log"; then
-  echo "check_degrade: split-run budget probe build failed" >&2
-  sed 's/^/    /' "$tmp/split-run-build.log" >&2; exit 1
-fi
-if ! "$SPLIT" >"$tmp/split-run.out" 2>"$tmp/split-run.err"; then
-  echo "check_degrade: split-run budget probe failed: $(cat "$tmp/split-run.err")" >&2
-  exit 1
-fi
-cat "$tmp/split-run.out"
-
 # Deterministic image generator shared by every case (scripts/synth_gen.py). Roles 'from' and
 # 'to' are derived from the SAME seed so a pair is reproducible from its parameters alone.
 #   gen <out> <from|to> <mode> <args...>

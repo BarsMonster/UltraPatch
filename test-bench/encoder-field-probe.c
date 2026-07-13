@@ -25,6 +25,62 @@ static void put16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
 }
 
+enum { SPLIT_HALF = 64, SPLIT_TOTAL = 2 * SPLIT_HALF };
+
+static OpVec split_fixture(void) {
+    OpVec v = {0};
+    v.payload = (uint8_t *)xmalloc(SPLIT_TOTAL);
+    memset(v.payload, 0x44, SPLIT_TOTAL);
+    opvec_push(&v, (Op){ SPLIT_HALF, 0, 0 });
+    opvec_push(&v, (Op){ SPLIT_HALF, 0, 0 });
+    return v;
+}
+
+static int split_same(const OpVec *a, const OpVec *b) {
+    return a->n == b->n &&
+           (!a->n || memcmp(a->v, b->v, a->n * sizeof(*a->v)) == 0) &&
+           memcmp(a->payload, b->payload, SPLIT_TOTAL) == 0;
+}
+
+static int split_budget_cases(void) {
+    Buf from = { (uint8_t *)xmalloc(SPLIT_TOTAL), SPLIT_TOTAL, SPLIT_TOTAL };
+    Buf to = { (uint8_t *)xmalloc(SPLIT_TOTAL), SPLIT_TOTAL, SPLIT_TOTAL };
+    OpVec original = split_fixture(), exact = split_fixture(), unlimited = split_fixture();
+    OpVec none = split_fixture(), first = split_fixture(), again = split_fixture();
+    EncCtx ctx = { .fwd = 1 };
+    int fail = 0;
+#define SPLIT_REQUIRE(x) do { if (!(x)) { \
+    fprintf(stderr, "split-run check failed: %s\n", #x); fail = 1; goto out; \
+} } while (0)
+    memset(from.d, 0x11, SPLIT_TOTAL);
+    memset(to.d, 0x55, SPLIT_TOTAL);
+
+    split_nonzero_diff_runs_budget(&ctx, &exact, &from, &to, 2);
+    split_nonzero_diff_runs_budget(&ctx, &unlimited, &from, &to, UINT64_MAX);
+    SPLIT_REQUIRE(split_same(&exact, &unlimited));
+
+    split_nonzero_diff_runs_budget(&ctx, &none, &from, &to, 0);
+    SPLIT_REQUIRE(split_same(&none, &original));
+
+    split_nonzero_diff_runs_budget(&ctx, &first, &from, &to, 1);
+    split_nonzero_diff_runs_budget(&ctx, &again, &from, &to, 1);
+    SPLIT_REQUIRE(split_same(&first, &again));
+    SPLIT_REQUIRE(first.n == 2u);
+    SPLIT_REQUIRE(first.v[0].diff_len == 0 && first.v[0].extra_len == SPLIT_HALF &&
+                  first.v[0].adj == SPLIT_HALF);
+    SPLIT_REQUIRE(first.v[1].diff_len == SPLIT_HALF && first.v[1].extra_len == 0 &&
+                  first.v[1].adj == 0);
+    for (size_t i = 0; i < SPLIT_HALF; i++) SPLIT_REQUIRE(first.payload[i] == 0x55u);
+    for (size_t i = SPLIT_HALF; i < SPLIT_TOTAL; i++) SPLIT_REQUIRE(first.payload[i] == 0x44u);
+
+out:
+#undef SPLIT_REQUIRE
+    opvec_free(&original); opvec_free(&exact); opvec_free(&unlimited);
+    opvec_free(&none); opvec_free(&first); opvec_free(&again);
+    buf_free(&from); buf_free(&to);
+    return fail;
+}
+
 static int boundary_cases(void) {
     enum { N = 1032 };
     uint8_t src[N]; memset(src, 0, sizeof(src));
@@ -157,9 +213,10 @@ static int smap_cases(void) {
 }
 
 int main(void) {
-    int fail = arithmetic_boundaries() || boundary_cases() || smap_cases();
+    int fail = arithmetic_boundaries() || boundary_cases() || smap_cases() || split_budget_cases();
     if (fail) return 1;
     printf("ldr_index_results=OK arithmetic=14 boundary=10\n");
     printf("smap_trim_results=OK cases=257 cap=160 stress=8192 wire_feasibility=OK\n");
+    puts("split_run_budget=OK");
     return 0;
 }

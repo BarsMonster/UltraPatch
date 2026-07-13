@@ -279,11 +279,6 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
                            const LdrTargetIndex *ldr);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to);
-#ifdef SPLIT_WORK_PROBE
-void split_nonzero_diff_runs_probe(const EncCtx *ctx, OpVec *ops,
-                                   const Buf *from, const Buf *to,
-                                   uint64_t transitions);
-#endif
 OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                               const uint8_t *frm, const uint8_t *true_to,
                               const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
