@@ -78,7 +78,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     /* A same-basename .elf sidecar is OPTIONAL. Without it Ranges stays zero, so relocation
      * normalization excludes no data window and heuristically scans the whole image before
      * bsdiff+LZ. A present-but-malformed ELF still dies loudly — only absence is tolerated.
-     * This enables raw-binary pairs (edge gate, foreign firmware without build artifacts). */
+     * This enables raw-binary pairs such as foreign firmware without build artifacts. */
     Ranges fr = {0}, tr = {0};
     if (felf_present) fr = elf_ranges(felf, &from, "from");
     if (telf_present) tr = elf_ranges(telf, &to, "to");
@@ -91,11 +91,9 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
      * in-family firmware. */
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
-    Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1; int best_desc = 0;
+    Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1;
     int natural_bestv = -1;
     unsigned char natural_opc[PLAN_SPEC_N] = {0};
-    size_t sweep_opc_splits = 0;   /* max OPC_CAP splits any plan variant needed (winner or not) */
-    size_t plans_evaluated = 0;
     /* The opposite direction is a resource-pressure fallback: admit it only when no natural
      * plan was feasible or the natural winner exhausted the journal budget. Once admitted,
      * rerun that winner plus natural plans that needed correction splitting. A clean natural
@@ -108,31 +106,19 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
         ctx.fwd = (dir == 0);
         for (int v = 0; v < PLAN_SPEC_N; v++) {
             if (pass && natural_bestv >= 0 && v != natural_bestv && !natural_opc[v]) continue;
-            plans_evaluated++;
             PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &PLAN_SPECS[v]);
             if (!pass) natural_opc[v] = (unsigned char)(pr.st.opc_splits != 0);
-            if (pr.st.opc_splits > sweep_opc_splits) sweep_opc_splits = pr.st.opc_splits;
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
             emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
             buf_free(&pr.body);                                          /* blob holds the copy */
             if (bestv < 0 || cand.n < best_blob.n) {
-                buf_free(&best_blob); best_blob = cand; best_st = pr.st; bestv = v; best_desc = dir;
+                buf_free(&best_blob); best_blob = cand; best_st = pr.st; bestv = v;
             } else buf_free(&cand);
         }
     }
     plan_prepare_free(&prep);
     if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
-    /* Wire-neutral degradation stat line for the SHIPPED plan. natural=1 => canonical size-delta
-     * uLEB; natural=0 => unnatural apply direction signaled by the overlong marker. */
-    if (getenv("DEGRADE_STATS"))
-        fprintf(stderr,
-                "DEGRADE dir=%s natural=%d deg_journal=%d pres_needed=%zu converted=%zu opc_splits=%zu opc_splits_sweep=%zu plans_evaluated=%zu budget=%u opc_cap=%u\n",
-                best_desc ? "bwd" : "fwd",
-                rc_dir_is_natural(from_size, to_size, best_desc),
-                best_st.deg_engaged, best_st.deg_pres_needed, best_st.deg_converted,
-                best_st.opc_splits, sweep_opc_splits, plans_evaluated,
-                (unsigned)JSLOTS, (unsigned)OPC_CAP);
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM page emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it

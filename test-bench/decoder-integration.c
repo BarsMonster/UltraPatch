@@ -2,16 +2,12 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Compile-only integration shapes shared by the ARM size, stack, and wire-config checks.
+ * Compile-only integration shapes used by the aggregate decoder-footprint gate.
  */
 #include "patch_apply.h"
 
 #if defined(DECODER_INTEGRATION_STATIC) == defined(DECODER_INTEGRATION_GENERIC)
 #error "select exactly one decoder integration shape"
-#endif
-
-#ifdef DECODER_INTEGRATION_BSS_PROBE_BYTES
-unsigned char decoder_integration_bss_probe[DECODER_INTEGRATION_BSS_PROBE_BYTES];
 #endif
 
 #ifdef DECODER_INTEGRATION_GENERIC

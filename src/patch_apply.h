@@ -329,7 +329,7 @@ static int up_s_bit_r(PatchApply *pa, uint16_t*prob,int rate){
  * literal/dval bit-trees keep their own per-tree rate via up_s_bit_r. */
 static int up_s_bit(PatchApply *pa, uint16_t*prob){ return up_s_bit_r(pa,prob,RC_S_BIT_RATE); }
 static int up_s_raw(PatchApply *pa){ return up_rc_decode(pa,pa->RC.range>>1); }
-/* CRASH-HARDENING (fuzz gate): a corrupt/truncated stream yields zero-fill past EOF,
+/* CRASH-HARDENING: a corrupt/truncated stream yields zero-fill past EOF,
  * which can drive the unbounded unary loops below forever (hang) or shift a value by >=32 bits
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail. g_rcerr is the ONE decode error latch — RC-level and apply-level failures all set it

@@ -127,16 +127,3 @@ out:
     buf_free(&image); buf_free(&blob);
     return rc;
 }
-
-#ifdef PATCH_APPLY_DEMO_MAIN
-static void decode_usage(const char *prog){
-    fprintf(stderr, "usage: %s --decode <image> <patch>\n", prog);
-}
-
-int main(int argc,char**argv){
-    if(argc==2 && (strcmp(argv[1],"-h")==0 || strcmp(argv[1],"--help")==0)){ decode_usage(argv[0]); return 0; }
-    if(argc==4 && strcmp(argv[1],"--decode")==0) return decode_patch(argv[2],argv[3]);
-    decode_usage(argv[0]);
-    return 2;
-}
-#endif

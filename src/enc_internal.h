@@ -56,9 +56,7 @@ int divsufsort(const uint8_t *T, int32_t *suffix_array, int32_t n);
 
 typedef struct {
     int fwd;
-    int    deg_engaged;
-    size_t deg_pres_needed;
-    size_t deg_converted;
+    int deg_engaged;
     size_t opc_splits;
 } EncCtx;
 
@@ -91,8 +89,8 @@ typedef struct { IVec pres; CorrVec corr; } OpPC;
 typedef struct { uint32_t data_off_begin, data_off_end; } Ranges;
 enum { STREAM_BL, STREAM_LDR, STREAM_NSTREAMS };
 typedef struct {
-    int    deg_engaged;
-    size_t deg_pres_needed, deg_converted, opc_splits;
+    int deg_engaged;
+    size_t opc_splits;
 } EncStats;
 enum { PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11, PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20, PLAN_RAW_N };
 enum { PLAN_DF_UNMASK, PLAN_DF_MASK, PLAN_DF_N };

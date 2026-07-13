@@ -45,13 +45,13 @@
 #           - toolchain externs   : bounded compiler helpers such as memmove / memset.
 #                                   Leaves, small bounded non-recursive frames; not in the .su,
 #                                   so excluded here and absorbed by the gate ceiling headroom.
-#                                   The separate ARM gate rejects divide helpers.
 #
 # Deterministic: no wall-clock, no randomness; output is a pure function of the object.
 
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -106,7 +106,7 @@ def parse_objdump(objdump, obj):
        indirect = {func: count of blx sites}"""
     try:
         out = subprocess.check_output(
-            [objdump, "-d", obj], universal_newlines=True)
+            shlex.split(objdump) + ["-d", obj], universal_newlines=True)
     except (OSError, subprocess.CalledProcessError) as e:
         die("objdump failed: %s" % e)
     order, edges, indirect = [], {}, {}
@@ -138,7 +138,8 @@ def check_no_code_address_taken(objdump, obj, internal):
     *JUMP) are direct calls already in the graph; R_ARM_PREL31 into .text is .ARM.exidx unwind
     metadata (never a callable pointer); ABS32 into .bss/.rodata/.data are data pointers."""
     try:
-        out = subprocess.check_output([objdump, "-r", obj], universal_newlines=True)
+        out = subprocess.check_output(
+            shlex.split(objdump) + ["-r", obj], universal_newlines=True)
     except (OSError, subprocess.CalledProcessError) as e:
         die("objdump -r failed: %s" % e)
     for ln in out.splitlines():

@@ -17,11 +17,9 @@
 
 /* GNU attributes are OPTIONAL codegen hints (host-text / ARM-size / stack shaping), never
  * correctness: the #else fallbacks keep this header standard C (C99 + C11 _Static_assert), so
- * non-GNU compilers build a wire-identical decoder — only the gated size/stack budgets, which
- * are measured on the GNU arm-none-eabi path, may differ. -DNO_GNU_EXTENSIONS forces the
- * plain-C fallbacks even when __GNUC__ is visible (for compilers that define it for
- * compatibility without full attribute support); the check-decoder-contract gate leg builds
- * and round-trips that variant and asserts its preprocessed first-party code is GNU-free. */
+ * non-GNU compilers build a wire-identical decoder. -DNO_GNU_EXTENSIONS forces the plain-C
+ * fallbacks even when __GNUC__ is visible, for compilers that define it for compatibility
+ * without full attribute support. */
 #if !defined(NO_GNU_EXTENSIONS) && (defined(__GNUC__) || defined(__clang__))
 #define RC_ALWAYS_INLINE static inline __attribute__((always_inline))
 #define RC_NOINLINE __attribute__((noinline))
@@ -50,9 +48,11 @@ static inline int rc_sub_overflow_i32(int32_t a,int32_t b,int32_t*out){
 
 /* Every model move below shifts bytes toward a higher address. Library mode deliberately uses
  * one memmove primitive for both overlapping MTF shifts and non-overlapping model copies, so a
- * decoder does not pull in both memcpy and memmove. Size-constrained integrations that do not
- * already link memmove may opt into the private backward byte loop. The volatile source access
- * prevents an optimizing compiler from recognizing the loop and reintroducing a libc call. */
+ * decoder does not pull in both memcpy and memmove. The decoder normally lives inside a larger
+ * program: if that program already links memmove, calling it here adds no library code. Otherwise,
+ * define HAND_ROLLED_MEMMOVE to avoid pulling memmove in and use the private backward byte loop.
+ * The volatile source access prevents an optimizing compiler from recognizing that loop and
+ * reintroducing a libc call. */
 #ifdef HAND_ROLLED_MEMMOVE
 static RC_NOINLINE void rc_move_high(void*dst,const void*src,size_t n){
     uint8_t*d=(uint8_t*)dst;

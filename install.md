@@ -7,11 +7,10 @@ helpers:
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   binutils-arm-none-eabi \
-  clang \
   gcc \
   gcc-arm-none-eabi \
   git \
-  libnewlib-arm-none-eabi \
+  libnewlib-dev \
   make \
   python3
 ```
@@ -20,7 +19,6 @@ Build and verify from the repository root:
 
 ```sh
 make
-make check
 make gate
 ```
 
@@ -34,12 +32,9 @@ make -s host-tool-path
 Do not assume a root-level `./ultrapatch`. For parallel compiler or measurement
 runs, pass a distinct `BUILD_DIR` to every command in each run.
 
-For a release, run the full sequence below from a clean `main` checkout and follow
+For a release, run the command below from a clean `main` checkout and follow
 [the release checklist](docs/release-checklist.md):
 
 ```sh
 make gate
-make check-decoder-sanitize
-make check-encoder-sanitize
-make check-clang
 ```

@@ -1,29 +1,15 @@
 # Test Bench
 
-This directory contains the tracked corpus sources used by verification
-checks. The gate uses 16 matrix ELFs (`images/`) plus the `v0_base` and
-`v1_one_face` fixture ELFs, and a second, unrelated Cortex-M0+ binary lineage under
-`foreign/` (18 CircuitPython feather_m0_express release images, 34 pair-
-directions — see `../docs/foreign-firmware-study.md`). Before a test runs, the
-profile-pinned Arm `objcopy` derives the exact home and fixture binaries under
-`.build/<profile-id>/corpus`, beside copies of their ELF sidecars.
+The release corpus contains 16 Sensor Watch home images, two real one-face fixtures, and 18
+CircuitPython `feather_m0_express` foreign images. Home and fixture binaries are derived from their
+tracked ELFs into the selected `BUILD_DIR`; the ELF sidecars remain beside them so the encoder uses
+the same relocation information as production. Foreign images are tracked raw binaries.
 
-`corpus-inventory.tsv` is the canonical ordered topology and hash inventory. A
-fixture or home row records its expected derived-binary SHA-256 and tracked ELF
-SHA-256; a foreign row records its tracked binary SHA-256 and `-` for the absent
-ELF. The file also lists the 17 ordered undirected foreign edges explicitly;
-each edge schedules its listed direction followed by the reverse direction.
-`make check-release-inventory` proves that `wire-baseline.tsv` describes that
-topology and agrees with the Makefile cardinality, home-total, one-face, and
-golden-count pins. `make check-corpus` gates the live foreign total because
-foreign baseline rows carry hashes but no per-pair sizes.
+`make gate` runs all 256 ordered home pairs, both directions of the 17 adjacent version-sorted
+foreign pairs, and the real one-face grow and revert directions.
 
-The tracked inputs and derived binaries are verified by:
-
-```sh
-make check-assets
-```
-
-`make check-malformed` uses the pinned one-face fixture to verify deterministic
-rejection of malformed patch envelopes and truncated blobs without requiring
-extra corpus assets.
+Each encoder call self-applies its emitted patch through `patch_apply.h`, checks the exact target and
+NVM write safety, and refuses to write an invalid patch. The corpus runner therefore records only
+the resulting patch size. One aggregate ceiling in `check_corpus.sh` covers all 290 home and foreign
+patches; the real one-face patches retain their own product limits. Exact corpus provenance is the
+Git commit.

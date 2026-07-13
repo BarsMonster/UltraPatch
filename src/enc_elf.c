@@ -68,18 +68,6 @@ static int range_offset_in_bin(const Buf *elf, const Buf *bin, uint32_t phoff,
 
 Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
     Buf e = slurp(elf_path);
-    /* -fanalyzer FALSE POSITIVES suppressed within this validated header/section-table parse only
-     * (checkers stay active for the rest of the function): the analyzer cannot see through slurp's
-     * allocator wrappers, so it models `e.d` as possibly-NULL at the memcmp (it is not: slurp always
-     * allocates >=1 byte and the `e.n < 52` guard short-circuits before the memcmp); and it cannot
-     * relate `sec = xcalloc(shnum, sizeof *sec)` to the `i < shnum` loop, so it reports the in-bounds
-     * `sec[i]` field stores as heap overflow. Verified by construction + the ASan encoder-fuzz
-     * campaign (hostile/truncated/oversized ELFs: clean die() or round-trip, zero ASan reports). */
-#if defined(__GNUC__) && !defined(__clang__)   /* -Wanalyzer-* is gcc-only; clang -Werror rejects it */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wanalyzer-null-argument"
-#pragma GCC diagnostic ignored "-Wanalyzer-out-of-bounds"
-#endif
     if (e.n < 52 || memcmp(e.d, "\177" "ELF", 4) || e.d[4] != 1 || e.d[5] != 1) die("expected ELF32 little-endian");
     uint32_t phoff = rc_u32le(e.d + 28), shoff = rc_u32le(e.d + 32);
     uint16_t phentsize = rc_u16le(e.d + 42), phnum = rc_u16le(e.d + 44);
@@ -98,9 +86,6 @@ Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which) {
         sec[i].entsize = rc_u32le(p + 36);
         sec[i].code.begin = sec[i].data.begin = UINT32_MAX;
     }
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
     for (uint16_t si = 0; si < shnum; si++) {
         if (sec[si].type != 2 || sec[si].entsize < 16 ||
             (uint64_t)sec[si].off + sec[si].size > e.n) continue;

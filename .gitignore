@@ -12,14 +12,6 @@
 # Native and firmware build products.
 /.build/
 /ultrapatch
-/test-bench/.wire-baseline-update.lock
-/test-bench/.encoder-kernel-baseline-update.lock
-/test-bench/.encoder-kernel-baseline.prepare.*
-/test-bench/.wire-baseline-update.transaction/
-/test-bench/.wire-baseline-update.prepare.*/
-/test-bench/.wire-baseline-update.done.*/
-/.wire-baseline-update.recover.*
-/test-bench/.wire-baseline-update.recover.*
 *.o
 *.a
 *.so
@@ -39,7 +31,7 @@
 !/test-bench/fixtures/
 !/test-bench/fixtures/**/
 !/test-bench/fixtures/**/*.elf
-# Foreign lineage (third-party CircuitPython images) remains tracked and inventory-pinned.
+# Foreign lineage (third-party CircuitPython images) remains tracked.
 !/test-bench/foreign/
 !/test-bench/foreign/**/
 !/test-bench/foreign/**/*.bin

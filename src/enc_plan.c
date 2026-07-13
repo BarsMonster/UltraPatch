@@ -53,7 +53,6 @@ static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *t
     OpPC *pc = preserve_corrections_pc(ctx, ops, fp_start, frm, to->d, fd,
                                        from_size, to_size, ldr, caps);
     size_t total = caps->pres_total;
-    ctx->deg_pres_needed = total;
     if (total == caps->pres_kept) return pc;
     int32_t C = caps->pres_cutoff;
     oppc_array_free(pc, ops->n);
@@ -85,7 +84,6 @@ static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *t
             memcpy(payload + tp0 + rs, to->d + (size_t)tp0 + (size_t)rs,
                    (size_t)(k - rs));
             ctx->deg_engaged = 1;
-            ctx->deg_converted += (size_t)(k - rs);
             seg = k;
             split_any = 1;
         }
@@ -265,7 +263,8 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};
-    ctx->deg_engaged = 0; ctx->deg_pres_needed = 0; ctx->deg_converted = 0; ctx->opc_splits = 0;
+    ctx->deg_engaged = 0;
+    ctx->opc_splits = 0;
     FieldDeltaVec fd = {0};
     PlanCaps caps;
     OpVec ops = build_candidate_ops(ctx, from, to, prep, spec, &fd);
@@ -277,8 +276,8 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
      * Normalize only the mutated path again; the reusable PC path remains untouched. */
     if (!pc) fp_start_s += fold_zero_ops(&ops);
     pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, pc, &caps);
-    /* degradation snapshot: load-bearing for direction-sweep pruning and DEGRADE_STATS */
-    r.st = (EncStats){ ctx->deg_engaged, ctx->deg_pres_needed, ctx->deg_converted, ctx->opc_splits };
+    /* The direction fallback needs to know whether resource-pressure paths were used. */
+    r.st = (EncStats){ ctx->deg_engaged, ctx->opc_splits };
     /* Decoder resource feasibility mirrors patch_apply OPC_CAP / JSLOTS. Relocation-cache misses
      * remain representable escapes and therefore do not make a plan infeasible. */
     int feasible = caps.ok;

@@ -92,9 +92,9 @@ may already have been changed.
 
 ## Memory budget
 
-The repository release gate limits the static-wrapper `.bss` to 12,288 bytes
-and each tested first-party decoder call graph to 480 bytes of stack. Current
-measurements are reported by `make gate`, not frozen in this document.
+The repository release gate has an absolute 12,288-byte `.bss` ceiling and ratchets the reference
+static-wrapper flash/state plus the worst supported call graph. It measures both library and
+hand-rolled copy modes and reports the current values in `make gate` output.
 
 Flash remains the image backing store. `PatchApply` stages at most
 `OUTROW_DEPTH` dirty output pages in RAM and never holds a full-image buffer.

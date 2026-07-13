@@ -16,9 +16,8 @@
 #include <unistd.h>
 
 #include "enc_internal.h"
-/* noreturn: lets the reader AND -fanalyzer know an allocation/parse failure terminates the
- * process, so the `if (!p) die(...); return p;` allocator wrappers below provably never return
- * NULL (without this the analyzer models a NULL return and reports spurious null-arg/OOB). */
+/* noreturn: an allocation or parse failure terminates the process, so the allocator wrappers
+ * below never return NULL. */
 void die(const char *msg) {
     fprintf(stderr, "ultrapatch: %s\n", msg);
     exit(2);

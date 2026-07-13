@@ -4,19 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* Shared SAML22-shaped NVM page emulator for the host gate binaries. The reusable
+/* Shared SAML22-shaped NVM page emulator for the host tool. The reusable
  * decoder (patch_apply.h) only calls flash_read()/flash_write_page(); all emulation and
  * write-safety counters live here, outside the production header. #included by
  * patch_host_backend.c BEFORE patch_apply.h, so CLI decode and encoder selfcheck
  * share one reference-decoder copy in the host tool.
  * Each page call erases and fully programs one aligned decoder-configured page. Counters reproduce
- * the product write-safety gate (each page erased at most once, monotonic erase frontier)
+ * the product write-safety rules (each page erased at most once, monotonic erase frontier)
  * and pin aligned/in-range calls plus preservation of the last page's bytes beyond the
  * logical image span. Requires <stdint.h>, <stdlib.h>, <string.h> from the includer. */
-#ifndef NVM_ROW
-#define NVM_ROW OUTROW
-#endif
-_Static_assert(NVM_ROW==OUTROW,"host NVM page must match decoder OUTROW");
 _Static_assert(PATCH_IMAGE_BASE==0u,"repository host NVM integration uses PATCH_IMAGE_BASE=0");
 static uint8_t *sc_flash, *sc_erasecnt, *sc_tail_canary;
 static uint32_t sc_flash_n, sc_image_span, sc_tail_n;
@@ -40,11 +36,11 @@ static void nvm_free(void){
  * Returns -1 on invalid geometry or allocation failure. */
 static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_t pad_seed){
     nvm_free();
-    if(from_n>span || span>UINT32_MAX-(NVM_ROW-1u)) return -1;
+    if(from_n>span || span>UINT32_MAX-(OUTROW-1u)) return -1;
     sc_image_span = span;
-    sc_flash_n = span ? (span+NVM_ROW-1u)&~(NVM_ROW-1u) : 0u;
+    sc_flash_n = span ? (span+OUTROW-1u)&~(OUTROW-1u) : 0u;
     sc_tail_n = sc_flash_n-span;
-    uint32_t nrows = sc_flash_n/NVM_ROW;
+    uint32_t nrows = sc_flash_n/OUTROW;
     sc_flash = (uint8_t*)malloc(sc_flash_n?sc_flash_n:1u);
     sc_erasecnt = (uint8_t*)calloc(nrows?nrows:1, 1);
     sc_tail_canary = (uint8_t*)malloc(sc_tail_n?sc_tail_n:1u);
@@ -69,13 +65,13 @@ uint8_t flash_read(uint32_t a){
     sc_oob_reads++;
     return 0xFFu;
 }
-void flash_write_page(uint32_t a, const uint8_t page[NVM_ROW]){
-    if((a&(NVM_ROW-1u))!=0u){ sc_unaligned++; return; }
+void flash_write_page(uint32_t a, const uint8_t page[OUTROW]){
+    if((a&(OUTROW-1u))!=0u){ sc_unaligned++; return; }
     uint32_t row=a;
-    if(row>sc_flash_n || sc_flash_n-row<NVM_ROW){ sc_oob_page_writes++; return; }
-    uint32_t er=row/NVM_ROW;
+    if(row>sc_flash_n || sc_flash_n-row<OUTROW){ sc_oob_page_writes++; return; }
+    uint32_t er=row/OUTROW;
     uint8_t e=sc_erasecnt[er];
-    sc_erases++; sc_page_writes++; sc_programs+=NVM_ROW;
+    sc_erases++; sc_page_writes++; sc_programs+=OUTROW;
     if(e<255) sc_erasecnt[er]=++e;
     if(e==1) sc_erows++;
     else if(e==2) sc_amplified++;
@@ -83,6 +79,6 @@ void flash_write_page(uint32_t a, const uint8_t page[NVM_ROW]){
     if(sc_ecount){ int d=(er>sc_last_erow)?1:(er<sc_last_erow?-1:0);
         if(d){ if(sc_edir==0) sc_edir=d; else if(d!=sc_edir) sc_finv++; } }
     sc_last_erow=er; sc_ecount++;
-    memset(sc_flash+row,0xFF,NVM_ROW);
-    memcpy(sc_flash+row,page,NVM_ROW);
+    memset(sc_flash+row,0xFF,OUTROW);
+    memcpy(sc_flash+row,page,OUTROW);
 }

@@ -207,7 +207,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size, const FieldD
  * fw_next yields, in wire consume order, either a classified field window (is_field=1, pos=window
  * anchor, ev) or one copy position (is_field=0, pos). Direction-parametrized: FWD ascends from 0
  * with anchor==cursor; reverse descends from dl-1 with anchor==cursor-3. Every encoder field walk
- * routes through this so no hand-copy can slip the order (a slip flips golden/selfcheck). */
+ * routes through this so no hand-copy can slip the order (a slip fails self-verification). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
              const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
              const uint8_t *diff, int32_t fp0, int32_t dl) {
@@ -444,11 +444,10 @@ static uint64_t split_diff_bits(const SplitScratch *sc, const Run *runs,
  * exact raw geometry code lengths. */
 enum { SPLIT_GAIN_MARGIN_BITS = 8 };
 
-/* Bound the quadratic inner recurrence across one candidate plan. Instrumenting the ordinary
- * release corpus plus the preexisting one-face, edge, degradation, and golden workloads found a
- * high-water mark of 7,489,853 candidate transitions in one plan call. (The adversarial timing
- * fixtures added with this bound are intentionally outside that acceptance workload.) Four times
- * the high-water is 29,959,412; rounding up gives this 2^25 budget (above the 2^20 minimum).
+/* Bound the quadratic inner recurrence across one candidate plan. Development measurements over
+ * the release corpus and synthetic adversaries found a high-water mark of 7,489,853 candidate
+ * transitions in one plan call. Four times the high-water is 29,959,412; rounding up gives this
+ * 2^25 budget (above the 2^20 minimum).
  * T(8191)=33,550,336 fits while T(8192)=33,558,528 does not, pinning the boundary arithmetic. */
 #define SPLIT_TRANSITION_BUDGET UINT64_C(33554432)
 _Static_assert(UINT64_C(8191) * 8192u / 2u <= SPLIT_TRANSITION_BUDGET,

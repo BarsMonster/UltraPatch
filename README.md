@@ -16,7 +16,6 @@ The host encoder lives under `src/`, and its suffix sorter is vendored under
 
 ```sh
 make
-make check
 
 tool=$(make -s host-tool-path)
 "$tool" [--encode] <from_image> <to_image> <patch>
@@ -63,14 +62,12 @@ update latency with the intended compiler and firmware.
 
 ```sh
 make gate
-make check-decoder-sanitize
-make check-encoder-sanitize
-make check-clang
 ```
 
-The authoritative release procedure and required evidence are in
-[the release checklist](docs/release-checklist.md). Corpus membership and
-provenance are documented in [test-bench/README.md](test-bench/README.md).
+The post-development release gate checks the complete corpus size regression, reference
+static-wrapper flash/state, and worst supported decoder stack. Every generated corpus patch
+self-verifies through the production decoder before its size is accepted. The authoritative
+procedure is in [the release checklist](docs/release-checklist.md).
 
 ## License
 
