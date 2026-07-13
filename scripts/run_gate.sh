@@ -30,14 +30,14 @@ ab_jobs="${AB_MATRIX_TEST_JOBS:-8}"
 
 echo "running gate (all legs concurrent; corpus jobs=$corpus_jobs; A-B jobs=$ab_jobs): check-release-inventory + check-assets + check + check-malformed + check-edge + check-degrade + check-golden + check-decoder-contract + check-models + check-arm + check-stack + check-ab-matrix + check-corpus..."
 
-LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-matrix-internal:m.txt:check-corpus"
+LEGS="check-release-inventory-internal:inventory.txt:check-release-inventory check-assets-internal:assets.txt:check-assets check-internal:c.txt:check check-malformed-internal:malformed.txt:check-malformed check-edge-internal:e.txt:check-edge check-degrade-internal:dg.txt:check-degrade check-golden-internal:g.txt:check-golden check-decoder-contract-internal:dec_contract.txt:check-decoder-contract check-models-internal:models.txt:check-models check-arm-internal:a.txt:check-arm check-stack-internal:st.txt:check-stack check-ab-matrix-internal:ab.txt:check-ab-matrix check-corpus-internal:m.txt:check-corpus"
 
 pids=""
 for spec in $LEGS; do
   IFS=: read -r target file _ <<<"$spec"
   # gate-internal published this exact profile-specific tool before forking. `-o` prevents a
   # concurrent leg from rebuilding it after an input mtime changes during the gate.
-  if [ "$target" = check-corpus-matrix-internal ]; then
+  if [ "$target" = check-corpus-internal ]; then
     "$MAKE_CMD" --no-print-directory -o "$HOST_TOOL" -o "$CORPUS_ASSET_STAMP" \
       JOBS="$corpus_jobs" "$target" >"$tmp/$file" 2>&1 &
   elif [ "$target" = check-degrade-internal ] || [ "$target" = check-edge-internal ]; then

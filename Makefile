@@ -793,32 +793,9 @@ golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publis
 # its home-only wall. matrix_ok/full_total gate the home set; home_size_{better,worse,equal}
 # compares each home pair against WIRE_BASELINE and rejects any worse pair;
 # foreign_ok(=34)/foreign_total gate the foreign set (foreign_total ratchets vs
-# BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N
-# and AB_MATRIX_TEST_JOBS=N. Standalone checks reserve one eighth of the available cores for
-# the concurrent A/B check; the full gate chooses its own split because it has more auxiliary legs.
-check-corpus-internal: ultrapatch
-	@set -e; \
-	. ./scripts/tempdir.sh; \
-	jobs="$(JOBS)"; \
-	ab_jobs="$${AB_MATRIX_TEST_JOBS:-}"; \
-	if [ -z "$$jobs" ]; then \
-	  cores=$$(nproc 2>/dev/null || echo 4); jobs=$$((cores * 7 / 8)); [ "$$jobs" -gt 0 ] || jobs=1; \
-	  if [ -z "$$ab_jobs" ]; then ab_jobs=$$((cores - jobs)); [ "$$ab_jobs" -gt 0 ] || ab_jobs=1; fi; \
-	fi; \
-	[ -n "$$ab_jobs" ] || ab_jobs=8; \
-	nice -n 10 $(MAKE) --no-print-directory -o "$(HOST_TOOL)" AB_MATRIX_TEST_JOBS="$$ab_jobs" check-ab-matrix-internal >"$$tmp/ab.txt" 2>&1 & apid=$$!; \
-	$(MAKE) --no-print-directory -o "$(HOST_TOOL)" JOBS="$$jobs" check-corpus-matrix-internal >"$$tmp/matrix.txt" 2>&1 & mpid=$$!; \
-	cleanup_children(){ kill "$$apid" "$$mpid" 2>/dev/null || :; wait "$$apid" 2>/dev/null || :; wait "$$mpid" 2>/dev/null || :; rm -rf "$$tmp"; }; \
-	trap 'cleanup_children' EXIT; \
-	trap 'cleanup_children; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
-	trap 'cleanup_children; trap - TERM INT EXIT; kill -s INT "$$$$"' INT; \
-	rc=0; wait "$$apid" || rc=1; wait "$$mpid" || rc=1; \
-	cat "$$tmp/ab.txt" "$$tmp/matrix.txt"; \
-	exit "$$rc"
-
-.PHONY: check-corpus-matrix-internal
-check-corpus-matrix-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology.py \
-                              $(CORPUS_INVENTORY)
+# BASE_FOREIGN_TOTAL); NVM write-safety maxima cover BOTH. Override parallelism with JOBS=N.
+check-corpus-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/corpus_topology.py \
+                       $(CORPUS_INVENTORY)
 	@IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	CORPUS_INVENTORY="$(CORPUS_INVENTORY)" \
 	BASE_FULL_TOTAL="$(BASE_FULL_TOTAL)" BASE_FOREIGN_TOTAL="$(BASE_FOREIGN_TOTAL)" \
