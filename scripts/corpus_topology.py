@@ -253,7 +253,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("counts", "jobs", "materialize", "test", "verify"))
     parser.add_argument("--inventory")
-    parser.add_argument("--images-root", default="test-bench/images")
+    parser.add_argument("--images-root")
     parser.add_argument("--foreign-root", default="test-bench/foreign")
     parser.add_argument("--source-root", default="test-bench")
     parser.add_argument("--output-root")
@@ -267,6 +267,8 @@ def main():
             parser.error("command requires --inventory")
         topology = parse_inventory(args.inventory)
         if args.command == "jobs":
+            if not args.images_root:
+                parser.error("jobs requires --images-root")
             for job in topology.jobs(args.images_root, args.foreign_root):
                 print("%s\t%s\t%s" % job)
         elif args.command in ("materialize", "verify"):

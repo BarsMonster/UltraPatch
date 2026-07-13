@@ -42,8 +42,8 @@
 set -u
 
 CC_HOST="${CC:-cc}"
-IMG="${IMAGES:-test-bench/images}"
-FIX="${FIXTURES:-test-bench/fixtures}"
+: "${IMAGES:?check_degrade.sh: IMAGES not set to the profile-scoped corpus}"
+IMG="$IMAGES"
 : "${CFLAGS:?check_degrade.sh: CFLAGS not set — invoke through make check-degrade}"
 : "${ENC_SEAM_SRCS:?check_degrade.sh: ENC_SEAM_SRCS not set — invoke through make check-degrade}"
 : "${CLANG:?check_degrade.sh: CLANG not set — invoke through make check-degrade}"

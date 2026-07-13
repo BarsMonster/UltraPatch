@@ -14,8 +14,9 @@ set -eu
 
 ENC="${1:-${ULTRAPATCH:-}}"
 : "${ENC:?oneface_metrics.sh: pass an encoder or set ULTRAPATCH}"
+: "${FIXTURES:?oneface_metrics.sh: FIXTURES not set to the profile-scoped corpus}"
 DEC="${2:-$ENC}"
-FIX="${FIXTURES:-test-bench/fixtures}"
+FIX="$FIXTURES"
 
 [ -x "$ENC" ] || { echo "oneface_metrics.sh: encoder is missing or not executable: $ENC" >&2; exit 2; }
 if [ "${ONEFACE_ROUNDTRIP:-0}" != 0 ] && [ ! -x "$DEC" ]; then

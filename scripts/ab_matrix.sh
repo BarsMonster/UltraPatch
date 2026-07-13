@@ -26,7 +26,9 @@
 set -u
 ENC_A="${1:?baseline encoder}"; ENC_B="${2:?candidate encoder}"; DEC_B="${3:?candidate decoder}"
 JOBS="${4:-$(nproc 2>/dev/null || echo 4)}"
-FIX="${FIXTURES:-test-bench/fixtures}"
+: "${IMAGES:?ab_matrix.sh: IMAGES not set to the profile-scoped corpus}"
+: "${FIXTURES:?ab_matrix.sh: FIXTURES not set to the profile-scoped corpus}"
+FIX="$FIXTURES"
 SDIR="$(dirname "$0")"
 CC="$SDIR/../check_corpus.sh"
 # One-face caps: taken straight from the env pins (no Makefile scrape); enforced only when set.

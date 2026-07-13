@@ -350,7 +350,7 @@ check-clang-internal: check-release-profile-internal
 
 .PHONY: check-clang-golden-internal
 check-clang-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ)
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
+	@FIXTURES="$(FIXTURES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
 
 # `make gate` is a release certification, not a configurable measurement. These variables may
@@ -709,7 +709,7 @@ check-edge-internal: ultrapatch
 # the path was actually taken — not merely that the blob round-trips. Builds a D=1 variant decoder
 # to prove the monotone larger-window compatibility contract. Small synthetic fixtures, fast.
 check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(ENCODER_KERNEL_BASELINE)
-	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" \
+	@CC="$(CC)" CLANG="$(CLANG)" CFLAGS="$(DECODER_CFLAGS)" IMAGES="$(IMAGES)" \
 	  ENC_SEAM_SRCS="$(ENC_SEAM_SRCS)" DEC_STANDALONE_SRCS="$(DEC_STANDALONE_SRCS)" \
 	  DEC_DEMO_DEFINES="$(DEC_DEMO_DEFINES)" \
 	  ENCODER_KERNEL_BASELINE="$(ENCODER_KERNEL_BASELINE)" scripts/check_degrade.sh
@@ -721,7 +721,7 @@ check-degrade-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(ENCODER_KERNEL_BASEL
 # Makefile ratchets. Commit both files in the SAME commit. If publication is interrupted between
 # the ordinary replaces, restore both files from Git and rerun the target.
 check-golden-internal: ultrapatch $(CORPUS_ASSET_PREREQ) $(WIRE_BASELINE)
-	@FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
+	@FIXTURES="$(FIXTURES)" WIRE_BASELINE="$(WIRE_BASELINE)" \
 	  scripts/check_golden.sh check
 
 # Intentional-wire-change A/B regression: a small real home+foreign matrix verifies that both
@@ -746,7 +746,7 @@ golden-update-measure-internal: ultrapatch $(CORPUS_ASSET_PREREQ) scripts/publis
 	preimage_baseline=$$(sha256sum "$(WIRE_BASELINE)"); preimage_baseline=$${preimage_baseline%% *}; \
 	preimage_make=$$(sha256sum Makefile); preimage_make=$${preimage_make%% *}; \
 	flock --unlock 9; exec 9>&-; \
-	FIXTURES="$(FIXTURES)" IMAGES="$(IMAGES)" GOLDEN_DUMP="$$tmp/golden.tsv" \
+	FIXTURES="$(FIXTURES)" GOLDEN_DUMP="$$tmp/golden.tsv" \
 	  scripts/check_golden.sh update >"$$tmp/golden.out"; \
 	IMAGES="$(IMAGES)" FOREIGN="$(FOREIGN)" CORPUS_INVENTORY="$(CORPUS_INVENTORY)" \
 	  CORPUS_SIZE_BASELINE="" WIRE_BASELINE="" \

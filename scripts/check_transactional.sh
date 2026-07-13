@@ -5,7 +5,8 @@
 # Transactional host CLI output and input/output alias regression checks.
 set -eu
 
-FIX="${FIXTURES:-test-bench/fixtures}"
+: "${FIXTURES:?check_transactional.sh: FIXTURES not set to the profile-scoped corpus}"
+FIX="$FIXTURES"
 : "${ULTRAPATCH:?check_transactional.sh: ULTRAPATCH not set; invoke through make check-malformed}"
 CC="${CC:-gcc}"
 CFLAGS="${CFLAGS:--std=c99 -Wall -Wextra -Werror}"

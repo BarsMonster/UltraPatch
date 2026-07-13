@@ -12,6 +12,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 JOBS="${AB_MATRIX_TEST_JOBS:-8}"
 : "${ULTRAPATCH:?check_ab_matrix.sh: ULTRAPATCH not set; invoke through make check-ab-matrix}"
+: "${FIXTURES:?check_ab_matrix.sh: FIXTURES not set to the profile-scoped corpus}"
 
 [ -x "$ULTRAPATCH" ] || {
   echo "check_ab_matrix.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
@@ -38,7 +39,7 @@ CAND=$(make --no-print-directory -s -C "$tmp/candidate" \
   exit 2
 }
 
-FIX="${FIXTURES:-$ROOT/test-bench/fixtures}"
+FIX="$FIXTURES"
 
 # Two small deterministic images produce four home pairs. Alternating the same images across
 # the pinned foreign release names produces all 34 foreign directions. This regression verifies

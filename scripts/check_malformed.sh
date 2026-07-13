@@ -5,7 +5,8 @@
 
 set -eu
 
-FIX="${FIXTURES:-test-bench/fixtures}"
+: "${FIXTURES:?check_malformed.sh: FIXTURES not set to the profile-scoped corpus}"
+FIX="$FIXTURES"
 base="$FIX/v0_base"
 one="$FIX/v1_one_face"
 

@@ -7,18 +7,18 @@
 #
 # On an INTENDED wire change, regenerate the manifest in the same commit:  make golden-update
 #
-# Usage: make check-golden (or set ULTRAPATCH to an executable and run this script directly)
+# Usage: make check-golden (direct runs must set ULTRAPATCH and profile-scoped FIXTURES)
 set -eu
 
 : "${ULTRAPATCH:?check_golden.sh: ULTRAPATCH not set; invoke through make check-golden}"
+: "${FIXTURES:?check_golden.sh: FIXTURES not set to the profile-scoped corpus}"
 [ -x "$ULTRAPATCH" ] || {
   echo "check_golden.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
   exit 2
 }
 
 MODE="${1:-check}"
-FIX="${FIXTURES:-test-bench/fixtures}"
-IMG="${IMAGES:-test-bench/images}"
+FIX="$FIXTURES"
 BASELINE="${WIRE_BASELINE:-test-bench/wire-baseline.tsv}"
 GOLDEN_DUMP="${GOLDEN_DUMP:-}"
 

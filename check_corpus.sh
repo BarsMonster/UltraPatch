@@ -5,8 +5,8 @@
 
 # Fast parallel corpus-matrix + foreign-lineage metrics for the release gate.
 #
-# Run from the repository root through Make, or set ULTRAPATCH explicitly. Prints the gate
-# metric lines so the Makefile (or a measurement run) can parse them.
+# Run from the repository root through Make, or set ULTRAPATCH and the profile-scoped IMAGES
+# path explicitly. Prints the gate metric lines so Make (or a measurement run) can parse them.
 #
 # Two independent pair sets share ONE parallel pool so the whole leg costs one wall-clock, not
 # the sum of two:
@@ -40,7 +40,8 @@
 # IMAGES/FOREIGN subset still validates that every scheduled job produced a metric line.
 set -u
 JOBS="${1:-$(nproc 2>/dev/null || echo 4)}"
-IMG="${IMAGES:-test-bench/images}"
+: "${IMAGES:?check_corpus.sh: IMAGES not set to the profile-scoped corpus; invoke through make check-corpus}"
+IMG="$IMAGES"
 FGN="${FOREIGN:-test-bench/foreign}"
 INVENTORY="${CORPUS_INVENTORY-test-bench/corpus-inventory.tsv}"
 TOPOLOGY_HELPER="scripts/corpus_topology.py"

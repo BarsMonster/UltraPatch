@@ -11,12 +11,13 @@ set -eu
 : "${CFLAGS:?check_decoder_api.sh: CFLAGS not set — invoke through make check-decoder-contract}"
 : "${DECODER_PUBLIC_HDRS:?check_decoder_api.sh: DECODER_PUBLIC_HDRS not set}"
 : "${ULTRAPATCH:?check_decoder_api.sh: ULTRAPATCH not set; invoke through make check-decoder-contract}"
+: "${FIXTURES:?check_decoder_api.sh: FIXTURES not set to the profile-scoped corpus}"
 NM=${NM:-nm}
 [ -x "$ULTRAPATCH" ] || {
     echo "check_decoder_api.sh: ULTRAPATCH is missing or not executable: $ULTRAPATCH" >&2
     exit 2
 }
-FIX="${FIXTURES:-test-bench/fixtures}"
+FIX="$FIXTURES"
 base="$FIX/v0_base/watch.bin"
 one="$FIX/v1_one_face/watch.bin"
 . "$(dirname "$0")/tempdir.sh"
