@@ -372,10 +372,10 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 #define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"
- * (bit 1). Structural priors (format invariants), NOT corpus caps — they make the very first op as
- * cheap as the warmed-up state. Shared rc_ugg_seed_cont and rc_init_* seed both sides.
- *   GDL  = per-op diff_len gamma; op magnitudes are essentially never tiny.
- *   GADJ = per-op adj gamma.
+ * (bit 1). Structural priors (format invariants), NOT corpus caps. Shared rc_ugg_seed_cont and
+ * rc_init_* seed both sides.
+ *   GDL  = shift-map count/gaps, then per-op diff_len.
+ *   GADJ = shift-map values, then per-op adj.
  *   GL   = match length gamma; matches are always len>=3 (value>=2 => cl>=1). */
 #define RC_SEED_DEPTH_GDL  6
 #define RC_SEED_DEPTH_GADJ 3
@@ -402,13 +402,12 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
  * the SINGLE source of the ~20-statement apply-phase init call sequence that was hand-mirrored across
  * decode_body, models_init_content and emit_body. Excluded by design: DR_BL/DR_EX (the host DRE wraps
  * up_DRStream with its own dict ptr+cap), the literal trees (different seed sources), and rep0h/last_dist
- * (zeroed by each side's memset). Init is idempotent per model, so either side may run these in whatever
- * order suits its surrounding code (e.g. the encoder borrows gdl/gadj for the map header, then re-inits
- * via rc_init_prekd) without moving the wire. */
+ * (zeroed by each side's memset). Both sides initialize the pre-kd group before the shift map, whose
+ * gdl/gadj adaptation then continues into operation geometry. */
 typedef struct {
     up_BitTree  dval;                         /* MTF escape bytes */
     up_IdxUnary dibl, diex;                   /* MTF cache-index unary priors (bl/ex) */
-    up_UGGamma  gdl, gel, gadj;                /* per-op geometry */
+    up_UGGamma  gdl, gel, gadj;                /* gdl/gadj: shift map + geometry; gel: geometry */
 } up_PreKdModels;
 typedef struct {
     up_UGRice  gd, go;                         /* backref-distance + out-position rice */
@@ -421,7 +420,7 @@ typedef struct {
 /* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
 static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UP_UG_CTX,depth); }
 
-/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (GDL/GADJ). */
+/* pre-kd apply-phase init: neutral models + structural seed_cont priors for shared map/geometry state. */
 static inline void rc_init_prekd(up_PreKdModels*m){
     up_bt_init(&m->dval);
     up_idx_init(&m->dibl,RC_IDX_SEED); up_idx_init(&m->diex,RC_IDX_SEED);

@@ -33,4 +33,4 @@ Whole-relink cases can require much more literal data than adjacent releases.
 The host encoder literalizes unsafe read-after-write copies and folds target-byte
 corrections into the normal content payload. A relocation field that cannot be
 reconstructed exactly is literalized as one complete field. This work remains
-encoder-side; wire v7 has no correction channel or decoder correction cap.
+encoder-side; the current wire has no correction channel or decoder correction cap.

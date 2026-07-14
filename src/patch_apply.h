@@ -325,9 +325,8 @@ static int32_t up_s_bv(PatchApply *pa, up_BitTree*t,int rate){
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
  * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
  * mantissa: rows 1..UP_UG_CTX-1 keep only reachable columns, the clamped row keeps all UP_UG_CTX+1). */
-/* the unary-prefix "continue"-seed helper (per-op geometry: firmware delta op magnitudes are
- * essentially never tiny, a structural prior that makes the very first op as cheap as the warmed-up
- * state) is single-sourced as rc_ugg_seed_cont in rc_models.h, folded into rc_init_prekd/rc_init_tok. */
+/* The unary-prefix "continue" seed for shift-map, geometry, and token gamma models is
+ * single-sourced as rc_ugg_seed_cont in rc_models.h, folded into rc_init_prekd/rc_init_tok. */
 /* shared adaptive unary prefix for BOTH the Golomb (Rice/Gamma) prefix and the MTF cache-index code:
  * read 1-bits on the per-position priors u[min(pos,clampmax)] until a 0-bit, `cap`-bounded against a
  * corrupt run-on so a zero-fill stream can't spin forever / shift by >=32 (UP_RC_UNARY_MAX for gamma,
@@ -905,12 +904,9 @@ static int up_decode_body(PatchApply *pa){
     /* ---- piecewise shift map: gamma count, then per entry a gamma boundary gap (first absolute,
      * later gaps-1; strictly ascending) and a zigzag-gamma byte-shift value. count 0 => no map
      * (all predictions 0 == the residual stream degenerates to the plain delta stream). ---- */
-    /* BORROW two caller-owned apply-phase gamma models (not yet live: the map is read before
-     * apply-model setup, and rc_init_prekd reinitializes both before the token loop). Coding the
-     * skewed map gap/value distributions through ADAPTIVE gamma beats raw equiprobable bits at
-     * ZERO extra SRAM. MDL_pre.gdl carries the count + boundary gaps; MDL_pre.gadj carries the
-     * zigzag shift values. */
-    rc_ugg_init(&pa->ARENA.apply.MDL_pre.gdl); rc_ugg_init(&pa->ARENA.apply.MDL_pre.gadj);
+    /* Initialize the complete pre-kd group once. The map uses gdl/gadj first, then operation
+     * geometry continues from their adapted state; the other models remain untouched until apply. */
+    rc_init_prekd(&pa->ARENA.apply.MDL_pre);
     { uint32_t mn=up_s_ug_gamma(pa,&pa->ARENA.apply.MDL_pre.gdl);
       if(mn>UP_SMAP_CAP){ pa->g_reject=REJ_RESOURCE; return 0; }
       uint32_t b=0;
@@ -926,14 +922,10 @@ static int up_decode_body(PatchApply *pa){
     /* out-match enable: 1 raw bit. 0 => no ko header field and no out-bit on any fresh match,
      * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
     pa->g_out_en=(uint8_t)up_s_raw(pa);
-    /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
-     * INLINE during apply (up_pull_delta in up_field_at). MDL_pre.dval (escape bytes), the two MTF
-     * dict streams, and the two cache-index unary models all persist through apply. ---- */
+    /* ---- STREAMED DELTAS: NO up-front DEREL phase. The fresh delta models are used INLINE during
+     * apply (up_pull_delta in up_field_at). MDL_pre.dval (escape bytes), the two MTF dict streams,
+     * and the two cache-index unary models all persist through apply. ---- */
     rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL, UP_DR_HIT_INIT); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX, UP_DR_HIT_INIT);
-    /* pre-kd apply-phase models: dval + dict-index seeds + geometry gammas with their
-     * structural seed_cont priors. This RE-INITs the gdl/gadj borrowed for the map header above; the
-     * whole sequence is single-sourced as rc_init_prekd in rc_models.h and shared with encoder emit_body. */
-    rc_init_prekd(&pa->ARENA.apply.MDL_pre);
     /* ---- [A] streaming apply (no bake): per op read direct geometry, then pull the
      * op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via up_pull_delta), write via up_out_write. ---- */

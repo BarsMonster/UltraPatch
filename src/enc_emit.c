@@ -253,8 +253,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     models_init_content(&M, seeds, kd, ko);   /* fresh literal trees + token-loop models */
     dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT);
     dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
-    ugg_init_e(&M.pre.gdl); ugg_init_e(&M.pre.gadj);   /* borrowed NEUTRAL to code the map header below;
-                                  * rc_init_prekd re-inits them (with seed_cont) after the map. */
+    rc_init_prekd(&M.pre);   /* map header and operation geometry share gdl/gadj adaptation */
     *overflow = 0;
     int out_en = 0;
     for (size_t i = 0; i < seq->n; i++) if (seq->v[i].type == 'O') { out_en = 1; break; }
@@ -263,8 +262,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     REnc rc;
     re_init(&rc);
     /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
-     * coded through the BORROWED M.pre.gdl (count+gaps) / M.pre.gadj (zz values) gamma models — mirror of the
-     * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ugg_encode). */
+     * coded through M.pre.gdl (count+gaps) / M.pre.gadj (zz values) — mirror of the patch_apply
+     * decode_body map reader. Their adapted state continues into operation geometry. */
     if (mn > UP_SMAP_CAP || !smap_wire_feasible(mb, mv, mn)) {
         rc.coding_overflow = 1;
     } else {
@@ -277,9 +276,6 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
               ugg_encode(&M.pre.gadj, &rc, rc_zz32(mv[i]));
           } }
     }
-    /* Now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj and initializes
-     * dval/dibl/diex/gel) through the same shared rc_init_prekd() the decoder calls. */
-    rc_init_prekd(&M.pre);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
      * op loop bounds it. */
