@@ -282,7 +282,7 @@ void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats) {
 }
 
 /* Per-byte integer bit-length literal proxy from the wire's time-0 seeded literal BitTrees -- the
- * exact model the real emit uses at seed (lit_tree_seed_e), replacing the from-image static-Huffman
+ * exact model the real emit uses at seed (lit_seed_trees_init), replacing the from-image static-Huffman
  * code that used to feed the pre-parse and the diff-run splitter. Context policy: tag0 bytes price
  * under the parity-0 seed tree, tag1 under parity-1; at seed every rc_lit0_sel context shares one seed,
  * so no previous-byte context need be chosen here -- adaptation (and the real pricing refinement)

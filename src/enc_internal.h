@@ -75,12 +75,7 @@ static inline uint8_t op_diff_byte(const uint8_t *frm, uint32_t from_size,
     return (uint8_t)(tob[tp] - src);
 }
 /* One entry per aligned source word: distance to its nearest preceding LDR halfword (0 = none). */
-typedef struct {
-    uint16_t *back;
-    size_t nwords;
-    const uint8_t *source;
-    uint32_t source_size;
-} LdrTargetIndex;
+typedef struct { uint16_t *back; } LdrTargetIndex;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct {
     int deg_engaged;
@@ -93,10 +88,17 @@ typedef struct {
     uint8_t merge_fields, raw_key;
 } PlanSpec;
 extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
+/* Immutable source-derived literal models, built once per image pair and reused by every plan. */
+typedef struct { up_BitTree lit0, lit1; } LitSeedTrees;
+typedef struct {
+    LitSeedTrees seeds;
+    uint8_t L0[256], L1[256];
+} SourceLitModels;
 /* Pair-owned immutable planning inputs. Every plan clones its op state before mutation. */
 typedef struct {
     OpVec raw[PLAN_RAW_N];
     LdrTargetIndex ldr;
+    SourceLitModels lit;
 } PlanPrep;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
@@ -131,13 +133,6 @@ _Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit ui
 
 enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
 typedef struct { int type; int32_t delta; } Event;
-typedef struct {
-    int fwd; int32_t dl, k;
-    const uint8_t *frm, *tob; uint32_t from_size, to_size;
-    const LdrTargetIndex *ldr;
-    int merge_fields; int32_t fp0, tp0;
-    int is_field; int32_t pos; Event ev;
-} FieldWalk;
 /* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
  * sees the historical source order by globally reversing this arena for a reverse apply. */
 typedef struct { uint32_t cc; int kind; uint32_t k1; int32_t need; uint32_t k2; } FieldInj;
@@ -162,10 +157,6 @@ typedef struct {
     up_UGGamma glo;
     int fixed_dist_bits;
 } PriceTab;
-
-/* Immutable time-0 literal trees for one source image. Every pricing/emission simulation copies
- * these into a fresh Models instance before adapting it; adapted state is never shared. */
-typedef struct { up_BitTree lit0, lit1; } LitSeedTrees;
 
 typedef struct {
     up_BitTree lit0[UP_LIT0_CTX], lit1;
@@ -229,15 +220,11 @@ OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
 void ldr_target_index_free(LdrTargetIndex *idx);
-int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk);
-void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-             const uint8_t *tob, uint32_t to_size, const LdrTargetIndex *ldr,
-             int merge_fields, int32_t fp0, int32_t tp0, int32_t dl);
-int fw_next(FieldWalk *w);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldInjArena *inj, int fwd, uint32_t *tb, int32_t *tv);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
-                             const Buf *from, const Buf *to);
+                             const Buf *from, const Buf *to,
+                             const SourceLitModels *lit);
 
 void re_init(REnc *r);
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
@@ -245,7 +232,6 @@ void re_raw(REnc *r, int bit);
 Buf re_flush_opt(REnc *r);
 void put_raw_bits(REnc *r, uint32_t v, int nb);
 void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate);
-void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t);
 void lit_seed_trees_init(LitSeedTrees *s, const uint8_t *frm, size_t n);
 void ugr_init_e(up_UGRice *g, int k);
 void ugg_init_e(up_UGGamma *g);
@@ -285,7 +271,7 @@ uint32_t bit_price(uint32_t p, int bit);
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const LdrTargetIndex *ldr, int merge_fields,
+                const LdrTargetIndex *ldr, const SourceLitModels *lit, int merge_fields,
                 int32_t fp_start, int *overflow_out);
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);

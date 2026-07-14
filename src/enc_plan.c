@@ -84,6 +84,8 @@ static OpVec prep_ops_clone(const OpVec *src) {
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to) {
     memset(prep, 0, sizeof(*prep));
+    lit_seed_trees_init(&prep->lit.seeds, from->d, from->n);
+    from_lit_proxy_bits(&prep->lit.seeds, prep->lit.L0, prep->lit.L1);
     ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
     prep->raw[PLAN_RAW_11] = bsdiff_ops(from, to, 11);
     prep->raw[PLAN_RAW_6] = bsdiff_ops(from, to, 6);
@@ -103,7 +105,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     PlanResult r = {0};
     ctx->deg_engaged = 0;
     OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key]);
-    split_nonzero_diff_runs(ctx, &ops, from, to);
+    split_nonzero_diff_runs(ctx, &ops, from, to, &prep->lit);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_end;
     int32_t fp_start_s = finalize_ops(ctx, &ops, from_size, to_size, &fp_end);
@@ -112,7 +114,8 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     Buf body = {0};
     int emit_overflow = 0;
     body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                       &prep->ldr, spec->merge_fields, fp_start_s, &emit_overflow);
+                       &prep->ldr, &prep->lit, spec->merge_fields,
+                       fp_start_s, &emit_overflow);
     if (emit_overflow) { buf_free(&body); body = (Buf){0}; }
     /* An infeasible plan returns an empty body and the sweep tries the remaining variants.
      * encode_patch dies only when every variant is infeasible. */

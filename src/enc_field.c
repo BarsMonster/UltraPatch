@@ -2,34 +2,15 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Host encoder module -- field/delta model + apply planning: classify_field,
- * proxy pricing and split runs.
+ * Host encoder module -- relocation indexes, shift-map candidates, and split-run planning.
  * Compiled as a normal internal encoder translation unit.
  */
 
 #include "enc_internal.h"
-/* ------------------------------------------------------------------------------------- */
-/* Field and apply planning.                                                               */
-/* ------------------------------------------------------------------------------------- */
-static int is_local_bl(const uint8_t *frm, uint32_t from_size, uint32_t fpk) {
-    if (fpk & 1u) return 0;
-    if (fpk > from_size || from_size - fpk < 4u) return 0;
-    return rc_bl_pattern(rc_u16le(frm + fpk), rc_u16le(frm + fpk + 2));
-}
-
-static int field_addr(int32_t fp0, int32_t k, uint32_t from_size, uint32_t *out) {
-    int64_t a = (int64_t)fp0 + k;
-    if (a < 0 || a + 4 > (int64_t)from_size) return 0;
-    *out = (uint32_t)a;
-    return 1;
-}
-
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size) {
     memset(idx, 0, sizeof(*idx));
-    idx->nwords = ((size_t)source_size + 3u) >> 2;
-    idx->back = (uint16_t *)xcalloc(idx->nwords ? idx->nwords : 1u, sizeof(*idx->back));
-    idx->source = source;
-    idx->source_size = source_size;
+    size_t nwords = ((size_t)source_size + 3u) >> 2;
+    idx->back = (uint16_t *)xcalloc(nwords ? nwords : 1u, sizeof(*idx->back));
     for (uint32_t a = 0; a + 2u <= source_size; a += 2u) {
         uint16_t up = rc_u16le(source + a);
         if (!rc_thumb_ldr_lit(up)) continue;
@@ -44,76 +25,6 @@ void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t
 void ldr_target_index_free(LdrTargetIndex *idx) {
     free(idx->back);
     memset(idx, 0, sizeof(*idx));
-}
-
-int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk) {
-    int hit = 0;
-    if (fpk <= idx->source_size && idx->source_size - fpk >= 4u &&
-        rc_ldr_target_in_op(fp0, dl, fpk)) {
-        uint16_t back = idx->back[fpk >> 2];
-        hit = back && (int32_t)(fpk - back) >= fp0;
-    }
-    return hit;
-}
-
-/* Merge plans derive relocation deltas from final geometry. Non-merge plans retain only fields
- * whose source and target bytes are already identical. */
-static Event classify_field(const uint8_t *frm, uint32_t from_size,
-                            const uint8_t *tob, uint32_t to_size,
-                            const LdrTargetIndex *ldr, int merge_fields,
-                            int32_t fp0, int32_t tp0, int32_t dl, int32_t k) {
-    uint32_t fpk, tpk;
-    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
-    int pure = merge_fields;
-    for (int b = 0; !pure && b < 4; b++)
-        if (op_diff_byte(frm, from_size, tob, fp0 + k + b, tp0 + k + b)) break;
-        else if (b == 3) pure = 1;
-    if (is_local_bl(frm, from_size, fpk)) {
-        if (!pure) return (Event){ EV_SBL, 0 };
-        if (field_addr(tp0, k, to_size, &tpk)) {
-            uint16_t tu = rc_u16le(tob + tpk), tl = rc_u16le(tob + tpk + 2);
-            if (rc_bl_pattern(tu, tl)) {
-                uint16_t fu = rc_u16le(frm + fpk), fl = rc_u16le(frm + fpk + 2);
-                return (Event){ EV_BL,
-                    rc_i32_from_u32((uint32_t)rc_bl_imm24s(fu, fl) -
-                                    (uint32_t)rc_bl_imm24s(tu, tl)) };
-            }
-        }
-        return (Event){ EV_SBL, 0 };
-    }
-    if (pure && ldr_target_index_query(ldr, fp0, dl, fpk)) {
-        int32_t delta = field_addr(tp0, k, to_size, &tpk)
-            ? rc_i32_from_u32(rc_u32le(frm + fpk) - rc_u32le(tob + tpk)) : 0;
-        return (Event){ EV_EX, delta };
-    }
-    return (Event){ EV_NONE, 0 };
-}
-
-/* The single encoder mirror of the decoder's apply_op 4-byte-window skeleton (patch_apply.h).
- * fw_next yields, in wire consume order, either a classified field window (is_field=1, pos=window
- * anchor, ev) or one copy position (is_field=0, pos). Direction-parametrized: FWD ascends from 0
- * with anchor==cursor; reverse descends from dl-1 with anchor==cursor-3. Every encoder field walk
- * routes through this so no hand-copy can slip the order (a slip fails self-verification). */
-void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
-             const uint8_t *tob, uint32_t to_size, const LdrTargetIndex *ldr,
-             int merge_fields, int32_t fp0, int32_t tp0, int32_t dl) {
-    w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
-    w->frm = frm; w->from_size = from_size; w->tob = tob; w->to_size = to_size; w->ldr = ldr;
-    w->merge_fields = merge_fields; w->fp0 = fp0; w->tp0 = tp0;
-}
-int fw_next(FieldWalk *w) {
-    if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
-    int32_t a0 = w->fwd ? w->k : w->k - 3;
-    if (a0 >= 0 && a0 + 4 <= w->dl) {
-        Event ev = classify_field(w->frm, w->from_size, w->tob, w->to_size, w->ldr,
-                                  w->merge_fields, w->fp0, w->tp0, w->dl, a0);
-        if (ev.type != EV_NONE) {
-            w->is_field = 1; w->pos = a0; w->ev = ev; w->k += w->fwd ? 4 : -4;
-            return 1;
-        }
-    }
-    w->is_field = 0; w->pos = w->k; w->ev = (Event){ EV_NONE, 0 }; w->k += w->fwd ? 1 : -1;
-    return 1;
 }
 
 /* ---- piecewise shift map (D1): lookups on both sides use the single rc_smap_at definition in
@@ -272,11 +183,9 @@ _Static_assert(UINT64_C(8192) * 8193u / 2u > SPLIT_TRANSITION_BUDGET,
 
 static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
                                            const Buf *from, const Buf *to,
+                                           const SourceLitModels *lit,
                                            uint64_t transitions_left) {
-    uint8_t L0[256], L1[256];
-    LitSeedTrees seeds;
-    lit_seed_trees_init(&seeds, from->d, from->n);
-    from_lit_proxy_bits(&seeds, L0, L1);
+    const uint8_t *L0 = lit->L0, *L1 = lit->L1;
     OpVec out = {0};
     int32_t tp = 0, fp = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
@@ -389,6 +298,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
 }
 
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
-                             const Buf *from, const Buf *to) {
-    split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
+                             const Buf *from, const Buf *to,
+                             const SourceLitModels *lit) {
+    split_nonzero_diff_runs_budget(ctx, ops, from, to, lit, SPLIT_TRANSITION_BUDGET);
 }

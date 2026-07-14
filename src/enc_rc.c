@@ -94,16 +94,15 @@ void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate) {
     (void)bt_xfer(t, r, byte, rate, BT_XFER_ENC);
 }
 
-void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t) {
-    uint32_t hist[256];
-    for (int i = 0; i < 256; i++) hist[i] = 1;
-    for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
-    rc_lit_tree_from_hist(t, hist);   /* mirror of decoder lit_tree_from_hist */
-}
-
 void lit_seed_trees_init(LitSeedTrees *s, const uint8_t *frm, size_t n) {
-    lit_tree_seed_e(frm, n, 0, &s->lit0);
-    lit_tree_seed_e(frm, n, 1, &s->lit1);
+    uint32_t hist0[256], hist1[256];
+    for (int i = 0; i < 256; i++) hist0[i] = hist1[i] = 1;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t *hist = i & 1u ? hist1 : hist0;
+        hist[frm[i]]++;
+    }
+    rc_lit_tree_from_hist(&s->lit0, hist0);   /* mirror of decoder lit_tree_from_hist */
+    rc_lit_tree_from_hist(&s->lit1, hist1);
 }
 
 /* Neutral-init entry points: thin out-of-line wrappers over the shared rc_ugr_init/rc_ugg_init

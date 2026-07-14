@@ -157,7 +157,7 @@ static inline uint16_t rc_adapt(uint32_t p, int bit, int rate){
  * beyond the 12-bit fraction; num<=den and MAX_IMAGE<=2^26 keep every doubled remainder in u32.
  * The rounded result is 0..RC_PBIT, so subtracting its high bit performs the upper clamp. Byte-tree
  * seeding below then rounds this value to the direct 8-bit domain and clamps it to 1..255.
- * Shared by decoder lit_tree_from_hist and encoder lit_tree_seed_e. */
+ * Shared by decoder lit_tree_from_hist and encoder lit_seed_trees_init. */
 static inline uint16_t rc_lit_seed_prob(uint32_t num, uint32_t den){
     if(!den) return RC_PHALF;
     uint32_t pr=0;
