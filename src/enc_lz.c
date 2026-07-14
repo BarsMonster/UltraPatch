@@ -312,7 +312,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, seeds, dk, ko);
-    REnc r; re_init_count(&r);           /* drives adaptation; emitted bytes counted, not stored */
+    REnc r; re_init(&r);                 /* drives the exact adaptive encoder state */
     /* Token count (seq->n) is no longer on the wire; the old raw count bits touched
      * no adaptive model, so dropping them leaves every price unchanged. */
     ContentStats st = {0};
@@ -320,6 +320,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     content_cursor_init(&cc, seq, content, tags, seq->n ? (size_t)seq->v[seq->n - 1u].start + (size_t)seq->v[seq->n - 1u].len : 0,
                         &M, &r, pt->fwd, pt->out_en, pt->oexp0);
     content_cursor_to(&cc, cc.content_n, &st);
+    buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
      * order-2 model on the previous two token kinds (up_Flag1, 4 contexts); a scalar span/match
      * average would wash that out. Pricing each flag under its real context lets the rep0-aware

@@ -223,7 +223,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
                      const OpPC *pc, const Buf *content, const Buf *tags,
                      const OpEmitRow *rows, const FieldInjArena *inj,
                      const uint32_t *mb, const int32_t *mv, int mn,
-                     int count_only, int *overflow) {
+                     int *overflow) {
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, seeds, kd, ko);   /* fresh literal trees + token-loop models */
@@ -237,7 +237,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     uint32_t oexp = 0;
     if (!FWD) { for (size_t i = 0; i < ops->n; i++) oexp += (uint32_t)(ops->v[i].diff_len + ops->v[i].extra_len); }
     REnc rc;
-    if (count_only) re_init_count(&rc); else re_init(&rc);
+    re_init(&rc);
     /* piecewise shift map: ADAPTIVE-gamma count + per-entry gap (first absolute, later -1) + zz value,
      * coded through the BORROWED M.pre.gdl (count+gaps) / M.pre.gadj (zz values) gamma models — mirror of the
      * patch_apply decode_body map reader (bit-exact wire; s_ug_gamma == ugg_encode). */
@@ -296,8 +296,10 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
                              const FieldInjArena *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     int overflow = 0;
     Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->seeds, m->pc,
-                         m->content, m->tags, m->rows, inj, mb, mv, mn, 1, &overflow);
-    return overflow ? (size_t)-1 : body.n;
+                         m->content, m->tags, m->rows, inj, mb, mv, mn, &overflow);
+    size_t n = overflow ? (size_t)-1 : body.n;
+    buf_free(&body);
+    return n;
 }
 
 /* ---- bits-based shift-map fit (D1, C6). The hit-count fit above scores a candidate map by the
@@ -560,7 +562,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
     int sel_n = use_map >= 0 ? map_n[use_map] : 0;
     Buf body = emit_body(&seq, kd, ko, ops, FWD, &seeds, pc, &content, &tags, rows,
-                         &inj, sel_b, sel_v, sel_n, 0, overflow_out);
+                         &inj, sel_b, sel_v, sel_n, overflow_out);
     free(inj.v);
     buf_free(&ocands); free(nocand);
     free(walk); free(rows); free(seq.v); buf_free(&content); buf_free(&tags);
