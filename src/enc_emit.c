@@ -171,7 +171,9 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     ugg_encode(&M->pre.pgn, r, (uint32_t)pc->corr.n);
     prev = 0;
     for (size_t i = 0; i < pc->corr.n; i++) {
-        ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, (uint32_t)(pc->corr.v[i].off - prev));
+        uint32_t gap = (uint32_t)(pc->corr.v[i].off - prev);
+        /* The first offset is absolute; later distinct offsets ship gap-1 so adjacency is zero. */
+        ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, i ? gap - 1u : gap);
         prev = pc->corr.v[i].off;
         bt_encode(&M->pre.dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
     }

@@ -5,8 +5,8 @@ CircuitPython `feather_m0_express` foreign images. Home and fixture binaries are
 tracked ELFs into the selected `BUILD_DIR`; the ELF sidecars remain beside them so the encoder uses
 the same relocation information as production. Foreign images are tracked raw binaries.
 
-`regressions/opc-extra` is a non-product raw pair that exercises correction-cap splitting inside
-an extra-heavy operation. It is self-verified by the release gate but is not part of the corpus
+`regressions/opc-nonfold` is a non-product raw pair whose non-foldable field corrections require
+correction-cap splitting. It is self-verified by the release gate but is not part of the corpus
 compression total.
 
 `make gate` runs all 256 ordered home pairs, both directions of the 17 adjacent version-sorted

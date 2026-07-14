@@ -518,7 +518,9 @@ static int32_t up_pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int
 /* up_ApplyState type + UP_RING/UP_MASK + the arena asserts live with the ARENA union above. */
 RC_ALWAYS_INLINE int up_op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
     uint32_t gap=up_s_ug_gamma(pa,idx?&pa->ARENA.apply.MDL_pre.pg2:&pa->ARENA.apply.MDL_pre.pg);
-    if((idx && gap==0u) || gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
+    /* Later offsets ship (positive gap)-1; reject the only value whose restoration wraps. */
+    if(idx){ if(gap==UINT32_MAX){ pa->g_rcerr=1; return 0; } gap+=1u; }
+    if(gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
     *off+=gap;
     if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; return 0; }
     return 1;
@@ -1089,7 +1091,6 @@ static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
 #undef RC_IDX_SEED
 #undef RC_SEED_DEPTH_GDL
 #undef RC_SEED_DEPTH_GADJ
-#undef RC_SEED_DEPTH_PG2
 #undef RC_SEED_DEPTH_GL
 #undef RC_OUTMATCH_MIN
 #undef RC_KFIELD_BITS

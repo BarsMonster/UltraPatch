@@ -381,11 +381,9 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * cheap as the warmed-up state. Shared rc_ugg_seed_cont and rc_init_* seed both sides.
  *   GDL  = per-op diff_len gamma; op magnitudes are essentially never tiny.
  *   GADJ = per-op adj gamma.
- *   PG2  = correction gaps are strictly-increasing distinct offsets => gap>=1.
  *   GL   = match length gamma; matches are always len>=3 (value>=2 => cl>=1). */
 #define RC_SEED_DEPTH_GDL  6
 #define RC_SEED_DEPTH_GADJ 3
-#define RC_SEED_DEPTH_PG2  1
 #define RC_SEED_DEPTH_GL   1
 
 /* Out-match minimum length: out-match lengths ship as (len - RC_OUTMATCH_MIN) via
@@ -428,12 +426,13 @@ typedef struct {
 /* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
 static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UP_UG_CTX,depth); }
 
-/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (PG2/GDL/GADJ). */
+/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (GDL/GADJ).
+ * PG2 stays neutral because later correction gaps ship as gap-1 and adjacency is value zero. */
 static inline void rc_init_prekd(up_PreKdModels*m){
     up_bt_init(&m->dval);
     up_idx_init(&m->dibl,RC_IDX_SEED); up_idx_init(&m->diex,RC_IDX_SEED);
     rc_ugg_init(&m->pg); rc_ugg_init(&m->pgn);
-    rc_ugg_init(&m->pg2); rc_ugg_seed_cont(&m->pg2,RC_SEED_DEPTH_PG2);
+    rc_ugg_init(&m->pg2);
     rc_ugg_init(&m->gdl); rc_ugg_init(&m->gel); rc_ugg_init(&m->gadj);
     rc_ugg_seed_cont(&m->gdl,RC_SEED_DEPTH_GDL); rc_ugg_seed_cont(&m->gadj,RC_SEED_DEPTH_GADJ);
 }

@@ -41,7 +41,7 @@ UP="$ULTRAPATCH"
 
 # One aggregate ratchet covers the complete home and foreign corpus. The real one-face update
 # remains independently visible because it is the product release patch.
-CORPUS_LIMIT=5421482
+CORPUS_LIMIT=5419019
 ONEFACE_GROW_LIMIT=570
 ONEFACE_REVERT_LIMIT=286
 
@@ -81,19 +81,19 @@ if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
 fi
 echo "short_body_regression=OK"
 
-# Exercise correction-cap salvage on a non-product raw pair whose selected plans contain an
-# extra-heavy op with 84 corrections. The encoder's built-in decoder self-check is the verdict;
+# Exercise correction-cap salvage on a non-product raw pair whose unsplit plans exceed OPC_CAP
+# with non-foldable field corrections. The encoder's built-in decoder self-check is the verdict;
 # this focused fixture is deliberately outside the 290-patch compression total.
-opc_from=test-bench/regressions/opc-extra/from.bin
-opc_to=test-bench/regressions/opc-extra/to.bin
+opc_from=test-bench/regressions/opc-nonfold/from.bin
+opc_to=test-bench/regressions/opc-nonfold/to.bin
 if [ ! -f "$opc_from" ] || [ ! -f "$opc_to" ]; then
   echo "check_corpus.sh: missing correction-split regression fixture" >&2
   exit 3
 fi
-if ! "$UP" "$opc_from" "$opc_to" "$tmp/opc-extra.patch" \
-     >"$tmp/opc-extra.stdout" 2>"$tmp/opc-extra.stderr"; then
+if ! "$UP" "$opc_from" "$opc_to" "$tmp/opc-nonfold.patch" \
+     >"$tmp/opc-nonfold.stdout" 2>"$tmp/opc-nonfold.stderr"; then
   echo "check_corpus.sh: correction-split regression failed" >&2
-  sed -n '1,20p' "$tmp/opc-extra.stderr" >&2
+  sed -n '1,20p' "$tmp/opc-nonfold.stderr" >&2
   exit 4
 fi
 echo "correction_split_regression=OK"

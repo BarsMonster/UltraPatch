@@ -60,7 +60,8 @@ typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } CorrFi
 
 typedef struct {
     const EncCtx *ctx;
-    const uint8_t *payload, *frm, *true_to;
+    uint8_t *payload;
+    const uint8_t *frm, *true_to;
     uint32_t from_size, to_size;
     PlanCaps *caps;
 } CorrWalk;
@@ -117,6 +118,13 @@ static void correction_byte(CorrWalk *cw, CorrFieldCursor *fc, OpPC *pc,
     }
     uint8_t want = cw->true_to[tp];
     uint8_t corr = (uint8_t)(want - produced);
+    uint8_t folded = (uint8_t)(byte + corr);
+    /* Extras already occupy content positions. For copied bytes, preserve the nonzero bitmap
+     * that drives BL/LDR purity so FieldWalk and the decoder keep identical field decisions. */
+    if (corr && !ev && (!is_diff || (byte && folded))) {
+        cw->payload[tp] = folded;
+        return;
+    }
     if (corr) {
         corr_push(&pc->corr, off, corr);
         if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > OPC_CAP)
