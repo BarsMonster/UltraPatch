@@ -136,6 +136,46 @@ past-2page     513 513
 EOF
 printf 'page_boundary_regression=%d/14\n' "$page_cases"
 
+# Exercise the shipped mutating CLI wrapper, not only the encoder's direct selfcheck call. Reuse
+# the nontrivial two-page grow case above: successful decode must atomically replace a source copy
+# with the exact target, while a truncated patch must fail without changing its input file.
+decode_cli_regression() {
+  local d=$1 patch_n
+  cp "$d/from.bin" "$d/applied.bin" || return 1
+  if ! "$UP" --decode "$d/applied.bin" "$d/patch.blob" \
+       >"$d/decode.stdout" 2>"$d/decode.stderr"; then
+    echo "check_corpus.sh: --decode regression failed on valid patch" >&2
+    sed -n '1,20p' "$d/decode.stderr" >&2
+    return 1
+  fi
+  if ! cmp -s "$d/applied.bin" "$d/to.bin"; then
+    echo "check_corpus.sh: --decode result differs from target" >&2
+    return 1
+  fi
+
+  patch_n=$(wc -c < "$d/patch.blob") || return 1
+  if [ "$patch_n" -le 1 ]; then
+    echo "check_corpus.sh: --decode regression patch is unexpectedly short" >&2
+    return 1
+  fi
+  head -c $((patch_n-1)) "$d/patch.blob" > "$d/truncated.blob" || return 1
+  cp "$d/from.bin" "$d/rejected.bin" || return 1
+  if "$UP" --decode "$d/rejected.bin" "$d/truncated.blob" \
+       >"$d/reject.stdout" 2>"$d/reject.stderr"; then
+    echo "check_corpus.sh: --decode accepted a truncated patch" >&2
+    return 1
+  fi
+  if ! cmp -s "$d/rejected.bin" "$d/from.bin"; then
+    echo "check_corpus.sh: rejected --decode modified its input file" >&2
+    return 1
+  fi
+}
+
+if ! decode_cli_regression "$tmp/page-grow-past-page"; then
+  exit 4
+fi
+echo "decode_cli_regression=OK"
+
 append_foreign_pair() {
   local from=$1 to=$2 from_id to_id
   from_id=${from##*/}; to_id=${to##*/}
