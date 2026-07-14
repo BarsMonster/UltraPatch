@@ -78,6 +78,64 @@ if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
 fi
 echo "short_body_regression=OK"
 
+# Exercise cache startup, page transitions, and the final partial-page commit around the
+# decoder's 256-byte OUTROW boundary. Same-size and shrink cases change the target's last
+# shared byte, guaranteeing a dirty final physical page rather than a read-only seam. Encoder
+# self-verification snapshots [to_size,page_round_up(max(from_size,to_size))) before apply;
+# a successful encode therefore also proves that old physical-page content beyond the new
+# logical image was preserved. Shrink cases protect real old-image bytes in that range, while
+# grow cases protect the deterministic pre-existing flash padding after the target.
+page_boundary_case() {
+  local id=$1 from_n=$2 to_n=$3 d="$tmp/page-$1" common_n
+  mkdir -p "$d" || return 1
+  head -c "$from_n" "$FIX/v0_base/watch.bin" > "$d/from.bin" || return 1
+  head -c "$to_n" "$FIX/v1_one_face/watch.bin" > "$d/to.bin" || return 1
+  if [ "$from_n" -gt 0 ]; then
+    printf '\132' | dd of="$d/from.bin" bs=1 seek=0 conv=notrunc status=none || return 1
+    printf '\074' | dd of="$d/from.bin" bs=1 seek=$((from_n-1)) conv=notrunc status=none || return 1
+  fi
+  if [ "$to_n" -gt 0 ]; then
+    printf '\245' | dd of="$d/to.bin" bs=1 seek=0 conv=notrunc status=none || return 1
+    printf '\303' | dd of="$d/to.bin" bs=1 seek=$((to_n-1)) conv=notrunc status=none || return 1
+  fi
+  common_n=$((from_n < to_n ? from_n : to_n))
+  if [ "$common_n" -gt 0 ]; then
+    printf '\074' | dd of="$d/from.bin" bs=1 seek=$((common_n-1)) conv=notrunc status=none || return 1
+    printf '\303' | dd of="$d/to.bin" bs=1 seek=$((common_n-1)) conv=notrunc status=none || return 1
+  fi
+  if ! "$UP" "$d/from.bin" "$d/to.bin" "$d/patch.blob" \
+       >"$d/stdout" 2>"$d/stderr"; then
+    echo "check_corpus.sh: page-boundary self-verification failed: $id ($from_n -> $to_n)" >&2
+    sed -n '1,20p' "$d/stderr" >&2
+    return 1
+  fi
+}
+
+page_cases=0
+while read -r id from_n to_n; do
+  [ -n "$id" ] || continue
+  if ! page_boundary_case "$id" "$from_n" "$to_n"; then
+    exit 4
+  fi
+  page_cases=$((page_cases+1))
+done <<'EOF'
+empty-grow       0   1
+empty-shrink     1   0
+one-page         1   1
+below-page     255 255
+grow-to-page   255 256
+shrink-in-page 256 255
+grow-past-page 256 257
+shrink-to-page 257 256
+past-page      257 257
+grow-to-2page  511 512
+shrink-in-2page 512 511
+grow-past-2page 512 513
+shrink-to-2page 513 512
+past-2page     513 513
+EOF
+printf 'page_boundary_regression=%d/14\n' "$page_cases"
+
 append_foreign_pair() {
   local from=$1 to=$2 from_id to_id
   from_id=${from##*/}; to_id=${to##*/}

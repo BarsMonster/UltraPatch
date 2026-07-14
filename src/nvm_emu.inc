@@ -31,7 +31,9 @@ static void nvm_free(void){
  * physical span is filled with a deterministic LCG pad (NOT 0xFF) seeded by pad_seed, so a decode
  * that reads not-yet-written output cannot coast on the 0xFF that both this emulator and
  * 0xFF-erased firmware would return. Bytes at and beyond preserve_from are snapshotted as a
- * canary: a correct final partial-page write must preserve them exactly.
+ * canary: a correct final partial-page write must preserve the old physical-page content beyond
+ * the new logical image exactly. For a shrinking image this includes old firmware bytes; for a
+ * growing image it includes the pre-existing page padding after the new target.
  * Returns -1 on invalid geometry or allocation failure. */
 static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span,
                     uint32_t preserve_from, uint32_t pad_seed){

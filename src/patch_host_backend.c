@@ -66,7 +66,7 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
         if(sc_unaligned) err = "NVM page write was unaligned";
         else if(sc_oob_page_writes) err = "NVM page write was out of bounds";
         else if(sc_oob_reads) err = "NVM read was out of bounds";
-        else if(nvm_canary_bad()) err = "NVM post-target data was corrupted";
+        else if(nvm_canary_bad()) err = "old NVM page content beyond target image was corrupted";
         else err = sc_amplified ? "NVM page erased more than once (write amplification)"
                                 : "NVM erase frontier inversion";
     }
