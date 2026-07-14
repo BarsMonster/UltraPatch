@@ -10,6 +10,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   gcc \
   gcc-arm-none-eabi \
   git \
+  libc6-dev \
   libnewlib-dev \
   make \
   python3
