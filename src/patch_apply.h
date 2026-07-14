@@ -143,7 +143,7 @@ typedef struct PatchApply {
     PatchPull g_pull_fn;
     void *g_pull_ctx;
     /* HOT-FLAG PLACEMENT INVARIANT: these decode flags are touched on nearly every range-coder
-     * step, so they fill the low word right after the two pointers (ARM offsets 28..31) instead of
+     * step, so they occupy the low word right after the two pointers (ARM offsets 28..30) instead of
      * being sunk to the struct tail. Thumb-1 ldrb/strb take
      * only a 5-bit immediate offset, so a flag byte at a LOW struct offset stays reachable cheaply,
      * whereas a tail byte forces an extra address add. Keep any future hot flag byte HERE (low), not
@@ -151,7 +151,6 @@ typedef struct PatchApply {
     uint8_t g_rcerr;
     uint8_t g_reject;   /* only REJ_RESOURCE cap sites set this during decode; REJ_CORRUPT is
                          * assigned once at the patch_apply_run boundary for every other failure */
-    uint8_t g_flash_touched;
     uint8_t g_FWD;
 
     up_RangeDec RC;
@@ -297,8 +296,6 @@ static int up_s_raw(PatchApply *pa){ return up_rc_decode(pa,pa->RC.range>>1); }
  * (UB). Every unbounded loop is capped to the max a 32-bit value needs; on overflow set g_rcerr
  * and bail. g_rcerr is the ONE decode error latch — RC-level and apply-level failures all set it
  * (clean reject, never crash / never silent-wrong); g_reject still carries the reason. */
-/* terminal-state flag: set at the single flash_write_page site (up_orow_commit_slot's dirty branch);
- * on ERROR it tells the integrator whether the old image is still intact. */
 #define UP_RC_UNARY_MAX 31           /* a uint32 value needs <=31 leading/unary bits */
 static uint32_t up_s_raw_bits(PatchApply *pa, int nb){ uint32_t v=0; for(int i=0;i<nb;i++) v=(v<<1)|(uint32_t)up_s_raw(pa); return v; }
 /* ---- bit-tree byte ---- */
@@ -437,7 +434,6 @@ static void up_flash_hist(uint32_t n,uint32_t*hist0,uint32_t*hist1){
 static void up_orow_commit_slot(PatchApply *pa, uint32_t s){
     if(pa->ARENA.apply.g_orow_base[s]!=UP_OROW_NONE && pa->ARENA.apply.g_orow_dirty[s]){
         uint32_t base=pa->ARENA.apply.g_orow_base[s];
-        pa->g_flash_touched=1;
         flash_write_page((uint32_t)(PATCH_IMAGE_BASE+base),pa->ARENA.apply.g_orow_buf[s]);
     }
     pa->ARENA.apply.g_orow_dirty[s]=0; pa->ARENA.apply.g_orow_base[s]=UP_OROW_NONE;
@@ -885,8 +881,8 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
  * zz(to_size-from_size) | [zz(fp_end-from_size) iff descending] | [zz(fp_start) iff ascending] |
  * compressed_body_len. The decoder derives the apply direction and the image span itself
  * and verifies the revision-tagged CRC32(from) over flash BEFORE the first flash write — a
- * mismatched wire revision, truncated header,
- * implausible sizes, or a wrong/dirty current image all reject cleanly with flash untouched.
+ * mismatched wire revision, truncated header, implausible sizes, or a wrong/dirty current image
+ * all reject before any flash write.
  * CRC32(to) is stashed in g_want_to here and checked over the final image after apply
  * (patch_apply_run). Then the literal bit-trees are seeded from flash parity histograms
  * (hist0/hist1/w borrow 3 KiB of ARENA before the apply
@@ -1028,12 +1024,6 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, Pa
  * accessor over reading g_reject directly; it is unused-static-inline and compiles out when the
  * integrator does not call it (no ARM .text cost). */
 static inline int patch_apply_reject(const PatchApply *pa){ return pa->g_reject; }
-
-/* After PATCH_APPLY_ERROR, whether any flash_write_page happened this run: 0 = old image intact
- * (still bootable, safe to retry after fixing the cause), 1 = image may be partially overwritten
- * or fully written but unverified (bootloader recovery required). Same unused-static-inline
- * compile-out as patch_apply_reject. */
-static inline int patch_apply_flash_touched(const PatchApply *pa){ return pa->g_flash_touched; }
 
 /* Parsed patch geometry/state after a completed run. These keep host harnesses and
  * integrations from depending on decoder global names while still compiling out when unused. */

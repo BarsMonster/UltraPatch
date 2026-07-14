@@ -66,7 +66,7 @@ int next_byte(void *ctx, uint8_t *out);
 PatchApply state; /* Caller-owned; use reserved storage if the stack is tight. */
 PatchApplyResult result = patch_apply_run(&state, next_byte, &my_ctx);
 if (result != PATCH_APPLY_DONE) {
-    /* Inspect patch_apply_reject() and patch_apply_flash_touched(). */
+    /* Inspect patch_apply_reject(), then recover by externally reflashing. */
 }
 ```
 
@@ -110,19 +110,11 @@ toolchain must be measured in the final firmware build.
 
 ## Failure and recovery
 
-Use both the return value and `patch_apply_flash_touched()` to decide what is
-safe:
-
-| Terminal state | Flash state | Required action |
-| --- | --- | --- |
-| `PATCH_APPLY_DONE` | Target image present and both CRCs verified | Boot the new image |
-| Error, flash untouched | Original image intact | Correct the cause; a later apply may start from the original image |
-| Error, flash touched | Original image destroyed or result unverified | Full external reflash |
-
-This includes resource rejection, transport loss, a silent write failure found
-by the final CRC, and any other decoder error. Never retry a patch against a
-partially overwritten image.
+`PATCH_APPLY_DONE` means the target image is present and both CRCs were verified.
+After `PATCH_APPLY_ERROR`, the image may be unchanged, partially written, or
+fully written but unverified; perform a full external reflash. Do not retry the
+patch.
 
 The decoder has no persistent progress marker, rollback, checkpoint, or resume
-protocol. After a reset or power loss that may have occurred after the first
-write, treat the image as touched and perform a full external reflash.
+protocol. A reset or power loss during apply also requires a full external
+reflash.
