@@ -85,13 +85,11 @@ int decode_patch(const char *image_path, const char *patch_path){
     }
     rc = read_file_buf(patch_path, &blob, 0); if(rc) goto out;
     if(blob.n<12){ fprintf(stderr,"blob too short\n"); rc = 1; goto out; }
-    rc = read_file_buf(image_path, &image, 0); if(rc) goto out;
-    if(image.n > UINT32_MAX){ fprintf(stderr,"image too large for host decoder: %zu\n", image.n); rc = 2; goto out; }
+    rc = read_file_buf(image_path, &image, MAX_IMAGE); if(rc) goto out;
     HostApply ha;
-    { uint32_t image_n = (uint32_t)image.n;
-      uint32_t span = image_n>MAX_IMAGE ? image_n : MAX_IMAGE;
-      if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, span,
-                         image_n, &ha)){ rc = 2; goto out; } }
+    uint32_t image_n = (uint32_t)image.n;
+    if(host_apply_blob(blob.d, blob.n, image.d, image_n, MAX_IMAGE, MAX_IMAGE,
+                       image_n, &ha)){ rc = 2; goto out; }
 
     if(ha.rc != PATCH_APPLY_DONE){
         int reject = patch_apply_reject(&ha.pa);

@@ -15,15 +15,6 @@ static void reject_patch_output(const char *patch_out, const char *input) {
     }
 }
 
-static uint32_t checked_image_size(const Buf *b, const char *name) {
-    if (b->n > MAX_IMAGE) {
-        fprintf(stderr, "%s image too large for this decoder build: %zu > %u\n",
-                name, b->n, (unsigned)MAX_IMAGE);
-        exit(2);
-    }
-    return (uint32_t)b->n;
-}
-
 /* Emit the full patch envelope into a fresh `blob`. The body's leading range-coder cache
  * byte is dropped on the wire. A short body is valid: the decoder zero-pads after the counted
  * bytes while initializing and consuming the range stream. */
@@ -47,8 +38,10 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out) {
     reject_patch_output(patch_out, from_image);
     reject_patch_output(patch_out, to_image);
-    Buf from = slurp(from_image), to = slurp(to_image);
-    uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");
+    Buf from = {0}, to = {0};
+    if (read_file_buf(from_image, &from, MAX_IMAGE) ||
+        read_file_buf(to_image, &to, MAX_IMAGE)) exit(2);
+    uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     PlanPrep prep;
     plan_prepare(&prep, &from, &to);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the

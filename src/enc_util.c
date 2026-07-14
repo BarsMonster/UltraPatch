@@ -138,14 +138,6 @@ fail:
     return 2;
 }
 
-Buf slurp(const char *path) {
-    Buf b = {0};
-    /* 1 GiB ceiling: bsdiff_ops casts image sizes to int32_t for the suffix array and every
-     * signed cursor, and the wire size fields are u32 — a >=2 GiB image would go negative. */
-    if (read_file_buf(path, &b, 1u << 30)) exit(2);
-    return b;
-}
-
 int file_alias(const char *a, const char *b) {
     struct stat sa, sb;
     if (stat(a, &sa)) {
