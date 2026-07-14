@@ -98,30 +98,36 @@ void plan_prepare_free(PlanPrep *prep) {
     memset(prep, 0, sizeof(*prep));
 }
 
-/* One full op-plan -> emitted body pipeline. Plans either keep raw byte deltas or add op-derived
- * field deltas exact under the bsdiff alignment. encode_patch emits the smallest body. */
-PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
-                       const PlanPrep *prep, const PlanSpec *spec) {
-    PlanResult r = {0};
+/* Prepare direction-dependent geometry once for adjacent registry entries that share a raw plan.
+ * Field merging affects only body construction, so both raw-11 modes can reuse this exact result. */
+void plan_geometry_prepare(PlanGeometry *geom, EncCtx *ctx,
+                           const Buf *from, const Buf *to,
+                           const PlanPrep *prep, int raw_key) {
+    memset(geom, 0, sizeof(*geom));
     ctx->deg_engaged = 0;
-    OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key]);
-    split_nonzero_diff_runs(ctx, &ops, from, to, &prep->lit);
+    geom->ops = prep_ops_clone(&prep->raw[raw_key]);
+    split_nonzero_diff_runs(ctx, &geom->ops, from, to, &prep->lit);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    int32_t fp_end;
-    int32_t fp_start_s = finalize_ops(ctx, &ops, from_size, to_size, &fp_end);
-    /* The direction fallback needs to know whether hazard literalization was used. */
-    r.st = (EncStats){ ctx->deg_engaged };
-    Buf body = {0};
+    geom->fp_start = finalize_ops(ctx, &geom->ops, from_size, to_size, &geom->fp_end);
+    geom->st = (EncStats){ ctx->deg_engaged };
+}
+
+void plan_geometry_free(PlanGeometry *geom) {
+    opvec_free(&geom->ops);
+    memset(geom, 0, sizeof(*geom));
+}
+
+/* Encode either field mode from finalized geometry. encode_patch emits the smallest body. */
+PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
+                       const PlanPrep *prep, const PlanGeometry *geom,
+                       int merge_fields) {
+    PlanResult r = { .fp_end = geom->fp_end, .fp_start = geom->fp_start, .st = geom->st };
     int emit_overflow = 0;
-    body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                       &prep->ldr, &prep->lit, spec->merge_fields,
-                       fp_start_s, &emit_overflow);
-    if (emit_overflow) { buf_free(&body); body = (Buf){0}; }
+    r.body = encode_body(ctx, &geom->ops, from->d, (uint32_t)from->n,
+                         to->d, (uint32_t)to->n, &prep->ldr, &prep->lit,
+                         merge_fields, geom->fp_start, &emit_overflow);
+    if (emit_overflow) { buf_free(&r.body); r.body = (Buf){0}; }
     /* An infeasible plan returns an empty body and the sweep tries the remaining variants.
      * encode_patch dies only when every variant is infeasible. */
-    opvec_free(&ops);
-    r.body = body;
-    r.fp_end = fp_end;
-    r.fp_start = fp_start_s;
     return r;
 }

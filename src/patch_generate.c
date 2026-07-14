@@ -61,9 +61,17 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
         if (pass && bestv >= 0 && !best_st.deg_engaged) break;
         if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
+        PlanGeometry geom = {0};
+        int geom_key = -1;
         for (int v = 0; v < PLAN_SPEC_N; v++) {
             if (pass && natural_bestv >= 0 && v != natural_bestv) continue;
-            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &PLAN_SPECS[v]);
+            const PlanSpec *spec = &PLAN_SPECS[v];
+            if (geom_key != spec->raw_key) {
+                plan_geometry_free(&geom);
+                plan_geometry_prepare(&geom, &ctx, &from, &to, &prep, spec->raw_key);
+                geom_key = spec->raw_key;
+            }
+            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &geom, spec->merge_fields);
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
             emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
@@ -72,6 +80,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
                 buf_free(&best_blob); best_blob = cand; best_st = pr.st; bestv = v;
             } else buf_free(&cand);
         }
+        plan_geometry_free(&geom);
     }
     plan_prepare_free(&prep);
     if (bestv < 0) die("no feasible plan for this pair");

@@ -100,6 +100,7 @@ typedef struct {
     LdrTargetIndex ldr;
     SourceLitModels lit;
 } PlanPrep;
+typedef struct { OpVec ops; int32_t fp_end, fp_start; EncStats st; } PlanGeometry;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
 typedef struct {
@@ -276,8 +277,13 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);
 void plan_prepare_free(PlanPrep *prep);
+void plan_geometry_prepare(PlanGeometry *geom, EncCtx *ctx,
+                           const Buf *from, const Buf *to,
+                           const PlanPrep *prep, int raw_key);
+void plan_geometry_free(PlanGeometry *geom);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
-                       const PlanPrep *prep, const PlanSpec *spec);
+                       const PlanPrep *prep, const PlanGeometry *geom,
+                       int merge_fields);
 
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out);
 int decode_patch(const char *image_path, const char *patch_path);
