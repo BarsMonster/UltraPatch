@@ -89,15 +89,12 @@ void plan_prepare_free(PlanPrep *prep) {
 }
 
 static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
-                                 const PlanPrep *prep, const PlanSpec *spec, FieldDeltaVec *fd) {
-    *fd = (FieldDeltaVec){0};
+                                 const PlanPrep *prep, const PlanSpec *spec) {
     OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key], to->n);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     split_nonzero_diff_runs(ctx, &ops, from, to);
     if (spec->merge_fields)
-        merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size,
-                              &prep->ldr, ctx->fwd);
-    coerce_reloc_literals(ctx, &ops, from->d, from_size, fd, &prep->ldr);
+        coerce_reloc_literals(ctx, &ops, from->d, from_size, to->d, to_size, &prep->ldr);
     return ops;
 }
 
@@ -172,13 +169,12 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
  * computes exactly the untransformed plan (bit-identical wire). */
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
                                const Buf *from, const Buf *to,
-                               const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
-                               PlanCaps *caps) {
+                               const LdrTargetIndex *ldr, PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     OpPC *pc = NULL;
     for (;;) {
         pc = corrections_pc(ctx, ops, fp_start, from->d, to->d,
-                            fd, from_size, to_size, ldr, caps);
+                            from_size, to_size, ldr, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc);
         if (!split_any) break;
@@ -198,14 +194,13 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     PlanResult r = {0};
     ctx->deg_engaged = 0;
     ctx->opc_splits = 0;
-    FieldDeltaVec fd = {0};
     PlanCaps caps;
-    OpVec ops = build_candidate_ops(ctx, from, to, prep, spec, &fd);
+    OpVec ops = build_candidate_ops(ctx, from, to, prep, spec);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
     literalize_hazards(ctx, &ops, to, fp_start_s, from_size, to_size);
     if (ctx->deg_engaged) fp_start_s += fold_zero_ops(&ops);
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, &caps);
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &prep->ldr, &caps);
     /* The direction fallback needs to know whether hazard/correction fallbacks were used. */
     r.st = (EncStats){ ctx->deg_engaged, ctx->opc_splits };
     /* Decoder resource feasibility mirrors patch_apply OPC_CAP. Relocation-cache misses
@@ -215,7 +210,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     if (feasible) {
         int emit_overflow = 0;
         body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                           &fd, &prep->ldr, pc, fp_start_s, &emit_overflow);
+                           &prep->ldr, pc, fp_start_s, &emit_overflow);
         if (emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
@@ -223,7 +218,6 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
      * correction budgets, so another variant may fit the decoder cap.
      * encode_patch dies only
      * when EVERY config is infeasible. */
-    free(fd.v);
     oppc_array_free(pc, ops.n);
     opvec_free(&ops);
     r.body = body;
