@@ -111,12 +111,10 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
  *  OLD window (source `frm`): FWD [tp_end, from_size); reverse [0, tp0)           — pristine flash
  *    the frontier has not reached (out_read returns it verbatim). OLD regions DECAY as later ops
  *    write, so OLD candidates are clipped to finish inside the op that starts them. */
-void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
-                           const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
-                           const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
-                           OCandArena *oc_out, uint8_t **noc_out) {
-    OCandArena oc = {0};
-    uint8_t *noc = (uint8_t *)xcalloc(n ? n : 1, 1);
+OCand *out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
+                      const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
+                      const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n) {
+    OCand *ocands = (OCand *)xcalloc(n ? n : 1, sizeof(*ocands));
     if (to_n >= 4 && n >= 4) {
         int32_t *head, *prev, *fhead, *fprev;
         oc_index(to, to_n, FWD, &head, &prev);
@@ -130,7 +128,7 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
             uint32_t lim = FWD ? tp0 : tpe;
             uint32_t lim2 = FWD ? tpe : (tp0 < from_n ? tp0 : (uint32_t)from_n);
             uint32_t cap = (uint32_t)(rows[step].content_end - i);
-            OCand row = {0};
+            OCand *row = &ocands[i];
             uint32_t key = hash3_key_fwd(content + i);
             int visits = 0;
             for (int32_t pj = head[key]; pj >= 0 && visits < 1024; pj = prev[pj], visits++) {
@@ -143,7 +141,7 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                     maxl = (size_t)((uint32_t)pj - lim + 1u);
                 }
                 if (maxl > n - i) maxl = n - i;
-                oc_match(&row, to, FWD, pj, content, i, maxl);
+                oc_match(row, to, FWD, pj, content, i, maxl);
             }
             if (cap >= RC_OUTMATCH_MIN) {
                 visits = 0;
@@ -158,17 +156,13 @@ void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                     }
                     if (maxl > n - i) maxl = n - i;
                     if (maxl > cap) maxl = cap;                /* OLD tokens end inside their op */
-                    oc_match(&row, frm, FWD, pj, content, i, maxl);
+                    oc_match(row, frm, FWD, pj, content, i, maxl);
                 }
-            }
-            if (row.len) {
-                noc[i] = 1;
-                buf_write(&oc, &row, sizeof(row));
             }
         }
         free(head); free(prev); free(fhead); free(fprev);
     }
-    *oc_out = oc; *noc_out = noc;
+    return ocands;
 }
 
 /* ---- price feedback: fractional bit-prices measured from the real adaptive models ----
@@ -382,9 +376,8 @@ static uint64_t *span_lit_prefix(size_t n, const uint8_t *content, const uint8_t
 }
 
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
-                                const CandArena *cands, const uint8_t *ncand,
-                                const OCandArena *ocands, const uint8_t *nocand,
-                                const PriceTab *pt) {
+                         const CandArena *cands, const uint8_t *ncand,
+                         const OCand *ocands, int32_t max_out_len, const PriceTab *pt) {
     uint32_t maxrun = LZ_MAX_RUN, win = 1u << WINDOW_LOG;
     /* slen[L]=span len price (flag added per-context below); mlen[L]=match len price;
      * dpr[D]=fresh-distance value price. slen is only ever indexed by a span/rep run length
@@ -403,17 +396,10 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                           : ugr_price(&pt->gd, D - 1u);
     const uint64_t INF = UINT64_MAX / 4;
     uint32_t *glo_price = NULL;
-    int32_t max_out_len = 0;
-    if (pt->out_en && ocands && nocand && ocands->n) {
-        const OCand *all = (const OCand *)ocands->d;
-        size_t all_n = ocands->n / sizeof(*all);
-        for (size_t oi = 0; oi < all_n; oi++)
-            if (all[oi].len > max_out_len) max_out_len = all[oi].len;
-        if (max_out_len >= (int32_t)RC_OUTMATCH_MIN) {
-            glo_price = (uint32_t *)xmalloc(((size_t)max_out_len + 1u) * sizeof(*glo_price));
-            for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= max_out_len; l++) {
-                glo_price[l] = ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
-            }
+    if (pt->out_en && ocands && max_out_len >= (int32_t)RC_OUTMATCH_MIN) {
+        glo_price = (uint32_t *)xmalloc(((size_t)max_out_len + 1u) * sizeof(*glo_price));
+        for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= max_out_len; l++) {
+            glo_price[l] = ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
         }
     }
     /* Every literal's tag0 context is now the deterministic previous content byte content[p-1]
@@ -450,13 +436,12 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     cost[0] = 0; rep[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, flag.h=0 */
     int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];
     size_t cand_off = 0;
-    const OCand *ocrow = ocands ? (const OCand *)ocands->d : NULL;
     for (size_t i = 0; i <= n; i++) {
         /* Reverse the old predecessor->endpoint span walk. Short spans may end anywhere;
          * longer spans end only where another token can start, or at the content end. Only
          * spans reach histories 0/2, so resolving them here cannot reorder a match arrival. */
         if (i) {
-            size_t span_cap = (i == n || ncand[i] || (nocand && nocand[i])) ? maxrun : 8u;
+            size_t span_cap = (i == n || ncand[i] || (ocands && ocands[i].len)) ? maxrun : 8u;
             size_t first = i > span_cap ? i - span_cap : 0;
             uint64_t best[2] = { INF, INF };
             size_t best_pos[2] = { 0, 0 };
@@ -505,9 +490,6 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         const Cand *row = NULL;
         if (nc) row = (const Cand *)cands->d + cand_off;
         cand_off += (size_t)nc;
-        int no = nocand ? nocand[i] : 0;
-        const OCand *orow = ocrow;
-        if (ocrow) ocrow += no;
         for (int k = 0; k < nc; k++) {
             int32_t lk = row[k].len, dk2 = row[k].dist;
             int at = k;
@@ -519,8 +501,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             if (k + 1 < nc && ord_dpr[k + 1] < dp2) { ord_dpr[k] = ord_dpr[k + 1]; ord_dist[k] = ord_dist[k + 1]; }
             else ord_dpr[k] = dp2;
         }
-        int32_t out_len = pt->out_en && orow && no ? orow->len : 0;
-        int32_t out_pos = out_len ? orow->pos : 0;
+        int32_t out_len = pt->out_en && ocands ? ocands[i].len : 0;
+        int32_t out_pos = out_len ? ocands[i].pos : 0;
         int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
         size_t match_lim = n < i + maxrun ? n : i + maxrun;
         for (int hr = 0; hr < 4; hr++) {
@@ -715,14 +697,14 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
     bootstrap_prices(&pt, L0, L1);
     pt.gd.k = WINDOW_LOG;
     pt.fixed_dist_bits = WINDOW_LOG;
-    TokenVec seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, NULL, &pt);
+    TokenVec seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, 0, &pt);
     int k = fit_k_tokens(&seq);
     int parsed_k = -1;
     for (int pass = 0; pass < 8; pass++) {
         free(seq.v);
         pt.gd.k = (uint8_t)k;
         pt.fixed_dist_bits = -1;
-        seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, NULL, &pt);
+        seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, 0, &pt);
         parsed_k = k;
         int nk = fit_k_tokens(&seq);
         if (nk == k) break;
@@ -732,7 +714,7 @@ TokenVec lz_candidates_c(const uint8_t *data, const uint8_t *tags, size_t n,
         free(seq.v);
         pt.gd.k = (uint8_t)k;
         pt.fixed_dist_bits = -1;
-        seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, NULL, &pt);
+        seq = lz_parse_priced(n, data, tags, &cands, ncand, NULL, 0, &pt);
     }
     *k_out = k;
     *cands_out = cands;

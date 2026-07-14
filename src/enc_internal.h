@@ -121,7 +121,6 @@ typedef Buf CandArena;
 #endif
 enum { LZ_MAX_RUN = 1024, LZ_MAX_MATCH = 2048 };
 typedef struct { int32_t pos, len; } OCand;
-typedef Buf OCandArena;
 enum { PR_SCALE = 64 };
 enum { PRICE_LIT_MAX = 255 * PR_SCALE };
 _Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit uint16_t");
@@ -264,16 +263,14 @@ void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
                          const uint8_t *content, const uint8_t *tags, size_t content_n,
                          Models *m, REnc *rc, int fwd, int out_en, uint32_t oexp);
 void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats);
-void out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
-                    const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
-                    const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n,
-                    OCandArena *oc_out, uint8_t **noc_out);
+OCand *out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
+                      const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
+                      const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n);
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                     const LitSeedTrees *seeds, int dk, int ko, PriceTab *pt);
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                          const CandArena *cands, const uint8_t *ncand,
-                         const OCandArena *ocands, const uint8_t *nocand,
-                         const PriceTab *pt);
+                         const OCand *ocands, int32_t max_out_len, const PriceTab *pt);
 void merge_adjacent_spans(TokenVec *tv);
 int fit_k_tokens(const TokenVec *tv);
 int fit_k_out(const TokenVec *tv, int cur, uint32_t oexp0, int fwd);

@@ -517,9 +517,11 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     }
     /* ---- D2 out-matches: each content position inherits the decode-time NEW/OLD flash
      * windows and OLD-token cap from the op that consumes it. */
-    OCandArena ocands = {0}; uint8_t *nocand = NULL;
-    out_candidates(content.d, content.n, ops, walk, rows, FWD,
-                   tob, to_size, frm, from_size, &ocands, &nocand);
+    OCand *ocands = out_candidates(content.d, content.n, ops, walk, rows, FWD,
+                                   tob, to_size, frm, from_size);
+    int32_t max_out_len = 0;
+    for (size_t i = 0; i < content.n; i++)
+        if (ocands[i].len > max_out_len) max_out_len = ocands[i].len;
     EmitBodyMeasure meas = { ops, &seeds, &content, &tags, rows, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
      * the result only if the FULL body (geometry/delta interleaved with the LZ tokens, after
@@ -532,12 +534,14 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
         /* Keep the legacy mixed-mode trajectory: establish prices without out-candidates, then
          * open them for two convergence passes. Every candidate still has to beat the exact body. */
         for (int phase = 0; phase < 3; phase++) {
-            const uint8_t *noc = phase ? nocand : NULL;
+            const OCand *phase_ocands = phase ? ocands : NULL;
             for (int pass = 0; pass < 16; pass++) {
                 PriceTab pt;
                 pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = 1;
                 measure_prices(&seq, content.d, tags.d, &seeds, kd, ko, &pt);
-                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, &cands, ncand, &ocands, noc, &pt);
+                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d,
+                                                    &cands, ncand, phase_ocands,
+                                                    phase ? max_out_len : 0, &pt);
                 int nk = fit_k_tokens(&cand_seq);
                 int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
                 merge_adjacent_spans(&cand_seq);
@@ -586,7 +590,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     Buf body = emit_body(&seq, kd, ko, ops, FWD, &seeds, &content, &tags, rows,
                          &inj, sel_b, sel_v, sel_n, overflow_out);
     free(inj.v);
-    buf_free(&ocands); free(nocand);
+    free(ocands);
     free(walk); free(rows); free(seq.v); buf_free(&content); buf_free(&tags);
     return body;
 }
