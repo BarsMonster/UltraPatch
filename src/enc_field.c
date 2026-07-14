@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Host encoder module -- field/delta model + apply planning: classify_field,
- * proxy pricing, split runs, payload folding.
+ * proxy pricing and split runs.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -56,63 +56,10 @@ int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, u
     return hit;
 }
 
-typedef struct {
-    const EncCtx *ctx;
-    uint8_t *payload;
-    const uint8_t *frm, *true_to;
-    uint32_t from_size, to_size;
-} FoldWalk;
-
-static void fold_byte(FoldWalk *fw, const OpWalkEnt *we, int32_t off) {
-    int32_t tp = we->tp + off, fp = we->fp + off;
-    uint8_t src = 0;
-    if (0 <= fp && (uint32_t)fp < fw->from_size) {
-        src = fw->frm[fp];
-    }
-    fw->payload[tp] = (uint8_t)(fw->true_to[tp] - src);
-}
-
-static void fold_field(FoldWalk *fw, const OpWalkEnt *we, const FieldWalk *w) {
-    uint8_t packed[4];
-    uint32_t fpk = (uint32_t)(we->fp + w->pos);
-    int32_t tpk = we->tp + w->pos;
-    if (w->ev.type == EV_BL) {
-        uint16_t up = rc_u16le(fw->frm + fpk), lo = rc_u16le(fw->frm + fpk + 2);
-        rc_bl_dereloc(up, lo, (uint32_t)w->ev.delta, packed);
-    } else {
-        uint32_t val = rc_u32le(fw->frm + fpk);
-        rc_u32le_put(packed, val - (uint32_t)w->ev.delta);
-    }
-    if (!memcmp(packed, fw->true_to + tpk, sizeof(packed))) return;
-    /* A relocation that cannot reproduce the exact target is no longer a field on the final
-     * walk. Literalize the complete window atomically so BL suppression and ordinary copy
-     * decoding both see target-minus-pristine-source bytes. */
-    for (int b = 0; b < 4; b++)
-        fw->payload[tpk + b] = (uint8_t)(fw->true_to[tpk + b] - fw->frm[fpk + (uint32_t)b]);
-}
-
-static void fold_op(FoldWalk *fw, const LdrTargetIndex *ldr, const OpWalkEnt *we) {
-    FieldWalk w;
-    fw_init(&w, fw->ctx->fwd, fw->frm, fw->from_size, fw->true_to, fw->to_size, ldr,
-            fw->payload + we->tp, we->fp, we->tp, we->o->diff_len);
-    while (fw_next(&w)) {
-        if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {
-            fold_field(fw, we, &w);
-        } else if (w.is_field) {
-            for (int b = 0; b < 4; b++) fold_byte(fw, we, w.pos + b);
-        } else {
-            fold_byte(fw, we, w.pos);
-        }
-    }
-    if (we->o->extra_len)
-        memcpy(fw->payload + we->tp + we->o->diff_len,
-               fw->true_to + we->tp + we->o->diff_len, (size_t)we->o->extra_len);
-}
-
 /* `diff==NULL` is the coercion probe: only a BL-compatible target window is relocatable, while
  * every LDR word can carry its exact occurrence-local delta. With a real diff, a still-dirty BL
  * remains suppressed; a pure BL with an unexpected incompatible target falls back to delta zero
- * so final payload folding can literalize the complete field window. */
+ * so content finalization can literalize the complete field window. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             const LdrTargetIndex *ldr, const uint8_t *diff,
@@ -444,17 +391,4 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to) {
     split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
-}
-
-void fold_payload(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                  const uint8_t *frm, const uint8_t *true_to,
-                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr) {
-    int FWD = ctx->fwd;
-    OpWalkEnt *m = opwalk_build(ops, fp_start);
-    FoldWalk fw = { ctx, ops->payload, frm, true_to, from_size, to_size };
-    for (size_t step = 0; step < ops->n; step++) {
-        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
-        fold_op(&fw, ldr, we);
-    }
-    free(m);
 }

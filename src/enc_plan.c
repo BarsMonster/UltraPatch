@@ -49,8 +49,8 @@ static int32_t finalize_ops(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf 
     int32_t fp_start = 0, tp0 = 0, fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op o = ops->v[oi];
-        /* Probe fields before hazard segmentation, which can cut a 4-byte window. Payload folding
-         * later repairs any cut field while preserving the original classification coordinates. */
+        /* Probe fields before hazard segmentation, which can cut a 4-byte window. Content
+         * finalization later repairs cuts while preserving the original classification coordinates. */
         if (merge_fields) {
             FieldWalk w;
             fw_init(&w, ctx->fwd, from->d, from_size, to->d, to_size, ldr, NULL,
@@ -128,8 +128,6 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     int32_t fp_end;
     int32_t fp_start_s = finalize_ops(ctx, &ops, from, to, &prep->ldr,
                                       spec->merge_fields, &fp_end);
-    fold_payload(ctx, &ops, fp_start_s, from->d, to->d,
-                 from_size, to_size, &prep->ldr);
     /* The direction fallback needs to know whether hazard literalization was used. */
     r.st = (EncStats){ ctx->deg_engaged };
     Buf body = {0};

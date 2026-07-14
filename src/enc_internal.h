@@ -236,9 +236,6 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
                     const FieldInjArena *inj, int fwd, uint32_t *tb, int32_t *tv);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to);
-void fold_payload(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                  const uint8_t *frm, const uint8_t *true_to,
-                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr);
 
 void re_init(REnc *r);
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate);

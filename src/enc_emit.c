@@ -53,19 +53,59 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
     lc->cprev = k;
 }
 
-/* Single per-op decoder-order walk: emit this op's content/tags bytes (uLEB nlit + per-literal
- * uLEB-gap+byte + extras) AND record the field-injection cursors in the same pass, so the
- * two can never diverge in byte layout. Routes through the shared FieldWalk (fw_next), the one
- * mirror of the decoder apply_op window skeleton. FWD/reverse asymmetry is preserved exactly:
+/* Single per-op decoder-order walk: finalize payload bytes, collect fields, and emit this op's
+ * content/tags (uLEB nlit + per-literal uLEB-gap+byte + extras). A field's temporary `cc` holds its
+ * window position until the literal merge replaces it with the exact read-ahead content cursor.
+ * Routes through the shared FieldWalk (fw_next), the one mirror of the decoder apply_op window
+ * skeleton. FWD/reverse asymmetry is preserved exactly:
  * reverse writes the extras (byte-reversed) before the dl body and gaps step back from dl; FWD writes
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
  * cc is a READ-AHEAD cursor: like the decoder up_LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
-static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
+static void op_emit_content(const Op *o, uint8_t *payload, int FWD,
                             const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             int32_t fp0, int32_t tp0, const LdrTargetIndex *ldr,
                             Buf *content, Buf *tags, FieldInjArena *out) {
+    size_t inj0 = out->n;
+    FieldWalk w;
+    fw_init(&w, FWD, frm, from_size, tob, to_size, ldr, payload,
+            fp0, tp0, o->diff_len);
+    while (fw_next(&w)) {
+        uint32_t fpk = (uint32_t)(fp0 + w.pos);
+        int keep = w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX);
+        if (keep) {
+            uint8_t packed[4];
+            if (w.ev.type == EV_BL) {
+                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
+                rc_bl_dereloc(up, lo, (uint32_t)w.ev.delta, packed);
+            } else {
+                rc_u32le_put(packed, rc_u32le(frm + fpk) - (uint32_t)w.ev.delta);
+            }
+            keep = !memcmp(packed, tob + tp0 + w.pos, sizeof(packed));
+        }
+        if (keep) {
+            uint32_t k2;
+            if (w.ev.type == EV_BL) {
+                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
+                k2 = rc_bl_target(fpk, up, lo);
+            } else {
+                k2 = rc_u32le(frm + fpk);
+            }
+            inj_push(out, (uint32_t)w.pos, w.ev.type, fpk, w.ev.delta, k2);
+        } else if (w.is_field) {
+            for (int b = 0; b < 4; b++)
+                payload[w.pos + b] = (uint8_t)(tob[tp0 + w.pos + b] - frm[fpk + (uint32_t)b]);
+        } else {
+            int32_t fp = fp0 + w.pos;
+            uint8_t src = 0;
+            if (fp >= 0 && (uint32_t)fp < from_size) src = frm[fp];
+            payload[w.pos] = (uint8_t)(tob[tp0 + w.pos] - src);
+        }
+    }
+    if (o->extra_len)
+        memcpy(payload + o->diff_len, tob + tp0 + o->diff_len, (size_t)o->extra_len);
+
     IVec lits = {0};
     for (int32_t k = 0; k < o->diff_len; k++) if (payload[k]) ivec_push(&lits, k);
     Buf tmp = {0};
@@ -78,22 +118,17 @@ static void op_emit_content(const Op *o, const uint8_t *payload, int FWD,
     EncLitCursor lc = { payload, &lits, &tmp, content, tags, (uint32_t)content->n,
         FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
-    FieldWalk w; fw_init(&w, FWD, frm, from_size, tob, to_size, ldr, payload,
-                         fp0, tp0, o->diff_len);
-    while (fw_next(&w)) {
-        if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {   /* pure field: no literals, inject delta */
-            uint32_t fpk = (uint32_t)(fp0 + w.pos), k2;
-            if (w.ev.type == EV_BL) {
-                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
-                k2 = rc_bl_target(fpk, up, lo);
-            } else {
-                k2 = rc_u32le(frm + fpk);
-            }
-            inj_push(out, lc.cc, w.ev.type, fpk, w.ev.delta, k2);
-        } else if (w.is_field) {   /* EV_SBL still-dirty window: its bytes ship as ordinary literals */
-            if (FWD) for (int b = 0; b < 4; b++) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
-            else     for (int b = 3; b >= 0; b--) { if (w.pos + b == lc.nextpos) { enc_litcur_emit(&lc, w.pos + b); enc_litcur_step(&lc); } }
-        } else if (w.pos == lc.nextpos) { enc_litcur_emit(&lc, w.pos); enc_litcur_step(&lc); }
+    for (size_t i = inj0; i < out->n; i++) {
+        int32_t p = (int32_t)out->v[i].cc;
+        while (lc.nextpos >= 0 && (FWD ? lc.nextpos < p : lc.nextpos > p + 3)) {
+            enc_litcur_emit(&lc, lc.nextpos);
+            enc_litcur_step(&lc);
+        }
+        out->v[i].cc = lc.cc;
+    }
+    while (lc.nextpos >= 0) {
+        enc_litcur_emit(&lc, lc.nextpos);
+        enc_litcur_step(&lc);
     }
     if (FWD)
         for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
