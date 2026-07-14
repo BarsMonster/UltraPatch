@@ -13,20 +13,10 @@ ARM_OBJDUMP=${ARM_OBJDUMP:-arm-none-eabi-objdump}
 ARM_DEC_FLAGS=${ARM_DEC_FLAGS:-"-mcpu=cortex-m0plus -mthumb -std=c11 -DPATCH_IMAGE_BASE=8192u -DPATCH_IMAGE_CAPACITY=67108864u -I src"}
 ARM_OBJECT_OPT=${ARM_OBJECT_OPT:--Os}
 DECODER_INTEGRATION_TU=${DECODER_INTEGRATION_TU:-test-bench/decoder-integration.c}
-BASE_FOOTPRINT_FLASH=${BASE_FOOTPRINT_FLASH:-5593}
-BASE_FOOTPRINT_STATE=${BASE_FOOTPRINT_STATE:-5928}
-BASE_FOOTPRINT_STACK=${BASE_FOOTPRINT_STACK:-480}
+BASE_FOOTPRINT_FLASH=5221
+BASE_FOOTPRINT_STATE=5436
+BASE_FOOTPRINT_STACK=432
 ARM_BSS_HARD_CAP=12288
-
-case "$BASE_FOOTPRINT_FLASH" in
-	''|*[!0-9]*) echo "invalid flash limit: $BASE_FOOTPRINT_FLASH" >&2; exit 2 ;;
-esac
-case "$BASE_FOOTPRINT_STATE" in
-	''|*[!0-9]*) echo "invalid state limit: $BASE_FOOTPRINT_STATE" >&2; exit 2 ;;
-esac
-case "$BASE_FOOTPRINT_STACK" in
-	''|*[!0-9]*) echo "invalid stack limit: $BASE_FOOTPRINT_STACK" >&2; exit 2 ;;
-esac
 
 . ./scripts/tempdir.sh
 

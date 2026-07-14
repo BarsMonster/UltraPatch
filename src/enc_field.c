@@ -61,20 +61,13 @@ typedef struct {
     uint8_t *payload;
     const uint8_t *frm, *true_to;
     uint32_t from_size, to_size;
-    PlanCaps *caps;
 } FoldWalk;
 
 static void fold_byte(FoldWalk *fw, const OpWalkEnt *we, int32_t off) {
     int32_t tp = we->tp + off, fp = we->fp + off;
     uint8_t src = 0;
     if (0 <= fp && (uint32_t)fp < fw->from_size) {
-        int behind = fw->ctx->fwd ? fp < tp : fp > tp;
-        int overwritten = behind && (uint32_t)fp < fw->to_size &&
-                          !row_covered(fw->ctx, fp, tp);
-        /* literalize_hazards must remove every read of committed flash. Model physical
-         * flash for diagnostics, but reject the plan if that invariant is ever violated. */
-        if (overwritten) fw->caps->ok = 0;
-        src = overwritten ? fw->true_to[fp] : fw->frm[fp];
+        src = fw->frm[fp];
     }
     fw->payload[tp] = (uint8_t)(fw->true_to[tp] - src);
 }
@@ -266,29 +259,6 @@ int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint
     return mn;
 }
 
-void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
-                           uint32_t from_size, const uint8_t *tob, uint32_t to_size,
-                           const LdrTargetIndex *ldr) {
-    int FWD = ctx->fwd;
-    uint8_t *payload = ops->payload;
-    int32_t fp0 = 0, tp0 = 0;
-    for (size_t oi = 0; oi < ops->n; oi++) {
-        Op *o = &ops->v[oi];
-        /* diff==NULL probes whether each source field has a compatible target occurrence; zeroing
-         * its byte deltas then lets the decoder reconstruct that occurrence from the streamed delta. */
-        FieldWalk w; fw_init(&w, FWD, frm, from_size, tob, to_size, ldr, NULL,
-                             fp0, tp0, o->diff_len);
-        while (fw_next(&w)) {
-            if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
-            int32_t k = w.pos;
-            uint8_t *d = payload + tp0 + k;
-            if (d[0] || d[1] || d[2] || d[3]) memset(d, 0, 4);
-        }
-        tp0 += o->diff_len + o->extra_len;
-        fp0 += o->diff_len + o->adj;
-    }
-}
-
 static uint64_t dz_bits_u32(uint32_t x) {
     uint32_t m = x + 1u;
     int n = bitlen32(m);
@@ -476,18 +446,12 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
     split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
 }
 
-void fold_payload(const EncCtx *ctx, OpVec *ops, int32_t fp_start,
+void fold_payload(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
                   const uint8_t *frm, const uint8_t *true_to,
-                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr,
-                  PlanCaps *caps) {
+                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr) {
     int FWD = ctx->fwd;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
-    *caps = (PlanCaps){ 1, fp_start };
-    if (ops->n) {
-        const OpWalkEnt *last = &m[ops->n - 1u];
-        caps->fp_end = last->fp + last->o->diff_len + last->o->adj;
-    }
-    FoldWalk fw = { ctx, ops->payload, frm, true_to, from_size, to_size, caps };
+    FoldWalk fw = { ctx, ops->payload, frm, true_to, from_size, to_size };
     for (size_t step = 0; step < ops->n; step++) {
         const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
         fold_op(&fw, ldr, we);

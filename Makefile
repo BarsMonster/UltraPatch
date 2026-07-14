@@ -8,6 +8,7 @@ override SHELL := /bin/sh
 # modes would otherwise let Make report success without establishing the release outcome.
 override CANONICAL_GOAL := $(firstword $(filter gate,$(MAKECMDGOALS)))
 override CANONICAL_SHORT_FLAGS := $(filter-out -%,$(firstword $(MAKEFLAGS)))
+override GATE_CONTROL_OVERRIDES := $(strip $(foreach v,MAKE MAKEFLAGS GNUMAKEFLAGS MAKECMDGOALS,$(if $(filter command line environment,$(origin $(v))),$(v))))
 ifneq ($(CANONICAL_GOAL),)
 ifneq ($(strip $(foreach f,n t i,$(if $(findstring $(f),$(CANONICAL_SHORT_FLAGS)),$(f)))),)
 $(error gate rejects Make launch mode: $(CANONICAL_SHORT_FLAGS))
@@ -67,9 +68,6 @@ export ULTRAPATCH
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -std=c11 $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 5221
-override BASE_FOOTPRINT_STATE := 5436
-override BASE_FOOTPRINT_STACK := 432
 
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80
@@ -81,6 +79,7 @@ $(CAPPED): %:
 	exit $$s
 
 gate:
+	$(if $(GATE_CONTROL_OVERRIDES),$(error gate rejects override of Make control variable(s): $(GATE_CONTROL_OVERRIDES)))
 	@mkdir -p "$(BUILD_DIR)"; build_dir=$$(mktemp -d "$(BUILD_DIR)/gate.XXXXXX"); \
 	trap 'rm -rf "$$build_dir"' EXIT; \
 	timeout $(RELEASE_GATE_TIMEOUT) \
@@ -115,9 +114,6 @@ check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \
 	@ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
 	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" \
 	  DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \
-	  BASE_FOOTPRINT_FLASH="$(BASE_FOOTPRINT_FLASH)" \
-	  BASE_FOOTPRINT_STATE="$(BASE_FOOTPRINT_STATE)" \
-	  BASE_FOOTPRINT_STACK="$(BASE_FOOTPRINT_STACK)" \
 	  scripts/check_footprint.sh
 
 # Post-development acceptance is deliberately outcome-only: compression/correctness over the full
