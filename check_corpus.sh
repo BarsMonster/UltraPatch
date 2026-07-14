@@ -177,13 +177,25 @@ if ! xargs -P "$JOBS" -n 5 bash -c 'cm_work "$@"' _ \
   exit 4
 fi
 
-read corpus_count corpus_total oneface_count grow revert <<EOF
-$(awk '$1=="P"{count++; total+=$4}
-       $1=="G"{oneface++}
-       $1=="G" && $2=="oneface_grow"{grow=$4}
-       $1=="G" && $2=="oneface_revert"{revert=$4}
-       END{print count+0, total+0, oneface+0, grow+0, revert+0}' "$tmp/pairs.txt")
-EOF
+if ! summary=$(awk '$1=="P"{count++; total+=$4}
+                    $1=="G"{oneface++}
+                    $1=="G" && $2=="oneface_grow"{grow=$4}
+                    $1=="G" && $2=="oneface_revert"{revert=$4}
+                    END{print count+0, total+0, oneface+0, grow+0, revert+0}' \
+                   "$tmp/pairs.txt"); then
+  echo "check_corpus.sh: cannot summarize corpus results" >&2
+  exit 3
+fi
+summary_re='^([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)$'
+if [[ ! "$summary" =~ $summary_re ]]; then
+  echo "check_corpus.sh: malformed corpus summary" >&2
+  exit 3
+fi
+corpus_count=${BASH_REMATCH[1]}
+corpus_total=${BASH_REMATCH[2]}
+oneface_count=${BASH_REMATCH[3]}
+grow=${BASH_REMATCH[4]}
+revert=${BASH_REMATCH[5]}
 
 if [ "$corpus_count" -ne 290 ] || [ "$oneface_count" -ne 2 ] || \
    [ "$grow" -le 0 ] || [ "$revert" -le 0 ]; then
