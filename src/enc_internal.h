@@ -65,11 +65,15 @@ static inline int row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
 }
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
-/* Plan geometry only. Payload bytes live in one target-indexed arena: copy spans hold
- * source deltas, while extra spans hold the literal target bytes to ship. */
+/* Plan geometry only; content is derived from the immutable source and target images. */
 typedef struct { int32_t diff_len, extra_len, adj; } Op;
-typedef struct { Op *v; size_t n, cap; uint8_t *payload; } OpVec;
+typedef struct { Op *v; size_t n, cap; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
+static inline uint8_t op_diff_byte(const uint8_t *frm, uint32_t from_size,
+                                   const uint8_t *tob, int32_t fp, int32_t tp) {
+    uint8_t src = fp >= 0 && (uint32_t)fp < from_size ? frm[fp] : 0;
+    return (uint8_t)(tob[tp] - src);
+}
 /* One entry per aligned source word: distance to its nearest preceding LDR halfword (0 = none). */
 typedef struct {
     uint16_t *back;
@@ -131,7 +135,7 @@ typedef struct {
     int fwd; int32_t dl, k;
     const uint8_t *frm, *tob; uint32_t from_size, to_size;
     const LdrTargetIndex *ldr;
-    const uint8_t *diff; int32_t fp0, tp0;
+    int merge_fields; int32_t fp0, tp0;
     int is_field; int32_t pos; Event ev;
 } FieldWalk;
 /* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
@@ -228,7 +232,7 @@ void ldr_target_index_free(LdrTargetIndex *idx);
 int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk);
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
              const uint8_t *tob, uint32_t to_size, const LdrTargetIndex *ldr,
-             const uint8_t *diff, int32_t fp0, int32_t tp0, int32_t dl);
+             int merge_fields, int32_t fp0, int32_t tp0, int32_t dl);
 int fw_next(FieldWalk *w);
 int smap_build_full(const OpVec *ops, int32_t fp_start, uint32_t from_size, uint32_t to_size,
                     const FieldInjArena *inj, int fwd, uint32_t *tb, int32_t *tv);
@@ -281,7 +285,8 @@ uint32_t bit_price(uint32_t p, int bit);
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const LdrTargetIndex *ldr, int32_t fp_start, int *overflow_out);
+                const LdrTargetIndex *ldr, int merge_fields,
+                int32_t fp_start, int *overflow_out);
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);
 void plan_prepare_free(PlanPrep *prep);

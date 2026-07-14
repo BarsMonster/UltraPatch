@@ -20,20 +20,21 @@ static void inj_push(FieldInjArena *v, uint32_t cc, int kind, uint32_t fpk,
 }
 
 typedef struct {
-    const uint8_t *payload;
+    const uint8_t *frm, *tob;
+    uint32_t from_size;
     const IVec *lits;
     Buf *tmp;
     Buf *content;
     Buf *tags;
     uint32_t cc;
     int FWD;
-    int32_t base, cprev, nextpos;
+    int32_t fp0, tp0, base, cprev, nextpos;
     size_t li;
 } EncLitCursor;
 
 static void enc_litcur_step(EncLitCursor *lc) {
     if (lc->li < lc->lits->n) {
-        int32_t p = lc->FWD ? lc->lits->v[lc->li] : lc->lits->v[lc->lits->n - 1u - lc->li];
+        int32_t p = lc->lits->v[lc->li];
         lc->cc += (uint32_t)rc_uleb_len((uint32_t)(lc->FWD ? p - lc->base : lc->base - p)) + 1u;
         lc->base = p;
         lc->nextpos = p;
@@ -48,12 +49,13 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
     put_uleb(lc->tmp, (uint32_t)(lc->FWD ? k - lc->cprev : lc->cprev - k));
     buf_write(lc->content, lc->tmp->d, lc->tmp->n);
     for (size_t i = 0; i < lc->tmp->n; i++) buf_put(lc->tags, 0);
-    buf_put(lc->content, lc->payload[k]);
+    buf_put(lc->content, op_diff_byte(lc->frm, lc->from_size, lc->tob,
+                                      lc->fp0 + k, lc->tp0 + k));
     buf_put(lc->tags, 0);
     lc->cprev = k;
 }
 
-/* Single per-op decoder-order walk: finalize payload bytes, collect fields, and emit this op's
+/* Single per-op decoder-order walk: derive content bytes, collect fields, and emit this op's
  * content/tags (uLEB nlit + per-literal uLEB-gap+byte + extras). A field's temporary `cc` holds its
  * window position until the literal merge replaces it with the exact read-ahead content cursor.
  * Routes through the shared FieldWalk (fw_next), the one mirror of the decoder apply_op window
@@ -62,14 +64,16 @@ static void enc_litcur_emit(EncLitCursor *lc, int32_t k) {
  * extras after and gaps measure from 0. tp0 = this op's to-image start (extras tag parity).
  * cc is a READ-AHEAD cursor: like the decoder up_LitCur, the next literal's gap+byte is consumed before
  * the field window that follows it, so cc leads content->n by the pending literal's cost. */
-static void op_emit_content(const Op *o, uint8_t *payload, int FWD,
+static void op_emit_content(const Op *o, int FWD,
                             const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             int32_t fp0, int32_t tp0, const LdrTargetIndex *ldr,
-                            Buf *content, Buf *tags, FieldInjArena *out) {
+                            int merge_fields, Buf *content, Buf *tags,
+                            FieldInjArena *out) {
     size_t inj0 = out->n;
+    IVec lits = {0};
     FieldWalk w;
-    fw_init(&w, FWD, frm, from_size, tob, to_size, ldr, payload,
+    fw_init(&w, FWD, frm, from_size, tob, to_size, ldr, merge_fields,
             fp0, tp0, o->diff_len);
     while (fw_next(&w)) {
         uint32_t fpk = (uint32_t)(fp0 + w.pos);
@@ -93,30 +97,24 @@ static void op_emit_content(const Op *o, uint8_t *payload, int FWD,
                 k2 = rc_u32le(frm + fpk);
             }
             inj_push(out, (uint32_t)w.pos, w.ev.type, fpk, w.ev.delta, k2);
-        } else if (w.is_field) {
-            for (int b = 0; b < 4; b++)
-                payload[w.pos + b] = (uint8_t)(tob[tp0 + w.pos + b] - frm[fpk + (uint32_t)b]);
         } else {
-            int32_t fp = fp0 + w.pos;
-            uint8_t src = 0;
-            if (fp >= 0 && (uint32_t)fp < from_size) src = frm[fp];
-            payload[w.pos] = (uint8_t)(tob[tp0 + w.pos] - src);
+            int32_t k = w.pos + (!FWD && w.is_field ? 3 : 0);
+            int n = w.is_field ? 4 : 1;
+            for (int b = 0; b < n; b++, k += FWD ? 1 : -1)
+                if (op_diff_byte(frm, from_size, tob, fp0 + k, tp0 + k)) ivec_push(&lits, k);
         }
     }
-    if (o->extra_len)
-        memcpy(payload + o->diff_len, tob + tp0 + o->diff_len, (size_t)o->extra_len);
 
-    IVec lits = {0};
-    for (int32_t k = 0; k < o->diff_len; k++) if (payload[k]) ivec_push(&lits, k);
     Buf tmp = {0};
     put_uleb(&tmp, (uint32_t)lits.n);
     buf_write(content, tmp.d, tmp.n);
     for (size_t i = 0; i < tmp.n; i++) buf_put(tags, 0);
     int32_t exstart = tp0 + o->diff_len;
     if (!FWD)   /* reverse: extras precede the dl body, byte-reversed in the content stream */
-        for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
-    EncLitCursor lc = { payload, &lits, &tmp, content, tags, (uint32_t)content->n,
-        FWD, FWD ? 0 : o->diff_len, FWD ? 0 : o->diff_len, -1, 0 };
+        for (int32_t e = o->extra_len - 1; e >= 0; e--) { buf_put(content, tob[exstart + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+    EncLitCursor lc = { frm, tob, from_size, &lits, &tmp, content, tags,
+        (uint32_t)content->n, FWD, fp0, tp0, FWD ? 0 : o->diff_len,
+        FWD ? 0 : o->diff_len, -1, 0 };
     enc_litcur_step(&lc);   /* prime: read-ahead the first literal (mirror litcur_init) */
     for (size_t i = inj0; i < out->n; i++) {
         int32_t p = (int32_t)out->v[i].cc;
@@ -131,7 +129,7 @@ static void op_emit_content(const Op *o, uint8_t *payload, int FWD,
         enc_litcur_step(&lc);
     }
     if (FWD)
-        for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, payload[o->diff_len + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
+        for (int32_t e = 0; e < o->extra_len; e++) { buf_put(content, tob[exstart + e]); buf_put(tags, (uint8_t)((exstart + e) & 1)); }
     free(lits.v); buf_free(&tmp);
 }
 
@@ -474,7 +472,8 @@ static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const LdrTargetIndex *ldr, int32_t fp_start, int *overflow_out) {
+                const LdrTargetIndex *ldr, int merge_fields,
+                int32_t fp_start, int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     OpEmitRow *rows = (OpEmitRow *)xmalloc((ops->n ? ops->n : 1) * sizeof(*rows));
@@ -485,8 +484,8 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &walk[opwalk_apply_index(ops->n, FWD, step)];
-        op_emit_content(we->o, ops->payload + we->tp, FWD, frm, from_size,
-                        tob, to_size, we->fp, we->tp, ldr, &content, &tags, &inj);
+        op_emit_content(we->o, FWD, frm, from_size, tob, to_size,
+                        we->fp, we->tp, ldr, merge_fields, &content, &tags, &inj);
         rows[step] = (OpEmitRow){content.n, inj.n};
     }
     uint8_t L0[256], L1[256];

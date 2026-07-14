@@ -82,9 +82,8 @@ void buf_free(Buf *b) { free(b->d); b->d = NULL; b->n = b->cap = 0; }
 
 void opvec_free(OpVec *v) {
     if (!v) return;
-    free(v->v); free(v->payload);
+    free(v->v);
     v->v = NULL;
-    v->payload = NULL;
     v->n = v->cap = 0;
 }
 

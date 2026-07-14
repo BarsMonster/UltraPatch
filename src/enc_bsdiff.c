@@ -70,8 +70,7 @@ static int32_t suffix_search(const int32_t *sa, const uint8_t *from, int32_t fro
                              begin, end, begin_lcp, end_lcp, pos);
 }
 
-static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
-                           const uint8_t *from, int32_t from_size,
+static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
                            const uint8_t *to, int32_t to_size, int32_t scan,
                            int32_t pos, int32_t *last_scan_p,
                            int32_t *last_pos_p, int32_t *last_offset_p) {
@@ -103,11 +102,7 @@ static void emit_bsdiff_op(OpVec *ops, uint8_t *payload,
         diff_size += (lens - overlap);
         lenb -= lens;
     }
-    int32_t extra_pos = last_scan + diff_size;
-    int32_t extra_size = scan - lenb - extra_pos;
-    for (int32_t i = 0; i < diff_size; i++)
-        payload[last_scan + i] = (uint8_t)(to[last_scan + i] - from[last_pos + i]);
-    if (extra_size) memcpy(payload + extra_pos, to + extra_pos, (size_t)extra_size);
+    int32_t extra_size = scan - lenb - (last_scan + diff_size);
     opvec_push(ops, (Op){ diff_size, extra_size,
                           (pos - lenb) - (last_pos + diff_size) });
     *last_scan_p = scan - lenb;
@@ -126,7 +121,6 @@ OpVec bsdiff_ops(const Buf *from_buf, const Buf *to, int fuzz) {
     if (from_size && divsufsort(from, &sa[1], from_size) != 0)
         die("divsufsort failed");
     OpVec ops = {0};
-    ops.payload = (uint8_t *)xmalloc(to->n);
     int32_t scan = 0, len = 0, last_scan = 0, last_pos = 0, last_offset = 0, pos = 0;
     while (scan < to_size) {
         int32_t from_score = 0;
@@ -140,7 +134,7 @@ OpVec bsdiff_ops(const Buf *from_buf, const Buf *to, int fuzz) {
             if ((scan + last_offset < from_size) && (from[scan + last_offset] == to->d[scan])) from_score--;
         }
         if ((len != from_score) || (scan == to_size))
-            emit_bsdiff_op(&ops, ops.payload, from, from_size, to->d, to_size, scan, pos,
+            emit_bsdiff_op(&ops, from, from_size, to->d, to_size, scan, pos,
                            &last_scan, &last_pos, &last_offset);
     }
     free(sa);

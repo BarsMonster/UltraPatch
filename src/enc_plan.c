@@ -38,29 +38,13 @@ static void final_op_push(OpVec *out, Op o, int32_t *fp_start) {
     }
 }
 
-/* Finalize post-split geometry in one rebuild: optional relocation coercion, hazard
- * literalization, and source-seek folding. fp0/tp0 walk the unmodified input geometry, so field
- * classification and hazard decisions retain their historical coordinates. */
-static int32_t finalize_ops(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf *to,
-                            const LdrTargetIndex *ldr, int merge_fields, int32_t *fp_end) {
-    uint8_t *payload = ops->payload;
-    OpVec out = { .payload = payload };
-    uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
+/* Finalize post-split geometry in one rebuild: hazard literalization and source-seek folding. */
+static int32_t finalize_ops(EncCtx *ctx, OpVec *ops, uint32_t from_size,
+                            uint32_t to_size, int32_t *fp_end) {
+    OpVec out = {0};
     int32_t fp_start = 0, tp0 = 0, fp0 = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op o = ops->v[oi];
-        /* Probe fields before hazard segmentation, which can cut a 4-byte window. Content
-         * finalization later repairs cuts while preserving the original classification coordinates. */
-        if (merge_fields) {
-            FieldWalk w;
-            fw_init(&w, ctx->fwd, from->d, from_size, to->d, to_size, ldr, NULL,
-                    fp0, tp0, o.diff_len);
-            while (fw_next(&w)) {
-                if (!w.is_field || (w.ev.type != EV_BL && w.ev.type != EV_EX)) continue;
-                uint8_t *d = payload + tp0 + w.pos;
-                if (d[0] || d[1] || d[2] || d[3]) memset(d, 0, 4);
-            }
-        }
         int32_t dl = o.diff_len;
         int32_t seg = 0, k = 0;
         int split_any = 0;
@@ -74,8 +58,6 @@ static int32_t finalize_ops(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf 
                 k++;
             }
             final_op_push(&out, (Op){ rs - seg, k - rs, k - rs }, &fp_start);
-            memcpy(payload + tp0 + rs, to->d + (size_t)tp0 + (size_t)rs,
-                   (size_t)(k - rs));
             ctx->deg_engaged = 1;
             seg = k;
             split_any = 1;
@@ -94,11 +76,9 @@ static int32_t finalize_ops(EncCtx *ctx, OpVec *ops, const Buf *from, const Buf 
     return fp_start;
 }
 
-static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
-    OpVec out = {(Op *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n,
-                 (uint8_t *)xmalloc(payload_n)};
+static OpVec prep_ops_clone(const OpVec *src) {
+    OpVec out = {(Op *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n};
     if (src->n) memcpy(out.v, src->v, src->n * sizeof(*src->v));
-    if (payload_n) memcpy(out.payload, src->payload, payload_n);
     return out;
 }
 
@@ -122,18 +102,17 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};
     ctx->deg_engaged = 0;
-    OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key], to->n);
+    OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key]);
     split_nonzero_diff_runs(ctx, &ops, from, to);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_end;
-    int32_t fp_start_s = finalize_ops(ctx, &ops, from, to, &prep->ldr,
-                                      spec->merge_fields, &fp_end);
+    int32_t fp_start_s = finalize_ops(ctx, &ops, from_size, to_size, &fp_end);
     /* The direction fallback needs to know whether hazard literalization was used. */
     r.st = (EncStats){ ctx->deg_engaged };
     Buf body = {0};
     int emit_overflow = 0;
     body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                       &prep->ldr, fp_start_s, &emit_overflow);
+                       &prep->ldr, spec->merge_fields, fp_start_s, &emit_overflow);
     if (emit_overflow) { buf_free(&body); body = (Buf){0}; }
     /* An infeasible plan returns an empty body and the sweep tries the remaining variants.
      * encode_patch dies only when every variant is infeasible. */

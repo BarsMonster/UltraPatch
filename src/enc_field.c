@@ -56,17 +56,18 @@ int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, u
     return hit;
 }
 
-/* `diff==NULL` is the coercion probe: only a BL-compatible target window is relocatable, while
- * every LDR word can carry its exact occurrence-local delta. With a real diff, a still-dirty BL
- * remains suppressed; a pure BL with an unexpected incompatible target falls back to delta zero
- * so content finalization can literalize the complete field window. */
+/* Merge plans derive relocation deltas from final geometry. Non-merge plans retain only fields
+ * whose source and target bytes are already identical. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
-                            const LdrTargetIndex *ldr, const uint8_t *diff,
+                            const LdrTargetIndex *ldr, int merge_fields,
                             int32_t fp0, int32_t tp0, int32_t dl, int32_t k) {
     uint32_t fpk, tpk;
     if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
-    int pure = !diff || (diff[k] == 0 && diff[k + 1] == 0 && diff[k + 2] == 0 && diff[k + 3] == 0);
+    int pure = merge_fields;
+    for (int b = 0; !pure && b < 4; b++)
+        if (op_diff_byte(frm, from_size, tob, fp0 + k + b, tp0 + k + b)) break;
+        else if (b == 3) pure = 1;
     if (is_local_bl(frm, from_size, fpk)) {
         if (!pure) return (Event){ EV_SBL, 0 };
         if (field_addr(tp0, k, to_size, &tpk)) {
@@ -78,7 +79,7 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size,
                                     (uint32_t)rc_bl_imm24s(tu, tl)) };
             }
         }
-        return (Event){ diff ? EV_BL : EV_SBL, 0 };
+        return (Event){ EV_SBL, 0 };
     }
     if (pure && ldr_target_index_query(ldr, fp0, dl, fpk)) {
         int32_t delta = field_addr(tp0, k, to_size, &tpk)
@@ -95,17 +96,17 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size,
  * routes through this so no hand-copy can slip the order (a slip fails self-verification). */
 void fw_init(FieldWalk *w, int fwd, const uint8_t *frm, uint32_t from_size,
              const uint8_t *tob, uint32_t to_size, const LdrTargetIndex *ldr,
-             const uint8_t *diff, int32_t fp0, int32_t tp0, int32_t dl) {
+             int merge_fields, int32_t fp0, int32_t tp0, int32_t dl) {
     w->fwd = fwd; w->dl = dl; w->k = fwd ? 0 : dl - 1;
     w->frm = frm; w->from_size = from_size; w->tob = tob; w->to_size = to_size; w->ldr = ldr;
-    w->diff = diff; w->fp0 = fp0; w->tp0 = tp0;
+    w->merge_fields = merge_fields; w->fp0 = fp0; w->tp0 = tp0;
 }
 int fw_next(FieldWalk *w) {
     if (w->fwd ? w->k >= w->dl : w->k < 0) return 0;
     int32_t a0 = w->fwd ? w->k : w->k - 3;
     if (a0 >= 0 && a0 + 4 <= w->dl) {
         Event ev = classify_field(w->frm, w->from_size, w->tob, w->to_size, w->ldr,
-                                  w->diff, w->fp0, w->tp0, w->dl, a0);
+                                  w->merge_fields, w->fp0, w->tp0, w->dl, a0);
         if (ev.type != EV_NONE) {
             w->is_field = 1; w->pos = a0; w->ev = ev; w->k += w->fwd ? 4 : -4;
             return 1;
@@ -274,26 +275,27 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
                                            uint64_t transitions_left) {
     uint8_t L0[256], L1[256];
     LitSeedTrees seeds;
-    uint8_t *payload = ops->payload;
     lit_seed_trees_init(&seeds, from->d, from->n);
     from_lit_proxy_bits(&seeds, L0, L1);
-    OpVec out = { .payload = payload };
-    int32_t tp = 0;
+    OpVec out = {0};
+    int32_t tp = 0, fp = 0;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
         Run *runs = NULL;
         size_t nr = 0, rcap = 0;
         for (int32_t scan = 0; scan < o->diff_len;) {
-            while (scan < o->diff_len && payload[tp + scan] == 0) scan++;
+            while (scan < o->diff_len && op_diff_byte(from->d, (uint32_t)from->n, to->d,
+                                                       fp + scan, tp + scan) == 0) scan++;
             if (scan >= o->diff_len) break;
             int32_t begin = scan++;
-            while (scan < o->diff_len && payload[tp + scan] != 0) scan++;
+            while (scan < o->diff_len && op_diff_byte(from->d, (uint32_t)from->n, to->d,
+                                                       fp + scan, tp + scan) != 0) scan++;
             runs = (Run *)vec_reserve(runs, &rcap, nr + 1, sizeof(runs[0]), 16);
             runs[nr++] = (Run){ begin, scan };
         }
         if (!nr) {
             opvec_push(&out, *o);
-            tp += o->diff_len + o->extra_len;
+            tp += o->diff_len + o->extra_len; fp += o->diff_len + o->adj;
             continue;
         }
         /* nr cannot exceed the ceiling of half the int32 diff length on alternating input, so this
@@ -303,7 +305,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
         if (transitions > transitions_left) {
             opvec_push(&out, *o);
             free(runs);
-            tp += o->diff_len + o->extra_len;
+            tp += o->diff_len + o->extra_len; fp += o->diff_len + o->adj;
             continue;
         }
         transitions_left -= transitions;
@@ -328,7 +330,8 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
         sc[0].w = 0; sc[0].cnt = 0; sc[0].gp = 0;
         for (size_t j = 0; j < nr; j++) {
             uint64_t w = 0;
-            for (int32_t k = runs[j].begin; k < runs[j].end; k++) w += L0[payload[tp + k]];
+            for (int32_t k = runs[j].begin; k < runs[j].end; k++)
+                w += L0[op_diff_byte(from->d, (uint32_t)from->n, to->d, fp + k, tp + k)];
             w += (uint64_t)(runs[j].end - runs[j].begin - 1) * uleb1;
             sc[j + 1].w = sc[j].w + w;
             sc[j + 1].cnt = sc[j].cnt + (uint32_t)(runs[j].end - runs[j].begin);
@@ -367,9 +370,6 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
               int32_t len = runs[s].end - runs[s].begin;
               int32_t pre = runs[s].begin - seg;
               opvec_push(&out, (Op){ pre, len, len });
-              /* Split-generated extras stay in the raw binary domain. */
-              memcpy(payload + tp + runs[s].begin,
-                     to->d + (size_t)tp + (size_t)runs[s].begin, (size_t)len);
               seg = runs[s].end;
               p = s + 1;
           } }
@@ -382,7 +382,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
         }
         free(sc);
         free(runs);
-        tp += o->diff_len + o->extra_len;
+        tp += o->diff_len + o->extra_len; fp += o->diff_len + o->adj;
     }
     free(ops->v);
     *ops = out;
