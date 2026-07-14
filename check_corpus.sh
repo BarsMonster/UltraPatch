@@ -32,6 +32,7 @@ esac
 : "${IMAGES:?check_corpus.sh: IMAGES not set to the build-local home corpus}"
 : "${FIXTURES:?check_corpus.sh: FIXTURES not set to the build-local fixtures}"
 : "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set to the host tool}"
+: "${ARM_OBJCOPY:?check_corpus.sh: ARM_OBJCOPY not set}"
 
 IMG="$IMAGES"
 FGN="${FOREIGN:-test-bench/foreign}"
@@ -79,6 +80,46 @@ if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
   exit 4
 fi
 echo "short_body_regression=OK"
+
+# Exercise correction-cap salvage on a non-product raw pair whose selected plans contain an
+# extra-heavy op with 84 corrections. The encoder's built-in decoder self-check is the verdict;
+# this focused fixture is deliberately outside the 290-patch compression total.
+opc_from=test-bench/regressions/opc-extra/from.bin
+opc_to=test-bench/regressions/opc-extra/to.bin
+if [ ! -f "$opc_from" ] || [ ! -f "$opc_to" ]; then
+  echo "check_corpus.sh: missing correction-split regression fixture" >&2
+  exit 3
+fi
+if ! "$UP" "$opc_from" "$opc_to" "$tmp/opc-extra.patch" \
+     >"$tmp/opc-extra.stdout" 2>"$tmp/opc-extra.stderr"; then
+  echo "check_corpus.sh: correction-split regression failed" >&2
+  sed -n '1,20p' "$tmp/opc-extra.stderr" >&2
+  exit 4
+fi
+echo "correction_split_regression=OK"
+
+# A present ELF must provide a usable symbol-derived data range. Strip a private copy of an
+# authentic fixture so its load image remains valid but its symbol table (and therefore ranges)
+# is empty; the encoder must reject it instead of silently taking the raw-binary path.
+elf_bad="$tmp/empty-range-elf"
+mkdir -p "$elf_bad"
+if [ ! -f "$FIX/v0_base/watch.elf" ] ||
+   ! cp "$FIX/v0_base/watch.bin" "$elf_bad/watch.bin" ||
+   ! "$ARM_OBJCOPY" --strip-all "$FIX/v0_base/watch.elf" "$elf_bad/watch.elf"; then
+  echo "check_corpus.sh: cannot prepare empty-range ELF regression" >&2
+  exit 3
+fi
+if "$UP" "$elf_bad/watch.bin" "$elf_bad/watch.bin" "$elf_bad/patch.blob" \
+     >"$elf_bad/stdout" 2>"$elf_bad/stderr"; then
+  echo "check_corpus.sh: encoder accepted a present ELF with empty ranges" >&2
+  exit 4
+fi
+if ! grep -Fq "ELF sidecar has no usable data range" "$elf_bad/stderr"; then
+  echo "check_corpus.sh: empty-range ELF failed for the wrong reason" >&2
+  sed -n '1,20p' "$elf_bad/stderr" >&2
+  exit 4
+fi
+echo "empty_elf_regression=OK"
 
 append_foreign_pair() {
   local from=$1 to=$2 from_id to_id

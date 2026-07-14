@@ -28,7 +28,7 @@ export LC_ALL := C
 
 OPT ?= -O2
 DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u
-CONTRACT_FLAGS := -std=c99 -I. -Isrc -Ivendor/libdivsufsort
+CONTRACT_FLAGS := -std=c11 -I. -Isrc -Ivendor/libdivsufsort
 CFLAGS += $(CONTRACT_FLAGS)
 CFLAGS += -g
 CFLAGS += -Wall
@@ -74,9 +74,9 @@ CORPUS_SOURCE_ELFS := $(wildcard test-bench/fixtures/*/watch.elf) \
                       $(wildcard test-bench/images/*/watch.elf)
 CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
 
-ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb $(DECODER_CONFIG_FLAGS) -I src
+ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -std=c11 $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 5589
+override BASE_FOOTPRINT_FLASH := 5569
 override BASE_FOOTPRINT_STATE := 5928
 override BASE_FOOTPRINT_STACK := 480
 
@@ -131,7 +131,7 @@ corpus-assets-internal: $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS)
 	echo "corpus_materialized=$$count binaries in $(CORPUS_BUILD_DIR)"
 
 check-corpus-internal: ultrapatch corpus-assets-internal check_corpus.sh
-	@IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" FOREIGN="$(FOREIGN)" \
+	@ARM_OBJCOPY="$(ARM_OBJCOPY)" IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" FOREIGN="$(FOREIGN)" \
 	  ./check_corpus.sh $(JOBS)
 
 check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \

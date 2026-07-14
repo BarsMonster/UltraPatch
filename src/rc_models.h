@@ -16,7 +16,7 @@
 #include "patch_config.h"
 
 /* GNU attributes are OPTIONAL codegen hints (host-text / ARM-size / stack shaping), never
- * correctness: the #else fallbacks keep this header standard C (C99 + C11 _Static_assert), so
+ * correctness: the #else fallbacks keep this header standard C11, so
  * non-GNU compilers build a wire-identical decoder. -DNO_GNU_EXTENSIONS forces the plain-C
  * fallbacks even when __GNUC__ is visible, for compilers that define it for compatibility
  * without full attribute support. */

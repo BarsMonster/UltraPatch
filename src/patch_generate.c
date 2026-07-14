@@ -78,10 +78,13 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     /* Product inputs require matching same-basename ELF artifacts. Absence is tolerated only for
      * non-product raw regression inputs: Ranges stays zero, so relocation normalization excludes
      * no data window and heuristically scans the whole image before bsdiff+LZ. A present-but-
-     * malformed ELF still dies loudly. */
+     * malformed or unusable ELF still dies loudly. */
     Ranges fr = {0}, tr = {0};
     if (felf_present) fr = elf_ranges(felf, &from, "from");
     if (telf_present) tr = elf_ranges(telf, &to, "to");
+    if ((felf_present && fr.data_off_end <= fr.data_off_begin) ||
+        (telf_present && tr.data_off_end <= tr.data_off_begin))
+        die("ELF sidecar has no usable data range");
     PlanPrep prep;
     plan_prepare(&prep, &from, &to, &fr, &tr);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the

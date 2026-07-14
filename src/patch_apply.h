@@ -180,7 +180,7 @@ _Static_assert(DR_KCAP_BL > 0u && DR_KCAP_EX > 0u && DR_KCAP_BL <= 65535u && DR_
  * the exact same checks. The final address may be UINT32_MAX; capacity therefore subtracts
  * one before the headroom comparison. */
 _Static_assert(OUTROW>0u && (OUTROW & (OUTROW-1u))==0u, "OUTROW must be a power of two");
-_Static_assert(OUTROW_DEPTH>0u && (OUTROW_DEPTH & (OUTROW_DEPTH-1u))==0u, "OUTROW_DEPTH must be a power of two");
+_Static_assert(OUTROW_DEPTH==2u, "OUTROW_DEPTH must match the two-slot output cache");
 _Static_assert(MAX_IMAGE>0u, "MAX_IMAGE must be nonzero");
 _Static_assert(PATCH_IMAGE_BASE>=0, "PATCH_IMAGE_BASE must not be negative");
 _Static_assert(PATCH_IMAGE_CAPACITY>0, "PATCH_IMAGE_CAPACITY must be positive");
@@ -444,16 +444,10 @@ static void up_orow_commit_slot(PatchApply *pa, uint32_t s){
 }
 /* final flush: commit remaining slots in WRITE order (frontier monotonicity holds on NVM). */
 static void up_orow_commit_all(PatchApply *pa){
-    for(uint32_t i=0;i<OUTROW_DEPTH;i++){
-        uint32_t best=UP_OROW_NONE, bs=0;
-        for(uint32_t s=0;s<OUTROW_DEPTH;s++){
-            uint32_t b=pa->ARENA.apply.g_orow_base[s];
-            if(b==UP_OROW_NONE) continue;
-            if(best==UP_OROW_NONE || (pa->g_FWD ? b<best : b>best)){ best=b; bs=s; }
-        }
-        if(best==UP_OROW_NONE) break;
-        up_orow_commit_slot(pa,bs);
-    }
+    uint32_t last=pa->g_FWD && pa->g_to_size
+        ? UP_OROW_SLOT(((pa->g_to_size-1u)/OUTROW)*OUTROW) : 0u;
+    up_orow_commit_slot(pa,last^1u);
+    up_orow_commit_slot(pa,last);
 }
 static void up_orow_reset(PatchApply *pa){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){ pa->ARENA.apply.g_orow_base[s]=UP_OROW_NONE; pa->ARENA.apply.g_orow_dirty[s]=0; } }
 /* read one byte of ALREADY-PRODUCED output at absolute position a: an uncommitted page from

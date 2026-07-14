@@ -149,9 +149,8 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
         if (high) {
             m = (int32_t)RC_PACKED_POS_LIMIT;
         } else {
-            if (dl < 2) continue;                   /* cannot split further: stays infeasible */
+            /* nc>OPC_CAP unique in-range offsets make this median internal to the whole op. */
             m = pc[step].corr.v[nc / 2].off;
-            if (m <= 0 || m >= dl) m = dl / 2;
         }
         if (m <= 0 || m >= nw) continue;
         cut[oi] = m;
