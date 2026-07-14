@@ -157,7 +157,6 @@ typedef struct {
     up_UGRice gd;
     up_UGGamma glo;
     int fixed_dist_bits;
-    int out_en;
 } PriceTab;
 
 /* Immutable time-0 literal trees for one source image. Every pricing/emission simulation copies

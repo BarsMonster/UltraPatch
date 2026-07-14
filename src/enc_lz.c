@@ -312,7 +312,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     ContentStats st = {0};
     ContentCursor cc;
     content_cursor_init(&cc, seq, content, tags, seq->n ? (size_t)seq->v[seq->n - 1u].start + (size_t)seq->v[seq->n - 1u].len : 0,
-                        &M, &r, pt->fwd, pt->out_en, pt->oexp0);
+                        &M, &r, pt->fwd, 1, pt->oexp0);
     content_cursor_to(&cc, cc.content_n, &st);
     buf_free(&r.out);
     /* Per-context flag price from the steady-state probabilities. The wire's token flag is an
@@ -396,7 +396,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                                           : ugr_price(&pt->gd, D - 1u);
     const uint64_t INF = UINT64_MAX / 4;
     uint32_t *glo_price = NULL;
-    if (pt->out_en && ocands && max_out_len >= (int32_t)RC_OUTMATCH_MIN) {
+    if (ocands && max_out_len >= (int32_t)RC_OUTMATCH_MIN) {
         glo_price = (uint32_t *)xmalloc(((size_t)max_out_len + 1u) * sizeof(*glo_price));
         for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= max_out_len; l++) {
             glo_price[l] = ugg_price(&pt->glo, (uint32_t)l - RC_OUTMATCH_MIN);
@@ -412,7 +412,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     uint64_t fresh_extra[4], reuse_extra[4], out_extra[4];
     for (int h = 0; h < 4; h++) {
         uint64_t mflag = (h & 1) ? (uint64_t)pt->fmatch_c[h] : 0;
-        fresh_extra[h] = mflag + pt->rep0_no + (pt->out_en ? pt->outb_no : 0);
+        fresh_extra[h] = mflag + pt->rep0_no + (ocands ? pt->outb_no : 0);
         reuse_extra[h] = mflag + pt->rep0_yes;
         out_extra[h]   = mflag + pt->rep0_no + pt->outb_yes;
     }
@@ -501,7 +501,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             if (k + 1 < nc && ord_dpr[k + 1] < dp2) { ord_dpr[k] = ord_dpr[k + 1]; ord_dist[k] = ord_dist[k + 1]; }
             else ord_dpr[k] = dp2;
         }
-        int32_t out_len = pt->out_en && ocands ? ocands[i].len : 0;
+        int32_t out_len = ocands ? ocands[i].len : 0;
         int32_t out_pos = out_len ? ocands[i].pos : 0;
         int32_t probe_ri = -1; size_t probe_rl = 0;   /* rep-probe scan memo: states share ri */
         size_t match_lim = n < i + maxrun ? n : i + maxrun;

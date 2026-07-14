@@ -527,31 +527,22 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
         size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, &inj, NULL, NULL, 0);
-        /* Keep the legacy mixed-mode trajectory: establish prices without out-candidates, then
-         * open them for two convergence passes. Every candidate still has to beat the exact body. */
-        for (int phase = 0; phase < 3; phase++) {
-            const OCand *phase_ocands = phase ? ocands : NULL;
-            for (int pass = 0; pass < 16; pass++) {
-                PriceTab pt;
-                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = 1;
-                measure_prices(&seq, content.d, tags.d, &seeds, kd, ko, &pt);
-                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d,
-                                                    &cands, ncand, phase_ocands,
-                                                    phase ? max_out_len : 0, &pt);
-                int nk = fit_k_tokens(&cand_seq);
-                int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
-                merge_adjacent_spans(&cand_seq);
-                size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, nko, &inj, NULL, NULL, 0);
-                if (cand_bytes < cur_bytes) {
-                    size_t gain = cur_bytes - cand_bytes;
-                    free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
-                    /* converged: on large content later passes shave a byte or two at full DP
-                     * cost; small patches (where every byte counts) always iterate to fixpoint. */
-                    if (gain < (content.n >> 13)) break;
-                } else {
-                    free(cand_seq.v);
-                    break;
-                }
+        /* Re-parse with out-candidates until the exact shipped body stops improving. */
+        for (int pass = 0; pass < 16; pass++) {
+            PriceTab pt;
+            pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD;
+            measure_prices(&seq, content.d, tags.d, &seeds, kd, ko, &pt);
+            TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d,
+                                                &cands, ncand, ocands, max_out_len, &pt);
+            int nk = fit_k_tokens(&cand_seq);
+            int nko = fit_k_out(&cand_seq, ko, FWD ? 0u : to_size, FWD);
+            merge_adjacent_spans(&cand_seq);
+            size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, nko, &inj, NULL, NULL, 0);
+            if (cand_bytes < cur_bytes) {
+                free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk; ko = nko;
+            } else {
+                free(cand_seq.v);
+                break;
             }
         }
         /* anneal rice parameters: fit_k_* minimizes raw codelen, but the shipped cost is the
