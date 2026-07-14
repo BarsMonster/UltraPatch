@@ -20,9 +20,11 @@ The committed UF2-derived releases are:
 `10.0.0`, `10.0.1`, `10.0.2`, `10.0.3`, `10.1.1`, `10.1.2`, and `10.1.3`.
 They were unpacked at application base `0x2000` to match the raw-bin layout.
 
-The gate sorts these 18 version directories and tests both directions of every adjacent pair,
-including the `3.0.3` to `10.0.0` cross-major transition. This produces 34 foreign cases in the
-common corpus worker pool. The exact Git commit is the corpus provenance record.
+The gate reads these committed static binaries in place, sorts their 18 version directories, and
+tests both directions of every adjacent pair, including the `3.0.3` to `10.0.0` cross-major
+transition. This produces 34 foreign cases in the common corpus worker pool. Like the home and
+one-face inputs, the foreign set is frozen; replacing a binary is an explicit corpus and ratchet
+change. The exact Git commit is the corpus provenance record.
 
 These cases contribute to the single complete-corpus size ratchet enforced by
 [`check_corpus.sh`](../check_corpus.sh).

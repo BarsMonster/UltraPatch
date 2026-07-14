@@ -4,28 +4,7 @@
  *
  * Host encoder CLI entry point.
  */
-#include <errno.h>
-
 #include "enc_internal.h"
-
-static char *elf_sidecar_path(const char *image_path) {
-    const char *slash = strrchr(image_path, '/');
-    const char *base = slash ? slash + 1 : image_path;
-    const char *dot = strrchr(base, '.');
-    size_t stem = dot ? (size_t)(dot - image_path) : strlen(image_path);
-    char *elf = (char *)xmalloc(stem + 5u);
-    memcpy(elf, image_path, stem);
-    memcpy(elf + stem, ".elf", 5u);
-    return elf;
-}
-
-static int optional_sidecar_present(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (f) { fclose(f); return 1; }
-    if (errno == ENOENT || errno == ENOTDIR) return 0;
-    perror(path);
-    exit(2);
-}
 
 static void reject_patch_output(const char *patch_out, const char *input) {
     int conflict = file_alias(patch_out, input);
@@ -66,27 +45,12 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 }
 
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out) {
-    char *felf = elf_sidecar_path(from_image), *telf = elf_sidecar_path(to_image);
-    int felf_present = optional_sidecar_present(felf);
-    int telf_present = optional_sidecar_present(telf);
     reject_patch_output(patch_out, from_image);
     reject_patch_output(patch_out, to_image);
-    if (felf_present) reject_patch_output(patch_out, felf);
-    if (telf_present) reject_patch_output(patch_out, telf);
     Buf from = slurp(from_image), to = slurp(to_image);
     uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");
-    /* Product inputs require matching same-basename ELF artifacts. Absence is tolerated only for
-     * non-product raw regression inputs: Ranges stays zero, so relocation normalization excludes
-     * no data window and heuristically scans the whole image before bsdiff+LZ. A present-but-
-     * malformed or unusable ELF still dies loudly. */
-    Ranges fr = {0}, tr = {0};
-    if (felf_present) fr = elf_ranges(felf, &from, "from");
-    if (telf_present) tr = elf_ranges(telf, &to, "to");
-    if ((felf_present && fr.data_off_end <= fr.data_off_begin) ||
-        (telf_present && tr.data_off_end <= tr.data_off_begin))
-        die("ELF sidecar has no usable data range");
     PlanPrep prep;
-    plan_prepare(&prep, &from, &to, &fr, &tr);
+    plan_prepare(&prep, &from, &to);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the
      * smallest complete envelope ships and ties keep the earliest entry. A config whose plan
      * exceeds the decoder correction cap returns an empty body and
@@ -131,7 +95,6 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
                    die("emitted patch failed reference-decoder self-verification"); } }
     write_file(patch_out, best_blob.d, best_blob.n);
     buf_free(&best_blob); buf_free(&from); buf_free(&to);
-    free(felf); free(telf);
 }
 
 static void usage(FILE *out, const char *prog) {

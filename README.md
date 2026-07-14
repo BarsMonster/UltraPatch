@@ -34,10 +34,11 @@ after its flash page has been programmed. It splits only those unsafe runs out
 of the source copy and transports their exact target bytes instead. These bytes
 are not necessarily stored literally in the patch: they join the common
 content stream and can use 1 KiB LZ backreferences, matches against already
-produced output, and adaptive entropy coding. Relocation-aware source deltas,
-the choice among competing plans, and the two-page delayed-write window leave
-few bytes that need this treatment, so the decoder does not need a general
-old-byte journal.
+produced output, and adaptive entropy coding. The encoder derives
+relocation-aware source deltas from the selected edit operations; together with
+the choice among competing plans and the two-page delayed-write window, this
+leaves few bytes that need special treatment, so the decoder does not need a
+general old-byte journal.
 
 Every generated patch is applied by the production decoder on the host before
 it is accepted. On the device, source CRC is checked before the first write,
@@ -55,13 +56,13 @@ tool=$(make -s host-tool-path)
 "$tool" --help
 ```
 
-The encoder accepts image files, not directories. Product encoding requires each
-image to have its authentic matching same-basename `.elf` beside it; the encoder
-uses ELF load and symbol information for relocation-aware planning, and
-pre-extracted offsets are not an acceptable product artifact. The CLI still
-tolerates absent ELF for non-product regression inputs, including the foreign
-corpus; universal enforcement is deferred until matching foreign ELFs are
-available.
+The encoder accepts raw firmware image files, not directories, and treats every
+input byte as part of the image. It neither parses ELF files nor discovers
+same-basename sidecars. The release corpus is a frozen set of committed raw
+binaries under `test-bench/`; the gate reads those files directly rather than
+generating test inputs during the build. This input simplification is host-only;
+it does not change the decoder interface or patch wire format.
+
 The default host executable is `.build/ultrapatch`; always use
 `make host-tool-path` to obtain its exact path instead of assuming a root-level
 `./ultrapatch`. Set `BUILD_DIR` to a private directory when parallel builds or
@@ -125,7 +126,6 @@ procedure is in [the release checklist](docs/release-checklist.md).
 ## License
 
 UltraPatch is MIT licensed except where a vendored dependency states otherwise.
-Vendored notices and the `enc_bsdiff.c` attribution are collected in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Vendored notices are collected in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.

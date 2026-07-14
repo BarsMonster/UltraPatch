@@ -19,7 +19,6 @@ ARM_PREFIX ?= arm-none-eabi-
 ARM_CC ?= $(ARM_PREFIX)gcc
 ARM_SIZE ?= $(ARM_PREFIX)size
 ARM_OBJDUMP ?= $(ARM_PREFIX)objdump
-ARM_OBJCOPY ?= $(ARM_PREFIX)objcopy
 ARM_OBJECT_OPT ?= -Os
 
 export LANG := C
@@ -47,7 +46,7 @@ LDFLAGS += -Wl,--gc-sections
 HOST_BACKEND_DEFINES := -D_POSIX_C_SOURCE=200809L
 
 DIVSUF := vendor/libdivsufsort/divsufsort.c
-ENC_MODULE_SRCS := src/enc_util.c src/enc_elf.c src/enc_bsdiff.c src/enc_field.c \
+ENC_MODULE_SRCS := src/enc_util.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 HOST_BACKEND_SRC := src/patch_host_backend.c
 TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(DIVSUF) $(HOST_BACKEND_SRC)
@@ -65,14 +64,6 @@ endif
 override HOST_TOOL := $(abspath $(BUILD_DIR))/ultrapatch
 override ULTRAPATCH := $(HOST_TOOL)
 export ULTRAPATCH
-
-override CORPUS_BUILD_DIR := $(abspath $(BUILD_DIR))/corpus
-override FIXTURES := $(CORPUS_BUILD_DIR)/fixtures
-override IMAGES := $(CORPUS_BUILD_DIR)/images
-override FOREIGN := test-bench/foreign
-CORPUS_SOURCE_ELFS := $(wildcard test-bench/fixtures/*/watch.elf) \
-                      $(wildcard test-bench/images/*/watch.elf)
-CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -std=c11 $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
@@ -99,7 +90,7 @@ gate:
 
 all-internal: ultrapatch
 
-.PHONY: host-tool-path ultrapatch FORCE corpus-assets-internal
+.PHONY: host-tool-path ultrapatch FORCE
 host-tool-path: $(HOST_TOOL)
 	@printf '%s\n' "$(HOST_TOOL)"
 
@@ -116,23 +107,8 @@ $(HOST_TOOL): FORCE $(TOOL_SRCS) $(GEN_HDR) $(NVM_EMU) Makefile
 	$(CC) $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES) $(TOOL_SRCS) $(LDFLAGS) -o "$$tmp"; \
 	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
 
-# Derive the exact home and fixture binaries beside their ELF sidecars. Foreign binaries are
-# already tracked and are consumed in place. The fresh directory prevents stale corpus members.
-corpus-assets-internal: $(CORPUS_SOURCE_ELFS) $(CORPUS_FOREIGN_BINS)
-	@set -e; rm -rf "$(CORPUS_BUILD_DIR)"; count=0; \
-	for role in fixtures images; do \
-	  for source in test-bench/$$role/*/watch.elf; do \
-	    id=$$(basename "$$(dirname "$$source")"); dest="$(CORPUS_BUILD_DIR)/$$role/$$id"; \
-	    mkdir -p "$$dest"; cp "$$source" "$$dest/watch.elf"; \
-	    "$(ARM_OBJCOPY)" -O binary "$$source" "$$dest/watch.bin"; count=$$((count + 1)); \
-	  done; \
-	done; \
-	test "$$count" -eq 18; \
-	echo "corpus_materialized=$$count binaries in $(CORPUS_BUILD_DIR)"
-
-check-corpus-internal: ultrapatch corpus-assets-internal check_corpus.sh
-	@ARM_OBJCOPY="$(ARM_OBJCOPY)" IMAGES="$(IMAGES)" FIXTURES="$(FIXTURES)" FOREIGN="$(FOREIGN)" \
-	  ./check_corpus.sh $(JOBS)
+check-corpus-internal: ultrapatch check_corpus.sh
+	@./check_corpus.sh $(JOBS)
 
 check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \
                           scripts/check_footprint.sh scripts/stack_bound.py scripts/tempdir.sh

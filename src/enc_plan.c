@@ -66,12 +66,6 @@ static void literalize_hazards(EncCtx *ctx, OpVec *ops, const Buf *to,
     *ops = out;
 }
 
-static FieldDeltaVec prep_fd_clone(const FieldDeltaVec *src) {
-    FieldDeltaVec out = {(FieldDelta *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n};
-    if (src->n) memcpy(out.v, src->v, src->n * sizeof(*src->v));
-    return out;
-}
-
 static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
     OpVec out = {(Op *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n,
                  (uint8_t *)xmalloc(payload_n)};
@@ -80,21 +74,15 @@ static OpVec prep_ops_clone(const OpVec *src, size_t payload_n) {
     return out;
 }
 
-void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to,
-                  const Ranges *fr, const Ranges *tr) {
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to) {
     memset(prep, 0, sizeof(*prep));
     ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
-    /* One relocation-normalized pair feeds the three bsdiff alignments named by PLAN_SPECS. */
-    data_format_encode(from, to, fr, tr, &prep->from_df, &prep->to_df, &prep->fd);
-    prep->raw[PLAN_RAW_11] = bsdiff_ops(&prep->from_df, &prep->to_df, 11);
-    prep->raw[PLAN_RAW_6] = bsdiff_ops(&prep->from_df, &prep->to_df, 6);
-    prep->raw[PLAN_RAW_20] = bsdiff_ops(&prep->from_df, &prep->to_df, 20);
+    prep->raw[PLAN_RAW_11] = bsdiff_ops(from, to, 11);
+    prep->raw[PLAN_RAW_6] = bsdiff_ops(from, to, 6);
+    prep->raw[PLAN_RAW_20] = bsdiff_ops(from, to, 20);
 }
 
 void plan_prepare_free(PlanPrep *prep) {
-    buf_free(&prep->from_df);
-    buf_free(&prep->to_df);
-    free(prep->fd.v);
     for (int i = 0; i < PLAN_RAW_N; i++) opvec_free(&prep->raw[i]);
     ldr_target_index_free(&prep->ldr);
     memset(prep, 0, sizeof(*prep));
@@ -102,10 +90,10 @@ void plan_prepare_free(PlanPrep *prep) {
 
 static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
                                  const PlanPrep *prep, const PlanSpec *spec, FieldDeltaVec *fd) {
-    *fd = prep_fd_clone(&prep->fd);
+    *fd = (FieldDeltaVec){0};
     OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key], to->n);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    split_nonzero_diff_runs(ctx, &ops, &prep->from_df, &prep->to_df);
+    split_nonzero_diff_runs(ctx, &ops, from, to);
     if (spec->merge_fields)
         merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size,
                               &prep->ldr, ctx->fwd);
@@ -203,8 +191,8 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
     return pc;
 }
 
-/* One full op-plan -> emitted body pipeline. Plans either keep legacy block-matched deltas or add
- * op-derived field deltas exact under the bsdiff alignment. encode_patch emits the smallest body. */
+/* One full op-plan -> emitted body pipeline. Plans either keep raw byte deltas or add op-derived
+ * field deltas exact under the bsdiff alignment. encode_patch emits the smallest body. */
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};

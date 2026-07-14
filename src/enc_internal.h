@@ -67,7 +67,7 @@ static inline int row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
 
 typedef struct { uint8_t *d; size_t n, cap; } Buf;
 /* Plan geometry only. Payload bytes live in one target-indexed arena: copy spans hold
- * normalized source deltas, while extra spans hold the literal target bytes to ship. */
+ * source deltas, while extra spans hold the literal target bytes to ship. */
 typedef struct { int32_t diff_len, extra_len, adj; } Op;
 typedef struct { Op *v; size_t n, cap; uint8_t *payload; } OpVec;
 typedef struct { int32_t tp, fp; const Op *o; } OpWalkEnt;
@@ -84,10 +84,7 @@ typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
 typedef struct { CorrVec corr; } OpPC;
-/* File-offset window of the .data-style segment inside the load image (from elf_ranges);
- * a zero-initialized Ranges is an empty (0,0) window: the raw-binary path with no ELF sidecar. */
-typedef struct { uint32_t data_off_begin, data_off_end; } Ranges;
-enum { STREAM_BL, STREAM_LDR, STREAM_NSTREAMS };
+enum { STREAM_BL, STREAM_LDR };
 typedef struct {
     int deg_engaged;
     size_t opc_splits;
@@ -100,10 +97,8 @@ typedef struct {
     uint8_t merge_fields, raw_key;
 } PlanSpec;
 extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
-/* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
+/* Pair-owned immutable planning inputs. Every plan clones its op state before mutation. */
 typedef struct {
-    Buf from_df, to_df;
-    FieldDeltaVec fd;
     OpVec raw[PLAN_RAW_N];
     LdrTargetIndex ldr;
 } PlanPrep;
@@ -248,9 +243,6 @@ void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta);
 void fd_finalize(FieldDeltaVec *v);
 const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
 
-Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which);
-void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                        Buf *from_df, Buf *to_df, FieldDeltaVec *fd);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
@@ -328,8 +320,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 const OpPC *pc, int32_t fp_start,
                 int *overflow_out);
 
-void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to,
-                  const Ranges *fr, const Ranges *tr);
+void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);
 void plan_prepare_free(PlanPrep *prep);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec);

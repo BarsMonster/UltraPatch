@@ -193,15 +193,12 @@ int fw_next(FieldWalk *w) {
 }
 
 /* Op-derived field deltas: for every BL/LDR field candidate inside a copy, the exact delta under
- * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
- * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */
+ * the bsdiff alignment (from value at fpk minus to value at tp0+k). */
 void merge_op_field_deltas(FieldDeltaVec *fd, const OpVec *ops, const uint8_t *frm,
                            uint32_t from_size, const uint8_t *tob, uint32_t to_size,
                            const LdrTargetIndex *ldr, int fwd) {
-    /* Append op-derived entries after the already-finalized block-matched entries, then a single
-     * fd_finalize: its ordinal keeps the appended op-derived entry after the same-key block entry,
-     * and its last-wins dedup makes op-derived override block-matched (and, among op-derived
-     * duplicates, the last fd_put win) -- bit-identical to the former add/out rebuild. */
+    /* Multiple op windows can discover the same source field. Finalize once after the walk; its
+     * ordinal gives deterministic last-wins dedup among those op-derived duplicates. */
     static const FieldDeltaVec empty_fd = {0};
     OpWalkEnt *walk = opwalk_build(ops, 0);
     for (size_t oi = 0; oi < ops->n; oi++) {
@@ -509,7 +506,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
               int32_t len = runs[s].end - runs[s].begin;
               int32_t pre = runs[s].begin - seg;
               opvec_push(&out, (Op){ pre, len, len });
-              /* Split-generated extras stay in the normalized data-format domain. */
+              /* Split-generated extras stay in the raw binary domain. */
               memcpy(payload + tp + runs[s].begin,
                      to->d + (size_t)tp + (size_t)runs[s].begin, (size_t)len);
               seg = runs[s].end;

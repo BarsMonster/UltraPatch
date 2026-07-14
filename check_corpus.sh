@@ -29,21 +29,18 @@ case "$JOBS" in
   ''|*[!0-9]*|0) echo "check_corpus.sh: jobs must be a positive integer" >&2; exit 3 ;;
 esac
 
-: "${IMAGES:?check_corpus.sh: IMAGES not set to the build-local home corpus}"
-: "${FIXTURES:?check_corpus.sh: FIXTURES not set to the build-local fixtures}"
 : "${ULTRAPATCH:?check_corpus.sh: ULTRAPATCH not set to the host tool}"
-: "${ARM_OBJCOPY:?check_corpus.sh: ARM_OBJCOPY not set}"
 
-IMG="$IMAGES"
-FGN="${FOREIGN:-test-bench/foreign}"
-FIX="$FIXTURES"
+IMG=test-bench/images
+FGN=test-bench/foreign
+FIX=test-bench/fixtures
 UP="$ULTRAPATCH"
 
 # One aggregate ratchet covers the complete home and foreign corpus. The real one-face update
 # remains independently visible because it is the product release patch.
-CORPUS_LIMIT=5419019
-ONEFACE_GROW_LIMIT=570
-ONEFACE_REVERT_LIMIT=286
+CORPUS_LIMIT=5407874
+ONEFACE_GROW_LIMIT=580
+ONEFACE_REVERT_LIMIT=297
 
 [ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
 
@@ -80,29 +77,6 @@ if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
   exit 4
 fi
 echo "short_body_regression=OK"
-
-# A present ELF must provide a usable symbol-derived data range. Strip a private copy of an
-# authentic fixture so its load image remains valid but its symbol table (and therefore ranges)
-# is empty; the encoder must reject it instead of silently taking the raw-binary path.
-elf_bad="$tmp/empty-range-elf"
-mkdir -p "$elf_bad"
-if [ ! -f "$FIX/v0_base/watch.elf" ] ||
-   ! cp "$FIX/v0_base/watch.bin" "$elf_bad/watch.bin" ||
-   ! "$ARM_OBJCOPY" --strip-all "$FIX/v0_base/watch.elf" "$elf_bad/watch.elf"; then
-  echo "check_corpus.sh: cannot prepare empty-range ELF regression" >&2
-  exit 3
-fi
-if "$UP" "$elf_bad/watch.bin" "$elf_bad/watch.bin" "$elf_bad/patch.blob" \
-     >"$elf_bad/stdout" 2>"$elf_bad/stderr"; then
-  echo "check_corpus.sh: encoder accepted a present ELF with empty ranges" >&2
-  exit 4
-fi
-if ! grep -Fq "ELF sidecar has no usable data range" "$elf_bad/stderr"; then
-  echo "check_corpus.sh: empty-range ELF failed for the wrong reason" >&2
-  sed -n '1,20p' "$elf_bad/stderr" >&2
-  exit 4
-fi
-echo "empty_elf_regression=OK"
 
 append_foreign_pair() {
   local from=$1 to=$2 from_id to_id

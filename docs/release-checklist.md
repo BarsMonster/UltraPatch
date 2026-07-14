@@ -7,11 +7,9 @@ validation remain integration responsibilities.
 ## Required inputs
 
 - Use a clean `main` checkout at the exact release commit.
-- Keep the 16 home and two one-face fixture ELFs under `test-bench/` intact. They are the
-  authoritative product/home artifacts, and the gate derives their matching binaries.
-- Keep the 18 official foreign firmware binaries under `test-bench/foreign`. Their raw path is a
-  corpus-only exception until authentic matching ELFs are available; it does not relax the
-  product/home ELF requirement.
+- Keep the frozen static `watch.bin` corpus under `test-bench/images`, `test-bench/fixtures`, and
+  `test-bench/foreign` intact. The gate reads all 36 binaries directly; it does not derive or
+  materialize corpus inputs during the release build.
 - Install the packages in [install.md](../install.md). Exact compiler and system-library identities
   are not release criteria; the measured size and memory outcomes are.
 
