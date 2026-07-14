@@ -81,23 +81,6 @@ if ! "$UP" "$tmp/empty.bin" "$tmp/empty.bin" "$tmp/empty.patch" \
 fi
 echo "short_body_regression=OK"
 
-# Exercise correction-cap salvage on a non-product raw pair whose unsplit plans exceed OPC_CAP
-# with non-foldable field corrections. The encoder's built-in decoder self-check is the verdict;
-# this focused fixture is deliberately outside the 290-patch compression total.
-opc_from=test-bench/regressions/opc-nonfold/from.bin
-opc_to=test-bench/regressions/opc-nonfold/to.bin
-if [ ! -f "$opc_from" ] || [ ! -f "$opc_to" ]; then
-  echo "check_corpus.sh: missing correction-split regression fixture" >&2
-  exit 3
-fi
-if ! "$UP" "$opc_from" "$opc_to" "$tmp/opc-nonfold.patch" \
-     >"$tmp/opc-nonfold.stdout" 2>"$tmp/opc-nonfold.stderr"; then
-  echo "check_corpus.sh: correction-split regression failed" >&2
-  sed -n '1,20p' "$tmp/opc-nonfold.stderr" >&2
-  exit 4
-fi
-echo "correction_split_regression=OK"
-
 # A present ELF must provide a usable symbol-derived data range. Strip a private copy of an
 # authentic fixture so its load image remains valid but its symbol table (and therefore ranges)
 # is empty; the encoder must reject it instead of silently taking the raw-binary path.

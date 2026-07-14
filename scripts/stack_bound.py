@@ -45,12 +45,8 @@ import subprocess
 import sys
 
 INTEGRATOR_EXTERNS = {"flash_read", "flash_write_page"}
-# Compiler-runtime helpers the codegen may emit (libgcc / freestanding builtins). Leaves,
-# not defined in the TU. Matched by exact name or these prefixes.
-TOOLCHAIN_EXTERN_RE = re.compile(
-    r"^(__aeabi_[a-z0-9]+|__udivsi3|__divsi3|__umodsi3|__modsi3|"
-    r"memcpy|memmove|memset|__gnu_thumb1_case_[a-z0-9]+)$"
-)
+# Intentional libc leaves; every other external helper invalidates the decoder contract.
+TOOLCHAIN_EXTERNS = {"memmove", "memset"}
 
 # GCC's VCG output keeps every node/edge on one line. Quoted fields may contain escaped
 # characters, hence the (?:\\.|[^"\\])* form rather than a plain [^"]*.
@@ -190,7 +186,7 @@ def main():
                 continue
             if t in INTEGRATOR_EXTERNS:
                 integ_ext.add(t)
-            elif TOOLCHAIN_EXTERN_RE.match(t):
+            elif t in TOOLCHAIN_EXTERNS:
                 tool_ext.add(t)
             else:
                 die("unexpected external call: %s -> %s (not a flash primitive, callback, "

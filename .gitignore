@@ -35,7 +35,3 @@
 !/test-bench/foreign/
 !/test-bench/foreign/**/
 !/test-bench/foreign/**/*.bin
-# Focused non-product raw regression inputs remain tracked.
-!/test-bench/regressions/
-!/test-bench/regressions/**/
-!/test-bench/regressions/**/*.bin

@@ -11,11 +11,11 @@
  * share one reference-decoder copy in the host tool.
  * Each page call erases and fully programs one aligned decoder-configured page. Counters reproduce
  * the product write-safety rules (each page erased at most once, monotonic erase frontier)
- * and pin aligned/in-range calls plus preservation of the last page's bytes beyond the
- * logical image span. Requires <stdint.h>, <stdlib.h>, <string.h> from the includer. */
+ * and pin aligned/in-range calls plus preservation of bytes beyond the target image.
+ * Requires <stdint.h>, <stdlib.h>, <string.h> from the includer. */
 _Static_assert(PATCH_IMAGE_BASE==0u,"repository host NVM integration uses PATCH_IMAGE_BASE=0");
 static uint8_t *sc_flash, *sc_erasecnt, *sc_tail_canary;
-static uint32_t sc_flash_n, sc_image_span, sc_tail_n;
+static uint32_t sc_flash_n, sc_preserve_from, sc_tail_n;
 static uint32_t sc_erows, sc_amplified, sc_max_erase;
 static uint32_t sc_page_writes, sc_unaligned, sc_oob_page_writes, sc_oob_reads;
 static long sc_erases, sc_programs, sc_finv;
@@ -25,21 +25,22 @@ static int sc_edir, sc_ecount;
 static void nvm_free(void){
     free(sc_flash); free(sc_erasecnt); free(sc_tail_canary);
     sc_flash = NULL; sc_erasecnt = NULL; sc_tail_canary = NULL;
-    sc_flash_n = sc_image_span = sc_tail_n = 0;
+    sc_flash_n = sc_preserve_from = sc_tail_n = 0;
 }
 
 /* Load `from` into fresh page-rounded flash and reset every counter. The beyond-`from`
  * physical span is filled with a deterministic LCG pad (NOT 0xFF) seeded by pad_seed, so a decode
  * that reads not-yet-written output cannot coast on the 0xFF that both this emulator and
- * 0xFF-erased firmware would return. Bytes beyond the logical image are snapshotted as a
+ * 0xFF-erased firmware would return. Bytes at and beyond preserve_from are snapshotted as a
  * canary: a correct final partial-page write must preserve them exactly.
  * Returns -1 on invalid geometry or allocation failure. */
-static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_t pad_seed){
+static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span,
+                    uint32_t preserve_from, uint32_t pad_seed){
     nvm_free();
-    if(from_n>span || span>UINT32_MAX-(OUTROW-1u)) return -1;
-    sc_image_span = span;
+    if(from_n>span || preserve_from>span || span>UINT32_MAX-(OUTROW-1u)) return -1;
     sc_flash_n = span ? (span+OUTROW-1u)&~(OUTROW-1u) : 0u;
-    sc_tail_n = sc_flash_n-span;
+    sc_preserve_from = preserve_from;
+    sc_tail_n = sc_flash_n-preserve_from;
     uint32_t nrows = sc_flash_n/OUTROW;
     sc_flash = (uint8_t*)malloc(sc_flash_n?sc_flash_n:1u);
     sc_erasecnt = (uint8_t*)calloc(nrows?nrows:1, 1);
@@ -48,7 +49,7 @@ static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_
     if(from_n) memcpy(sc_flash, from, from_n);   /* from is NULL for an empty image (memcpy nonnull UB) */
     if(sc_flash_n>from_n){ uint32_t r=pad_seed;
         for(uint32_t a=from_n;a<sc_flash_n;a++){ r=r*1664525u+1013904223u; sc_flash[a]=(uint8_t)(r>>24); } }
-    if(sc_tail_n) memcpy(sc_tail_canary,sc_flash+span,sc_tail_n);
+    if(sc_tail_n) memcpy(sc_tail_canary,sc_flash+preserve_from,sc_tail_n);
     sc_erases = sc_programs = sc_finv = 0;
     sc_erows = sc_amplified = sc_max_erase = 0;
     sc_page_writes = sc_unaligned = sc_oob_page_writes = sc_oob_reads = 0;
@@ -57,7 +58,7 @@ static int nvm_init(const uint8_t *from, uint32_t from_n, uint32_t span, uint32_
 }
 static uint32_t nvm_canary_bad(void){
     uint32_t bad=0;
-    for(uint32_t i=0;i<sc_tail_n;i++) if(sc_flash[sc_image_span+i]!=sc_tail_canary[i]) bad++;
+    for(uint32_t i=0;i<sc_tail_n;i++) if(sc_flash[sc_preserve_from+i]!=sc_tail_canary[i]) bad++;
     return bad;
 }
 uint8_t flash_read(uint32_t a){

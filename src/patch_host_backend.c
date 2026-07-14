@@ -26,10 +26,11 @@ typedef struct {
 
 static int host_apply_blob(const uint8_t *blob, size_t blob_n,
                            const uint8_t *from, uint32_t from_n,
-                           uint32_t span, uint32_t pad_seed,
+                           uint32_t span, uint32_t preserve_from,
+                           uint32_t pad_seed,
                            HostApply *out)
 {
-    if (nvm_init(from, from_n, span, pad_seed)) return -1;
+    if (nvm_init(from, from_n, span, preserve_from, pad_seed)) return -1;
     PullCtx pc = { blob, blob_n, 0 };
     out->rc = patch_apply_run(&out->pa, pull_next, &pc);
     out->consumed = pc.i;
@@ -46,7 +47,8 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
     for (int k = 0; k < 8; k++) pad_seed = pad_seed * 1664525u + 1013904223u + blob[k];
     HostApply ha;
     const char *err = NULL;
-    if (host_apply_blob(blob, blob_n, from, (uint32_t)from_n, span, pad_seed, &ha)) return "selfcheck out of memory";
+    if (host_apply_blob(blob, blob_n, from, (uint32_t)from_n, span,
+                        (uint32_t)to_n, pad_seed, &ha)) return "selfcheck out of memory";
     if (ha.rc != PATCH_APPLY_DONE) {
         err = patch_apply_reject(&ha.pa) == REJ_RESOURCE
                   ? "reference decoder rejected the patch (resource cap)"
@@ -64,7 +66,7 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
         if(sc_unaligned) err = "NVM page write was unaligned";
         else if(sc_oob_page_writes) err = "NVM page write was out of bounds";
         else if(sc_oob_reads) err = "NVM read was out of bounds";
-        else if(nvm_canary_bad()) err = "NVM final-page canary was corrupted";
+        else if(nvm_canary_bad()) err = "NVM post-target data was corrupted";
         else err = sc_amplified ? "NVM page erased more than once (write amplification)"
                                 : "NVM erase frontier inversion";
     }
@@ -88,7 +90,8 @@ int decode_patch(const char *image_path, const char *patch_path){
     HostApply ha;
     { uint32_t image_n = (uint32_t)image.n;
       uint32_t span = image_n>MAX_IMAGE ? image_n : MAX_IMAGE;
-      if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, image_n, &ha)){ rc = 2; goto out; } }
+      if(host_apply_blob(blob.d, blob.n, image.d, image_n, span, span,
+                         image_n, &ha)){ rc = 2; goto out; } }
 
     if(ha.rc != PATCH_APPLY_DONE){
         int reject = patch_apply_reject(&ha.pa);
