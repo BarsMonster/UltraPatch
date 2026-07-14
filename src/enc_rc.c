@@ -95,10 +95,10 @@ void bt_encode(up_BitTree *t, REnc *r, uint8_t byte, int rate) {
 }
 
 void lit_tree_seed_e(const uint8_t *frm, size_t n, int parity, up_BitTree *t) {
-    uint32_t hist[256], w[256];
+    uint32_t hist[256];
     for (int i = 0; i < 256; i++) hist[i] = 1;
     for (size_t i = 0; i < n; i++) if ((int)(i & 1) == parity) hist[frm[i]]++;
-    rc_lit_tree_from_hist(t, hist, w);   /* mirror of decoder lit_tree_from_hist */
+    rc_lit_tree_from_hist(t, hist);   /* mirror of decoder lit_tree_from_hist */
 }
 
 void lit_seed_trees_init(LitSeedTrees *s, const uint8_t *frm, size_t n) {

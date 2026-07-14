@@ -67,9 +67,9 @@ export ULTRAPATCH
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -std=c11 $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 5593
-override BASE_FOOTPRINT_STATE := 5928
-override BASE_FOOTPRINT_STACK := 480
+override BASE_FOOTPRINT_FLASH := 5221
+override BASE_FOOTPRINT_STATE := 5436
+override BASE_FOOTPRINT_STACK := 432
 
 GATE_TIMEOUT ?= 80
 override RELEASE_GATE_TIMEOUT := 80

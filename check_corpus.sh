@@ -38,9 +38,9 @@ UP="$ULTRAPATCH"
 
 # One aggregate ratchet covers the complete home and foreign corpus. The real one-face update
 # remains independently visible because it is the product release patch.
-CORPUS_LIMIT=5403437
+CORPUS_LIMIT=5402874
 ONEFACE_GROW_LIMIT=580
-ONEFACE_REVERT_LIMIT=297
+ONEFACE_REVERT_LIMIT=296
 
 [ -x "$UP" ] || { echo "check_corpus.sh: encoder is missing or not executable: $UP" >&2; exit 3; }
 

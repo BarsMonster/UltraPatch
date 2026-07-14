@@ -69,8 +69,6 @@ static RC_NOINLINE void rc_move_high(void*dst,const void*src,size_t n){
 #define RC_PBIT 4096u
 #define RC_PHALF 2048u
 #define RC_PROB_BOUND(range, prob) (((range) >> RC_PROB_BITS) * (prob))
-#define RC_PACKED_POS_BITS 24u
-#define RC_PACKED_POS_LIMIT (1u<<RC_PACKED_POS_BITS)
 /* Inclusive maximum Rice quotient accepted by the decoder's adaptive-unary reader. Keep the
  * encoder on the same bound: a larger quotient would make an otherwise valid generated patch
  * fail as a malformed run-on at apply time. */
@@ -220,21 +218,18 @@ static RC_NOINLINE void rc_ugg_init(up_UGGamma*g){
     for(int i=0;i<UP_UG_GAMMA_MANT;i++) g->m[i]=RC_PHALF;
 }
 
-static inline void rc_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w){
-    /* Leaves are already resident in hist[]. Keeping a second 256-word leaf copy in the
-     * decoder's phase-overlaid seed workspace only inflated PatchApply: build the internal
-     * nodes directly against hist and retain only those nodes in w[]. */
-    for(int m=255;m>=1;m--){
-        int leaf=2*m>=256;
-        uint32_t l=leaf?hist[2*m-256]:w[2*m];
-        uint32_t r=leaf?hist[2*m+1-256]:w[2*m+1];
-        w[m]=l+r;
-    }
-    for(int m=1;m<256;m++){
-        uint32_t l=2*m>=256?hist[2*m-256]:w[2*m];
-        uint16_t p=rc_lit_seed_prob(l,w[m]);
-        uint16_t q=(uint16_t)((p+8u)>>4);
-        t->p[m-1]=(uint8_t)(q ? (q<256u ? q : 255u) : 1u);
+static inline void rc_lit_tree_from_hist(up_BitTree*t,uint32_t*hist){
+    /* Once a pair of child counts has supplied its node probability, only their sum is live.
+     * Reduce each level into the front of hist[] in place, from the 128 leaf-pair nodes to the
+     * root, so literal seeding needs no separate internal-node workspace. */
+    for(int base=128;base;base>>=1){
+        for(int i=0;i<base;i++){
+            uint32_t l=hist[2*i], total=l+hist[2*i+1];
+            uint16_t p=rc_lit_seed_prob(l,total);
+            uint16_t q=(uint16_t)((p+8u)>>4);
+            t->p[base+i-1]=(uint8_t)(q ? (q<256u ? q : 255u) : 1u);
+            hist[i]=total;
+        }
     }
 }
 
@@ -352,8 +347,8 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
 /* Per-tree adaptation-shift rates for the literal + dval byte-trees. These bit-trees carry their
  * OWN rate (not stored per-tree — see the up_BitTree note above — but passed at every s_bt/bt_encode
  * call site), single-sourced here so encoder and decoder move together. RC_LIT0_RATE (tag0 span
- * literals, order-1 context), RC_LIT1_RATE (tag1 literals), and RC_DVAL_RATE (MTF escape + [C]
- * correction bytes) all track at 1/16. */
+ * literals, order-1 context), RC_LIT1_RATE (tag1 literals), and RC_DVAL_RATE (MTF escape bytes)
+ * all track at 1/16. */
 #define RC_LIT0_RATE 4
 #define RC_LIT1_RATE 4
 #define RC_DVAL_RATE 4
@@ -411,9 +406,9 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
  * order suits its surrounding code (e.g. the encoder borrows gdl/gadj for the map header, then re-inits
  * via rc_init_prekd) without moving the wire. */
 typedef struct {
-    up_BitTree  dval;                         /* MTF escape + [C] correction bytes */
+    up_BitTree  dval;                         /* MTF escape bytes */
     up_IdxUnary dibl, diex;                   /* MTF cache-index unary priors (bl/ex) */
-    up_UGGamma  pg, pgn, pg2, gdl, gel, gadj; /* correction gaps + counts + per-op geometry */
+    up_UGGamma  gdl, gel, gadj;                /* per-op geometry */
 } up_PreKdModels;
 typedef struct {
     up_UGRice  gd, go;                         /* backref-distance + out-position rice */
@@ -426,13 +421,10 @@ typedef struct {
 /* bias the first `depth` unary-prefix positions of a gamma model toward "continue" (bit 1). */
 static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u,UP_UG_CTX,depth); }
 
-/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (GDL/GADJ).
- * PG2 stays neutral because later correction gaps ship as gap-1 and adjacency is value zero. */
+/* pre-kd apply-phase init: neutral models + the structural seed_cont priors (GDL/GADJ). */
 static inline void rc_init_prekd(up_PreKdModels*m){
     up_bt_init(&m->dval);
     up_idx_init(&m->dibl,RC_IDX_SEED); up_idx_init(&m->diex,RC_IDX_SEED);
-    rc_ugg_init(&m->pg); rc_ugg_init(&m->pgn);
-    rc_ugg_init(&m->pg2);
     rc_ugg_init(&m->gdl); rc_ugg_init(&m->gel); rc_ugg_init(&m->gadj);
     rc_ugg_seed_cont(&m->gdl,RC_SEED_DEPTH_GDL); rc_ugg_seed_cont(&m->gadj,RC_SEED_DEPTH_GADJ);
 }

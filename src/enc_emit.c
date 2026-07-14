@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Host encoder module -- shift-map fitting, body assembly, and range-coder emission:
- * op_emit_content, emit_delta, emit_geom_pc, emit_body, encode_body.
+ * op_emit_content, emit_delta, emit_geom, emit_body, encode_body.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -164,20 +164,10 @@ static void emit_delta(Models *M, REnc *r, int kind, int32_t delta) {
     (void)delta_xfer(D, gix, &M->pre.dval, r, delta);
 }
 
-static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
+static void emit_geom(REnc *r, Models *M, const Op *o) {
     ugg_encode(&M->pre.gdl, r, (uint32_t)o->diff_len);
     ugg_encode(&M->pre.gel, r, (uint32_t)o->extra_len);
     ugg_encode(&M->pre.gadj, r, rc_zz32(o->adj));
-    int32_t prev = 0;
-    ugg_encode(&M->pre.pgn, r, (uint32_t)pc->corr.n);
-    prev = 0;
-    for (size_t i = 0; i < pc->corr.n; i++) {
-        uint32_t gap = (uint32_t)(pc->corr.v[i].off - prev);
-        /* The first offset is absolute; later distinct offsets ship gap-1 so adjacency is zero. */
-        ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, i ? gap - 1u : gap);
-        prev = pc->corr.v[i].off;
-        bt_encode(&M->pre.dval, r, pc->corr.v[i].byte, RC_DVAL_RATE);
-    }
 }
 
 /* residual = need - pred under a candidate shift map, wrapped mod 2^32 exactly like the decoder
@@ -214,13 +204,12 @@ static int smap_wire_feasible(const uint32_t *mb, const int32_t *mv, int mn) {
     return 1;
 }
 
-/* Emit the full body (token geometry/correction/delta streams interleaved with the LZ content tokens)
+/* Emit the full body (token geometry/delta streams interleaved with the LZ content tokens)
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
- * the flushed Buf. The geometry/correction/delta streams are parse-independent, so this same routine
+ * the flushed Buf. The geometry/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
-                     const LitSeedTrees *seeds,
-                     const OpPC *pc, const Buf *content, const Buf *tags,
+                     const LitSeedTrees *seeds, const Buf *content, const Buf *tags,
                      const OpEmitRow *rows, const FieldInjArena *inj,
                      const uint32_t *mb, const int32_t *mv, int mn,
                      int *overflow) {
@@ -253,8 +242,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
               ugg_encode(&M.pre.gadj, &rc, rc_zz32(mv[i]));
           } }
     }
-    /* now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj, inits dval/dibl/diex/
-     * pg/pgn/pg2/gel) through the same shared rc_init_prekd() the decoder calls. */
+    /* Now init the full apply-phase pre-kd state (re-seeds the borrowed gdl/gadj and initializes
+     * dval/dibl/diex/gel) through the same shared rc_init_prekd() the decoder calls. */
     rc_init_prekd(&M.pre);
     re_raw(&rc, out_en);   /* out-match enable bit (mirror patch_apply) */
     /* token count (seq->n) is NO LONGER shipped: the decoder pulls content demand-driven and the
@@ -267,7 +256,7 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     content_cursor_init(&ec, seq, content->d, tags->d, content->n, &M, &rc, FWD, out_en, oexp);
     for (size_t step = 0; step < ops->n; step++) {
         size_t oi = FWD ? step : ops->n - 1 - step;
-        emit_geom_pc(&rc, &M, &ops->v[oi], &pc[step]);
+        emit_geom(&rc, &M, &ops->v[oi]);
         size_t ib = step ? rows[step - 1u].inj_end : 0u;
         for (size_t ii = ib; ii < rows[step].inj_end; ii++) {
             const FieldInj *ij = &inj->v[ii];
@@ -285,7 +274,6 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
 typedef struct {
     const OpVec *ops;
     const LitSeedTrees *seeds;
-    const OpPC *pc;
     const Buf *content;
     const Buf *tags;
     const OpEmitRow *rows;
@@ -295,8 +283,8 @@ typedef struct {
 static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int kd, int ko,
                              const FieldInjArena *inj, const uint32_t *mb, const int32_t *mv, int mn) {
     int overflow = 0;
-    Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->seeds, m->pc,
-                         m->content, m->tags, m->rows, inj, mb, mv, mn, &overflow);
+    Buf body = emit_body(seq, kd, ko, m->ops, m->FWD, m->seeds, m->content,
+                         m->tags, m->rows, inj, mb, mv, mn, &overflow);
     size_t n = overflow ? (size_t)-1 : body.n;
     buf_free(&body);
     return n;
@@ -308,8 +296,8 @@ static size_t emit_body_size(const EmitBodyMeasure *m, const TokenVec *seq, int 
  * byte tree). This fit instead prices, in fractional bits, the exact map header PLUS the BL/EX
  * residual streams under a candidate map, and eliminates segments by NET bits (segment wire cost
  * vs the residual-bit increase from dropping it). The price is a PROXY (residuals are priced in
- * field-reference order and the shared dval tree ignores the interleaved corrections, both
- * second-order); the final map choice is always settled by encode_body's exact full-body byte
+ * field-reference order rather than full emission order, a second-order effect); the final map
+ * choice is always settled by encode_body's exact full-body byte
  * gate, which competes this map against the hit-count map and the no-map body. ---- */
 
 /* Price one residual through the bounded MTF/rep/hit/escape machine (mirror emit_delta). */
@@ -455,8 +443,7 @@ static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const LdrTargetIndex *ldr, const OpPC *pc, int32_t fp_start,
-                int *overflow_out) {
+                const LdrTargetIndex *ldr, int32_t fp_start, int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     OpEmitRow *rows = (OpEmitRow *)xmalloc((ops->n ? ops->n : 1) * sizeof(*rows));
@@ -498,9 +485,9 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     OCandArena ocands = {0}; uint8_t *nocand = NULL;
     out_candidates(content.d, content.n, ops, walk, rows, FWD,
                    tob, to_size, frm, from_size, &ocands, &nocand);
-    EmitBodyMeasure meas = { ops, &seeds, pc, &content, &tags, rows, FWD };
+    EmitBodyMeasure meas = { ops, &seeds, &content, &tags, rows, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
-     * the result only if the FULL body (geometry/correction/delta interleaved with the LZ tokens, after
+     * the result only if the FULL body (geometry/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
      * gates token selection on the quantity we actually pay, so an order-1-cheaper parse that the
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */
@@ -561,7 +548,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     const uint32_t *sel_b = use_map >= 0 ? map_b[use_map] : NULL;
     const int32_t *sel_v = use_map >= 0 ? map_v[use_map] : NULL;
     int sel_n = use_map >= 0 ? map_n[use_map] : 0;
-    Buf body = emit_body(&seq, kd, ko, ops, FWD, &seeds, pc, &content, &tags, rows,
+    Buf body = emit_body(&seq, kd, ko, ops, FWD, &seeds, &content, &tags, rows,
                          &inj, sel_b, sel_v, sel_n, overflow_out);
     free(inj.v);
     buf_free(&ocands); free(nocand);

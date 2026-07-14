@@ -98,7 +98,7 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
     return ops;
 }
 
-/* Fold zero-output pure source seeks out of the plan before PC/body generation. A leading seek becomes
+/* Fold zero-output pure source seeks out of the plan before payload/body generation. A leading seek becomes
  * the envelope's fp_start seed; every later seek extends the previous kept op's adj. Kept op source
  * coordinates are unchanged when walks start from fp_start. */
 static int32_t fold_zero_ops(OpVec *ops) {
@@ -118,107 +118,32 @@ static int32_t fold_zero_ops(OpVec *ops) {
     return fp_start;
 }
 
-static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
-    int split_any = 0;
-    int FWDD = ctx->fwd;
-    int32_t *cut = (int32_t *)xmalloc((ops->n ? ops->n : 1) * sizeof(int32_t));
-    for (size_t i = 0; i < ops->n; i++) cut[i] = -1;
-    for (size_t step = 0; step < ops->n; step++) {
-        size_t nc = pc[step].corr.n;
-        int high = nc && (uint32_t)pc[step].corr.v[nc - 1u].off >= RC_PACKED_POS_LIMIT;
-        if (nc <= OPC_CAP && !high) continue;
-        size_t oi = FWDD ? step : ops->n - 1 - step;
-        int32_t dl = ops->v[oi].diff_len;
-        int32_t nw = dl + ops->v[oi].extra_len;
-        int32_t m;
-        if (high) {
-            m = (int32_t)RC_PACKED_POS_LIMIT;
-        } else {
-            /* nc>OPC_CAP unique in-range offsets make this median internal to the whole op. */
-            m = pc[step].corr.v[nc / 2].off;
-        }
-        if (m <= 0 || m >= nw) continue;
-        cut[oi] = m;
-        ctx->opc_splits++;
-        split_any = 1;
-    }
-    if (split_any) {
-        OpVec out2 = { .payload = ops->payload };
-        for (size_t oi = 0; oi < ops->n; oi++) {
-            Op *o = &ops->v[oi];
-            if (cut[oi] < 0) { opvec_push(&out2, *o); continue; }
-            /* Split at an arbitrary output offset. If it falls in extras, sub1 carries
-             * their prefix and sub2 is extra-only; source still advances exactly dl+adj. */
-            int32_t d1 = cut[oi] < o->diff_len ? cut[oi] : o->diff_len;
-            int32_t e1 = cut[oi] - d1;
-            opvec_push(&out2, (Op){ d1, e1, 0 });
-            opvec_push(&out2, (Op){ o->diff_len - d1, o->extra_len - e1, o->adj });
-        }
-        free(ops->v);
-        *ops = out2;
-    }
-    free(cut);
-    return split_any;
-}
-
-/* Corrections-cap degradation: OPC_CAP bounds
- * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
- * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
- * op boundaries, which shifts field detection and thus the corrections themselves, so
- * this iterates to a fixpoint. On the home corpus no op ever exceeds the cap and pass 0
- * computes exactly the untransformed plan (bit-identical wire). */
-static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
-                               const Buf *from, const Buf *to,
-                               const LdrTargetIndex *ldr, PlanCaps *caps) {
-    uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    OpPC *pc = NULL;
-    for (;;) {
-        pc = corrections_pc(ctx, ops, fp_start, from->d, to->d,
-                            from_size, to_size, ldr, caps);
-        size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
-        int split_any = split_overfull_corrections(ctx, ops, pc);
-        if (!split_any) break;
-        /* Each cut partitions one non-empty output span into two. Therefore ops->n grows
-         * strictly and can do so at most to_size times, independent of correction churn. */
-        if (ops->n <= old_n || ops->n > to_size)
-            die("correction split progress invariant");
-        oppc_array_free(pc, old_n);
-    }
-    return pc;
-}
-
 /* One full op-plan -> emitted body pipeline. Plans either keep raw byte deltas or add op-derived
  * field deltas exact under the bsdiff alignment. encode_patch emits the smallest body. */
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};
     ctx->deg_engaged = 0;
-    ctx->opc_splits = 0;
     PlanCaps caps;
     OpVec ops = build_candidate_ops(ctx, from, to, prep, spec);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
     literalize_hazards(ctx, &ops, to, fp_start_s, from_size, to_size);
     if (ctx->deg_engaged) fp_start_s += fold_zero_ops(&ops);
-    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &prep->ldr, &caps);
-    /* The direction fallback needs to know whether hazard/correction fallbacks were used. */
-    r.st = (EncStats){ ctx->deg_engaged, ctx->opc_splits };
-    /* Decoder resource feasibility mirrors patch_apply OPC_CAP. Relocation-cache misses
-     * remain representable escapes and therefore do not make a plan infeasible. */
+    fold_payload(ctx, &ops, fp_start_s, from->d, to->d,
+                 from_size, to_size, &prep->ldr, &caps);
+    /* The direction fallback needs to know whether hazard literalization was used. */
+    r.st = (EncStats){ ctx->deg_engaged };
     int feasible = caps.ok;
     Buf body = {0};
     if (feasible) {
         int emit_overflow = 0;
         body = encode_body(ctx, &ops, from->d, from_size, to->d, to_size,
-                           &prep->ldr, pc, fp_start_s, &emit_overflow);
+                           &prep->ldr, fp_start_s, &emit_overflow);
         if (emit_overflow) { buf_free(&body); body = (Buf){0}; feasible = 0; }
     }
-    /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
-     * and the sweep tries the remaining configs — different bsdiff alignments need different
-     * correction budgets, so another variant may fit the decoder cap.
-     * encode_patch dies only
-     * when EVERY config is infeasible. */
-    oppc_array_free(pc, ops.n);
+    /* An infeasible plan returns an empty body and the sweep tries the remaining variants.
+     * encode_patch dies only when every variant is infeasible. */
     opvec_free(&ops);
     r.body = body;
     r.fp_end = caps.fp_end;

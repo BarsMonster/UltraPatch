@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Host encoder module -- field/delta model + apply planning: classify_field,
- * proxy pricing, split runs, corrections.
+ * proxy pricing, split runs, payload folding.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -56,99 +56,70 @@ int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, u
     return hit;
 }
 
-typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } CorrFieldCursor;
-
 typedef struct {
     const EncCtx *ctx;
     uint8_t *payload;
     const uint8_t *frm, *true_to;
     uint32_t from_size, to_size;
     PlanCaps *caps;
-} CorrWalk;
+} FoldWalk;
 
-static void corr_field_cursor_next(CorrFieldCursor *fc) {
-    while (fw_next(&fc->w)) {
-        if (!fc->w.is_field || (fc->w.ev.type != EV_BL && fc->w.ev.type != EV_EX)) continue;
-        fc->pos = fc->w.pos;
-        uint32_t fpk = (uint32_t)(fc->w.fp0 + fc->w.pos);
-        if (fc->w.ev.type == EV_BL) {
-            uint16_t up = rc_u16le(fc->w.frm + fpk), lo = rc_u16le(fc->w.frm + fpk + 2);
-            rc_bl_dereloc(up, lo, (uint32_t)fc->w.ev.delta, fc->packed);
-        } else {
-            uint32_t val = rc_u32le(fc->w.frm + fpk);
-            rc_u32le_put(fc->packed, val - (uint32_t)fc->w.ev.delta);
-        }
-        fc->have = 1;
-        return;
+static void fold_byte(FoldWalk *fw, const OpWalkEnt *we, int32_t off) {
+    int32_t tp = we->tp + off, fp = we->fp + off;
+    uint8_t src = 0;
+    if (0 <= fp && (uint32_t)fp < fw->from_size) {
+        int behind = fw->ctx->fwd ? fp < tp : fp > tp;
+        int overwritten = behind && (uint32_t)fp < fw->to_size &&
+                          !row_covered(fw->ctx, fp, tp);
+        /* literalize_hazards must remove every read of committed flash. Model physical
+         * flash for diagnostics, but reject the plan if that invariant is ever violated. */
+        if (overwritten) fw->caps->ok = 0;
+        src = overwritten ? fw->true_to[fp] : fw->frm[fp];
     }
-    fc->have = 0;
+    fw->payload[tp] = (uint8_t)(fw->true_to[tp] - src);
 }
 
-static const CorrFieldCursor *corr_event(const EncCtx *ctx, CorrFieldCursor *fc, int32_t off) {
-    if (!fc->have) corr_field_cursor_next(fc);
-    while (fc->have) {
-        int32_t d = off - fc->pos;
-        if ((uint32_t)d < 4u) return fc;
-        if (ctx->fwd ? d > 3 : d < 0) { corr_field_cursor_next(fc); continue; }
-        return NULL;
-    }
-    return NULL;
-}
-
-static void correction_byte(CorrWalk *cw, CorrFieldCursor *fc, OpPC *pc,
-                            const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
-    int32_t tp = we->tp + off;
-    int32_t fp = is_diff ? we->fp + off : -1;
-    uint8_t produced;
-    const CorrFieldCursor *ev = is_diff ? corr_event(cw->ctx, fc, off) : NULL;
-    if (ev) {
-        produced = ev->packed[off - ev->pos];
+static void fold_field(FoldWalk *fw, const OpWalkEnt *we, const FieldWalk *w) {
+    uint8_t packed[4];
+    uint32_t fpk = (uint32_t)(we->fp + w->pos);
+    int32_t tpk = we->tp + w->pos;
+    if (w->ev.type == EV_BL) {
+        uint16_t up = rc_u16le(fw->frm + fpk), lo = rc_u16le(fw->frm + fpk + 2);
+        rc_bl_dereloc(up, lo, (uint32_t)w->ev.delta, packed);
     } else {
-        uint8_t src = 0;
-        if (is_diff && 0 <= fp && (uint32_t)fp < cw->from_size) {
-            int behind = cw->ctx->fwd ? fp < tp : fp > tp;
-            int overwritten = behind && (uint32_t)fp < cw->to_size &&
-                              !row_covered(cw->ctx, fp, tp);
-            /* literalize_hazards must remove every read of committed flash. Model physical
-             * flash for diagnostics, but reject the plan if that invariant is ever violated. */
-            if (overwritten) cw->caps->ok = 0;
-            src = overwritten ? cw->true_to[fp] : cw->frm[fp];
-        }
-        produced = (uint8_t)(byte + src);
+        uint32_t val = rc_u32le(fw->frm + fpk);
+        rc_u32le_put(packed, val - (uint32_t)w->ev.delta);
     }
-    uint8_t want = cw->true_to[tp];
-    uint8_t corr = (uint8_t)(want - produced);
-    uint8_t folded = (uint8_t)(byte + corr);
-    /* Extras already occupy content positions. For copied bytes, preserve the nonzero bitmap
-     * that drives BL/LDR purity so FieldWalk and the decoder keep identical field decisions. */
-    if (corr && !ev && (!is_diff || (byte && folded))) {
-        cw->payload[tp] = folded;
-        return;
-    }
-    if (corr) {
-        corr_push(&pc->corr, off, corr);
-        if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > OPC_CAP)
-            cw->caps->ok = 0;
-    }
+    if (!memcmp(packed, fw->true_to + tpk, sizeof(packed))) return;
+    /* A relocation that cannot reproduce the exact target is no longer a field on the final
+     * walk. Literalize the complete window atomically so BL suppression and ordinary copy
+     * decoding both see target-minus-pristine-source bytes. */
+    for (int b = 0; b < 4; b++)
+        fw->payload[tpk + b] = (uint8_t)(fw->true_to[tpk + b] - fw->frm[fpk + (uint32_t)b]);
 }
 
-static void corrections_op(CorrWalk *cw, CorrFieldCursor *fc, OpPC *pc,
-                           const OpWalkEnt *we) {
-    const Op *o = we->o;
-    int32_t n = o->diff_len + o->extra_len;
-    int FWD = cw->ctx->fwd;
-    for (int32_t i = 0; i < n; i++) {
-        int32_t off = FWD ? i : n - 1 - i;
-        int is_diff = off < o->diff_len;
-        uint8_t byte = cw->payload[we->tp + off];
-        correction_byte(cw, fc, pc, we, off, is_diff, byte);
+static void fold_op(FoldWalk *fw, const LdrTargetIndex *ldr, const OpWalkEnt *we) {
+    FieldWalk w;
+    fw_init(&w, fw->ctx->fwd, fw->frm, fw->from_size, fw->true_to, fw->to_size, ldr,
+            fw->payload + we->tp, we->fp, we->tp, we->o->diff_len);
+    while (fw_next(&w)) {
+        if (w.is_field && (w.ev.type == EV_BL || w.ev.type == EV_EX)) {
+            fold_field(fw, we, &w);
+        } else if (w.is_field) {
+            for (int b = 0; b < 4; b++) fold_byte(fw, we, w.pos + b);
+        } else {
+            fold_byte(fw, we, w.pos);
+        }
     }
+    if (we->o->extra_len)
+        memcpy(fw->payload + we->tp + we->o->diff_len,
+               fw->true_to + we->tp + we->o->diff_len, (size_t)we->o->extra_len);
 }
 
 /* `diff==NULL` is the coercion probe: only a BL-compatible target window is relocatable, while
  * every LDR word can carry its exact occurrence-local delta. With a real diff, a still-dirty BL
  * remains suppressed; a pure BL with an unexpected incompatible target falls back to delta zero
- * so corrections retain the decoder's source-only classification. */
+ * so final payload folding can literalize the complete field window. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             const LdrTargetIndex *ldr, const uint8_t *diff,
@@ -422,7 +393,7 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
         /* The historical DP re-priced every (segment start, split run) pair with a fresh
          * op_proxy_bits walk over the diff bytes -- O(nr^2 * diff_len) time and an O(nr^2)
          * state table, quadratic-cubic on scattered-diff inputs (the scattered-diff /
-         * correction-storm stress cases). Every query boundary is a RUN boundary, so
+         * scattered-diff stress cases). Every query boundary is a RUN boundary, so
          * diff_proxy_bits decomposes exactly into run-indexed prefix sums (uint64 addition
          * is associative; the terms are the same uleb_proxy_bits/L0 values in a different
          * association order), and the full (ri, p) table collapses to its diagonal
@@ -505,10 +476,10 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
     split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
 }
 
-OpPC *corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                     const uint8_t *frm, const uint8_t *true_to,
-                     uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr,
-                     PlanCaps *caps) {
+void fold_payload(const EncCtx *ctx, OpVec *ops, int32_t fp_start,
+                  const uint8_t *frm, const uint8_t *true_to,
+                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr,
+                  PlanCaps *caps) {
     int FWD = ctx->fwd;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
     *caps = (PlanCaps){ 1, fp_start };
@@ -516,21 +487,10 @@ OpPC *corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
         const OpWalkEnt *last = &m[ops->n - 1u];
         caps->fp_end = last->fp + last->o->diff_len + last->o->adj;
     }
-    OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    CorrWalk cw = { ctx, ops->payload, frm, true_to, from_size, to_size, caps };
-    const OpWalkEnt *we;
+    FoldWalk fw = { ctx, ops->payload, frm, true_to, from_size, to_size, caps };
     for (size_t step = 0; step < ops->n; step++) {
-        we = &m[opwalk_apply_index(ops->n, FWD, step)];
-        CorrFieldCursor fc;
-        fw_init(&fc.w, FWD, frm, from_size, true_to, to_size, ldr,
-                ops->payload + we->tp, we->fp, we->tp, we->o->diff_len);
-        fc.have = 0;
-        OpPC *pc = &out[step];
-        corrections_op(&cw, &fc, pc, we);
-        if (!FWD) {
-            if (pc->corr.n > 1) qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
-        }
+        const OpWalkEnt *we = &m[opwalk_apply_index(ops->n, FWD, step)];
+        fold_op(&fw, ldr, we);
     }
     free(m);
-    return out;
 }

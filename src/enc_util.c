@@ -88,12 +88,6 @@ void opvec_free(OpVec *v) {
     v->n = v->cap = 0;
 }
 
-void oppc_array_free(OpPC *pc, size_t n) {
-    if (!pc) return;
-    for (size_t i = 0; i < n; i++) free(pc[i].corr.v);
-    free(pc);
-}
-
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start) {
     OpWalkEnt *w = (OpWalkEnt *)xmalloc((ops->n ? ops->n : 1) * sizeof(*w));
     int32_t tp = 0, fp = fp_start;
@@ -266,18 +260,6 @@ void put_uleb_overlong(Buf *b, uint32_t v) {
 void ivec_push(IVec *v, int32_t x) {
     v->v = (int32_t *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
     v->v[v->n++] = x;
-}
-
-void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
-    v->v = (CorrEnt *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
-    v->v[v->n].off = off;
-    v->v[v->n].byte = byte;
-    v->n++;
-}
-
-int cmp_corr(const void *a, const void *b) {
-    const CorrEnt *x = (const CorrEnt *)a, *y = (const CorrEnt *)b;
-    return (x->off > y->off) - (x->off < y->off);
 }
 
 void opvec_push(OpVec *v, Op o) {

@@ -57,7 +57,6 @@ int divsufsort(const uint8_t *T, int32_t *suffix_array, int32_t n);
 typedef struct {
     int fwd;
     int deg_engaged;
-    size_t opc_splits;
 } EncCtx;
 
 static inline int row_covered(const EncCtx *ctx, int64_t a, int64_t t) {
@@ -79,12 +78,8 @@ typedef struct {
     uint32_t source_size;
 } LdrTargetIndex;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
-typedef struct { int32_t off; uint8_t byte; } CorrEnt;
-typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
-typedef struct { CorrVec corr; } OpPC;
 typedef struct {
     int deg_engaged;
-    size_t opc_splits;
 } EncStats;
 enum { PLAN_RAW_11, PLAN_RAW_6, PLAN_RAW_20, PLAN_RAW_N };
 enum { PLAN_SPEC_N = 4 };
@@ -176,7 +171,7 @@ typedef struct { up_BitTree lit0, lit1; } LitSeedTrees;
 
 typedef struct {
     up_BitTree lit0[UP_LIT0_CTX], lit1;
-    up_PreKdModels pre;   /* dval/dibl/diex/pg/pgn/pg2/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
+    up_PreKdModels pre;   /* dval/dibl/diex/gdl/gel/gadj (rc_init_prekd, rc_models.h) */
     up_TokModels tok;     /* gd/go/gl/gs/glo/outb/flag/rep0 (rc_init_tok, rc_models.h) */
     DRE dr_bl, dr_ex;
     int32_t dic_bl[DR_KCAP_BL], dic_ex[DR_KCAP_EX];
@@ -215,7 +210,6 @@ void buf_write(Buf *b, const void *p, size_t n);
 void buf_put_u32le(Buf *b, uint32_t v);
 void buf_free(Buf *b);
 void opvec_free(OpVec *v);
-void oppc_array_free(OpPC *pc, size_t n);
 OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
 /* Decoder-order index for step `step` of an n-op apply walk (forward: 0..n-1; reverse: n-1..0).
  * Callers loop `for (step=0; step<n; step++) we = &walk[opwalk_apply_index(n, fwd, step)];`. */
@@ -231,8 +225,6 @@ int bitlen32(uint32_t v);
 void put_uleb(Buf *b, uint32_t v);
 void put_uleb_overlong(Buf *b, uint32_t v);
 void ivec_push(IVec *v, int32_t x);
-void corr_push(CorrVec *v, int32_t off, uint8_t byte);
-int cmp_corr(const void *a, const void *b);
 void opvec_push(OpVec *v, Op o);
 
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
@@ -251,10 +243,10 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
                            const LdrTargetIndex *ldr);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to);
-OpPC *corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                     const uint8_t *frm, const uint8_t *true_to,
-                     uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr,
-                     PlanCaps *caps);
+void fold_payload(const EncCtx *ctx, OpVec *ops, int32_t fp_start,
+                  const uint8_t *frm, const uint8_t *true_to,
+                  uint32_t from_size, uint32_t to_size, const LdrTargetIndex *ldr,
+                  PlanCaps *caps);
 
 void re_init(REnc *r);
 void re_bit(REnc *r, uint16_t *prob, int bit, int rate);
@@ -304,8 +296,7 @@ uint32_t bit_price(uint32_t p, int bit);
 
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
-                const LdrTargetIndex *ldr, const OpPC *pc, int32_t fp_start,
-                int *overflow_out);
+                const LdrTargetIndex *ldr, int32_t fp_start, int *overflow_out);
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);
 void plan_prepare_free(PlanPrep *prep);

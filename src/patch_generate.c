@@ -45,19 +45,16 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     PlanPrep prep;
     plan_prepare(&prep, &from, &to);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the
-     * smallest complete envelope ships and ties keep the earliest entry. A config whose plan
-     * exceeds the decoder correction cap returns an empty body and
-     * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
-     * in-family firmware. */
+     * smallest complete envelope ships and ties keep the earliest entry. An infeasible config
+     * returns an empty body and is skipped. */
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
     Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1;
     int natural_bestv = -1;
-    unsigned char natural_opc[PLAN_SPEC_N] = {0};
     /* The opposite direction is a fallback: admit it only when no natural plan was feasible or
-     * the natural winner needed hazard literalization. Once admitted,
-     * rerun that winner plus natural plans that needed correction splitting. A clean natural
-     * winner is already applicable, so skipping the opposite pass can only affect blob size. */
+     * the natural winner needed hazard literalization. Once admitted, retry only that winner;
+     * if no natural plan was feasible, try every variant. A clean natural winner is already
+     * applicable, so skipping the opposite pass can only affect blob size. */
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
@@ -65,9 +62,8 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
         if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
         for (int v = 0; v < PLAN_SPEC_N; v++) {
-            if (pass && natural_bestv >= 0 && v != natural_bestv && !natural_opc[v]) continue;
+            if (pass && natural_bestv >= 0 && v != natural_bestv) continue;
             PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &PLAN_SPECS[v]);
-            if (!pass) natural_opc[v] = (unsigned char)(pr.st.opc_splits != 0);
             if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
             Buf cand = {0};
             emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
@@ -78,7 +74,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
         }
     }
     plan_prepare_free(&prep);
-    if (bestv < 0) die("no feasible plan: every config exceeds a decoder resource cap for this pair");
+    if (bestv < 0) die("no feasible plan for this pair");
     /* Self-verification (patch_host_backend.c): apply the finished blob to `from` on the
      * REFERENCE decoder (the real patch_apply.h + an NVM page emulator) and require the
      * exact `to` image plus clean NVM write-safety. ultrapatch refuses to ship a patch it

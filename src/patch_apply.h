@@ -30,9 +30,9 @@
  * division — Cortex-M0+ has no HW divide) decodes ONE interleaved stream whose symbols are
  * emitted in decode-consumption order (no length prefixes, no byte-aligned sections).
  *
- * Reconstruction is NO-BAKE: NO source writes. The [A] copy reads RAW from[fp]; the new image
- * is corrected at the monotonic output frontier by the to-ordered additive corrections [C]
- * (out[tp] = db + raw_from[fp] + corr[tp]). Relocation fields are de-relocated on the fly: bl
+ * Reconstruction is NO-BAKE: NO source writes. The [A] copy reads RAW from[fp], and the content
+ * payload supplies target-indexed additive bytes (out[tp] = db + raw_from[fp]). Relocation fields
+ * are de-relocated on the fly: bl
  * positions are DERIVED by a local halfword pattern; ldr positions are DERIVED per op (a field is
  * ldr iff an ldr-literal instruction in the same op's copy range targets it) — so positions are
  * never shipped, only the per-field delta VALUES, pulled inline from the single stream (adaptive
@@ -106,21 +106,20 @@ typedef struct { uint32_t range, code; } up_RangeDec;
 /* WINDOW_LOG is configured above. */
 #define UP_RING (1u<<WINDOW_LOG)
 #define UP_MASK (UP_RING-1u)
-/* up_ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) + the count-bounded
- * per-op correction array + the streaming scalars/cursors. */
+/* up_ApplyState = the whole apply-phase working set: the LZSS content-history ring (2^W) +
+ * the streaming scalars/cursors. */
 typedef struct {
     uint8_t ring[UP_RING]; uint32_t ototal;       /* content history (masked) + total produced */
     uint32_t tok_left, tok_src;                   /* token replay count + ring/output source */
     int32_t tp, fp;                               /* running accumulators (apply order) */
-    uint32_t op_corr[OPC_CAP]; uint8_t op_nc;     /* high 24 bits = offset, low 8 = correction */
     uint8_t tok_mode;                             /* 0=idle, 1=span, 2=backref, 3=out-match */
     uint8_t last_span;                            /* previous token was a span (flag implicit) */
 } up_ApplyState;
 /* One ARENA, two disjoint phase lifetimes overlaid as a union. Literal seeding finishes before
  * any member of apply is initialized or read, so the complete apply-only working set can reuse
- * that otherwise-dead 3 KiB workspace. */
+ * that otherwise-dead 2 KiB workspace. */
 typedef union {
-    struct { uint32_t hist0[256], hist1[256], w[256]; } seed;
+    struct { uint32_t hist0[256], hist1[256]; } seed;
     struct {
         up_ApplyState sa;
         uint32_t g_smap_b[UP_SMAP_CAP];
@@ -172,7 +171,6 @@ _Static_assert(sizeof(((up_Arena *)0)->apply) >= sizeof(((up_Arena *)0)->seed),
 _Static_assert(offsetof(up_Arena, apply.sa)==0u && (offsetof(up_Arena, apply.sa)&3u)==0u,
                "up_ApplyState must start the apply workspace and be >=4-aligned");
 _Static_assert(MAX_IMAGE <= 0x7fffffffu, "MAX_IMAGE must stay < 2^31 (int32 tp/fp cursors, 32-bit overflow guards)");
-_Static_assert(OPC_CAP <= UINT8_MAX, "OPC_CAP must fit the uint8 correction count");
 _Static_assert(DR_KCAP_BL > 0u && DR_KCAP_EX > 0u && DR_KCAP_BL <= 65535u && DR_KCAP_EX <= 65535u,
                "DR_KCAP_* must be nonzero and fit uint16 up_DRStream.K");
 /* Integration geometry is part of the public type/configuration contract, so every build applies
@@ -220,7 +218,7 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa,
 static int up_decode_body(PatchApply *pa);  /* 1 = body decoded; 0 = error (g_reject/g_rcerr hold why) */
 /* The literal-seed histograms are real uint32_t arrays in the ARENA union's seed member, so the
  * reads/writes are ordinary typed lvalues — no may_alias / char-array reinterpretation needed. */
-static void up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w);
+static void up_lit_tree_from_hist(up_BitTree*t,uint32_t*hist);
 
 /* One raw blob byte straight from the callback. Envelope callers unwind immediately on failure;
  * the counted-body caller owns its persistent abort state. */
@@ -394,7 +392,7 @@ static void up_flash_hist(uint32_t n,uint32_t*hist0,uint32_t*hist1){
 /* The STREAMED-DELTA wire holds no resident per-detection store, only bounded MOVE-TO-FRONT
  * caches. A full cache evicts its least-recent value; every miss remains representable as a
  * full-width escape, independent of firmware diversity. */
-/* DR_KCAP_* and OPC_CAP are configured above. */
+/* DR_KCAP_* are configured above. */
 /* Suppressed BL positions are implicit: a BL-looking field with any literal patch byte (`!pure`) is
  * a normal 4-byte copy. No sbl offset stream or resident gap buffer is needed. */
 /* ===================================================================================== */
@@ -505,33 +503,13 @@ static int32_t up_pull_delta(PatchApply *pa, up_DRStream*d, up_IdxUnary*gix, int
 
 /* ===================================================================================== */
 /* streaming [A] apply: NO split, NO per-op literal/extra buffer.                             */
-/* Per op the decoder reads DIRECT geometry+C (outside LZSS), then PULLS the op's CONTENT bytes */
+/* Per op the decoder reads DIRECT geometry (outside LZSS), then PULLS the op's CONTENT bytes */
 /* from the cut whole-stream LZSS token stream and writes                                      */
 /* each output byte immediately (ascending/FWD or descending/reverse). Literal patches are consumed */
-/* via an O(1) next-position cursor; corrections via an O(1) sorted-array cursor (count-bounded).*/
+/* via an O(1) next-position cursor. */
 /* The LZSS ring (size 2^WINDOW_LOG) is the content history; backref distances <= 2^WINDOW_LOG.             */
 /* ===================================================================================== */
 /* up_ApplyState type + UP_RING/UP_MASK + the arena asserts live with the ARENA union above. */
-RC_ALWAYS_INLINE int up_op_next_offset(PatchApply *pa, uint32_t *off, uint32_t idx, uint32_t nwu){
-    uint32_t gap=up_s_ug_gamma(pa,idx?&pa->ARENA.apply.MDL_pre.pg2:&pa->ARENA.apply.MDL_pre.pg);
-    /* Later offsets ship (positive gap)-1; reject the only value whose restoration wraps. */
-    if(idx){ if(gap==UINT32_MAX){ pa->g_rcerr=1; return 0; } gap+=1u; }
-    if(gap>UINT32_MAX-*off){ pa->g_rcerr=1; return 0; }
-    *off+=gap;
-    if(*off>=nwu || *off>=RC_PACKED_POS_LIMIT){ pa->g_rcerr=1; return 0; }
-    return 1;
-}
-typedef struct { int32_t i, step; } up_CorrCur;
-static void up_corr_cur_init(up_CorrCur*c, up_ApplyState*s, int fwd){
-    c->step=fwd?1:-1; c->i=fwd?0:s->op_nc-1;
-}
-static int32_t up_corr_take(up_ApplyState*s, up_CorrCur*c, int32_t off){
-    if(c->i>=0 && c->i<s->op_nc){
-        uint32_t slot=s->op_corr[c->i];
-        if((int32_t)(slot>>8)==off){ c->i+=c->step; return (int32_t)(slot&0xffu); }
-    }
-    return 0;
-}
 /* LDR derivation: a 256-bit ring records future 4-aligned literal-pool targets of Thumb
  * LDR-literal halfwords. The target span is <=1024 B, so target>>2 modulo 256 is collision-free
  * while every consumed target stays in the current 1 KiB window. FWD records halfwords as their
@@ -758,24 +736,24 @@ RC_ALWAYS_INLINE void up_litcur_init(PatchApply *pa, up_ApplyState*s, up_LitCur*
     up_litcur_step(pa, s, lc, nl);   /* read the first patch (or set nextpos=-1 when nl==0) */
 }
 /* el extra bytes, written in iteration direction (after dl for FWD, before dl for reverse) */
-static void up_wr_extras(PatchApply *pa, up_ApplyState*s, up_CorrCur*cc, int fwd, int32_t tp0, int32_t dl, int32_t el){
+static void up_wr_extras(PatchApply *pa, up_ApplyState*s, int fwd, int32_t tp0, int32_t dl, int32_t el){
     for(int32_t i=0;i<el && !pa->g_rcerr;i++){
         int32_t e = fwd ? i : (el-1-i);
         uint8_t eb=up_next_content(pa,s,(int)((tp0+dl+e)&1));
         if(pa->g_rcerr) return;
-        up_out_write(pa,(uint32_t)(tp0+dl+e), (uint8_t)(eb + up_corr_take(s,cc,dl+e)));
+        up_out_write(pa,(uint32_t)(tp0+dl+e),eb);
     }
 }
 /* copy-mode byte at K: take the literal patch if the cursor sits on K, else the caller's cached
  * pristine source byte. FWD records it only now, at the actual copy-read point. */
-static void up_wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, up_CorrCur*cc, int32_t tp0, int32_t fp, int32_t nl, int32_t K, uint8_t src){
+static void up_wr_copy(PatchApply *pa, up_ApplyState*s, up_LitCur*lc, int32_t tp0, int32_t fp, int32_t nl, int32_t K, uint8_t src){
     uint8_t db=0;
     if(K==lc->nextpos){ db=(uint8_t)lc->litb; lc->li++; up_litcur_step(pa,s,lc,nl); }
     if(pa->g_rcerr) return;
     if(pa->g_FWD) up_hy_src_rec(pa,fp,src);
-    up_out_write(pa,(uint32_t)(tp0+K), (uint8_t)(db + src + up_corr_take(s,cc,K)));
+    up_out_write(pa,(uint32_t)(tp0+K),(uint8_t)(db+src));
 }
-/* One streaming op: direct geometry+corrections, then inline write-order field detection and
+/* One streaming op: direct geometry, then inline write-order field detection and
  * streaming write via up_out_write (ascending/FWD or descending/reverse). */
 static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
     uint32_t dl_u=up_s_ug_gamma(pa,&pa->ARENA.apply.MDL_pre.gdl);
@@ -813,17 +791,6 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
      * a corrupt adj walk can park fp0 near INT32_MAX and make the bare fp0+dl overflow (UB).
      * Valid streams keep fp inside the image plus small overshoot, so this never fires there. */
     if(fp0>(int32_t)0x7fffffff-dl){ pa->g_rcerr=1; return; }
-    /* ---- [C] op-local offsets: fill the bounded sorted correction array. ---- */
-    uint32_t nwu=(uint32_t)nw;
-    uint32_t n=up_s_ug_gamma(pa,&pa->ARENA.apply.MDL_pre.pgn), off=0;
-    if(n>(uint32_t)OPC_CAP){ pa->g_rcerr=1; pa->g_reject=REJ_RESOURCE; return; }
-    if(n>nwu){ pa->g_rcerr=1; return; }
-    s->op_nc=(uint8_t)n;
-    for(uint32_t i=0;i<n && !pa->g_rcerr;i++){
-        if(!up_op_next_offset(pa,&off,i,nwu)) return;
-        int cbyte=up_s_bt(pa,&pa->ARENA.apply.MDL_pre.dval, RC_DVAL_RATE);
-        s->op_corr[i]=(off<<8)|(uint32_t)cbyte;
-    }
     /* No BL/LDR offsets are on the wire. BL suppression is inferred from !pure, and LDR positions
      * are derived per op (ldr_targets). */
     /* ---- CONTENT decode + streaming write with inline field detection ----
@@ -839,8 +806,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
     int fwd=pa->g_FWD; int32_t step=fwd?1:-1;
     memset(pa->g_psrc_ldr,0,sizeof pa->g_psrc_ldr); pa->g_psrc_even=UINT32_MAX;
     up_LitCur lc;
-    up_CorrCur cc; up_corr_cur_init(&cc,s,fwd);
-    if(!fwd) up_wr_extras(pa,s, &cc, fwd, tp0, dl, el);
+    if(!fwd) up_wr_extras(pa,s,fwd,tp0,dl,el);
     up_litcur_init(pa,s, &lc, fwd, nl, dl);
     int32_t k=fwd?0:(dl-1);
     uint32_t srcw=0; int32_t srcw_at=-4;                 /* low op-local offset cached in srcw */
@@ -856,20 +822,20 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
             int fa=up_field_at(pa, fp0, a0, srcw, packed, pure, dl);
             if(fa){
                 for(int b=fwd?0:3; b>=0 && b<4; b+=step){
-                    if(fa==2) up_wr_copy(pa,s, &lc, &cc, tp0, fp0+a0+b, nl, a0+b, (uint8_t)(srcw>>(8*b)));
-                    else up_out_write(pa,(uint32_t)(tp0+a0+b),(uint8_t)(packed[b]+up_corr_take(s,&cc,a0+b)));
+                    if(fa==2) up_wr_copy(pa,s,&lc,tp0,fp0+a0+b,nl,a0+b,(uint8_t)(srcw>>(8*b)));
+                    else up_out_write(pa,(uint32_t)(tp0+a0+b),packed[b]);
                 }
                 k+=4*step; continue;
             }
-            up_wr_copy(pa,s, &lc, &cc, tp0, fp0+k, nl, k, (uint8_t)(fwd?srcw:srcw>>24));
+            up_wr_copy(pa,s,&lc,tp0,fp0+k,nl,k,(uint8_t)(fwd?srcw:srcw>>24));
         } else {
             int32_t d=k-srcw_at;
             uint8_t src=(uint32_t)d<4u ? (uint8_t)(srcw>>(8*d)) : up_hy_src_peek(pa,fp0+k);
-            up_wr_copy(pa,s, &lc, &cc, tp0, fp0+k, nl, k, src);
+            up_wr_copy(pa,s,&lc,tp0,fp0+k,nl,k,src);
         }
         k+=step;
     }
-    if(fwd) up_wr_extras(pa,s, &cc, fwd, tp0, dl, el);
+    if(fwd) up_wr_extras(pa,s,fwd,tp0,dl,el);
 }
 
 /* ===================================================================================== */
@@ -885,7 +851,7 @@ static void RC_NOINLINE up_apply_op(PatchApply *pa, up_ApplyState*s){
  * all reject before any flash write.
  * CRC32(to) is stashed in g_want_to here and checked over the final image after apply
  * (patch_apply_run). Then the literal bit-trees are seeded from flash parity histograms
- * (hist0/hist1/w borrow 3 KiB of ARENA before the apply
+ * (hist0/hist1 borrow 2 KiB of ARENA before the apply
  * overlays it). noinline: this runs ONCE at the top of up_decode_body, so keeping its locals in
  * their own frame (not merged into up_decode_body's) keeps them off the deep apply call chain
  * that runs afterward — it trims the decode's peak CALLER-stack usage. */
@@ -921,13 +887,13 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     if(!up_env_uleb(pa,&bl,0)) return 0;
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
-    { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1, *w=pa->ARENA.seed.w;
+    { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1;
       if(rc_wire_from_crc((uint32_t)CRC32_DECODE(0u,fs))!=want_from) return 0;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       up_flash_hist(fs,hist0,hist1);
-      up_lit_tree_from_hist(&pa->M_lit0[0],hist0,w);
+      up_lit_tree_from_hist(&pa->M_lit0[0],hist0);
       for(int c=1;c<UP_LIT0_CTX;c++) RC_MOVE_HIGH(&pa->M_lit0[c],&pa->M_lit0[0],sizeof pa->M_lit0[c]);
-      up_lit_tree_from_hist(&pa->M_lit1,hist1,w); }
+      up_lit_tree_from_hist(&pa->M_lit1,hist1); }
     /* Literal seeding occupied the same arena phase; initialize apply state only after it ends. */
     { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
     return 1;
@@ -961,14 +927,14 @@ static int up_decode_body(PatchApply *pa){
      * so patches that never out-match (e.g. the one-face update) pay exactly one bit. */
     pa->g_out_en=(uint8_t)up_s_raw(pa);
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The delta models are initialized fresh and used
-     * INLINE during apply (up_pull_delta in up_field_at). MDL_pre.dval (escape/correction bytes), the two MTF
+     * INLINE during apply (up_pull_delta in up_field_at). MDL_pre.dval (escape bytes), the two MTF
      * dict streams, and the two cache-index unary models all persist through apply. ---- */
     rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL, UP_DR_HIT_INIT); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX, UP_DR_HIT_INIT);
-    /* pre-kd apply-phase models: dval + dict-index seeds + correction/geometry gammas with their
+    /* pre-kd apply-phase models: dval + dict-index seeds + geometry gammas with their
      * structural seed_cont priors. This RE-INITs the gdl/gadj borrowed for the map header above; the
      * whole sequence is single-sourced as rc_init_prekd in rc_models.h and shared with encoder emit_body. */
     rc_init_prekd(&pa->ARENA.apply.MDL_pre);
-    /* ---- [A] streaming apply (no bake): per op read direct geometry+corrections, then pull the
+    /* ---- [A] streaming apply (no bake): per op read direct geometry, then pull the
      * op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via up_pull_delta), write via up_out_write. ---- */
     { up_ApplyState*s=&pa->ARENA.apply.sa;
@@ -1000,8 +966,8 @@ static int up_decode_body(PatchApply *pa){
 /* ===================================================================================== */
 /* public API: patch_apply_run(state, callback, ctx) -> DONE / ERROR                       */
 /* ===================================================================================== */
-static void RC_NOINLINE up_lit_tree_from_hist(up_BitTree*t,const uint32_t*hist,uint32_t*w){
-    rc_lit_tree_from_hist(t,hist,w);
+static void RC_NOINLINE up_lit_tree_from_hist(up_BitTree*t,uint32_t*hist){
+    rc_lit_tree_from_hist(t,hist);
 }
 
 /* Run the whole decode synchronously on the CALLER's stack. `next` returns PATCH_PULL_BYTE and
@@ -1045,7 +1011,7 @@ static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
  * header pulls in transitively, so they do NOT leak into the integrator's TU after the include.
  * Only the documented integration/configuration macros (PATCH_IMAGE_BASE,
  * PATCH_IMAGE_CAPACITY, CRC32_DECODE, HAND_ROLLED_MEMMOVE, WINDOW_LOG, OUTROW, OUTROW_DEPTH,
- * OPC_CAP, DR_KCAP_BL, DR_KCAP_EX, and MAX_IMAGE) stay defined. The
+ * DR_KCAP_BL, DR_KCAP_EX, and MAX_IMAGE) stay defined. The
  * encoder TUs include rc_models.h/patch_config.h DIRECTLY (not through this header), so these
  * #undefs never reach the encoder side of the mirror.
  *
@@ -1063,8 +1029,6 @@ static inline int patch_apply_forward(const PatchApply *pa){ return pa->g_FWD; }
 #undef RC_PBIT
 #undef RC_PHALF
 #undef RC_PROB_BOUND
-#undef RC_PACKED_POS_BITS
-#undef RC_PACKED_POS_LIMIT
 #undef UP_BT_PROBS
 #undef UP_UG_CTX
 #undef UP_UG_C
