@@ -92,18 +92,17 @@ typedef struct {
     int deg_engaged;
     size_t opc_splits;
 } EncStats;
-enum { PLAN_RAW_UNMASK_11, PLAN_RAW_MASK_11, PLAN_RAW_UNMASK_6, PLAN_RAW_UNMASK_20, PLAN_RAW_N };
-enum { PLAN_DF_UNMASK, PLAN_DF_MASK, PLAN_DF_N };
-enum { PLAN_SPEC_N = 5 };
-/* The ordered plan registry is the sole definition of sweep order. df selects the normalized
- * input pair; raw_key selects one of the four prepared bsdiff results. */
+enum { PLAN_RAW_11, PLAN_RAW_6, PLAN_RAW_20, PLAN_RAW_N };
+enum { PLAN_SPEC_N = 4 };
+/* The ordered plan registry is the sole definition of sweep order. raw_key selects one of the
+ * three prepared bsdiff results; merge_fields enables op-derived relocation deltas. */
 typedef struct {
-    uint8_t variant, df, raw_key;
+    uint8_t merge_fields, raw_key;
 } PlanSpec;
 extern const PlanSpec PLAN_SPECS[PLAN_SPEC_N];
 /* Pair-owned immutable planning inputs. Every plan clones its fd/op state before mutation. */
 typedef struct {
-    Buf from_df[PLAN_DF_N], to_df[PLAN_DF_N];
+    Buf from_df, to_df;
     FieldDeltaVec fd;
     OpVec raw[PLAN_RAW_N];
     LdrTargetIndex ldr;
@@ -251,10 +250,9 @@ const FieldDelta *fd_find_kind(const FieldDeltaVec *v, uint32_t addr, int kind);
 
 Ranges elf_ranges(const char *elf_path, const Buf *bin, const char *which);
 void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                        Buf *from_df, Buf *to_df, FieldDeltaVec *fd, int mask_bl);
+                        Buf *from_df, Buf *to_df, FieldDeltaVec *fd);
 OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
 
-void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n);
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
 void ldr_target_index_free(LdrTargetIndex *idx);
 int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, uint32_t fpk);

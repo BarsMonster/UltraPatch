@@ -334,7 +334,7 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     pt->outb_yes = st.oy_n ? (uint32_t)(st.oy_cost / st.oy_n) : bit_price(RC_PHALF, 1);
     pt->outb_no  = st.on_n ? (uint32_t)(st.on_cost / st.on_n) : bit_price(RC_PHALF, 0);
     /* DP position price: the measured average (the DP cannot track the expected-position state);
-     * with no out tokens yet, an optimistic small-delta estimate lets phase 2 explore. */
+     * with no out tokens yet, an optimistic small-delta estimate lets out-candidates explore. */
     pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.tok.go, rc_zz32(256));
     pt->glo = M.tok.glo;
     for (int c = 0; c < UP_LIT0_CTX; c++)

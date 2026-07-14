@@ -271,7 +271,7 @@ static void create_patch_block(Buf *from_mut, Buf *to_mut, const m4_stream_t *fr
 }
 
 void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const Ranges *tr,
-                        Buf *from_mut, Buf *to_mut, FieldDeltaVec *fd, int mask_bl) {
+                        Buf *from_mut, Buf *to_mut, FieldDeltaVec *fd) {
     m4_stream_t from_st[STREAM_NSTREAMS] = {{0}}, to_st[STREAM_NSTREAMS] = {{0}};
     disassemble(from->d, from->n, fr->data_off_begin, fr->data_off_end, from_st);
     disassemble(to->d, to->n, tr->data_off_begin, tr->data_off_end, to_st);
@@ -286,10 +286,6 @@ void data_format_encode(const Buf *from, const Buf *to, const Ranges *fr, const 
     free_streams(from_st);
     free_streams(to_st);
     fd_finalize(fd);
-    if (mask_bl) {
-        mask_bl_imms(from->d, from_mut->d, from->n);
-        mask_bl_imms(to->d, to_mut->d, to->n);
-    }
 }
 
 /* ------------------------------------------------------------------------------------- */

@@ -184,20 +184,6 @@ int fw_next(FieldWalk *w) {
     return 1;
 }
 
-/* Mask every local-BL immediate in `mut` (positions detected on the REAL image), keeping the
- * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
- * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
- * corrections_pc absorbs any mask-induced diff mismatch by construction. */
-void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
-    for (size_t a = 0; a + 4 <= n;) {
-        uint16_t up = rc_u16le(real + a), lo = rc_u16le(real + a + 2);
-        if (rc_bl_pattern(up, lo)) {
-            mut[a] = 0x00; mut[a + 1] = 0xf0; mut[a + 2] = 0x00; mut[a + 3] = 0xd0;
-            a += 4;
-        } else a += 2;
-    }
-}
-
 /* Op-derived field deltas: for every BL/LDR field candidate inside a copy, the exact delta under
  * the bsdiff alignment (from value at fpk minus to value at tp0+k). These override block-matched
  * entries (which can be misaligned vs the op plan and then cost 4 correction bytes per field). */

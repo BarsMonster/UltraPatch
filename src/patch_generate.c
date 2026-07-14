@@ -75,10 +75,10 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     if (telf_present) reject_patch_output(patch_out, telf);
     Buf from = slurp(from_image), to = slurp(to_image);
     uint32_t from_size = checked_image_size(&from, "from"), to_size = checked_image_size(&to, "to");
-    /* A same-basename .elf sidecar is OPTIONAL. Without it Ranges stays zero, so relocation
-     * normalization excludes no data window and heuristically scans the whole image before
-     * bsdiff+LZ. A present-but-malformed ELF still dies loudly — only absence is tolerated.
-     * This enables raw-binary pairs such as foreign firmware without build artifacts. */
+    /* Product inputs require matching same-basename ELF artifacts. Absence is tolerated only for
+     * non-product raw regression inputs: Ranges stays zero, so relocation normalization excludes
+     * no data window and heuristically scans the whole image before bsdiff+LZ. A present-but-
+     * malformed ELF still dies loudly. */
     Ranges fr = {0}, tr = {0};
     if (felf_present) fr = elf_ranges(felf, &from, "from");
     if (telf_present) tr = elf_ranges(telf, &to, "to");

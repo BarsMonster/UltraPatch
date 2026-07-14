@@ -40,7 +40,7 @@ UP="$ULTRAPATCH"
 
 # One aggregate ratchet covers the complete home and foreign corpus. The real one-face update
 # remains independently visible because it is the product release patch.
-CORPUS_LIMIT=5420803
+CORPUS_LIMIT=5421482
 ONEFACE_GROW_LIMIT=570
 ONEFACE_REVERT_LIMIT=286
 

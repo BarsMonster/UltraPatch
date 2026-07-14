@@ -502,15 +502,13 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     merge_adjacent_spans(&seq);   /* ship-shape: adjacent spans coded as one */
     if (content.n) {
         size_t cur_bytes = emit_body_size(&meas, &seq, kd, ko, &inj, NULL, NULL, 0);
-        /* Keep the legacy mixed-mode trajectory as the incumbent (phases 0/1), then try the
-         * corrected ring-only pricing state (phase 2) before re-opening out-candidates (phase 3).
-         * Every candidate still has to beat the exact emitted body. */
-        for (int phase = 0; phase < 4; phase++) {
-            int price_out_en = (phase == 0 || phase == 1 || phase == 3);
-            const uint8_t *noc = (phase == 1 || phase == 3) ? nocand : NULL;
+        /* Keep the legacy mixed-mode trajectory: establish prices without out-candidates, then
+         * open them for two convergence passes. Every candidate still has to beat the exact body. */
+        for (int phase = 0; phase < 3; phase++) {
+            const uint8_t *noc = phase ? nocand : NULL;
             for (int pass = 0; pass < 16; pass++) {
                 PriceTab pt;
-                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = price_out_en;
+                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD; pt.out_en = 1;
                 measure_prices(&seq, content.d, tags.d, &seeds, kd, ko, &pt);
                 TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d, &cands, ncand, &ocands, noc, &pt);
                 int nk = fit_k_tokens(&cand_seq);

@@ -11,11 +11,10 @@
 /* Ordered plan selectors and tie priority live here. Keeping the legacy entry first is
  * wire-significant: equal-size candidates retain the earliest registry entry. */
 const PlanSpec PLAN_SPECS[PLAN_SPEC_N] = {
-    {0, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_11},
-    {2, PLAN_DF_MASK,   PLAN_RAW_MASK_11},
-    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_6},
-    {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_20},
+    {0, PLAN_RAW_11},
+    {1, PLAN_RAW_11},
+    {1, PLAN_RAW_6},
+    {1, PLAN_RAW_20},
 };
 /* Convert every copy that would read already-committed flash into true target literals. An
  * equal source adjustment skips the removed copy bytes, leaving every surviving source read
@@ -67,12 +66,6 @@ static void literalize_hazards(EncCtx *ctx, OpVec *ops, const Buf *to,
     *ops = out;
 }
 
-static Buf prep_buf_clone(const Buf *src) {
-    Buf out = {(uint8_t *)xmalloc(src->n), src->n, src->n};
-    if (src->n) memcpy(out.d, src->d, src->n);
-    return out;
-}
-
 static FieldDeltaVec prep_fd_clone(const FieldDeltaVec *src) {
     FieldDeltaVec out = {(FieldDelta *)xmalloc(src->n * sizeof(*src->v)), src->n, src->n};
     if (src->n) memcpy(out.v, src->v, src->n * sizeof(*src->v));
@@ -91,26 +84,16 @@ void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to,
                   const Ranges *fr, const Ranges *tr) {
     memset(prep, 0, sizeof(*prep));
     ldr_target_index_build(&prep->ldr, from->d, (uint32_t)from->n);
-    /* Both normalizations share the relocation pass. Derive the masked pair from that immutable
-     * base, then prepare the four bsdiff inputs named by PLAN_SPECS. */
-    data_format_encode(from, to, fr, tr, &prep->from_df[PLAN_DF_UNMASK],
-                       &prep->to_df[PLAN_DF_UNMASK], &prep->fd, 0);
-    prep->from_df[PLAN_DF_MASK] = prep_buf_clone(&prep->from_df[PLAN_DF_UNMASK]);
-    prep->to_df[PLAN_DF_MASK] = prep_buf_clone(&prep->to_df[PLAN_DF_UNMASK]);
-    mask_bl_imms(from->d, prep->from_df[PLAN_DF_MASK].d, from->n);
-    mask_bl_imms(to->d, prep->to_df[PLAN_DF_MASK].d, to->n);
-    prep->raw[PLAN_RAW_UNMASK_11] =
-        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 11);
-    prep->raw[PLAN_RAW_MASK_11] =
-        bsdiff_ops(&prep->from_df[PLAN_DF_MASK], &prep->to_df[PLAN_DF_MASK], 11);
-    prep->raw[PLAN_RAW_UNMASK_6] =
-        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 6);
-    prep->raw[PLAN_RAW_UNMASK_20] =
-        bsdiff_ops(&prep->from_df[PLAN_DF_UNMASK], &prep->to_df[PLAN_DF_UNMASK], 20);
+    /* One relocation-normalized pair feeds the three bsdiff alignments named by PLAN_SPECS. */
+    data_format_encode(from, to, fr, tr, &prep->from_df, &prep->to_df, &prep->fd);
+    prep->raw[PLAN_RAW_11] = bsdiff_ops(&prep->from_df, &prep->to_df, 11);
+    prep->raw[PLAN_RAW_6] = bsdiff_ops(&prep->from_df, &prep->to_df, 6);
+    prep->raw[PLAN_RAW_20] = bsdiff_ops(&prep->from_df, &prep->to_df, 20);
 }
 
 void plan_prepare_free(PlanPrep *prep) {
-    for (int i = 0; i < PLAN_DF_N; i++) { buf_free(&prep->from_df[i]); buf_free(&prep->to_df[i]); }
+    buf_free(&prep->from_df);
+    buf_free(&prep->to_df);
     free(prep->fd.v);
     for (int i = 0; i < PLAN_RAW_N; i++) opvec_free(&prep->raw[i]);
     ldr_target_index_free(&prep->ldr);
@@ -121,10 +104,9 @@ static OpVec build_candidate_ops(EncCtx *ctx, const Buf *from, const Buf *to,
                                  const PlanPrep *prep, const PlanSpec *spec, FieldDeltaVec *fd) {
     *fd = prep_fd_clone(&prep->fd);
     OpVec ops = prep_ops_clone(&prep->raw[spec->raw_key], to->n);
-    const Buf *from_df = &prep->from_df[spec->df], *to_df = &prep->to_df[spec->df];
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
-    split_nonzero_diff_runs(ctx, &ops, from_df, to_df);
-    if (spec->variant >= 1)
+    split_nonzero_diff_runs(ctx, &ops, &prep->from_df, &prep->to_df);
+    if (spec->merge_fields)
         merge_op_field_deltas(fd, &ops, from->d, from_size, to->d, to_size,
                               &prep->ldr, ctx->fwd);
     coerce_reloc_literals(ctx, &ops, from->d, from_size, fd, &prep->ldr);
@@ -222,10 +204,8 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
     return pc;
 }
 
-/* One full op-plan -> emitted body pipeline. variant: 0 = legacy block-matched deltas;
- * 1 = + op-derived field deltas (exact under the bsdiff alignment); 2 = + BL-immediate masking
- * of the bsdiff inputs (copies extend through recompiled code). encode_patch emits whichever
- * plan's exact body is smallest (ties keep the earliest registry entry), so this cannot regress. */
+/* One full op-plan -> emitted body pipeline. Plans either keep legacy block-matched deltas or add
+ * op-derived field deltas exact under the bsdiff alignment. encode_patch emits the smallest body. */
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanSpec *spec) {
     PlanResult r = {0};

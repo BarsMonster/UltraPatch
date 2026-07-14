@@ -55,8 +55,13 @@ tool=$(make -s host-tool-path)
 "$tool" --help
 ```
 
-The encoder accepts image files, not directories. If a same-basename `.elf`
-sidecar is present beside an image, the encoder uses it for range extraction.
+The encoder accepts image files, not directories. Product encoding requires each
+image to have its authentic matching same-basename `.elf` beside it; the encoder
+uses ELF load and symbol information for relocation-aware planning, and
+pre-extracted offsets are not an acceptable product artifact. The CLI still
+tolerates absent ELF for non-product regression inputs, including the foreign
+corpus; universal enforcement is deferred until matching foreign ELFs are
+available.
 The default host executable is `.build/ultrapatch`; always use
 `make host-tool-path` to obtain its exact path instead of assuming a root-level
 `./ultrapatch`. Set `BUILD_DIR` to a private directory when parallel builds or
