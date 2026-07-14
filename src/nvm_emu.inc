@@ -13,7 +13,6 @@
  * the product write-safety rules (each page erased at most once, monotonic erase frontier)
  * and pin aligned/in-range calls plus preservation of bytes beyond the target image.
  * Requires <stdint.h>, <stdlib.h>, <string.h> from the includer. */
-_Static_assert(PATCH_IMAGE_BASE==0u,"repository host NVM integration uses PATCH_IMAGE_BASE=0");
 static uint8_t *sc_flash, *sc_erasecnt, *sc_tail_canary;
 static uint32_t sc_flash_n, sc_preserve_from, sc_tail_n;
 static uint32_t sc_erows, sc_amplified, sc_max_erase;
@@ -61,12 +60,20 @@ static uint32_t nvm_canary_bad(void){
     for(uint32_t i=0;i<sc_tail_n;i++) if(sc_flash[sc_preserve_from+i]!=sc_tail_canary[i]) bad++;
     return bad;
 }
+static int nvm_relative_addr(uint32_t absolute, uint32_t *relative){
+    uint32_t base=(uint32_t)PATCH_IMAGE_BASE;
+    if(absolute<base) return 0;
+    *relative=absolute-base;
+    return 1;
+}
 uint8_t flash_read(uint32_t a){
+    if(!nvm_relative_addr(a,&a)){ sc_oob_reads++; return 0xFFu; }
     if(a<sc_flash_n) return sc_flash[a];
     sc_oob_reads++;
     return 0xFFu;
 }
 void flash_write_page(uint32_t a, const uint8_t page[OUTROW]){
+    if(!nvm_relative_addr(a,&a)){ sc_oob_page_writes++; return; }
     if((a&(OUTROW-1u))!=0u){ sc_unaligned++; return; }
     uint32_t row=a;
     if(row>sc_flash_n || sc_flash_n-row<OUTROW){ sc_oob_page_writes++; return; }

@@ -27,7 +27,7 @@ export LANGUAGE := C
 export LC_ALL := C
 
 OPT ?= -O2
-DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u
+DECODER_CONFIG_FLAGS ?= -DPATCH_IMAGE_BASE=8192u -DPATCH_IMAGE_CAPACITY=67108864u
 CONTRACT_FLAGS := -std=c11 -I. -Isrc -Ivendor/libdivsufsort
 CFLAGS += $(CONTRACT_FLAGS)
 CFLAGS += -g
@@ -76,7 +76,7 @@ CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb -std=c11 $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 5557
+override BASE_FOOTPRINT_FLASH := 5593
 override BASE_FOOTPRINT_STATE := 5928
 override BASE_FOOTPRINT_STACK := 480
 
