@@ -28,6 +28,6 @@ These cases contribute to the single complete-corpus size ratchet enforced by
 [`check_corpus.sh`](../check_corpus.sh).
 
 Whole-relink cases can require much more literal data than adjacent releases.
-The host encoder degrades or skips candidates so the emitted patch stays within
-the decoder's fixed journal and correction caps. This fallback is encoder-side;
-it does not enlarge or complicate the device decoder.
+The host encoder literalizes unsafe read-after-write copies and splits candidates
+as needed to stay within the decoder's correction cap. This fallback is
+encoder-side; it does not enlarge or complicate the device decoder.

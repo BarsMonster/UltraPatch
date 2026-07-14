@@ -12,10 +12,9 @@ ARM_SIZE=${ARM_SIZE:-arm-none-eabi-size}
 ARM_OBJDUMP=${ARM_OBJDUMP:-arm-none-eabi-objdump}
 ARM_DEC_FLAGS=${ARM_DEC_FLAGS:-"-mcpu=cortex-m0plus -mthumb -DPATCH_IMAGE_BASE=0u -DPATCH_IMAGE_CAPACITY=67108864u -I src"}
 ARM_OBJECT_OPT=${ARM_OBJECT_OPT:--Os}
-ARM_STACK_OPT=${ARM_STACK_OPT:--O2}
 DECODER_INTEGRATION_TU=${DECODER_INTEGRATION_TU:-test-bench/decoder-integration.c}
-BASE_FOOTPRINT_FLASH=${BASE_FOOTPRINT_FLASH:-6129}
-BASE_FOOTPRINT_STATE=${BASE_FOOTPRINT_STATE:-8460}
+BASE_FOOTPRINT_FLASH=${BASE_FOOTPRINT_FLASH:-5589}
+BASE_FOOTPRINT_STATE=${BASE_FOOTPRINT_STATE:-5928}
 BASE_FOOTPRINT_STACK=${BASE_FOOTPRINT_STACK:-480}
 ARM_BSS_HARD_CAP=12288
 
@@ -34,27 +33,6 @@ esac
 max_flash=0
 max_state=0
 max_bss=0
-for mode in library hand-rolled; do
-	mode_flags=
-	if [ "$mode" = hand-rolled ]; then
-		mode_flags=-DHAND_ROLLED_MEMMOVE
-	fi
-	obj="$tmp/footprint-$mode.o"
-	# ARM_*FLAGS are Make configuration strings and intentionally undergo word splitting.
-	$ARM_CC $ARM_DEC_FLAGS $ARM_OBJECT_OPT \
-		$mode_flags -DDECODER_INTEGRATION_STATIC -c "$DECODER_INTEGRATION_TU" -o "$obj"
-	set -- $($ARM_SIZE "$obj" | awk 'NR == 2 { print $1, $2, $3 }')
-	if [ "$#" -ne 3 ]; then
-		echo "cannot read ARM size for $mode decoder" >&2
-		exit 1
-	fi
-	flash=$(( $1 + $2 ))
-	state=$(( $2 + $3 ))
-	[ "$flash" -le "$max_flash" ] || max_flash=$flash
-	[ "$state" -le "$max_state" ] || max_state=$state
-	[ "$3" -le "$max_bss" ] || max_bss=$3
-done
-
 max_stack=0
 for variant in library-static library-generic hand-rolled-static hand-rolled-generic; do
 	case "$variant" in
@@ -63,9 +41,24 @@ for variant in library-static library-generic hand-rolled-static hand-rolled-gen
 		hand-rolled-static)  mode_flags=-DHAND_ROLLED_MEMMOVE; shape_flags=-DDECODER_INTEGRATION_STATIC ;;
 		hand-rolled-generic) mode_flags=-DHAND_ROLLED_MEMMOVE; shape_flags=-DDECODER_INTEGRATION_GENERIC ;;
 	esac
-	obj="$tmp/stack-$variant.o"
-	$ARM_CC $ARM_DEC_FLAGS $ARM_STACK_OPT $mode_flags $shape_flags \
-		-fstack-usage -c "$DECODER_INTEGRATION_TU" -o "$obj"
+	obj="$tmp/footprint-$variant.o"
+	# ARM_*FLAGS are Make configuration strings and intentionally undergo word splitting.
+	$ARM_CC $ARM_DEC_FLAGS $ARM_OBJECT_OPT $mode_flags $shape_flags \
+		-fcallgraph-info=su -c "$DECODER_INTEGRATION_TU" -o "$obj"
+	case "$variant" in
+		*-static)
+			set -- $($ARM_SIZE "$obj" | awk 'NR == 2 { print $1, $2, $3 }')
+			if [ "$#" -ne 3 ]; then
+				echo "cannot read ARM size for $variant decoder" >&2
+				exit 1
+			fi
+			flash=$(( $1 + $2 ))
+			state=$(( $2 + $3 ))
+			[ "$flash" -le "$max_flash" ] || max_flash=$flash
+			[ "$state" -le "$max_state" ] || max_state=$state
+			[ "$3" -le "$max_bss" ] || max_bss=$3
+			;;
+	esac
 	bound=$(OBJDUMP="$ARM_OBJDUMP" python3 scripts/stack_bound.py --quiet "$obj" |
 		sed -n 's/^stack_bound_bytes=//p')
 	case "$bound" in

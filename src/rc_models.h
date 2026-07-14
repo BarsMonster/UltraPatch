@@ -381,7 +381,7 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * cheap as the warmed-up state. Shared rc_ugg_seed_cont and rc_init_* seed both sides.
  *   GDL  = per-op diff_len gamma; op magnitudes are essentially never tiny.
  *   GADJ = per-op adj gamma.
- *   PG2  = rest preserve/corr gaps are strictly-increasing distinct offsets => gap>=1.
+ *   PG2  = correction gaps are strictly-increasing distinct offsets => gap>=1.
  *   GL   = match length gamma; matches are always len>=3 (value>=2 => cl>=1). */
 #define RC_SEED_DEPTH_GDL  6
 #define RC_SEED_DEPTH_GADJ 3
@@ -415,7 +415,7 @@ static inline uint32_t rc_outmatch_next_expect(int fwd, uint32_t pos, uint32_t l
 typedef struct {
     up_BitTree  dval;                         /* MTF escape + [C] correction bytes */
     up_IdxUnary dibl, diex;                   /* MTF cache-index unary priors (bl/ex) */
-    up_UGGamma  pg, pgn, pg2, gdl, gel, gadj; /* preserve/corr gaps + counts + per-op geometry */
+    up_UGGamma  pg, pgn, pg2, gdl, gel, gadj; /* correction gaps + counts + per-op geometry */
 } up_PreKdModels;
 typedef struct {
     up_UGRice  gd, go;                         /* backref-distance + out-position rice */

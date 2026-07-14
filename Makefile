@@ -21,7 +21,6 @@ ARM_SIZE ?= $(ARM_PREFIX)size
 ARM_OBJDUMP ?= $(ARM_PREFIX)objdump
 ARM_OBJCOPY ?= $(ARM_PREFIX)objcopy
 ARM_OBJECT_OPT ?= -Os
-ARM_STACK_OPT ?= -O2
 
 export LANG := C
 export LANGUAGE := C
@@ -77,8 +76,8 @@ CORPUS_FOREIGN_BINS := $(wildcard test-bench/foreign/*/watch.bin)
 
 ARM_DEC_FLAGS := -mcpu=cortex-m0plus -mthumb $(DECODER_CONFIG_FLAGS) -I src
 DECODER_INTEGRATION_TU := test-bench/decoder-integration.c
-override BASE_FOOTPRINT_FLASH := 6129
-override BASE_FOOTPRINT_STATE := 8460
+override BASE_FOOTPRINT_FLASH := 5589
+override BASE_FOOTPRINT_STATE := 5928
 override BASE_FOOTPRINT_STACK := 480
 
 GATE_TIMEOUT ?= 80
@@ -139,7 +138,7 @@ check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \
                           scripts/check_footprint.sh scripts/stack_bound.py scripts/tempdir.sh
 	@ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
 	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" \
-	  ARM_STACK_OPT="$(ARM_STACK_OPT)" DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \
+	  DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \
 	  BASE_FOOTPRINT_FLASH="$(BASE_FOOTPRINT_FLASH)" \
 	  BASE_FOOTPRINT_STATE="$(BASE_FOOTPRINT_STATE)" \
 	  BASE_FOOTPRINT_STACK="$(BASE_FOOTPRINT_STACK)" \

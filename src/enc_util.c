@@ -90,10 +90,7 @@ void opvec_free(OpVec *v) {
 
 void oppc_array_free(OpPC *pc, size_t n) {
     if (!pc) return;
-    for (size_t i = 0; i < n; i++) {
-        free(pc[i].pres.v);
-        free(pc[i].corr.v);
-    }
+    for (size_t i = 0; i < n; i++) free(pc[i].corr.v);
     free(pc);
 }
 
@@ -284,11 +281,6 @@ void corr_push(CorrVec *v, int32_t off, uint8_t byte) {
     v->v[v->n].off = off;
     v->v[v->n].byte = byte;
     v->n++;
-}
-
-int cmp_i32(const void *a, const void *b) {
-    int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
-    return (x > y) - (x < y);
 }
 
 int cmp_corr(const void *a, const void *b) {

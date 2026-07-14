@@ -167,9 +167,7 @@ static void emit_geom_pc(REnc *r, Models *M, const Op *o, const OpPC *pc) {
     ugg_encode(&M->pre.gdl, r, (uint32_t)o->diff_len);
     ugg_encode(&M->pre.gel, r, (uint32_t)o->extra_len);
     ugg_encode(&M->pre.gadj, r, rc_zz32(o->adj));
-    ugg_encode(&M->pre.pgn, r, (uint32_t)pc->pres.n);
     int32_t prev = 0;
-    for (size_t i = 0; i < pc->pres.n; i++) { ugg_encode(i ? &M->pre.pg2 : &M->pre.pg, r, (uint32_t)(pc->pres.v[i] - prev)); prev = pc->pres.v[i]; }
     ugg_encode(&M->pre.pgn, r, (uint32_t)pc->corr.n);
     prev = 0;
     for (size_t i = 0; i < pc->corr.n; i++) {
@@ -213,9 +211,9 @@ static int smap_wire_feasible(const uint32_t *mb, const int32_t *mv, int mn) {
     return 1;
 }
 
-/* Emit the full body (token geom/preserve/delta streams interleaved with the LZ content tokens)
+/* Emit the full body (token geometry/correction/delta streams interleaved with the LZ content tokens)
  * for a given parse `seq` and rice parameter `kd`, finalize with the optimal flush, and return
- * the flushed Buf. The geom/preserve/delta streams are parse-independent, so this same routine
+ * the flushed Buf. The geometry/correction/delta streams are parse-independent, so this same routine
  * both measures a candidate parse's true shipped size and produces the final output. */
 static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int FWD,
                      const LitSeedTrees *seeds,
@@ -497,7 +495,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                    tob, to_size, frm, from_size, &ocands, &nocand);
     EmitBodyMeasure meas = { ops, &seeds, pc, &content, &tags, rows, FWD };
     /* Price-feedback: re-parse using bit-prices measured from the real adaptive models, and keep
-     * the result only if the FULL body (geom/preserve/delta interleaved with the LZ tokens, after
+     * the result only if the FULL body (geometry/correction/delta interleaved with the LZ tokens, after
      * the optimal range-coder flush) is strictly fewer bytes -- i.e. the exact shipped size. This
      * gates token selection on the quantity we actually pay, so an order-1-cheaper parse that the
      * range-coder interleave would round up by a byte is correctly rejected. Iterate to a fixpoint. */

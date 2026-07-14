@@ -86,7 +86,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     plan_prepare(&prep, &from, &to, &fr, &tr);
     /* Op-plan sweep: every config runs the full pipeline in the natural apply direction; the
      * smallest complete envelope ships and ties keep the earliest entry. A config whose plan
-     * exceeds a decoder resource cap (journal/corrections) returns an empty body and
+     * exceeds the decoder correction cap returns an empty body and
      * is skipped — including the legacy config 0, whose feasibility is only guaranteed on
      * in-family firmware. */
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
@@ -94,8 +94,8 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1;
     int natural_bestv = -1;
     unsigned char natural_opc[PLAN_SPEC_N] = {0};
-    /* The opposite direction is a resource-pressure fallback: admit it only when no natural
-     * plan was feasible or the natural winner exhausted the journal budget. Once admitted,
+    /* The opposite direction is a fallback: admit it only when no natural plan was feasible or
+     * the natural winner needed hazard literalization. Once admitted,
      * rerun that winner plus natural plans that needed correction splitting. A clean natural
      * winner is already applicable, so skipping the opposite pass can only affect blob size. */
     int natdir = rc_natural_desc(from_size, to_size);

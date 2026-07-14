@@ -116,7 +116,7 @@ int decode_patch(const char *image_path, const char *patch_path){
     uint32_t to_size=patch_apply_to_size(&ha.pa), span=patch_apply_image_span(&ha.pa);
     rc = replace_file(image_path, sc_flash, to_size);
     if(rc) goto out;
-    fprintf(stderr,"ok to_size=%u dir=%s journal_used=%u slots (cap=%u)\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd",(unsigned)patch_apply_journal_used(&ha.pa),(unsigned)JSLOTS);
+    fprintf(stderr,"ok to_size=%u dir=%s\n",to_size,patch_apply_forward(&ha.pa)?"fwd":"bwd");
     fprintf(stderr,"NVM: erases=%ld pages=%u pagewrites=%u programmed_bytes=%ld amplified=%u maxpageerase=%u inversions=%ld unaligned=%u oob=%u oob_reads=%u canary=%u (span=%u pages_total=%u)\n",
             sc_erases,sc_erows,sc_page_writes,sc_programs,sc_amplified,sc_max_erase,sc_finv,
             sc_unaligned,sc_oob_page_writes,sc_oob_reads,nvm_canary_bad(),span,

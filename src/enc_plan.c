@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>
  * SPDX-License-Identifier: MIT
  *
- * Host encoder module -- plan/degrade: degrade_ops_to_journal_budget, plan_encode.
+ * Host encoder module -- plan/degrade: literalize_hazards, plan_encode.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -17,70 +17,37 @@ const PlanSpec PLAN_SPECS[PLAN_SPEC_N] = {
     {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_6},
     {1, PLAN_DF_UNMASK, PLAN_RAW_UNMASK_20},
 };
-/* ---- journal-budget degradation (encoder-only; wire format and decoder untouched) ----
- * The decoder's never-evict journal holds at most JSLOTS overwritten source bytes. When
- * the ideal op plan needs more, convert the OVER-BUDGET read-after-overwrite copy regions
- * into plain extra bytes (the exact to-image bytes, shipped in the content stream):
- * compression degrades — those bytes code as literals/LZ instead of free copies — but the
- * plan becomes journal-feasible instead of refusing. Preserves are journaled in apply order
- * (strictly ascending output positions for FWD, descending for reverse — the NVM gate pins
- * frontier monotonicity), so the first JSLOTS preserves in that order stay protected and
- * every read of a later (unprotected) overwritten position is converted. A read-behind-
- * frontier within one op sits at the constant offset fp0-tp0, so the conversion range is
- * contiguous per op and each affected op splits into at most two wire ops. Every remaining
- * overwritten read still goes through the journal — the invariant that keeps the wire
- * independent of the deployment's NVM page size. Correctness of the transformed plan is
- * still proven per blob by the reference-decoder self-verification. */
-static int degrade_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_t k,
-                             uint32_t from_size, uint32_t to_size, int32_t cutoff) {
+/* Convert every copy that would read already-committed flash into true target literals. An
+ * equal source adjustment skips the removed copy bytes, leaving every surviving source read
+ * either ahead of the frontier or covered by the uncommitted output-page window. */
+static int copy_hazard_at(const EncCtx *ctx, int32_t fp0, int32_t tp0, int32_t k,
+                          uint32_t from_size, uint32_t to_size) {
     int64_t a = (int64_t)fp0 + k, t = (int64_t)tp0 + k;
-    int unprotected = ctx->fwd ? a >= cutoff
-                               : a >= RC_PACKED_POS_LIMIT || (cutoff >= 0 && a <= cutoff);
+    int behind = ctx->fwd ? a < t : a > t;
     return a >= 0 && a < (int64_t)from_size && a < (int64_t)to_size &&
-           unprotected &&
-           !row_covered(ctx, a, t);
+           behind && !row_covered(ctx, a, t);
 }
 
-static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *to,
-                                           const uint8_t *frm, const FieldDeltaVec *fd,
-                                           const LdrTargetIndex *ldr,
-                                           int32_t fp_start, uint32_t from_size, uint32_t to_size,
-                                           PlanCaps *caps) {
-    int FWD = ctx->fwd;
+static void literalize_hazards(EncCtx *ctx, OpVec *ops, const Buf *to,
+                               int32_t fp_start, uint32_t from_size, uint32_t to_size) {
     uint8_t *payload = ops->payload;
-    /* Derive the preserve total and cutoff from a single preserve_corrections_pc pass over the same
-     * folded opwalk+readarr geometry used by body planning. */
-    OpPC *pc = preserve_corrections_pc(ctx, ops, fp_start, frm, to->d, fd,
-                                       from_size, to_size, ldr, caps);
-    size_t total = caps->pres_total;
-    if (total == caps->pres_kept) return pc;
-    int32_t C = caps->pres_cutoff;
-    oppc_array_free(pc, ops->n);
-    /* FWD protects [0,C). Grow protects [C+1,2^24): high unrepresentable positions are
-     * skipped before consuming its budget, then C is the first lower over-budget preserve. */
     OpVec out = { .payload = payload };
     int32_t tp0 = 0, fp0 = fp_start;
     for (size_t oi = 0; oi < ops->n; oi++) {
         Op *o = &ops->v[oi];
         int32_t dl = o->diff_len;
-        int behind = FWD ? (fp0 < tp0) : (fp0 > tp0);   /* op reads behind the write frontier */
         int32_t seg = 0, k = 0;
         int split_any = 0;
-        while (behind && k < dl) {
-            /* hazard = behind-frontier read of an UNPROTECTED overwritten position that the
-             * page window does NOT cover. Coverage is periodic within each output page, so
-             * hazard runs fragment; every maximal run becomes exact extra bytes (source
-             * skipped via adj), splitting the op into copy/extra alternations. */
-            int hz = degrade_hazard_at(ctx, fp0, tp0, k, from_size, to_size, C);
+        while (k < dl) {
+            int hz = copy_hazard_at(ctx, fp0, tp0, k, from_size, to_size);
             if (!hz) { k++; continue; }
             int32_t rs = k;
             while (k < dl) {
-                hz = degrade_hazard_at(ctx, fp0, tp0, k, from_size, to_size, C);
+                hz = copy_hazard_at(ctx, fp0, tp0, k, from_size, to_size);
                 if (!hz) break;
                 k++;
             }
             opvec_push(&out, (Op){ rs - seg, k - rs, k - rs });
-            /* Journal degradation bypasses normalized copies: extras reconstruct true `to`. */
             memcpy(payload + tp0 + rs, to->d + (size_t)tp0 + (size_t)rs,
                    (size_t)(k - rs));
             ctx->deg_engaged = 1;
@@ -98,7 +65,6 @@ static OpPC *degrade_ops_to_journal_budget(EncCtx *ctx, OpVec *ops, const Buf *t
     }
     free(ops->v);
     *ops = out;
-    return NULL;
 }
 
 static Buf prep_buf_clone(const Buf *src) {
@@ -229,7 +195,7 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
     return split_any;
 }
 
-/* corrections-cap degradation (same philosophy as the journal budget): OPC_CAP bounds
+/* Corrections-cap degradation: OPC_CAP bounds
  * corrections PER OP, so an op that needs more is SPLIT at its median-correction offset
  * (a few geometry bytes of degradation) and everything is recomputed — splitting moves
  * op boundaries, which shifts field detection and thus the corrections themselves, so
@@ -238,12 +204,12 @@ static int split_overfull_corrections(EncCtx *ctx, OpVec *ops, const OpPC *pc) {
 static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
                                const Buf *from, const Buf *to,
                                const FieldDeltaVec *fd, const LdrTargetIndex *ldr,
-                               OpPC *pc, PlanCaps *caps) {
+                               PlanCaps *caps) {
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
+    OpPC *pc = NULL;
     for (;;) {
-        if (!pc)
-            pc = preserve_corrections_pc(ctx, ops, fp_start, from->d, to->d,
-                                         fd, from_size, to_size, ldr, caps);
+        pc = corrections_pc(ctx, ops, fp_start, from->d, to->d,
+                            fd, from_size, to_size, ldr, caps);
         size_t old_n = ops->n;                               /* pc[] is sized for THIS op count */
         int split_any = split_overfull_corrections(ctx, ops, pc);
         if (!split_any) break;
@@ -252,7 +218,6 @@ static OpPC *build_pc_fixpoint(EncCtx *ctx, OpVec *ops, int32_t fp_start,
         if (ops->n <= old_n || ops->n > to_size)
             die("correction split progress invariant");
         oppc_array_free(pc, old_n);
-        pc = NULL;
     }
     return pc;
 }
@@ -271,15 +236,12 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     OpVec ops = build_candidate_ops(ctx, from, to, prep, spec, &fd);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     int32_t fp_start_s = fold_zero_ops(&ops);
-    OpPC *pc = degrade_ops_to_journal_budget(ctx, &ops, to, from->d, &fd, &prep->ldr,
-                                             fp_start_s, from_size, to_size, &caps);
-    /* A fully degraded diff with a nonzero source adjustment leaves a new pure seek.
-     * Normalize only the mutated path again; the reusable PC path remains untouched. */
-    if (!pc) fp_start_s += fold_zero_ops(&ops);
-    pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, pc, &caps);
-    /* The direction fallback needs to know whether resource-pressure paths were used. */
+    literalize_hazards(ctx, &ops, to, fp_start_s, from_size, to_size);
+    if (ctx->deg_engaged) fp_start_s += fold_zero_ops(&ops);
+    OpPC *pc = build_pc_fixpoint(ctx, &ops, fp_start_s, from, to, &fd, &prep->ldr, &caps);
+    /* The direction fallback needs to know whether hazard/correction fallbacks were used. */
     r.st = (EncStats){ ctx->deg_engaged, ctx->opc_splits };
-    /* Decoder resource feasibility mirrors patch_apply OPC_CAP / JSLOTS. Relocation-cache misses
+    /* Decoder resource feasibility mirrors patch_apply OPC_CAP. Relocation-cache misses
      * remain representable escapes and therefore do not make a plan infeasible. */
     int feasible = caps.ok;
     Buf body = {0};
@@ -291,8 +253,7 @@ PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
     }
     /* An infeasible plan (any variant, INCLUDING the legacy config 0) returns an empty body
      * and the sweep tries the remaining configs — different bsdiff alignments need different
-     * preserve/correction budgets, so another variant may fit the decoder caps (measured on
-     * foreign firmware: config 0 over-journal while alternate bsdiff preparations fit).
+     * correction budgets, so another variant may fit the decoder cap.
      * encode_patch dies only
      * when EVERY config is infeasible. */
     free(fd.v);

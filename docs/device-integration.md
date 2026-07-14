@@ -19,7 +19,9 @@ Production builds must not override these constants. `PATCH_IMAGE_BASE` and
 `PATCH_IMAGE_CAPACITY` are the decoder-only deployment-geometry exceptions.
 `HAND_ROLLED_MEMMOVE` is a separate, non-wire decoder code-generation option;
 the [README configuration guide](../README.md#decoder-configuration) explains
-when to enable it. The installed wire
+when to enable it. `CRC32_DECODE(start,end)` is likewise a decoder-only,
+non-wire hook for a platform CRC implementation; the same guide defines its
+range and CRC semantics. The installed wire
 mode targets Cortex-M0/ARMv6-M. `CORTEX_M4` is a reserved wire-selection macro
 and defining it is rejected; compiling the same C for another CPU does not
 select a different wire.
@@ -81,8 +83,8 @@ old-image CRC, apply, and final-image CRC succeed. Every other result is
 a patch cannot be resumed.
 
 The call blocks through both full-image CRC scans and the apply, with no internal
-watchdog hook. Service the watchdog inside `flash_read`, `flash_write_page`, and
-the byte callback.
+watchdog hook. Service the watchdog inside `flash_read`, `flash_write_page`, the
+byte callback, and any platform `CRC32_DECODE` implementation.
 
 CRC32 detects accidental corruption; it does not authenticate an update.
 Authenticate the complete manifest and blob, and enforce target and anti-rollback
@@ -100,11 +102,11 @@ Flash remains the image backing store. `PatchApply` stages at most
 `OUTROW_DEPTH` dirty output pages in RAM and never holds a full-image buffer.
 
 The stack limit includes the repository integration wrapper but excludes
-`PatchApply` storage, the integrator's flash functions and pull callback, and
-bounded toolchain leaves. Place the state object in reserved static/noinit
-storage if necessary, then add those external frames, interrupt nesting, and
-RTOS frames to the product budget. A different wrapper or toolchain must be
-measured in the final firmware build.
+`PatchApply` storage, the integrator's flash functions, pull callback, platform
+CRC override, and bounded toolchain leaves. Place the state object in reserved
+static/noinit storage if necessary, then add those external frames, interrupt
+nesting, and RTOS frames to the product budget. A different wrapper or
+toolchain must be measured in the final firmware build.
 
 ## Failure and recovery
 

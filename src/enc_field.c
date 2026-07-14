@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Host encoder module -- field/delta model + apply planning: classify_field,
- * merge_op_field_deltas, proxy pricing, split runs, preserve/corrections.
+ * merge_op_field_deltas, proxy pricing, split runs, corrections.
  * Compiled as a normal internal encoder translation unit.
  */
 
@@ -56,43 +56,16 @@ int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0, int32_t dl, u
     return hit;
 }
 
-static int preserve_needed_at(const uint8_t *hazard, uint32_t from_size, int32_t tpw) {
-    if (!(0 <= tpw && (uint32_t)tpw < from_size)) return 0;
-    return hazard[tpw] != 0;
-}
-
-/* Mark source addresses whose pristine byte must survive until a later source read. Output is
- * monotonic, so the exact latest/earliest read frontier is unnecessary: one behind-frontier,
- * page-uncovered read is enough to require a journal entry when that address is overwritten. */
-static uint8_t *preserve_hazards(const EncCtx *ctx, const OpWalkEnt *walk,
-                                 size_t nwalk, uint32_t from_size) {
-    int FWD = ctx->fwd;
-    uint8_t *hazard = (uint8_t *)xcalloc(from_size ? from_size : 1u, 1);
-    for (size_t oi = 0; oi < nwalk; oi++) {
-        const OpWalkEnt *we = &walk[oi];
-        for (int32_t k = 0; k < we->o->diff_len; k++) {
-            int32_t a = we->fp + k;
-            if (0 <= a && (uint32_t)a < from_size) {
-                int32_t t = we->tp + k;
-                int behind = FWD ? a < t : a > t;
-                if (behind && !row_covered(ctx, a, t)) hazard[a] = 1;
-            }
-        }
-    }
-    return hazard;
-}
-
-typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } PreserveFieldCursor;
+typedef struct { FieldWalk w; int32_t pos; uint8_t packed[4]; int have; } CorrFieldCursor;
 
 typedef struct {
     const EncCtx *ctx;
-    const uint8_t *hazard;
     const uint8_t *payload, *frm, *true_to;
     uint32_t from_size, to_size;
     PlanCaps *caps;
-} PreserveCorrWalk;
+} CorrWalk;
 
-static void preserve_field_cursor_next(PreserveFieldCursor *fc) {
+static void corr_field_cursor_next(CorrFieldCursor *fc) {
     while (fw_next(&fc->w)) {
         if (!fc->w.is_field || (fc->w.ev.type != EV_BL && fc->w.ev.type != EV_EX)) continue;
         fc->pos = fc->w.pos;
@@ -110,68 +83,49 @@ static void preserve_field_cursor_next(PreserveFieldCursor *fc) {
     fc->have = 0;
 }
 
-static const PreserveFieldCursor *preserve_corr_event(const EncCtx *ctx,
-                                                      PreserveFieldCursor *fc, int32_t off) {
-    if (!fc->have) preserve_field_cursor_next(fc);
+static const CorrFieldCursor *corr_event(const EncCtx *ctx, CorrFieldCursor *fc, int32_t off) {
+    if (!fc->have) corr_field_cursor_next(fc);
     while (fc->have) {
         int32_t d = off - fc->pos;
         if ((uint32_t)d < 4u) return fc;
-        if (ctx->fwd ? d > 3 : d < 0) { preserve_field_cursor_next(fc); continue; }
+        if (ctx->fwd ? d > 3 : d < 0) { corr_field_cursor_next(fc); continue; }
         return NULL;
     }
     return NULL;
 }
 
-static void preserve_corr_byte(PreserveCorrWalk *pw, PreserveFieldCursor *fc, OpPC *pc,
-                               const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
+static void correction_byte(CorrWalk *cw, CorrFieldCursor *fc, OpPC *pc,
+                            const OpWalkEnt *we, int32_t off, int is_diff, uint8_t byte) {
     int32_t tp = we->tp + off;
     int32_t fp = is_diff ? we->fp + off : -1;
-    int preserve = preserve_needed_at(pw->hazard, pw->from_size, tp);
-    if (preserve) {
-        ivec_push(&pc->pres, off);
-        pw->caps->pres_total++;
-        if ((uint32_t)tp < RC_PACKED_POS_LIMIT && pw->caps->pres_kept < JSLOTS) {
-            pw->caps->pres_kept++;
-        } else {
-            pw->caps->ok = 0;
-            /* Preserves arrive in actual apply order. FWD's first unkept position starts
-             * its high suffix; reverse skips the unrepresentable >=16 MiB prefix, then the
-             * first over-budget representable position starts its low suffix. */
-            if ((uint32_t)tp < RC_PACKED_POS_LIMIT &&
-                (pw->ctx->fwd ? pw->caps->pres_cutoff == (int32_t)RC_PACKED_POS_LIMIT
-                              : pw->caps->pres_cutoff < 0))
-                pw->caps->pres_cutoff = tp;
-        }
-    }
     uint8_t produced;
-    const PreserveFieldCursor *ev = is_diff ? preserve_corr_event(pw->ctx, fc, off) : NULL;
+    const CorrFieldCursor *ev = is_diff ? corr_event(cw->ctx, fc, off) : NULL;
     if (ev) {
         produced = ev->packed[off - ev->pos];
     } else {
         uint8_t src = 0;
-        if (is_diff && 0 <= fp && (uint32_t)fp < pw->from_size) {
-            int behind = pw->ctx->fwd ? (fp < tp) : (fp > tp);
-            /* Ahead/current addresses are still pristine. A behind address is also pristine
-             * when journaled or resident in the decoder's uncommitted page window; otherwise
-             * monotonic output has replaced it with its final target byte. Addresses beyond a
-             * shorter target are never overwritten. */
-            int pristine = !behind || pw->hazard[fp] || row_covered(pw->ctx, fp, tp) ||
-                           (uint32_t)fp >= pw->to_size;
-            src = pristine ? pw->frm[fp] : pw->true_to[fp];
+        if (is_diff && 0 <= fp && (uint32_t)fp < cw->from_size) {
+            int behind = cw->ctx->fwd ? fp < tp : fp > tp;
+            int overwritten = behind && (uint32_t)fp < cw->to_size &&
+                              !row_covered(cw->ctx, fp, tp);
+            /* literalize_hazards must remove every read of committed flash. Model physical
+             * flash for diagnostics, but reject the plan if that invariant is ever violated. */
+            if (overwritten) cw->caps->ok = 0;
+            src = overwritten ? cw->true_to[fp] : cw->frm[fp];
         }
         produced = (uint8_t)(byte + src);
     }
-    uint8_t want = pw->true_to[tp];
+    uint8_t want = cw->true_to[tp];
     uint8_t corr = (uint8_t)(want - produced);
     if (corr) {
         corr_push(&pc->corr, off, corr);
         if ((uint32_t)off >= RC_PACKED_POS_LIMIT || pc->corr.n > OPC_CAP)
-            pw->caps->ok = 0;
+            cw->caps->ok = 0;
     }
 }
 
-static void preserve_corr_op(PreserveCorrWalk *cw, PreserveFieldCursor *fc, OpPC *pc,
-                             const OpWalkEnt *we) {
+static void corrections_op(CorrWalk *cw, CorrFieldCursor *fc, OpPC *pc,
+                           const OpWalkEnt *we) {
     const Op *o = we->o;
     int32_t n = o->diff_len + o->extra_len;
     int FWD = cw->ctx->fwd;
@@ -179,7 +133,7 @@ static void preserve_corr_op(PreserveCorrWalk *cw, PreserveFieldCursor *fc, OpPC
         int32_t off = FWD ? i : n - 1 - i;
         int is_diff = off < o->diff_len;
         uint8_t byte = cw->payload[we->tp + off];
-        preserve_corr_byte(cw, fc, pc, we, off, is_diff, byte);
+        correction_byte(cw, fc, pc, we, off, is_diff, byte);
     }
 }
 
@@ -233,7 +187,7 @@ int fw_next(FieldWalk *w) {
 /* Mask every local-BL immediate in `mut` (positions detected on the REAL image), keeping the
  * F000/D000 anchors, so bsdiff sees identical bytes for any two BLs and copies extend through
  * recompiled code. Encoder-only: the decoder classifies fields on the pristine from image, and
- * preserve_corrections_pc absorbs any mask-induced diff mismatch by construction. */
+ * corrections_pc absorbs any mask-induced diff mismatch by construction. */
 void mask_bl_imms(const uint8_t *real, uint8_t *mut, size_t n) {
     for (size_t a = 0; a + 4 <= n;) {
         uint16_t up = rc_u16le(real + a), lo = rc_u16le(real + a + 2);
@@ -503,8 +457,8 @@ static void split_nonzero_diff_runs_budget(const EncCtx *ctx, OpVec *ops,
         transitions_left -= transitions;
         /* The historical DP re-priced every (segment start, split run) pair with a fresh
          * op_proxy_bits walk over the diff bytes -- O(nr^2 * diff_len) time and an O(nr^2)
-         * state table, quadratic-cubic on scattered-diff inputs (the stress_journal_scatter
-         * / stress_corr_storm hangs). Every query boundary is a RUN boundary, so
+         * state table, quadratic-cubic on scattered-diff inputs (the scattered-diff /
+         * correction-storm stress cases). Every query boundary is a RUN boundary, so
          * diff_proxy_bits decomposes exactly into run-indexed prefix sums (uint64 addition
          * is associative; the terms are the same uleb_proxy_bits/L0 values in a different
          * association order), and the full (ri, p) table collapses to its diagonal
@@ -587,36 +541,32 @@ void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
     split_nonzero_diff_runs_budget(ctx, ops, from, to, SPLIT_TRANSITION_BUDGET);
 }
 
-OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                              const uint8_t *frm, const uint8_t *true_to,
-                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              const LdrTargetIndex *ldr, PlanCaps *caps) {
+OpPC *corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
+                     const uint8_t *frm, const uint8_t *true_to,
+                     const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                     const LdrTargetIndex *ldr, PlanCaps *caps) {
     int FWD = ctx->fwd;
     OpWalkEnt *m = opwalk_build(ops, fp_start);
-    *caps = (PlanCaps){ 1, fp_start,
-        FWD ? (int32_t)RC_PACKED_POS_LIMIT : -1, 0, 0 };
+    *caps = (PlanCaps){ 1, fp_start };
     if (ops->n) {
         const OpWalkEnt *last = &m[ops->n - 1u];
         caps->fp_end = last->fp + last->o->diff_len + last->o->adj;
     }
-    uint8_t *hazard = preserve_hazards(ctx, m, ops->n, from_size);
     OpPC *out = (OpPC *)xcalloc(ops->n ? ops->n : 1, sizeof(*out));
-    PreserveCorrWalk cw = { ctx, hazard, ops->payload, frm, true_to,
-                            from_size, to_size, caps };
+    CorrWalk cw = { ctx, ops->payload, frm, true_to, from_size, to_size, caps };
     const OpWalkEnt *we;
     for (size_t step = 0; step < ops->n; step++) {
         we = &m[opwalk_apply_index(ops->n, FWD, step)];
-        PreserveFieldCursor fc;
+        CorrFieldCursor fc;
         fw_init(&fc.w, FWD, frm, from_size, fd, ldr, ops->payload + we->tp,
                 we->fp, we->o->diff_len);
         fc.have = 0;
         OpPC *pc = &out[step];
-        preserve_corr_op(&cw, &fc, pc, we);
+        corrections_op(&cw, &fc, pc, we);
         if (!FWD) {
-            if (pc->pres.n > 1) qsort(pc->pres.v, pc->pres.n, sizeof(pc->pres.v[0]), cmp_i32);
             if (pc->corr.n > 1) qsort(pc->corr.v, pc->corr.n, sizeof(pc->corr.v[0]), cmp_corr);
         }
     }
-    free(hazard); free(m);
+    free(m);
     return out;
 }

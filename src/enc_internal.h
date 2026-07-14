@@ -83,7 +83,7 @@ typedef struct {
 typedef struct { int32_t *v; size_t n, cap; } IVec;
 typedef struct { int32_t off; uint8_t byte; } CorrEnt;
 typedef struct { CorrEnt *v; size_t n, cap; } CorrVec;
-typedef struct { IVec pres; CorrVec corr; } OpPC;
+typedef struct { CorrVec corr; } OpPC;
 /* File-offset window of the .data-style segment inside the load image (from elf_ranges);
  * a zero-initialized Ranges is an empty (0,0) window: the raw-binary path with no ELF sidecar. */
 typedef struct { uint32_t data_off_begin, data_off_end; } Ranges;
@@ -110,8 +110,7 @@ typedef struct {
 } PlanPrep;
 typedef struct {
     int ok;
-    int32_t fp_end, pres_cutoff;
-    size_t pres_total, pres_kept;
+    int32_t fp_end;
 } PlanCaps;
 typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
 
@@ -244,7 +243,6 @@ void put_uleb(Buf *b, uint32_t v);
 void put_uleb_overlong(Buf *b, uint32_t v);
 void ivec_push(IVec *v, int32_t x);
 void corr_push(CorrVec *v, int32_t off, uint8_t byte);
-int cmp_i32(const void *a, const void *b);
 int cmp_corr(const void *a, const void *b);
 void opvec_push(OpVec *v, Op o);
 void fd_put(FieldDeltaVec *v, uint32_t addr, int kind, int32_t delta);
@@ -274,10 +272,10 @@ void coerce_reloc_literals(const EncCtx *ctx, OpVec *ops, const uint8_t *frm,
                            const LdrTargetIndex *ldr);
 void split_nonzero_diff_runs(const EncCtx *ctx, OpVec *ops,
                              const Buf *from, const Buf *to);
-OpPC *preserve_corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
-                              const uint8_t *frm, const uint8_t *true_to,
-                              const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
-                              const LdrTargetIndex *ldr, PlanCaps *caps);
+OpPC *corrections_pc(const EncCtx *ctx, const OpVec *ops, int32_t fp_start,
+                     const uint8_t *frm, const uint8_t *true_to,
+                     const FieldDeltaVec *fd, uint32_t from_size, uint32_t to_size,
+                     const LdrTargetIndex *ldr, PlanCaps *caps);
 
 void re_init(REnc *r);
 void re_init_count(REnc *r);
