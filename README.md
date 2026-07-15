@@ -45,11 +45,31 @@ it is accepted. On the device, source CRC is checked before the first write,
 each changed flash page is erased and programmed at most once, and target CRC
 is checked after the final buffered pages are committed.
 
-## Build and CLI
+## Install
+
+On Debian or Ubuntu, install the host compiler, Cortex-M0+ toolchain, and build helpers:
 
 ```sh
-make
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  binutils-arm-none-eabi \
+  gcc \
+  gcc-arm-none-eabi \
+  git \
+  libc6-dev \
+  libnewlib-dev \
+  make \
+  python3
+```
 
+Build from the repository root with `make`. The default host executable is
+`.build/ultrapatch`; use `make -s host-tool-path` to obtain the exact path selected by the current
+Make arguments. Do not assume a root-level `./ultrapatch`. Give parallel compiler or measurement
+runs distinct `BUILD_DIR` values.
+
+## CLI
+
+```sh
 tool=$(make -s host-tool-path)
 "$tool" [--encode] <from_image> <to_image> <patch>
 "$tool" --decode <image> <patch>
@@ -62,13 +82,6 @@ same-basename sidecars. The release corpus is a frozen set of committed raw
 binaries under `test-bench/`; the gate reads those files directly rather than
 generating test inputs during the build. This input simplification is host-only;
 it does not change the decoder interface or patch wire format.
-
-The default host executable is `.build/ultrapatch`; always use
-`make host-tool-path` to obtain its exact path instead of assuming a root-level
-`./ultrapatch`. Set `BUILD_DIR` to a private directory when parallel builds or
-measurements need isolation.
-
-See [install.md](install.md) for packages and common commands.
 
 ## Device decoder
 

@@ -10,8 +10,8 @@ validation remain integration responsibilities.
 - Keep the frozen static `watch.bin` corpus under `test-bench/images`, `test-bench/fixtures`, and
   `test-bench/foreign` intact. The gate reads all 36 binaries directly; it does not derive or
   materialize corpus inputs during the release build.
-- Install the packages in [install.md](../install.md). Exact compiler and system-library identities
-  are not release criteria; the measured size and memory outcomes are.
+- Install the packages listed in the [README](../README.md#install). Exact compiler and
+  system-library identities are not release criteria; the measured size and memory outcomes are.
 
 ## Verification
 
