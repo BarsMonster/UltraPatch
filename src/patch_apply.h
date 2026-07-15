@@ -12,7 +12,7 @@
 #define UP_PATCH_APPLY_H
 /*
  * UltraPatch — streaming, in-place, real-NVM firmware decoder (C).
- * Production solution; integration and release gates are documented under docs/.
+ * Production solution; integration and release gates are documented in README.md.
  * This is the only header application code includes. Install it beside the companion
  * patch_config.h and rc_models.h headers; the public entrypoint is intentionally not amalgamated.
  *
