@@ -121,7 +121,9 @@ make gate
 The post-development release gate checks the complete corpus size regression, reference
 static-wrapper flash/state, and worst supported decoder stack. Every generated corpus patch
 self-verifies through the production decoder before its size is accepted. The authoritative
-procedure is in [the release checklist](docs/release-checklist.md).
+procedure is in [the release checklist](docs/release-checklist.md). The gate also exercises the host
+`--decode` workflow, including exact in-place application and no file change after rejecting a
+truncated patch.
 
 ## License
 

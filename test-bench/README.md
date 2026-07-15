@@ -13,7 +13,3 @@ NVM write safety, and refuses to write an invalid patch. The corpus runner there
 the resulting patch size. One aggregate ceiling in `check_corpus.sh` covers all 290 home and foreign
 patches; the real one-face patches retain their own product limits. Exact corpus provenance is the
 Git commit. Replacing any binary is an explicit corpus and ratchet change.
-
-The gate also exercises the shipped host `--decode` workflow on a nontrivial page-boundary patch. It
-requires an exact in-place target result, then truncates the same patch and verifies that rejection
-leaves the host image file unchanged.
