@@ -18,7 +18,13 @@ BASE_FOOTPRINT_STATE=5436
 BASE_FOOTPRINT_STACK=432
 ARM_BSS_HARD_CAP=12288
 
-. ./scripts/tempdir.sh
+# Temp dir cleaned on normal exit and on the Makefile time-cap group-kill. dash does not run an
+# EXIT trap for an untrapped fatal signal, so TERM/INT clean up, restore the default disposition,
+# and re-raise so the shell dies by the signal (exit status preserved).
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; trap - TERM INT EXIT; kill -s TERM "$$"' TERM
+trap 'rm -rf "$tmp"; trap - TERM INT EXIT; kill -s INT "$$"' INT
 
 max_flash=0
 max_state=0

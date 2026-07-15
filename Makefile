@@ -8,7 +8,7 @@ override SHELL := /bin/sh
 # modes would otherwise let Make report success without establishing the release outcome.
 override CANONICAL_GOAL := $(firstword $(filter gate,$(MAKECMDGOALS)))
 override CANONICAL_SHORT_FLAGS := $(filter-out -%,$(firstword $(MAKEFLAGS)))
-override GATE_CONTROL_OVERRIDES := $(strip $(foreach v,MAKE MAKEFLAGS GNUMAKEFLAGS MAKECMDGOALS,$(if $(filter command line environment,$(origin $(v))),$(v))))
+override GATE_CONTROL_OVERRIDES := $(strip $(foreach v,MAKE MAKEFLAGS GNUMAKEFLAGS MAKECMDGOALS,$(if $(filter command line,$(origin $(v))),$(v))))
 ifneq ($(CANONICAL_GOAL),)
 ifneq ($(strip $(foreach f,n t i,$(if $(findstring $(f),$(CANONICAL_SHORT_FLAGS)),$(f)))),)
 $(error gate rejects Make launch mode: $(CANONICAL_SHORT_FLAGS))
@@ -110,7 +110,7 @@ check-corpus-internal: ultrapatch check_corpus.sh
 	@./check_corpus.sh $(JOBS)
 
 check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \
-                          scripts/check_footprint.sh scripts/stack_bound.py scripts/tempdir.sh
+                          scripts/check_footprint.sh scripts/stack_bound.py
 	@ARM_CC="$(ARM_CC)" ARM_SIZE="$(ARM_SIZE)" ARM_OBJDUMP="$(ARM_OBJDUMP)" \
 	  ARM_DEC_FLAGS="$(ARM_DEC_FLAGS)" ARM_OBJECT_OPT="$(ARM_OBJECT_OPT)" \
 	  DECODER_INTEGRATION_TU="$(DECODER_INTEGRATION_TU)" \

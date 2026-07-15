@@ -12,7 +12,7 @@
 #
 # The release set is deliberately fixed and small enough to describe without another inventory:
 #   * all 256 ordered pairs over the 16 sorted home image directories;
-#   * both directions of the 17 adjacent sorted foreign versions, with the cross-major pair first;
+#   * both directions of the 17 adjacent sorted foreign versions;
 #   * the real one-face fixture in both directions.
 #
 # Every parallel worker owns a private temporary directory.  Worker output is a single line, so
@@ -185,27 +185,10 @@ append_foreign_pair() {
     "$to/watch.bin" "$from/watch.bin" >> "$tmp/jobs.txt"
 }
 
-# Start the slow cross-major foreign edge first, then the remaining adjacent edges.  This keeps
-# the longest job overlapped with the full home matrix without a separate scheduler.
-cross=-1
-for ((i=1; i<${#FOREIGN_DIRS[@]}; i++)); do
-  prev=${FOREIGN_DIRS[i-1]##*/}; cur=${FOREIGN_DIRS[i]##*/}
-  pmaj=${prev%%.*}; cmaj=${cur%%.*}
-  if { [ "$pmaj" -le 3 ] && [ "$cmaj" -ge 10 ]; } || \
-     { [ "$pmaj" -ge 10 ] && [ "$cmaj" -le 3 ]; }; then
-    cross=$i
-    break
-  fi
-done
-if [ "$cross" -lt 1 ]; then
-  echo "check_corpus.sh: foreign corpus has no cross-major adjacent edge" >&2
-  exit 3
-fi
-
+# Schedule both directions of each adjacent foreign edge. All foreign jobs precede the home matrix
+# in jobs.txt, so xargs dispatches them in the first waves and their tails overlap the home run.
 : > "$tmp/jobs.txt"
-append_foreign_pair "${FOREIGN_DIRS[cross-1]}" "${FOREIGN_DIRS[cross]}"
 for ((i=1; i<${#FOREIGN_DIRS[@]}; i++)); do
-  [ "$i" -eq "$cross" ] && continue
   append_foreign_pair "${FOREIGN_DIRS[i-1]}" "${FOREIGN_DIRS[i]}"
 done
 
