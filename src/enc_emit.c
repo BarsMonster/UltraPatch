@@ -30,43 +30,55 @@ static int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0,
 }
 
 /* Merge plans derive relocation deltas from final geometry. Non-merge plans retain only fields
- * whose source and target bytes are already identical. */
+ * whose source and target bytes are already identical.
+ *
+ * Single classification pass over the pristine field bytes: derives the de-reloc delta, VERIFIES the
+ * reconstructed field reproduces the target 4 bytes (else the field degrades to EV_SBL == 4 literal
+ * copies, the same downstream path), and returns the shift-map key k2 (BL branch target / EX word).
+ * op_emit_content then just reads {type, delta, k2}; nothing re-reads the field bytes. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             const LdrTargetIndex *ldr, int merge_fields,
                             int32_t fp0, int32_t tp0, int32_t dl, int32_t k) {
     uint32_t fpk, tpk;
-    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0 };
+    if (!field_addr(fp0, k, from_size, &fpk)) return (Event){ EV_NONE, 0, 0 };
     int pure = merge_fields;
     for (int b = 0; !pure && b < 4; b++)
         if (op_diff_byte(frm, from_size, tob, fp0 + k + b, tp0 + k + b)) break;
         else if (b == 3) pure = 1;
+    uint8_t packed[4];
     if (is_local_bl(frm, from_size, fpk)) {
-        if (!pure) return (Event){ EV_SBL, 0 };
+        if (!pure) return (Event){ EV_SBL, 0, 0 };
+        uint16_t fu = rc_u16le(frm + fpk), fl = rc_u16le(frm + fpk + 2);
         if (field_addr(tp0, k, to_size, &tpk)) {
             uint16_t tu = rc_u16le(tob + tpk), tl = rc_u16le(tob + tpk + 2);
             if (rc_bl_pattern(tu, tl)) {
-                uint16_t fu = rc_u16le(frm + fpk), fl = rc_u16le(frm + fpk + 2);
-                return (Event){ EV_BL,
-                    rc_i32_from_u32((uint32_t)rc_bl_imm24s(fu, fl) -
-                                    (uint32_t)rc_bl_imm24s(tu, tl)) };
+                int32_t delta = rc_i32_from_u32((uint32_t)rc_bl_imm24s(fu, fl) -
+                                                (uint32_t)rc_bl_imm24s(tu, tl));
+                rc_bl_dereloc(fu, fl, (uint32_t)delta, packed);
+                if (!memcmp(packed, tob + tp0 + k, sizeof(packed)))
+                    return (Event){ EV_BL, delta, rc_bl_target(fpk, fu, fl) };
             }
         }
-        return (Event){ EV_SBL, 0 };
+        return (Event){ EV_SBL, 0, 0 };
     }
     if (pure && ldr_target_index_query(ldr, fp0, dl, fpk)) {
+        uint32_t word = rc_u32le(frm + fpk);
         int32_t delta = field_addr(tp0, k, to_size, &tpk)
-            ? rc_i32_from_u32(rc_u32le(frm + fpk) - rc_u32le(tob + tpk)) : 0;
-        return (Event){ EV_EX, delta };
+            ? rc_i32_from_u32(word - rc_u32le(tob + tpk)) : 0;
+        rc_u32le_put(packed, word - (uint32_t)delta);
+        if (!memcmp(packed, tob + tp0 + k, sizeof(packed)))
+            return (Event){ EV_EX, delta, word };
+        return (Event){ EV_SBL, 0, 0 };
     }
-    return (Event){ EV_NONE, 0 };
+    return (Event){ EV_NONE, 0, 0 };
 }
 
 /* One field injection (delta escaped into the LZ content stream): cc = absolute content byte cursor,
  * kind = EV_BL/EV_EX, k1 = from-image field address, need = plain (no-map) wire
- * residual, k2 = shift-map lookup key (BL branch target / EX word value) derived ONCE here from the
- * pristine from-image bytes. The mapped residual derives from need+k2 via smap_resid() without
- * re-walking those bytes. */
+ * residual, k2 = shift-map lookup key (BL branch target / EX word value) derived ONCE in
+ * classify_field from the pristine from-image bytes. The mapped residual derives from need+k2 via
+ * smap_resid() without re-walking those bytes. */
 static void inj_push(FieldInjArena *v, uint32_t cc, int kind, uint32_t fpk,
                      int32_t delta, uint32_t k2) {
     v->v = (FieldInj *)vec_reserve(v->v, &v->cap, v->n + 1, sizeof(v->v[0]), 16);
@@ -130,7 +142,7 @@ static void op_emit_content(const Op *o, int FWD,
     while (FWD ? walk_k < o->diff_len : walk_k >= 0) {
         int is_field = 0;
         int32_t pos = walk_k;
-        Event ev = { EV_NONE, 0 };
+        Event ev = { EV_NONE, 0, 0 };
         int32_t a0 = FWD ? walk_k : walk_k - 3;
         if (a0 >= 0 && a0 + 4 <= o->diff_len) {
             ev = classify_field(frm, from_size, tob, to_size, ldr, merge_fields,
@@ -143,26 +155,8 @@ static void op_emit_content(const Op *o, int FWD,
         }
         if (!is_field) walk_k += FWD ? 1 : -1;
         uint32_t fpk = (uint32_t)(fp0 + pos);
-        int keep = is_field && (ev.type == EV_BL || ev.type == EV_EX);
-        if (keep) {
-            uint8_t packed[4];
-            if (ev.type == EV_BL) {
-                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
-                rc_bl_dereloc(up, lo, (uint32_t)ev.delta, packed);
-            } else {
-                rc_u32le_put(packed, rc_u32le(frm + fpk) - (uint32_t)ev.delta);
-            }
-            keep = !memcmp(packed, tob + tp0 + pos, sizeof(packed));
-        }
-        if (keep) {
-            uint32_t k2;
-            if (ev.type == EV_BL) {
-                uint16_t up = rc_u16le(frm + fpk), lo = rc_u16le(frm + fpk + 2);
-                k2 = rc_bl_target(fpk, up, lo);
-            } else {
-                k2 = rc_u32le(frm + fpk);
-            }
-            inj_push(out, (uint32_t)pos, ev.type, fpk, ev.delta, k2);
+        if (is_field && (ev.type == EV_BL || ev.type == EV_EX)) {
+            inj_push(out, (uint32_t)pos, ev.type, fpk, ev.delta, ev.k2);
         } else {
             int32_t k = pos + (!FWD && is_field ? 3 : 0);
             int n = is_field ? 4 : 1;

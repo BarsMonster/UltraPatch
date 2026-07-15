@@ -137,7 +137,7 @@ enum { PRICE_LIT_MAX = 255 * PR_SCALE };
 _Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit uint16_t");
 
 enum { EV_NONE, EV_BL, EV_EX, EV_SBL };
-typedef struct { int type; int32_t delta; } Event;
+typedef struct { int type; int32_t delta; uint32_t k2; } Event;
 /* Deltas injected between content bytes live in one decoder-apply-order arena. Shift-map fitting
  * sees the historical source order by globally reversing this arena for a reverse apply. */
 typedef struct { uint32_t cc; int kind; uint32_t k1; int32_t need; uint32_t k2; } FieldInj;
