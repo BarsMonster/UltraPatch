@@ -210,10 +210,10 @@ OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start);
 static inline size_t opwalk_apply_index(size_t n, int fwd, size_t step) {
     return fwd ? step : n - 1u - step;
 }
-int read_file_buf(const char *path, Buf *out, uint64_t max_size);
+void read_file_buf(const char *path, Buf *out, uint64_t max_size);
 int file_alias(const char *a, const char *b);
-int replace_file(const char *path, const void *p, size_t n);
-void write_file(const char *path, const void *p, size_t n);
+void reject_if_alias(const char *a, const char *b, const char *what);
+void replace_file(const char *path, const void *p, size_t n);
 uint32_t crc32_buf(const uint8_t *p, size_t n);
 int bitlen32(uint32_t v);
 void put_uleb(Buf *b, uint32_t v);

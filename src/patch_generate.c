@@ -6,15 +6,6 @@
  */
 #include "enc_internal.h"
 
-static void reject_patch_output(const char *patch_out, const char *input) {
-    int conflict = file_alias(patch_out, input);
-    if (conflict < 0) exit(2);
-    if (conflict) {
-        fprintf(stderr, "%s: patch output aliases input %s\n", patch_out, input);
-        exit(2);
-    }
-}
-
 /* Emit the full patch envelope into a fresh `blob`. The body's leading range-coder cache
  * byte is dropped on the wire. A short body is valid: the decoder zero-pads after the counted
  * bytes while initializing and consuming the range stream. */
@@ -36,11 +27,11 @@ static void emit_wire_blob(Buf *blob, uint32_t from_crc, uint32_t to_crc,
 }
 
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out) {
-    reject_patch_output(patch_out, from_image);
-    reject_patch_output(patch_out, to_image);
+    reject_if_alias(patch_out, from_image, "patch output aliases input");
+    reject_if_alias(patch_out, to_image, "patch output aliases input");
     Buf from = {0}, to = {0};
-    if (read_file_buf(from_image, &from, MAX_IMAGE) ||
-        read_file_buf(to_image, &to, MAX_IMAGE)) exit(2);
+    read_file_buf(from_image, &from, MAX_IMAGE);
+    read_file_buf(to_image, &to, MAX_IMAGE);
     uint32_t from_size = (uint32_t)from.n, to_size = (uint32_t)to.n;
     PlanPrep prep;
     plan_prepare(&prep, &from, &to);
@@ -94,7 +85,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     { const char *scerr = selfcheck(best_blob.d, best_blob.n, from.d, from.n, to.d, to.n);
       if (scerr) { fprintf(stderr, "self-verify: %s\n", scerr);
                    die("emitted patch failed reference-decoder self-verification"); } }
-    write_file(patch_out, best_blob.d, best_blob.n);
+    replace_file(patch_out, best_blob.d, best_blob.n);
     buf_free(&best_blob); buf_free(&from); buf_free(&to);
 }
 

@@ -98,70 +98,69 @@ OpWalkEnt *opwalk_build(const OpVec *ops, int32_t fp_start) {
     return w;
 }
 
-int read_file_buf(const char *path, Buf *out, uint64_t max_size) {
+/* An I/O syscall failure on a host path is one of the process's single fatal fates (exit 2). */
+static void die_errno(const char *path) RC_NORETURN;
+static void die_errno(const char *path) { perror(path); exit(2); }
+
+void read_file_buf(const char *path, Buf *out, uint64_t max_size) {
     FILE *f = fopen(path, "rb");
     Buf b = {0};
-    if (!f) { perror(path); return 2; }
-    if (fseek(f, 0, SEEK_END)) { perror(path); goto fail; }
+    if (!f) die_errno(path);
+    if (fseek(f, 0, SEEK_END)) die_errno(path);
     long sz = ftell(f);
-    if (sz < 0) { perror(path); goto fail; }
+    if (sz < 0) die_errno(path);
     if ((uint64_t)sz > SIZE_MAX || (max_size && (uint64_t)sz > max_size)) {
         fprintf(stderr, "%s: file too large\n", path);
-        goto fail;
+        exit(2);
     }
-    if (fseek(f, 0, SEEK_SET)) { perror(path); goto fail; }
+    if (fseek(f, 0, SEEK_SET)) die_errno(path);
     size_t alloc = sz ? (size_t)sz : 1u;     /* never leave b.d NULL: an empty image is a valid
                                               * input, and from->d/to->d flow straight into memcpy/
                                               * memcmp whose args are declared nonnull (0-len UB) */
-    b.d = (uint8_t *)malloc(alloc);
-    if (!b.d) { fprintf(stderr, "out of memory\n"); goto fail; }
+    b.d = (uint8_t *)xmalloc(alloc);
     b.n = (size_t)sz;
     b.cap = alloc;
     if (b.n && fread(b.d, 1, b.n, f) != b.n) {
-        if (ferror(f)) perror(path);
-        else fprintf(stderr, "%s: short read\n", path);
-        goto fail;
+        if (ferror(f)) die_errno(path);
+        fprintf(stderr, "%s: short read\n", path);
+        exit(2);
     }
-    if (fclose(f)) { perror(path); buf_free(&b); return 2; }
+    if (fclose(f)) die_errno(path);
     *out = b;
-    return 0;
-fail:
-    if (fclose(f)) perror(path);
-    buf_free(&b);
-    return 2;
 }
 
 int file_alias(const char *a, const char *b) {
     struct stat sa, sb;
     if (stat(a, &sa)) {
         if (errno == ENOENT || errno == ENOTDIR) return 0;
-        perror(a);
-        return -1;
+        die_errno(a);
     }
-    if (stat(b, &sb)) {
-        perror(b);
-        return -1;
-    }
+    if (stat(b, &sb)) die_errno(b);
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
-int replace_file(const char *path, const void *p, size_t n) {
+/* Shared usage-error guard: if `a` and `b` name the same file, `what` describes the conflict and
+ * the process terminates (exit 2) — a rewrite that aliased its own input would corrupt it. */
+void reject_if_alias(const char *a, const char *b, const char *what) {
+    if (file_alias(a, b)) {
+        fprintf(stderr, "%s: %s %s\n", a, what, b);
+        exit(2);
+    }
+}
+
+void replace_file(const char *path, const void *p, size_t n) {
     static const char suffix[] = ".tmp.XXXXXX";
     struct stat st;
     mode_t mode;
     size_t path_n = strlen(path);
     char *tmp;
-    int fd = -1, rc = 2;
+    int fd = -1;
 
     if (path_n > SIZE_MAX - sizeof(suffix)) {
         fprintf(stderr, "%s: path too long\n", path);
-        return 2;
+        exit(2);
     }
-    tmp = (char *)malloc(path_n + sizeof(suffix));
-    if (!tmp) {
-        fprintf(stderr, "out of memory\n");
-        return 2;
-    }
+    tmp = (char *)xmalloc(path_n + sizeof(suffix));
     memcpy(tmp, path, path_n);
     memcpy(tmp + path_n, suffix, sizeof(suffix));
 
@@ -173,12 +172,12 @@ int replace_file(const char *path, const void *p, size_t n) {
         mode = 0666u & ~mask;
     } else {
         perror(path);
-        goto out;
+        goto fail;
     }
     fd = mkstemp(tmp);
     if (fd < 0) {
         perror(path);
-        goto out;
+        goto fail;
     }
     {
         const uint8_t *d = (const uint8_t *)p;
@@ -189,35 +188,32 @@ int replace_file(const char *path, const void *p, size_t n) {
             if (wrote <= 0) {
                 if (wrote == 0) errno = EIO;
                 perror(path);
-                goto out;
+                goto fail;
             }
             off += (size_t)wrote;
         }
     }
     if (fchmod(fd, mode) || fsync(fd)) {
         perror(path);
-        goto out;
+        goto fail;
     }
     if (close(fd)) {
         fd = -1;
         perror(path);
-        goto out;
+        goto fail;
     }
     fd = -1;
     if (rename(tmp, path)) {
         perror(path);
-        goto out;
+        goto fail;
     }
-    rc = 0;
-out:
-    if (fd >= 0) (void)close(fd);
-    if (rc) (void)unlink(tmp);
     free(tmp);
-    return rc;
-}
-
-void write_file(const char *path, const void *p, size_t n) {
-    if (replace_file(path, p, n)) exit(2);
+    return;
+fail:
+    if (fd >= 0) (void)close(fd);
+    (void)unlink(tmp);
+    free(tmp);
+    exit(2);
 }
 
 uint32_t crc32_buf(const uint8_t *p, size_t n) {

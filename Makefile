@@ -53,7 +53,6 @@ HOST_BACKEND_SRC := src/patch_host_backend.c
 TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(DIVSUF) $(HOST_BACKEND_SRC)
 GEN_HDR := src/rc_models.h src/patch_config.h src/enc_internal.h
 DECODER_PUBLIC_HDRS := src/patch_config.h src/rc_models.h src/patch_apply.h
-NVM_EMU := src/nvm_emu.inc
 
 BUILD_DIR ?= .build
 ifneq ($(words $(BUILD_DIR)),1)
@@ -98,7 +97,7 @@ ultrapatch: $(HOST_TOOL)
 FORCE:
 
 # Rebuild the CLI atomically on every request so compiler and flag changes cannot reuse a stale tool.
-$(HOST_TOOL): FORCE $(TOOL_SRCS) $(GEN_HDR) $(NVM_EMU) Makefile
+$(HOST_TOOL): FORCE $(TOOL_SRCS) $(GEN_HDR) Makefile
 	@mkdir -p "$(dir $@)"
 	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
 	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
