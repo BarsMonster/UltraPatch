@@ -51,7 +51,6 @@ ENC_MODULE_SRCS := src/enc_util.c src/enc_bsdiff.c src/enc_field.c \
                    src/enc_rc.c src/enc_lz.c src/enc_emit.c src/enc_plan.c
 HOST_BACKEND_SRC := src/patch_host_backend.c
 TOOL_SRCS := src/patch_generate.c $(ENC_MODULE_SRCS) $(DIVSUF) $(HOST_BACKEND_SRC)
-GEN_HDR := src/rc_models.h src/patch_config.h src/enc_internal.h
 DECODER_PUBLIC_HDRS := src/patch_config.h src/rc_models.h src/patch_apply.h
 
 BUILD_DIR ?= .build
@@ -96,8 +95,8 @@ ultrapatch: $(HOST_TOOL)
 
 FORCE:
 
-# Rebuild the CLI atomically on every request so compiler and flag changes cannot reuse a stale tool.
-$(HOST_TOOL): FORCE $(TOOL_SRCS) $(GEN_HDR) Makefile
+# Rebuild the CLI atomically on every request via FORCE (no source prereqs), so compiler and flag changes cannot reuse a stale tool.
+$(HOST_TOOL): FORCE
 	@mkdir -p "$(dir $@)"
 	@set -e; tmp="$@.$$$$.tmp"; cleanup(){ rm -f "$$tmp"; }; trap 'cleanup' EXIT; \
 	trap 'cleanup; trap - TERM INT EXIT; kill -s TERM "$$$$"' TERM; \
