@@ -32,10 +32,14 @@ static int ldr_target_index_query(const LdrTargetIndex *idx, int32_t fp0,
 /* Merge plans derive relocation deltas from final geometry. Non-merge plans retain only fields
  * whose source and target bytes are already identical.
  *
- * Single classification pass over the pristine field bytes: derives the de-reloc delta, VERIFIES the
- * reconstructed field reproduces the target 4 bytes (else the field degrades to EV_SBL == 4 literal
- * copies, the same downstream path), and returns the shift-map key k2 (BL branch target / EX word).
- * op_emit_content then just reads {type, delta, k2}; nothing re-reads the field bytes. */
+ * Single classification pass over the pristine field bytes: derives the de-reloc delta and the
+ * shift-map key k2 (BL branch target / EX word). The BL de-reloc is verified, since imm24 packing
+ * can fail to represent the delta; on failure the field degrades to EV_SBL (suppressed BL, written
+ * as literal copies) -- mirror-consistent, as the decoder likewise treats a non-pure / non-
+ * reproducing BL as copies. The EX de-reloc is an exact 32-bit difference that always reproduces
+ * for an in-target field, so it always classifies as EV_EX (guarded by a coverage-invariant
+ * assert) and never degrades to EV_SBL. op_emit_content then just reads {type, delta, k2}; nothing
+ * re-reads the field bytes. */
 static Event classify_field(const uint8_t *frm, uint32_t from_size,
                             const uint8_t *tob, uint32_t to_size,
                             const LdrTargetIndex *ldr, int merge_fields,
@@ -46,9 +50,9 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size,
     for (int b = 0; !pure && b < 4; b++)
         if (op_diff_byte(frm, from_size, tob, fp0 + k + b, tp0 + k + b)) break;
         else if (b == 3) pure = 1;
-    uint8_t packed[4];
     if (is_local_bl(frm, from_size, fpk)) {
         if (!pure) return (Event){ EV_SBL, 0, 0 };
+        uint8_t packed[4];
         uint16_t fu = rc_u16le(frm + fpk), fl = rc_u16le(frm + fpk + 2);
         if (field_addr(tp0, k, to_size, &tpk)) {
             uint16_t tu = rc_u16le(tob + tpk), tl = rc_u16le(tob + tpk + 2);
@@ -63,13 +67,16 @@ static Event classify_field(const uint8_t *frm, uint32_t from_size,
         return (Event){ EV_SBL, 0, 0 };
     }
     if (pure && ldr_target_index_query(ldr, fp0, dl, fpk)) {
+        /* EX de-reloc is an exact 32-bit difference: word - delta always reproduces the target
+         * word, so no memcmp verification is needed (unlike the BL arm, whose imm24 packing can
+         * fail to represent the delta). op_emit_content only classifies fields fully inside
+         * diff_len and op geometry keeps tp0+diff_len <= to_size, so field_addr cannot fail here.
+         * Assert it rather than fall back to EV_SBL: an EX EV_SBL has NO decoder mirror
+         * (up_field_at pulls a delta for every pure LDR hit) and would desync the wire. */
         uint32_t word = rc_u32le(frm + fpk);
-        int32_t delta = field_addr(tp0, k, to_size, &tpk)
-            ? rc_i32_from_u32(word - rc_u32le(tob + tpk)) : 0;
-        rc_u32le_put(packed, word - (uint32_t)delta);
-        if (!memcmp(packed, tob + tp0 + k, sizeof(packed)))
-            return (Event){ EV_EX, delta, word };
-        return (Event){ EV_SBL, 0, 0 };
+        if (!field_addr(tp0, k, to_size, &tpk))
+            die("classify_field: EX field past target end (op coverage invariant broken)");
+        return (Event){ EV_EX, rc_i32_from_u32(word - rc_u32le(tob + tpk)), word };
     }
     return (Event){ EV_NONE, 0, 0 };
 }
