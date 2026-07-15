@@ -7,12 +7,16 @@
 # stack is the maximum across the static and caller-owned integration shapes.
 set -eu
 
-ARM_CC=${ARM_CC:-arm-none-eabi-gcc}
-ARM_SIZE=${ARM_SIZE:-arm-none-eabi-size}
-ARM_OBJDUMP=${ARM_OBJDUMP:-arm-none-eabi-objdump}
-ARM_DEC_FLAGS=${ARM_DEC_FLAGS:-"-mcpu=cortex-m0plus -mthumb -std=c11 -DPATCH_IMAGE_BASE=8192u -DPATCH_IMAGE_CAPACITY=67108864u -I src"}
-ARM_OBJECT_OPT=${ARM_OBJECT_OPT:--Os}
-DECODER_INTEGRATION_TU=${DECODER_INTEGRATION_TU:-test-bench/decoder-integration.c}
+# The Makefile is the single owner of the ARM measurement configuration and passes every knob
+# via env (see check-footprint-internal). Require them here instead of re-defaulting, so this
+# script cannot silently measure a stale configuration when run outside `make check-footprint` --
+# the same env contract check_corpus.sh already enforces for ULTRAPATCH.
+: "${ARM_CC:?run via make check-footprint}"
+: "${ARM_SIZE:?run via make check-footprint}"
+: "${ARM_OBJDUMP:?run via make check-footprint}"
+: "${ARM_DEC_FLAGS:?run via make check-footprint}"
+: "${ARM_OBJECT_OPT:?run via make check-footprint}"
+: "${DECODER_INTEGRATION_TU:?run via make check-footprint}"
 BASE_FOOTPRINT_FLASH=5189
 BASE_FOOTPRINT_STATE=5436
 BASE_FOOTPRINT_STACK=432
