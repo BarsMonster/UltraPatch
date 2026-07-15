@@ -106,6 +106,24 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
     *head_out = head; *prev_out = prev;
 }
 
+static void out_index_ensure(OutIndex *index, const uint8_t *to, size_t to_n,
+                             const uint8_t *frm, size_t from_n, int FWD) {
+    if (index->built) {
+        if (index->fwd != FWD) die("out-match index direction mismatch");
+        return;
+    }
+    oc_index(to, to_n, FWD, &index->to_head, &index->to_prev);
+    oc_index(frm, from_n, FWD, &index->from_head, &index->from_prev);
+    index->fwd = FWD;
+    index->built = 1;
+}
+
+void out_index_free(OutIndex *index) {
+    free(index->to_head); free(index->to_prev);
+    free(index->from_head); free(index->from_prev);
+    memset(index, 0, sizeof(*index));
+}
+
 /* Out-match candidates from BOTH decode-time flash states:
  *  NEW window (source `to`): FWD [0, tp0);             reverse [tp_end, to_size) — written output.
  *  OLD window (source `frm`): FWD [tp_end, from_size); reverse [0, tp0)           — pristine flash
@@ -113,12 +131,13 @@ static void oc_index(const uint8_t *src, size_t src_n, int FWD, int32_t **head_o
  *    write, so OLD candidates are clipped to finish inside the op that starts them. */
 OCand *out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                       const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
+                      OutIndex *index,
                       const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n) {
     OCand *ocands = (OCand *)xcalloc(n ? n : 1, sizeof(*ocands));
     if (to_n >= 4 && n >= 4) {
-        int32_t *head, *prev, *fhead, *fprev;
-        oc_index(to, to_n, FWD, &head, &prev);
-        oc_index(frm, from_n, FWD, &fhead, &fprev);
+        out_index_ensure(index, to, to_n, frm, from_n, FWD);
+        int32_t *head = index->to_head, *prev = index->to_prev;
+        int32_t *fhead = index->from_head, *fprev = index->from_prev;
         size_t step = 0;
         for (size_t i = 0; i + 4 <= n; i++) {
             while (i >= rows[step].content_end) step++;
@@ -160,7 +179,6 @@ OCand *out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                 }
             }
         }
-        free(head); free(prev); free(fhead); free(fprev);
     }
     return ocands;
 }

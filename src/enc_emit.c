@@ -539,7 +539,7 @@ static int fit_shift_map_bits(const uint32_t *fb, const int32_t *fv, int fn,
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
                 const LdrTargetIndex *ldr, const SourceLitModels *lit, int merge_fields,
-                int32_t fp_start, int *overflow_out) {
+                int32_t fp_start, OutIndex *out_index, int *overflow_out) {
     int FWD = ctx->fwd;
     Buf content = {0}, tags = {0};
     OpEmitRow *rows = (OpEmitRow *)xmalloc((ops->n ? ops->n : 1) * sizeof(*rows));
@@ -575,7 +575,7 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
     }
     /* ---- D2 out-matches: each content position inherits the decode-time NEW/OLD flash
      * windows and OLD-token cap from the op that consumes it. */
-    OCand *ocands = out_candidates(content.d, content.n, ops, walk, rows, FWD,
+    OCand *ocands = out_candidates(content.d, content.n, ops, walk, rows, FWD, out_index,
                                    tob, to_size, frm, from_size);
     int32_t max_out_len = 0;
     for (size_t i = 0; i < content.n; i++)

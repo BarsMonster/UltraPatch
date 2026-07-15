@@ -110,16 +110,9 @@ static void emit_bsdiff_op(OpVec *ops, const uint8_t *from, int32_t from_size,
     *last_offset_p = pos - scan;
 }
 
-OpVec bsdiff_ops(const Buf *from_buf, const Buf *to, int fuzz) {
-    uint8_t empty_source = 0;
-    /* Some direct seam probes represent an empty Buf with d==NULL. suffix_search performs
-     * zero-offset pointer arithmetic even though it never dereferences the empty source. */
-    const uint8_t *from = from_buf->d ? from_buf->d : &empty_source;
-    int32_t from_size = (int32_t)from_buf->n, to_size = (int32_t)to->n;
-    int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(*sa));
-    sa[0] = from_size;
-    if (from_size && divsufsort(from, &sa[1], from_size) != 0)
-        die("divsufsort failed");
+static OpVec bsdiff_ops_sa(const int32_t *sa, const uint8_t *from, int32_t from_size,
+                           const Buf *to, int fuzz) {
+    int32_t to_size = (int32_t)to->n;
     OpVec ops = {0};
     int32_t scan = 0, len = 0, last_scan = 0, last_pos = 0, last_offset = 0, pos = 0;
     while (scan < to_size) {
@@ -137,6 +130,21 @@ OpVec bsdiff_ops(const Buf *from_buf, const Buf *to, int fuzz) {
             emit_bsdiff_op(&ops, from, from_size, to->d, to_size, scan, pos,
                            &last_scan, &last_pos, &last_offset);
     }
-    free(sa);
     return ops;
+}
+
+void bsdiff_ops_all(const Buf *from_buf, const Buf *to, OpVec out[PLAN_RAW_N]) {
+    uint8_t empty_source = 0;
+    /* Some direct seam probes represent an empty Buf with d==NULL. suffix_search performs
+     * zero-offset pointer arithmetic even though it never dereferences the empty source. */
+    const uint8_t *from = from_buf->d ? from_buf->d : &empty_source;
+    int32_t from_size = (int32_t)from_buf->n;
+    int32_t *sa = (int32_t *)xmalloc(((size_t)from_size + 1) * sizeof(*sa));
+    sa[0] = from_size;
+    if (from_size && divsufsort(from, &sa[1], from_size) != 0)
+        die("divsufsort failed");
+    out[PLAN_RAW_11] = bsdiff_ops_sa(sa, from, from_size, to, 11);
+    out[PLAN_RAW_6] = bsdiff_ops_sa(sa, from, from_size, to, 6);
+    out[PLAN_RAW_20] = bsdiff_ops_sa(sa, from, from_size, to, 20);
+    free(sa);
 }

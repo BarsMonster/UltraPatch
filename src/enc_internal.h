@@ -128,6 +128,10 @@ typedef Buf CandArena;
 #endif
 enum { LZ_MAX_RUN = 1024, LZ_MAX_MATCH = 2048 };
 typedef struct { int32_t pos, len; } OCand;
+typedef struct {
+    int32_t *to_head, *to_prev, *from_head, *from_prev;
+    int fwd, built;
+} OutIndex;
 enum { PR_SCALE = 64 };
 enum { PRICE_LIT_MAX = 255 * PR_SCALE };
 _Static_assert(PRICE_LIT_MAX <= UINT16_MAX, "PriceTab literal prices must fit uint16_t");
@@ -217,7 +221,7 @@ void put_uleb_overlong(Buf *b, uint32_t v);
 void ivec_push(IVec *v, int32_t x);
 void opvec_push(OpVec *v, Op o);
 
-OpVec bsdiff_ops(const Buf *from, const Buf *to, int fuzz);
+void bsdiff_ops_all(const Buf *from, const Buf *to, OpVec out[PLAN_RAW_N]);
 
 void ldr_target_index_build(LdrTargetIndex *idx, const uint8_t *source, uint32_t source_size);
 void ldr_target_index_free(LdrTargetIndex *idx);
@@ -255,7 +259,9 @@ void content_cursor_init(ContentCursor *cc, const TokenVec *seq,
 void content_cursor_to(ContentCursor *cc, size_t end, ContentStats *stats);
 OCand *out_candidates(const uint8_t *content, size_t n, const OpVec *ops,
                       const OpWalkEnt *walk, const OpEmitRow *rows, int FWD,
+                      OutIndex *index,
                       const uint8_t *to, size_t to_n, const uint8_t *frm, size_t from_n);
+void out_index_free(OutIndex *index);
 void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *tags,
                     const LitSeedTrees *seeds, int dk, int ko, PriceTab *pt);
 TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
@@ -273,7 +279,7 @@ uint32_t bit_price(uint32_t p, int bit);
 Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_t from_size,
                 const uint8_t *tob, uint32_t to_size,
                 const LdrTargetIndex *ldr, const SourceLitModels *lit, int merge_fields,
-                int32_t fp_start, int *overflow_out);
+                int32_t fp_start, OutIndex *out_index, int *overflow_out);
 
 void plan_prepare(PlanPrep *prep, const Buf *from, const Buf *to);
 void plan_prepare_free(PlanPrep *prep);
@@ -283,7 +289,7 @@ void plan_geometry_prepare(PlanGeometry *geom, EncCtx *ctx,
 void plan_geometry_free(PlanGeometry *geom);
 PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
                        const PlanPrep *prep, const PlanGeometry *geom,
-                       int merge_fields);
+                       int merge_fields, OutIndex *out_index);
 
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out);
 int decode_patch(const char *image_path, const char *patch_path);
