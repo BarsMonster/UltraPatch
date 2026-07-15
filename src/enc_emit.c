@@ -214,9 +214,9 @@ static uint64_t bv_xfer(up_BitTree *t, REnc *r, int32_t x) {
     return c;
 }
 
-static void dr_init_e(DRE *d, int32_t *dic, int cap, uint16_t hitseed) {
+static void dr_init_e(DRE *d, int32_t *dic, int cap) {
     d->dic = dic; d->cap = (uint16_t)cap;
-    rc_dr_init(&d->s, d->dic, hitseed);
+    rc_dr_init(&d->s, d->dic);
 }
 
 enum { DR_TR_REP, DR_TR_HIT, DR_TR_ESC };
@@ -315,8 +315,8 @@ static Buf emit_body(const TokenVec *seq, int kd, int ko, const OpVec *ops, int 
     Models M;
     memset(&M, 0, sizeof(M));
     models_init_content(&M, seeds, kd, ko);   /* fresh literal trees + token-loop models */
-    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT);
-    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
+    dr_init_e(&M.dr_bl, M.dic_bl, DR_KCAP_BL);
+    dr_init_e(&M.dr_ex, M.dic_ex, DR_KCAP_EX);
     rc_init_prekd(&M.pre);   /* map header and operation geometry share gdl/gadj adaptation */
     *overflow = 0;
     int out_en = 0;
@@ -421,8 +421,8 @@ static uint64_t px_map_total(const uint32_t *mb, const int32_t *mv, int mn,
                              int32_t *dic_bl, int32_t *dic_ex) {
     uint64_t c = px_hdr_bits(mb, mv, mn);
     if (c == UINT64_MAX / 2u) return c;
-    DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL, UP_DR_HIT_INIT); dr_init_e(&ex, dic_ex, DR_KCAP_EX, UP_DR_HIT_INIT);
-    up_IdxUnary di_bl, di_ex; up_idx_init(&di_bl, RC_IDX_SEED); up_idx_init(&di_ex, RC_IDX_SEED);
+    DRE bl, ex; dr_init_e(&bl, dic_bl, DR_KCAP_BL); dr_init_e(&ex, dic_ex, DR_KCAP_EX);
+    up_IdxUnary di_bl, di_ex; up_idx_init(&di_bl); up_idx_init(&di_ex);
     up_BitTree dval; up_bt_init(&dval);
     for (size_t i = 0; i < inj->n; i++) {
         const FieldInj *fk = field_inj_key(inj, fwd, i);

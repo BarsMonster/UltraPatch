@@ -303,7 +303,11 @@ static inline int32_t rc_smap_pred_ex(const uint32_t*b, const int32_t*v, int n, 
  * code worse). Shared struct + seed; the encode/decode loops live in each side. */
 #define UP_IDX_CTX 5
 typedef struct { uint16_t u[UP_IDX_CTX]; } up_IdxUnary;
-static inline void up_idx_init(up_IdxUnary*g,uint16_t seed){ for(int i=0;i<UP_IDX_CTX;i++) g->u[i]=seed; }
+/* MTF cache-index unary seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
+ * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
+ * corpus optimum. Baked into the shared init so the encoder/decoder seed cannot drift. */
+#define RC_IDX_SEED 2816u
+static inline void up_idx_init(up_IdxUnary*g){ for(int i=0;i<UP_IDX_CTX;i++) g->u[i]=RC_IDX_SEED; }
 
 static inline void rc_mtf_promote_i32(int32_t*dic,uint32_t j){
     if(j){ int32_t t=dic[j]; RC_MOVE_HIGH(&dic[1],&dic[0],(size_t)j*sizeof(dic[0])); dic[0]=t; }
@@ -325,10 +329,14 @@ typedef struct {
     uint16_t K;                       /* MTF cache entries in use (index 0 = most-recently-used) */
     uint16_t rep[4], hit; uint8_t rh; /* adaptive binary models (P(bit==0)); rep keyed by prev repeat + last==0 */
 } up_DRStream;
-RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
+/* MTF cache-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF cache makes the hit-bit==1 likely, so seed
+ * the adaptive hit model high. 576 = tuned corpus optimum. Baked into the shared init so the
+ * encoder/decoder seed cannot drift. */
+#define UP_DR_HIT_INIT 576u
+RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic){
     d->K=1; dic[0]=0;
     rc_init_probs(d->rep,4,RC_PHALF);
-    d->rh=0; d->hit=hitseed;
+    d->rh=0; d->hit=UP_DR_HIT_INIT;
 }
 
 /* =====================================================================================
@@ -361,15 +369,6 @@ RC_ALWAYS_INLINE void rc_dr_init(up_DRStream*d,int32_t*dic,uint16_t hitseed){
  * ~1/4 (3/8 helps corpus more but regresses the real one-face update by +1/+1). Both sides store
  * the prior in up_TokModels.rep0 and initialize it through rc_init_tok. */
 #define RC_REP0_INIT (RC_PBIT - (RC_PBIT>>2))
-
-/* MTF cache-hit bit seed (DR_BL/DR_EX): a zero-seeded MTF cache makes the hit-bit==1 likely, so seed
- * the adaptive hit model high. 576 = tuned corpus optimum. Shared rc_dr_init seeds both sides. */
-#define UP_DR_HIT_INIT 576u
-
-/* MTF cache-index unary seed (dibl/diex): seed every unary-prefix prior toward STOP (idx 0) so the
- * just-promoted index 1 (encoded value 0), which dominates, is cheap from the first symbol. 2816 =
- * corpus optimum. (Shared up_idx_init seeds both sides.) */
-#define RC_IDX_SEED 2816u
 
 /* seed_cont depths: bias the first N unary-prefix positions of a gamma model toward "continue"
  * (bit 1). Structural priors (format invariants), NOT corpus caps. Shared rc_ugg_seed_cont and
@@ -423,7 +422,7 @@ static inline void rc_ugg_seed_cont(up_UGGamma*g,int depth){ rc_seed_cont_u(g->u
 /* pre-kd apply-phase init: neutral models + structural seed_cont priors for shared map/geometry state. */
 static inline void rc_init_prekd(up_PreKdModels*m){
     up_bt_init(&m->dval);
-    up_idx_init(&m->dibl,RC_IDX_SEED); up_idx_init(&m->diex,RC_IDX_SEED);
+    up_idx_init(&m->dibl); up_idx_init(&m->diex);
     rc_ugg_init(&m->gdl); rc_ugg_init(&m->gel); rc_ugg_init(&m->gadj);
     rc_ugg_seed_cont(&m->gdl,RC_SEED_DEPTH_GDL); rc_ugg_seed_cont(&m->gadj,RC_SEED_DEPTH_GADJ);
 }

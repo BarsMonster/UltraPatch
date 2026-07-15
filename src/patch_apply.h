@@ -447,7 +447,6 @@ static void up_orow_reset(PatchApply *pa){ for(uint32_t s=0;s<OUTROW_DEPTH;s++){
  * its RAM slot, anything else from flash. Valid streams only reference written positions; a
  * corrupt position yields stale flash bytes, which the CRC32(to) gate rejects. */
 static uint8_t up_out_read(PatchApply *pa, uint32_t a){
-    if(a>=pa->g_image_span) return 0;
     { uint32_t base=(a/OUTROW)*OUTROW, s=UP_OROW_SLOT(base);
       if(pa->ARENA.apply.g_orow_base[s]==base) return pa->ARENA.apply.g_orow_buf[s][a-base]; }
     return up_image_flash_read(a);
@@ -455,7 +454,6 @@ static uint8_t up_out_read(PatchApply *pa, uint32_t a){
 /* OUTPUT write: buffer in the page's slot, committing the slot's previous occupant (the page
  * exactly OUTROW_DEPTH pages behind) on a page change. */
 static void up_out_write(PatchApply *pa, uint32_t a, uint8_t v){
-    if(a>=pa->g_image_span) return;
     uint32_t base=(a/OUTROW)*OUTROW, s=UP_OROW_SLOT(base);
     if(base!=pa->ARENA.apply.g_orow_base[s]){
         up_orow_commit_slot(pa,s);
@@ -925,7 +923,7 @@ static int up_decode_body(PatchApply *pa){
     /* ---- STREAMED DELTAS: NO up-front DEREL phase. The fresh delta models are used INLINE during
      * apply (up_pull_delta in up_field_at). MDL_pre.dval (escape bytes), the two MTF dict streams,
      * and the two cache-index unary models all persist through apply. ---- */
-    rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL, UP_DR_HIT_INIT); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX, UP_DR_HIT_INIT);
+    rc_dr_init(&pa->DR_BL, pa->DR_DIC_BL); rc_dr_init(&pa->DR_EX, pa->DR_DIC_EX);
     /* ---- [A] streaming apply (no bake): per op read direct geometry, then pull the
      * op's CONTENT from the cut whole-stream LZSS, detect de-reloc fields inline in
      * write order (pulling each delta from the single stream via up_pull_delta), write via up_out_write. ---- */
