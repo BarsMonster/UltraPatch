@@ -591,7 +591,13 @@ static uint8_t up_next_content(PatchApply *pa, up_ApplyState*s, int tag){
                 uint32_t p=rc_outmatch_pos(pa->ARENA.apply.g_oexp,dpos);
                 uint32_t ln=up_s_ug_gamma(pa,&pa->ARENA.apply.MDL_tok.glo)+RC_OUTMATCH_MIN;
                 /* replay walks the output in WRITE direction (ascending/FWD, descending/reverse) so
-                 * reverse content (whose extras are byte-reversed) still matches produced output. */
+                 * reverse content (whose extras are byte-reversed) still matches produced output.
+                 * ln>=RC_OUTMATCH_MIN (>=1, so every out-match advances) is an ENCODER-maintained wire
+                 * invariant, not a decoder check: the encoder emits only RC_OUTMATCH_MIN<=len<=image_span
+                 * (enc_lz.c ships len-RC_OUTMATCH_MIN), so the gamma argument is < MAX_IMAGE and
+                 * gamma+RC_OUTMATCH_MIN can neither wrap nor fall below RC_OUTMATCH_MIN. A crafted
+                 * out-of-range gamma is out of scope (controlled inputs; truncation zero-fills to gamma 0
+                 * => ln==RC_OUTMATCH_MIN), matching the deliberately un-hardened malformed-stream model. */
                 if(pa->g_rcerr || p>=pa->g_image_span || (pa->g_FWD ? ln>pa->g_image_span-p : ln>p+1u)) goto fail;
                 pa->ARENA.apply.g_oexp=rc_outmatch_next_expect(pa->g_FWD,p,ln);
                 s->tok_mode=3; s->tok_src=p; s->tok_left=ln; s->last_span=0;

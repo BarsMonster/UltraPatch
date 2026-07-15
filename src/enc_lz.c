@@ -248,6 +248,10 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
           if (stats) { stats->op_cost += ugr_price(&M->tok.go, zv); stats->op_n++; }
           ugr_encode(&M->tok.go, rc, zv);
           cc->oexp = rc_outmatch_next_expect(cc->fwd, (uint32_t)cc->cur.dist, (uint32_t)cc->cur.len); }
+        /* cur.len is a kept out-match candidate: RC_OUTMATCH_MIN<=len<=image_span (filtered in
+         * out_candidates / lz_parse_priced), so the shipped len-RC_OUTMATCH_MIN is < MAX_IMAGE and
+         * the decoder's gamma+RC_OUTMATCH_MIN reconstructs len without wrap. This is the wire
+         * invariant the decoder relies on instead of a per-op length guard. */
         ugg_encode(&M->tok.glo, rc, (uint32_t)cc->cur.len - RC_OUTMATCH_MIN);
         cc->tok_mode = 'R';
         cc->tok_left = cc->cur.len;
