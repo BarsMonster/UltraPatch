@@ -104,7 +104,7 @@ constants, including the unsigned 8-bit `PATCH_WIRE_VERSION`. Its nonzero value
 domain-separates incompatible revisions at the pre-write source CRC check.
 Production builds must not override these constants. `PATCH_IMAGE_BASE` and
 `PATCH_IMAGE_CAPACITY` are the decoder-only deployment-geometry exceptions.
-`HAND_ROLLED_MEMMOVE` and `CRC32_DECODE(start,end)` are decoder-only, non-wire
+`HAND_ROLLED_MEMMOVE` and `CRC32_DECODE(start,size)` are decoder-only, non-wire
 configuration hooks described below. The installed wire mode targets
 Cortex-M0/ARMv6-M. `CORTEX_M4` is a reserved wire-selection macro and defining
 it is rejected; compiling the same C for another CPU does not select a
@@ -114,16 +114,17 @@ different wire.
 
 The default decoder computes reflected IEEE CRC-32 with a tableless internal
 routine. A platform CRC library or hardware peripheral may replace it by
-defining `CRC32_DECODE(start,end)` before including any UltraPatch header.
-`start` and `end` are image-relative offsets describing `[start,end)`; the
-result must match zlib's reflected IEEE CRC-32 (polynomial `0xedb88320`, initial
-and final XOR `0xffffffff`) and must observe flash writes completed during the
-apply. For example:
+defining `CRC32_DECODE(start,size)` before including any UltraPatch header.
+`start` is the absolute device address supplied by the decoder and `size` is the
+number of bytes to checksum; it already includes `PATCH_IMAGE_BASE`, so the hook
+must not add the base again. The result must match zlib's reflected IEEE CRC-32
+(polynomial `0xedb88320`, initial and final XOR `0xffffffff`) and must observe
+flash writes completed during the apply. For example:
 
 ```c
 #include <stdint.h>
-uint32_t platform_image_crc32(uint32_t start, uint32_t end);
-#define CRC32_DECODE(start,end) platform_image_crc32((start),(end))
+uint32_t platform_image_crc32(uint32_t start, uint32_t size);
+#define CRC32_DECODE(start,size) platform_image_crc32((start),(size))
 #include "patch_apply.h"
 ```
 

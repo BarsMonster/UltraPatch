@@ -38,14 +38,15 @@
 #define OUTROW 256u
 #define OUTROW_DEPTH 2u
 
-/* Decoder-only CRC integration hook. `start` and `end` are image-relative byte offsets
- * describing the half-open range [start,end); the result must be the reflected IEEE CRC-32
- * used by zlib (polynomial 0xedb88320, initial/final XOR 0xffffffff). Platforms may define
+/* Decoder-only CRC integration hook. `start` is an absolute device address that already
+ * includes PATCH_IMAGE_BASE, and `size` is the number of bytes to checksum; the result must
+ * be the reflected IEEE CRC-32 used by zlib (polynomial 0xedb88320, initial/final XOR
+ * 0xffffffff). Platforms may define
  * CRC32_DECODE before any UltraPatch header to use a hardware or library implementation.
  * The default is the decoder's tableless, allocation-free implementation. */
 #ifndef CRC32_DECODE
 #define UP_CRC32_DECODE_DEFAULT 1
-#define CRC32_DECODE(start,end) up_crc32_decode_default((start),(end))
+#define CRC32_DECODE(start,size) up_crc32_decode_default((start),(size))
 #endif
 
 #endif /* UP_PATCH_CONFIG_H */

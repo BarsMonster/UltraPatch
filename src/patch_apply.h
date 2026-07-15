@@ -366,16 +366,16 @@ static uint32_t up_s_ug_gamma(PatchApply *pa, up_UGGamma*g){
 static int up_s_flag(PatchApply *pa, up_Flag1*f){ int b=up_s_bit(pa,&f->m[f->h]); f->h=rc_fl_hist(f->h,b); return b; }
 
 /* ===================================================================================== */
-/* Default reflected IEEE CRC-32 over an image-relative half-open range. Integrations may */
+/* Default reflected IEEE CRC-32 over an absolute-addressed byte range. Integrations may */
 /* replace CRC32_DECODE with a hardware/library implementation in patch_config.h. The     */
 /* fallback is deliberately tableless: it uses only scalar state and no arena or stack     */
 /* buffer. Literal seeding still scans the source separately to build its parity histograms. */
 /* ===================================================================================== */
 #ifdef UP_CRC32_DECODE_DEFAULT
-static uint32_t RC_NOINLINE up_crc32_decode_default(uint32_t start,uint32_t end){
+static uint32_t RC_NOINLINE up_crc32_decode_default(uint32_t start,uint32_t size){
     uint32_t c=0xffffffffu;
-    for(uint32_t i=start;i<end;i++){
-        c^=up_image_flash_read(i);
+    for(uint32_t i=0;i<size;i++){
+        c^=flash_read((uint32_t)(start+i));
         for(int k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (uint32_t)(-(int32_t)(c&1u)));
     }
     return c^0xffffffffu;
@@ -891,7 +891,7 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
     pa->g_from_size=fs; pa->g_to_size=ts; pa->g_want_to=want_to;
     pa->g_body_left=bl;
     { uint32_t *hist0=pa->ARENA.seed.hist0, *hist1=pa->ARENA.seed.hist1;
-      if(rc_wire_from_crc((uint32_t)CRC32_DECODE(0u,fs))!=want_from) return 0;
+      if(rc_wire_from_crc((uint32_t)CRC32_DECODE((uint32_t)PATCH_IMAGE_BASE,fs))!=want_from) return 0;
       for(int i=0;i<256;i++){ hist0[i]=1; hist1[i]=1; }
       up_flash_hist(fs,hist0,hist1);
       up_lit_tree_from_hist(&pa->M_lit0[0],hist0);
@@ -976,7 +976,8 @@ static PatchApplyResult RC_WARN_UNUSED_RESULT patch_apply_run(PatchApply *pa, Pa
                                                                void *ctx){
     memset(pa,0,sizeof *pa);
     pa->g_pull_fn=next; pa->g_pull_ctx=ctx;
-    if(!up_decode_body(pa) || (uint32_t)CRC32_DECODE(0u,pa->g_to_size)!=pa->g_want_to){
+    if(!up_decode_body(pa) ||
+       (uint32_t)CRC32_DECODE((uint32_t)PATCH_IMAGE_BASE,pa->g_to_size)!=pa->g_want_to){
         if(!pa->g_reject) pa->g_reject=REJ_CORRUPT;
         return PATCH_APPLY_ERROR; }
     return PATCH_APPLY_DONE;
