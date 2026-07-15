@@ -30,6 +30,19 @@ selected by the current Make arguments with:
 make -s host-tool-path
 ```
 
+Use that printed path for both host CLI modes:
+
+```sh
+tool=$(make -s host-tool-path)
+"$tool" [--encode] <from_image> <to_image> <patch>
+"$tool" --decode <image> <patch>
+```
+
+`--decode` applies the patch to the host image file in place. The CLI replaces the file only after
+the production decoder accepts the complete patch; a rejected or truncated patch leaves the file
+unchanged. Device flash updates follow the separate recovery contract in
+[`docs/device-integration.md`](docs/device-integration.md).
+
 Do not assume a root-level `./ultrapatch`. For parallel compiler or measurement
 runs, pass a distinct `BUILD_DIR` to every command in each run.
 
