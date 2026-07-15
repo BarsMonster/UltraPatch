@@ -119,36 +119,20 @@ typedef struct {
     PatchApplyResult rc;
 } HostApply;
 
-/* Self-contained uLEB reader over the raw blob prefix (the header is plain bytes, not range-coded).
- * Advances *pi; rejects truncation and a value that would overflow uint32 (mirrors the decoder's
- * UP_ULEB32_OVERFLOW cap). */
-static int peek_uleb(const uint8_t *blob, size_t blob_n, size_t *pi, uint32_t *out){
-    uint32_t v = 0; int sh = 0; size_t i = *pi;
-    for(;;){
-        if(i >= blob_n) return 0;
-        uint8_t b = blob[i++];
-        if(sh == 28 && (b & 0x7fu) > 15u) return 0;      /* would overflow uint32_t */
-        v |= (uint32_t)(b & 0x7fu) << sh; sh += 7;
-        if(!(b & 0x80u)) break;
-        if(sh > 28) return 0;                            /* > 5 bytes: malformed */
-    }
-    *pi = i; *out = v; return 1;
-}
-/* Strict envelope peek mirroring emit_wire_blob's plain-byte header prefix: skip the 8 CRC bytes
- * (4 from^ver, 4 to), read uLEB from_size, then the zigzag-uLEB size delta and reconstruct
- * to_size exactly as up_decode_header / rc_zz_abs do (the overlong "unnatural direction" marker
- * on the delta is value-neutral, so a plain uLEB read recovers the magnitude). Returns 0 on any
- * truncation or implausible size (both capped at MAX_IMAGE), leaving the outputs untouched. */
+/* Envelope size peek: skip the 8 CRC bytes (4 from^ver, 4 to) and drive the decoder's own
+ * up_env_uleb over a scratch PatchApply -- only the pull hooks are touched -- so there is exactly
+ * one envelope parser and no hand-mirror of the wire grammar to keep in sync. from_size is read
+ * canonical (ov=NULL); the size delta is read with a non-NULL ov because the overlong-uLEB
+ * "unnatural apply direction" marker is a legal, value-neutral encoding there (mirrors
+ * up_decode_header), and rc_zz_abs reconstructs to_size. Returns 0 on truncation or implausible
+ * size (both capped at MAX_IMAGE), leaving the outputs untouched. */
 static int peek_envelope_sizes(const uint8_t *blob, size_t blob_n, uint32_t *fs, uint32_t *ts){
-    size_t i = 8;
-    uint32_t f, z;
-    if(!peek_uleb(blob, blob_n, &i, &f) || f > MAX_IMAGE) return 0;
-    if(!peek_uleb(blob, blob_n, &i, &z)) return 0;
-    uint32_t t;
-    if(z & 1u){ uint32_t m = (z>>1)+1u; if(m > f) return 0; t = f - m; }
-    else      { uint32_t d = z>>1;      if(d > MAX_IMAGE || f > MAX_IMAGE - d) return 0; t = f + d; }
-    *fs = f; *ts = t;
-    return 1;
+    PatchApply pa;
+    PullCtx pc = { blob, blob_n, 8 };          /* skip the 8 CRC envelope bytes */
+    pa.g_pull_fn = pull_next; pa.g_pull_ctx = &pc;
+    uint32_t f, z; uint8_t ov;                 /* ov: read-only to permit the overlong delta */
+    if(!up_env_uleb(&pa, &f, 0) || f > MAX_IMAGE || !up_env_uleb(&pa, &z, &ov)) return 0;
+    return rc_zz_abs(f, z, MAX_IMAGE, ts) ? (*fs = f, 1) : 0;
 }
 
 /* Owns the NVM geometry policy so the two callers no longer disagree (the CLI path previously
