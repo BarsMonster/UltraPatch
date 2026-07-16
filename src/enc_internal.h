@@ -152,13 +152,12 @@ typedef struct {
     uint32_t fspan_c[4], fmatch_c[4];
     uint32_t rep0_yes, rep0_no;
     uint32_t outb_yes, outb_no;
-    uint32_t opos_avg;
     uint32_t oexp0;
     int fwd;
     uint16_t lit0[UP_LIT0_CTX][256];
     uint16_t lit1[256];
     up_UGGamma gs, gl;
-    up_UGRice gd;
+    up_UGRice gd, go;
     up_UGGamma glo;
     int fixed_dist_bits;
 } PriceTab;
@@ -174,8 +173,8 @@ typedef struct {
 } Models;
 
 typedef struct {
-    uint64_t oy_cost, on_cost, op_cost, r0y_cost, r0n_cost;
-    uint32_t oy_n, on_n, op_n, r0y_n, r0n_n;
+    uint64_t oy_cost, on_cost, r0y_cost, r0n_cost;
+    uint32_t oy_n, on_n, r0y_n, r0n_n;
 } ContentStats;
 
 typedef struct {

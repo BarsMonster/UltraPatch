@@ -608,6 +608,31 @@ Buf encode_body(const EncCtx *ctx, const OpVec *ops, const uint8_t *frm, uint32_
                 break;
             }
         }
+        /* A winner without 'O' tokens ships out_en=0 and pays no out-bits at all, yet every
+         * refined parse above priced a phantom outb_no on each fresh match (measure_prices
+         * simulates out_en=1). Re-refine with out pricing excluded: ocands=NULL zeroes the
+         * outb term in fresh_extra, mirroring the no-out emit exactly. Same exact byte gate;
+         * a no-out parse cannot produce 'O' tokens, so the branch is stable once taken. */
+        { int has_out = 0;
+          for (size_t i = 0; i < seq.n; i++) if (seq.v[i].type == 'O') { has_out = 1; break; }
+          if (!has_out) {
+            for (int pass = 0; pass < 16; pass++) {
+                PriceTab pt;
+                pt.oexp0 = FWD ? 0u : to_size; pt.fwd = FWD;
+                measure_prices(&seq, content.d, tags.d, &lit->seeds, kd, ko, &pt);
+                TokenVec cand_seq = lz_parse_priced(content.n, content.d, tags.d,
+                                                    &cands, ncand, NULL, 0, &pt);
+                int nk = fit_k_tokens(&cand_seq);
+                merge_adjacent_spans(&cand_seq);
+                size_t cand_bytes = emit_body_size(&meas, &cand_seq, nk, ko, &inj, NULL, NULL, 0);
+                if (cand_bytes < cur_bytes) {
+                    free(seq.v); seq = cand_seq; cur_bytes = cand_bytes; kd = nk;
+                } else {
+                    free(cand_seq.v);
+                    break;
+                }
+            }
+          } }
         /* anneal rice parameters: fit_k_* minimizes raw codelen, but the shipped cost is the
          * ADAPTIVE ug_encode seed. Walk each parameter outward under the exact full-body gate. */
         for (int which = 0; which < 2; which++) {

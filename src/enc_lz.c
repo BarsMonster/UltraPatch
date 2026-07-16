@@ -245,7 +245,6 @@ static void content_cursor_start_token(ContentCursor *cc, ContentStats *stats) {
         if (stats) { stats->oy_cost += bit_price(M->tok.outb, 1); stats->oy_n++; }
         re_bit(rc, &M->tok.outb, 1, RC_S_BIT_RATE);
         { uint32_t zv = rc_outmatch_delta((uint32_t)cc->cur.dist, cc->oexp);
-          if (stats) { stats->op_cost += ugr_price(&M->tok.go, zv); stats->op_n++; }
           ugr_encode(&M->tok.go, rc, zv);
           cc->oexp = rc_outmatch_next_expect(cc->fwd, (uint32_t)cc->cur.dist, (uint32_t)cc->cur.len); }
         /* cur.len is a kept out-match candidate: RC_OUTMATCH_MIN<=len<=image_span (filtered in
@@ -350,14 +349,11 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
     pt->rep0_no  = st.r0n_n ? (uint32_t)(st.r0n_cost / st.r0n_n) : bit_price(RC_REP0_INIT, 0);
     pt->outb_yes = st.oy_n ? (uint32_t)(st.oy_cost / st.oy_n) : bit_price(RC_PHALF, 1);
     pt->outb_no  = st.on_n ? (uint32_t)(st.on_cost / st.on_n) : bit_price(RC_PHALF, 0);
-    /* DP position price: the measured average (the DP cannot track the expected-position state);
-     * with no out tokens yet, an optimistic small-delta estimate lets out-candidates explore. */
-    pt->opos_avg = st.op_n ? (uint32_t)(st.op_cost / st.op_n) : ugr_price(&M.tok.go, rc_zz32(256));
     pt->glo = M.tok.glo;
     for (int c = 0; c < UP_LIT0_CTX; c++)
         for (int b = 0; b < 256; b++) pt->lit0[c][b] = (uint16_t)bt_price_static(&M.lit0[c], (uint8_t)b);
     for (int b = 0; b < 256; b++) pt->lit1[b] = (uint16_t)bt_price_static(&M.lit1, (uint8_t)b);
-    pt->gs = M.tok.gs; pt->gl = M.tok.gl; pt->gd = M.tok.gd;
+    pt->gs = M.tok.gs; pt->gl = M.tok.gl; pt->gd = M.tok.gd; pt->go = M.tok.go;
     pt->fixed_dist_bits = -1;
 }
 
@@ -369,19 +365,24 @@ void measure_prices(const TokenVec *seq, const uint8_t *content, const uint8_t *
  * there. The wire's token flag is also an order-2 model (up_Flag1, 4 contexts on the previous two
  * token kinds), so the flag history h=(prev2<<1|prev1) is part of the forward state too: we keep
  * one DP state per (position, h) and price each flag under its real context fspan_c[h]/fmatch_c[h]
- * instead of a washed-out scalar average. Cheapest-arrival-per-state keeps it O(n*4); the chosen
+ * instead of a washed-out scalar average. The expected out-position is forward state for the same
+ * reason (the wire delta-codes 'O' positions against the rc_outmatch_next_expect chain), carried
+ * per state like the rep distance. Cheapest-arrival-per-state keeps it O(n*4); the chosen
  * parse is only ever ACCEPTED by the exact full-body byte gate in encode_body, so any approximation
  * here can never corrupt the wire -- it only changes which legal parse is tried.
  * Length/dist value prices are precomputed once per pass (frozen model snapshot). */
-/* Relax a candidate arrival (cost c, rep rr, token v, predecessor h) into the state
- * at index jb = j*4 + h'. Cheapest arrival only: a second distinct-rep arrival variant was
- * measured worth 0.08% corpus for ~25% of encode time and removed. (No prevlit is carried: the
- * tag0 literal context is now the deterministic content[p-1], fully baked into span_lit.) */
+/* Relax a candidate arrival (cost c, rep rr, expected out-position ox, token v, predecessor h)
+ * into the state at index jb = j*4 + h'. Cheapest arrival only: a second distinct-rep arrival
+ * variant was measured worth 0.08% corpus for ~25% of encode time and removed. (No prevlit is
+ * carried: the tag0 literal context is now the deterministic content[p-1], fully baked into
+ * span_lit.) ox is carried exactly like rr: spans and matches pass it through unchanged, an 'O'
+ * arrival advances it via rc_outmatch_next_expect, so out positions price at the emitter's real
+ * chained-delta cost instead of a per-pass scalar average. */
 __attribute__((always_inline))
-static inline void relax2(uint64_t *cost, int32_t *rep, Token *via, uint8_t *vh,
-                          size_t jb, uint64_t c, int32_t rr, Token v, uint8_t hr) {
+static inline void relax2(uint64_t *cost, int32_t *rep, uint32_t *oxp, Token *via, uint8_t *vh,
+                          size_t jb, uint64_t c, int32_t rr, uint32_t ox, Token v, uint8_t hr) {
     if (c < cost[jb]) {
-        cost[jb] = c; rep[jb] = rr; via[jb] = v; vh[jb] = hr;
+        cost[jb] = c; rep[jb] = rr; oxp[jb] = ox; via[jb] = v; vh[jb] = hr;
     }
 }
 
@@ -447,6 +448,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
     size_t ns = (n + 1) * 4;   /* one state per (position, flag-history h): cheapest arrival */
     uint64_t *cost = (uint64_t *)xmalloc(ns * sizeof(uint64_t));
     int32_t  *rep  = (int32_t *)xmalloc(ns * sizeof(int32_t)); /* rep distance arriving at state */
+    uint32_t *oxp  = (uint32_t *)xmalloc(ns * sizeof(uint32_t)); /* expected out-position at state */
     Token *via = (Token *)xcalloc(ns, sizeof(Token));         /* token that arrives at state */
     uint8_t *vh = (uint8_t *)xcalloc(ns, sizeof(uint8_t));    /* predecessor flag-history h for backtrack */
     /* A span always arrives in an even flag-history state. Collapse the two predecessor
@@ -454,8 +456,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
      * each destination. This preserves the old strict-< order: positions are considered in
      * ascending order, and the lower history wins an equal-cost pair. */
     uint64_t *span_pair = (uint64_t *)xmalloc((n ? n : 1) * 2u * sizeof(*span_pair));
-    for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; }
-    cost[0] = 0; rep[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, flag.h=0 */
+    for (size_t s = 0; s < ns; s++) { cost[s] = INF; rep[s] = 0; oxp[s] = pt->oexp0; }
+    cost[0] = 0; rep[0] = 0; /* pos 0, h=0: wire seeds last_dist=0, flag.h=0, oexp=oexp0 */
     int ord_len[LZ_CAND_MAX]; int32_t ord_dist[LZ_CAND_MAX]; uint32_t ord_dpr[LZ_CAND_MAX];
     size_t cand_off = 0;
     for (size_t i = 0; i <= n; i++) {
@@ -486,7 +488,8 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                             ? cost[ps + (size_t)h1] + pt->fspan_c[h1] : INF;
                 int h = b1 < b0 ? h1 : h0;
                 size_t jb = i * 4u + (size_t)(q * 2);
-                relax2(cost, rep, via, vh, jb, best[q], rep[ps + (size_t)h],
+                relax2(cost, rep, oxp, via, vh, jb, best[q], rep[ps + (size_t)h],
+                       oxp[ps + (size_t)h],
                        (Token){ 'S', (int32_t)p, (int32_t)(i - p), 0 }, (uint8_t)h);
             }
         }
@@ -531,7 +534,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
             int h = hr;
             size_t si = i * 4 + (size_t)h;
             if (cost[si] >= INF) continue;       /* unreachable along any cheap path */
-            uint64_t ci = cost[si]; int32_t ri = rep[si];
+            uint64_t ci = cost[si]; int32_t ri = rep[si]; uint32_t xi = oxp[si];
             /* matches: emit one match flag (kind 1) under context h; rep0 reuse when the candidate
              * distance equals the incoming rep distance. New flag history after a match: h' = (h<<1|1)&3. */
             int hm = rc_fl_hist(h, 1);
@@ -546,20 +549,27 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                     size_t j = i + (size_t)l;
                     uint64_t c = mbase + mlen[l];
                     size_t jb = j * 4 + (size_t)hm;
-                    relax2(cost, rep, via, vh, jb, c, bd,
+                    relax2(cost, rep, oxp, via, vh, jb, c, bd, xi,
                            (Token){ 'R', (int32_t)i, l, bd }, (uint8_t)hr);
                 }
                 prevl = lk;
               } }
-            /* out-matches: fresh rep0 + out-bit + absolute output position + own length gamma.
-             * The rep distance is carried through unchanged (out-matches do not set last_dist). */
-            uint64_t obase = ci + out_extra[h] + pt->opos_avg;
-            for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= out_len; l++) {
-                size_t j = i + (size_t)l;
-                uint64_t c = obase + glo_price[l];
-                size_t jb = j * 4 + (size_t)hm;
-                relax2(cost, rep, via, vh, jb, c, ri,
-                       (Token){ 'O', (int32_t)i, l, out_pos }, (uint8_t)hr);
+            /* out-matches: fresh rep0 + out-bit + chained-delta output position + own length
+             * gamma. The rep distance is carried through unchanged (out-matches do not set
+             * last_dist); the position prices at the emitter's real rule -- zigzag-rice of
+             * (pos - expected) on the carried per-state expectation chain -- so a chain
+             * continuation costs its true few bits instead of a per-pass scalar average. */
+            if (out_len >= (int32_t)RC_OUTMATCH_MIN) {
+                uint64_t obase = ci + out_extra[h] +
+                                 ugr_price(&pt->go, rc_outmatch_delta((uint32_t)out_pos, xi));
+                for (int32_t l = (int32_t)RC_OUTMATCH_MIN; l <= out_len; l++) {
+                    size_t j = i + (size_t)l;
+                    uint64_t c = obase + glo_price[l];
+                    size_t jb = j * 4 + (size_t)hm;
+                    relax2(cost, rep, oxp, via, vh, jb, c, ri,
+                           rc_outmatch_next_expect(pt->fwd, (uint32_t)out_pos, (uint32_t)l),
+                           (Token){ 'O', (int32_t)i, l, out_pos }, (uint8_t)hr);
+                }
             }
             /* explicit rep0 (reuse-distance) probe. The Pareto candidate set can drop a match at
              * distance == ri (the incoming rep distance) because it is not on the (dist,len) frontier,
@@ -580,7 +590,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
                     size_t j = i + l;
                     uint64_t c = ci + reuse_extra[h] + mlen[l];
                     size_t jb = j * 4 + (size_t)hm;
-                    relax2(cost, rep, via, vh, jb, c, ri,
+                    relax2(cost, rep, oxp, via, vh, jb, c, ri, xi,
                            (Token){ 'R', (int32_t)i, (int32_t)l, ri }, (uint8_t)hr);
                 }
             }
@@ -601,7 +611,7 @@ TokenVec lz_parse_priced(size_t n, const uint8_t *content, const uint8_t *tags,
         hr = vh[s];
     }
     for (size_t a = 0, b = tv.n; a + 1 < b; a++, b--) { Token t = tv.v[a]; tv.v[a] = tv.v[b - 1]; tv.v[b - 1] = t; }
-    free(cost); free(rep); free(via); free(vh); free(span_pair); free(glo_price); free(dpr); free(span_lit);
+    free(cost); free(rep); free(oxp); free(via); free(vh); free(span_pair); free(glo_price); free(dpr); free(span_lit);
     return tv;
 }
 
