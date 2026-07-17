@@ -674,6 +674,17 @@ static void bootstrap_prices(PriceTab *pt, const uint8_t L0[256], const uint8_t 
     ugg_init_e(&pt->gs);
     ugg_init_e(&pt->gl);
     ugr_init_e(&pt->gd, WINDOW_LOG);
+    /* Seed the token-flag and rep0 prices to their init-implied neutral values (the flag model
+     * starts at RC_PHALF in every context, rep0 at RC_REP0_INIT) instead of leaving them at 0.
+     * A zero flag/rep0 price makes the bootstrap + k-refit parse treat token flags and distance
+     * reuse as free, over-favoring matches vs literal spans. Same flavor orientation as the
+     * measure_prices fallbacks (fspan=flag 0, fmatch=flag 1; rep0_yes=1, rep0_no=0). */
+    for (int h = 0; h < 4; h++) {
+        pt->fspan_c[h]  = bit_price(RC_PHALF, 0);
+        pt->fmatch_c[h] = bit_price(RC_PHALF, 1);
+    }
+    pt->rep0_yes = bit_price(RC_REP0_INIT, 1);
+    pt->rep0_no  = bit_price(RC_REP0_INIT, 0);
     pt->fixed_dist_bits = -1;
 }
 

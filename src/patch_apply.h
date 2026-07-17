@@ -321,7 +321,7 @@ static int32_t up_s_bv(PatchApply *pa, up_BitTree*t,int rate){
  * Crash-hardening: cap the adaptive unary prefix. For GAMMA ('g') the prefix is the bit-length
  * of (value+1), so <=31 for any uint32 (UP_RC_UNARY_MAX). For RICE ('r') the prefix is the QUOTIENT
  * value>>k, which for a legit field (e.g. backref_dist <= window 2^WINDOW_LOG with no-split, WINDOW_LOG default
- * 10 (see patch_config.h) => up to ~32 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
+ * 11 (see patch_config.h) => up to ~32 at small k) can far exceed 31 — cap it much higher (1<<20) so valid streams decode
  * while a corrupt run-on is still bounded (the mantissa shift below caps the magnitude anyway).
  * The neutral rc_ugr_init/rc_ugg_init init helpers are single-sourced in rc_models.h (compact gamma
  * mantissa: rows 1..UP_UG_CTX-1 keep only reachable columns, the clamped row keeps all UP_UG_CTX+1). */

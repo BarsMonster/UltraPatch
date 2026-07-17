@@ -22,7 +22,7 @@
 
 /* Unsigned 8-bit wire revision. A nonzero value is folded into the source CRC so mismatched
  * encoder/decoder revisions reject before the first flash write without growing the envelope. */
-#define PATCH_WIRE_VERSION ((uint8_t)8u)
+#define PATCH_WIRE_VERSION ((uint8_t)9u)
 
 /* Plausibility cap on envelope image sizes; decoder cursors are signed 32-bit. */
 #define MAX_IMAGE (64u<<20)
@@ -32,7 +32,7 @@
  * properties. WINDOW_LOG is the LZ window log; DR_KCAP_* size the always-representable
  * relocation caches; OUTROW x OUTROW_DEPTH is the uncommitted
  * NVM page window. */
-#define WINDOW_LOG 10
+#define WINDOW_LOG 11
 #define DR_KCAP_BL 152
 #define DR_KCAP_EX 88
 #define OUTROW 256u

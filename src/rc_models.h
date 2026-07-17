@@ -114,19 +114,25 @@ static inline int rc_ugg_mant_idx(int row,int pos){
  * (REJ_RESOURCE) above UP_SMAP_CAP, and the encoder never emits more entries than this. */
 #define UP_SMAP_CAP 48
 
-/* ---- tag0 literal-tree context map: previous literal byte -> tree id. The five context IDs were
- * derived by coder-faithful coordinate descent over the surviving tag0 span literals of the home
- * and foreign corpora. ENCODING-AFFECTING: device decoder and host encoder modules share this table
- * (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. ---- */
-#define UP_LIT0_CTX 5
+/* ---- tag0 literal-tree context map: previous literal byte -> tree id. The six context IDs were
+ * derived by coder-faithful greedy descent over the home tag0 span-literal dumps with a foreign
+ * no-regress guard. ENCODING-AFFECTING: device decoder and host encoder modules share this table
+ * (bit-exact wire). UP_LIT0_CTX must equal 1 + max entry. The map is nibble-packed (two class ids
+ * per byte, low nibble = even p, high nibble = odd p): the table covers all 256 rows, including the
+ * row-247 singleton, so no special case is needed. ---- */
+#define UP_LIT0_CTX 6
+static const uint8_t RC_LIT0_MAP4[128] = {
+    5,0,0,0,0,0,0,0,0,0,0,0,0,0,49,1,
+    34,34,34,34,34,34,34,34,17,17,17,17,17,17,17,1,
+    19,51,51,19,17,17,17,17,1,17,19,19,48,16,0,16,
+    51,51,51,51,51,3,51,51,51,51,51,51,51,51,51,3,
+    51,51,17,3,51,19,51,19,34,34,34,34,34,34,34,34,
+    0,2,48,0,34,34,18,18,0,0,16,16,1,17,17,1,
+    2,17,1,32,1,32,33,2,17,17,17,32,17,17,17,0,
+    1,0,0,0,0,0,0,0,5,0,0,64,0,0,0,0
+};
 static inline uint8_t rc_lit0_sel(uint8_t p){
-    uint8_t v=(uint8_t)(
-        "\001\000\000\000\000\000\000\035\252\252\252\252\125\125\125\025"
-        "\367\177\125\125\121\167\114\160\377\377\077\377\377\377\377\077"
-        "\377\065\177\177\252\252\252\252\000\000\232\146\000\004\021\025"
-        "\102\200\000\050\125\205\125\005\000\000\000\000\002\000\000\000"
-    )[p>>2];
-    return p==247u ? 4u : (uint8_t)((v >> ((p&3u)*2u)) & 3u);
+    return (uint8_t)((RC_LIT0_MAP4[p>>1] >> ((p&1u)*4u)) & 15u);
 }
 
 /* ---- order-2 token flag: 4 contexts (previous 2 flags) ---- */
