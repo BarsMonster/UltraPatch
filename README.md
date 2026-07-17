@@ -11,34 +11,18 @@ internal flash directly from a byte stream: no second image slot, no heap, no
 full-image RAM buffer, and no internal global state. New bytes are staged in two
 256-byte RAM pages.
 
-The safety model in three lines:
-
-- A wrong or stale patch — including one from a mismatched UltraPatch revision —
-  is rejected by the source CRC before the first flash write.
-- Applying is not power-fail-safe. Keep an external full-image recovery path.
-- CRC detects accidental corruption only. Authenticate patches before decoding.
-
-## Feasibility
+A wrong or stale patch is rejected by the source CRC before the first flash write.
+Applying is not power-fail-safe. A partially applied patch can only be recovered by
+a full reflash. UltraPatch can also do a full reflash — use an empty (zero-length)
+source image to generate a full-reflash patch (it is still compressed by ~30%).
 
 The decoder targets Cortex-M0/ARMv6-M and is plain C11 with no heap, no
 file-scope state, no 64-bit integers, no floating point, and no division. All
-working state lives in one caller-owned `PatchApply` object. Approximate costs:
+working state lives in one caller-owned `PatchApply`.
 
-| Resource | Cost |
-|---|---|
-| Decoder code (flash) | ≈ 5.3 KiB |
-| `PatchApply` RAM (all state, including both page buffers) | ≈ 6.6 KiB |
-| Decoder stack | < 0.5 KiB |
+UltraPatch requires approximately 5.2 KiB of flash, 6.6+0.5 KiB of SRAM (with stack).
 
-`make check-footprint` reports the exact flash, state, and stack numbers of your
-checkout for both copy modes. The reported stack excludes `PatchApply` storage,
-platform flash and CRC functions, the byte callback, interrupts, and RTOS
-frames; include those costs when measuring the final firmware. If stack space is
-tight, place `PatchApply` in caller-owned static or no-init storage —
-`patch_apply_run` zeroes the object itself, so no-init placement needs no
-initialization code.
-
-## Host CLI
+## Host CLI & build process
 
 On Debian or Ubuntu, install the build dependencies:
 
@@ -192,11 +176,11 @@ must fit in `uint32_t`. The decoder rejects an oversized image before scanning
 or writing image flash; the check includes the final partial page.
 
 `OUTROW` (256 bytes by default; retargetable, see Parameters) is the erase-page
-size: the decoder changes flash only in whole, aligned erase pages. `flash_read` and `flash_write_page` receive
-absolute addresses. `flash_read` must immediately observe completed writes.
-`flash_write_page` must synchronously erase and program one aligned `OUTROW`
-page from the complete supplied buffer. If the hardware program page is smaller
-than the erase page, erase once and program the 256 bytes in as many write
+size: the decoder changes flash only in whole, aligned erase pages. `flash_read`
+and `flash_write_page` receive absolute addresses. `flash_read` must immediately
+observe completed writes. `flash_write_page` must synchronously erase and program
+one aligned `OUTROW` page from the complete supplied buffer. If the hardware program
+page is smaller than the erase page, erase once and program the 256 bytes in as many write
 operations as the part requires.
 
 The decoder preserves bytes beyond the logical image end when it prepares the
@@ -209,12 +193,10 @@ after a write failure, the decoder cannot reconstruct the original image.
 
 ### Optional hooks
 
-The default CRC implementation is a tableless reflected IEEE CRC-32. It favors
-zero RAM and minimal code over speed: it processes one bit at a time, and the
-decoder scans the full image at least twice (source CRC before the first write,
-target CRC after the apply). A hardware CRC peripheral or a table-driven
-library implementation shortens those scans substantially — on battery-powered
-devices this is a direct apply-time and energy saving:
+The default CRC implementation is a tableless reflected IEEE CRC-32, which is very
+compact but might be a bit slow on a microcontroller. A hardware CRC peripheral
+(available on many microcontrollers) or a table-driven library implementation
+can be 10+x faster and save some battery:
 
 ```c
 #include <stdint.h>
@@ -249,16 +231,15 @@ revision, truncated header, implausible size, oversized image, or wrong or
 dirty source image all reject before the first flash write.
 
 CRC detects accidental corruption but does not authenticate an update.
-Authenticate the complete manifest and patch, and enforce target and
-anti-rollback policy, before calling the decoder. The call can spend a long
-time in full-image CRC scans and patch application, so service the watchdog
-inside the flash functions, byte callback, and platform CRC implementation.
+Authenticate the patch if needed, and enforce target and anti-rollback policy,
+before calling the decoder. The call can spend a long time in full-image CRC
+scans and patch application, so service the watchdog inside the flash
+functions, byte callback, and platform CRC implementation.
 
 After `PATCH_APPLY_ERROR`, the image may be unchanged, partially written, or
 fully written but unverified. Recover with a full external reflash; do not retry
-the patch. A reset or power loss during application has the same recovery
-requirement. The decoder has no resume, rollback, or persistent progress
-protocol.
+the patch (it will likely be rejected due to mismatch of original image CRC).
+A reset or power loss during application will also require full reflash.
 
 ## Reference
 
@@ -274,12 +255,6 @@ protocol.
 | `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | wire parameters — MUST match on encoder and decoder | adjust by editing `patch_config.h` and rebuilding both the CLI and the device decoder from the same headers (e.g. retarget `OUTROW` to the hardware erase-page size); predefining them per build is a compile error, which prevents silent mismatch; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
 
 ### Wire compatibility
-
-Patches embed the wire revision (`PATCH_WIRE_VERSION`, currently 9), folded
-into the envelope's source CRC. A patch produced by a different UltraPatch
-revision fails that check and is rejected before the first flash write. After
-updating the decoder headers, regenerate patches with the matching `ultrapatch`
-build.
 
 The wire parameters in the table above are part of the same contract: an
 encoder and a decoder built with different values (for example a retargeted
