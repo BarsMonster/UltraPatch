@@ -9,8 +9,8 @@ devices. It provides:
 The host does the expensive analysis. The device decoder applies the patch to
 internal flash directly from a byte stream: no second image slot, no heap, no
 full-image RAM buffer, and no internal global state. New bytes are staged in two
-256-byte RAM pages, and each changed flash page is erased and programmed at most
-once.
+256-byte RAM pages, and each changed erase page of flash is erased and
+programmed at most once.
 
 The safety model in three lines:
 
@@ -192,10 +192,13 @@ be aligned to `OUTROW`, the capacity must be nonzero, and the complete range
 must fit in `uint32_t`. The decoder rejects an oversized image before scanning
 or writing image flash; the check includes the final partial page.
 
-`flash_read` and `flash_write_page` receive absolute addresses.
-`flash_read` must immediately observe completed writes.
-`flash_write_page` must synchronously erase and program one aligned
-`OUTROW` page from the complete supplied buffer.
+`OUTROW` (256 bytes) is the erase-page size: the decoder changes flash only in
+whole, aligned erase pages. `flash_read` and `flash_write_page` receive
+absolute addresses. `flash_read` must immediately observe completed writes.
+`flash_write_page` must synchronously erase and program one aligned `OUTROW`
+page from the complete supplied buffer. If the hardware program page is smaller
+than the erase page, erase once and program the 256 bytes in as many write
+operations as the part requires.
 
 The decoder preserves bytes beyond the logical image end when it prepares the
 last page. If the hardware erase unit is larger than `OUTROW`, the driver must
@@ -263,7 +266,7 @@ protocol.
 | `CRC32_DECODE(start,size)` | optional | hardware or library CRC-32 replacement; zlib semantics; `start` is absolute |
 | `HAND_ROLLED_MEMMOVE` | optional | private backward-copy loop instead of libc `memmove`; codegen only |
 | `NO_GNU_EXTENSIONS` | optional | plain-C11 fallbacks for compilers with incomplete GNU attribute support |
-| `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256), `OUTROW_DEPTH` (2) | fixed wire contract | predefining any of them is a compile error; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
+| `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | fixed wire contract | predefining any of them is a compile error; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
 
 ### Wire compatibility
 
