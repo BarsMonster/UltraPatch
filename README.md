@@ -209,8 +209,12 @@ after a write failure, the decoder cannot reconstruct the original image.
 
 ### Optional hooks
 
-The default CRC implementation is a tableless reflected IEEE CRC-32. A platform
-library or hardware peripheral can replace it:
+The default CRC implementation is a tableless reflected IEEE CRC-32. It favors
+zero RAM and minimal code over speed: it processes one bit at a time, and the
+decoder scans the full image at least twice (source CRC before the first write,
+target CRC after the apply). A hardware CRC peripheral or a table-driven
+library implementation shortens those scans substantially — on battery-powered
+devices this is a direct apply-time and energy saving:
 
 ```c
 #include <stdint.h>
@@ -225,10 +229,12 @@ to checksum. The result must match zlib CRC-32: reversed polynomial
 `0xedb88320`, initial value `0xffffffff`, and final XOR `0xffffffff`. It
 must see flash writes completed during the apply.
 
-The decoder uses the C library's `memmove` by default. If the final firmware
-does not already link it, define `HAND_ROLLED_MEMMOVE` before including
-`patch_apply.h` to use the decoder's private backward-copy loop. This changes
-code generation, not the patch format or RAM layout.
+The decoder uses the C library's `memmove` by default, which is free when the
+firmware already links it. If it does not, define `HAND_ROLLED_MEMMOVE` before
+including `patch_apply.h` to use the decoder's private backward-copy loop
+instead of pulling the library implementation into flash — a code-size saving
+when `memmove` would be linked only for the decoder. This changes code
+generation, not the patch format or RAM layout.
 
 Define `NO_GNU_EXTENSIONS` to force the plain-C11 fallbacks for compilers that
 define `__GNUC__` without full attribute support. The decoder behaves
