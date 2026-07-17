@@ -4,7 +4,7 @@ UltraPatch creates compact, in-place firmware delta patches for Cortex-M0/M0+-cl
 devices. It provides:
 
 - `ultrapatch`, a host CLI that creates patches and can apply them for testing.
-- A header-only device decoder rooted at `src/patch_apply.h`.
+- A header-only device decoder in `src/patch_apply.h`.
 
 The host does the expensive analysis. The device decoder applies the patch to
 internal flash directly from a byte stream: no second image slot, no heap, no
@@ -82,7 +82,7 @@ PATCH_IMAGE_CAPACITY` while running, so the updater code, the flash driver, and
 the active vector table must all live outside that range. Either extend the
 bootloader and link UltraPatch into it, or copy the updater to SRAM and execute
 it from there — practical on microcontrollers with at least 16 KiB of SRAM,
-given the decoder's roughly 12.5 KiB combined code, state, and stack budget.
+given the decoder's roughly 12.5 KiB required for code, state, and stack.
 
 ### Integration steps
 
