@@ -171,15 +171,14 @@ bit-at-a-time CRC, on the order of seconds for a 100 KiB image; a hardware
 `CRC32_DECODE` shortens exactly this). While the decoder is stalled, incoming
 bytes accumulate in the ring. With link-level flow control a small ring is
 enough — assert flow control while the ring is more than half full. Without
-flow control, the ring must absorb the byte rate times the longest stall: at
-115200 baud (≈11 KiB/s) a one-second CRC scan needs an 11+ KiB ring.
+flow control, the ring must absorb the byte rate times the longest stall.
 
 The `CRC32_READY` hook (see Optional hooks) removes the scan stall from the
 ring budget entirely. Protocol: always send exactly the first 27 bytes of the
 patch (27 covers the envelope header of any valid patch; send the whole patch
 if it is smaller), wait for the device to report that `CRC32_READY` fired,
 then stream the remainder. The ring then only has to absorb page-commit
-bursts, so a few dozen bytes suffice.
+bursts, so a 64-128 byte ring is typically enough.
 
 ### Flash contract
 
