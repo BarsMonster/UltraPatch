@@ -132,22 +132,23 @@ the decoder stops after that body and does not consume trailing bytes, so outer
 framing such as signatures or manifests can follow the patch in the same
 stream.
 
-Byte-pull — the patch is already staged in local storage:
+Pull mode — the callback fetches the next byte itself. This fits transports
+that already buffer and flow-control in the driver or protocol (a TCP socket,
+USB with NAK, an RTS/CTS UART driver), and reads from staged local storage the
+same way:
 
 ```c
-typedef struct { uint32_t off, len; } Staged;
-
-int staged_pull(void *ctx, uint8_t *out) {
-    Staged *s = ctx;
-    if (s->off == s->len) return PATCH_PULL_END; /* truncation guard only:
-                                                    a valid patch ends itself */
-    *out = staging_read(s->off++);
+int stream_pull(void *ctx, uint8_t *out) {
+    (void)ctx;
+    int c = transport_read_byte_blocking();  /* service the watchdog inside */
+    if (c < 0) return PATCH_PULL_END;        /* link closed or timed out */
+    *out = (uint8_t)c;
     return PATCH_PULL_BYTE;
 }
 ```
 
-Byte-push — the transport delivers chunks asynchronously (BLE, UART, USB).
-Bridge push into pull by blocking on a buffer the transport fills:
+Push mode — the transport delivers bytes asynchronously (interrupt or DMA)
+into a ring buffer; the callback drains the ring and sleeps while it is empty:
 
 ```c
 int ring_pull(void *ctx, uint8_t *out) {
@@ -162,12 +163,17 @@ int ring_pull(void *ctx, uint8_t *out) {
 }
 ```
 
-Under an RTOS, block on a queue or stream buffer instead and run the apply in
-its own task.
-
-Staging the complete patch before applying is the recommended default: it
-composes directly with authenticating the whole patch before decoding, and a
-transport failure then cannot leave a half-applied image.
+Size the ring for the decoder's work bursts, not the average byte rate. Most
+patch bytes decode in microseconds, but a byte that completes an output page
+triggers a synchronous page erase and program, and the header bytes trigger
+the full-image source CRC scan — the longest stall by far (with the default
+bit-at-a-time CRC, on the order of seconds for a 100 KiB image; a hardware
+`CRC32_DECODE` shortens exactly this). While the decoder is stalled, incoming
+bytes accumulate in the ring. With link-level flow control a small ring is
+enough — assert flow control while the ring is more than half full. Without
+flow control, the ring must absorb the byte rate times the longest stall: at
+115200 baud (≈11 KiB/s) a one-second CRC scan needs an 11+ KiB ring, so pacing
+or flow control at the protocol level is usually the better answer.
 
 ### Flash contract
 
