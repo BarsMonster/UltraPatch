@@ -1,30 +1,56 @@
 # UltraPatch
 
-UltraPatch creates compact, in-place firmware patches for Sensor Watch. It
-provides:
+UltraPatch creates compact, in-place firmware delta patches for Cortex-M0/M0+-class
+devices (built for Sensor Watch). It provides:
 
 - `ultrapatch`, a host CLI that creates patches and can apply them for testing.
 - A header-only device decoder rooted at `src/patch_apply.h`.
 
-The host does the expensive analysis. The device decoder uses bounded RAM, no
-heap, and no internal global state.
+The host does the expensive analysis. The device decoder applies the patch to
+internal flash directly from a byte stream: no second image slot, no heap, no
+full-image RAM buffer, and no internal global state. New bytes are staged in two
+256-byte RAM pages, and each changed flash page is erased and programmed at most
+once.
 
-## Build and use
+The safety model in three lines:
+
+- A wrong or stale patch — including one from a mismatched UltraPatch revision —
+  is rejected by the source CRC before the first flash write.
+- Applying is not power-fail-safe. Keep an external full-image recovery path.
+- CRC detects accidental corruption only. Authenticate patches before decoding.
+
+## Feasibility
+
+The decoder targets Cortex-M0/ARMv6-M and is plain C11 with no heap, no
+file-scope state, no 64-bit integers, no floating point, and no division. All
+working state lives in one caller-owned `PatchApply` object. Approximate costs:
+
+| Resource | Cost |
+|---|---|
+| Decoder code (flash) | ≈ 5.3 KiB |
+| `PatchApply` RAM (all state, including both page buffers) | ≈ 6.6 KiB |
+| Decoder stack | < 0.5 KiB |
+
+`make check-footprint` reports the exact flash, state, and stack numbers of your
+checkout for both copy modes. The reported stack excludes `PatchApply` storage,
+platform flash and CRC functions, the byte callback, interrupts, and RTOS
+frames; include those costs when measuring the final firmware. If stack space is
+tight, place `PatchApply` in caller-owned static or no-init storage —
+`patch_apply_run` zeroes the object itself, so no-init placement needs no
+initialization code.
+
+## Host CLI
 
 On Debian or Ubuntu, install the build dependencies:
 
 ```sh
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  binutils-arm-none-eabi \
-  gcc \
-  gcc-arm-none-eabi \
-  git \
-  libc6-dev \
-  libnewlib-dev \
-  make \
-  python3
+  gcc git libc6-dev make python3
 ```
+
+`gcc-arm-none-eabi`, `binutils-arm-none-eabi`, and `libnewlib-dev` are needed
+only by `make check-footprint`, which cross-compiles the decoder to measure it.
 
 Build the CLI and ask Make for its path:
 
@@ -34,8 +60,7 @@ tool=$(make -s host-tool-path)
 ```
 
 The default path is `.build/ultrapatch`, but build arguments can change it.
-Do not assume a root-level `./ultrapatch`. Use a different `BUILD_DIR` for
-each parallel build or measurement run.
+Do not assume a root-level `./ultrapatch`.
 
 ```sh
 "$tool" [--encode] <old.bin> <new.bin> <patch>
@@ -58,7 +83,23 @@ cmp test.bin new.bin
 Encoder inputs are raw firmware binaries. Every byte belongs to the image;
 UltraPatch does not parse ELF files or look for sidecar files.
 
+Every encode self-applies its patch with the production decoder and refuses to
+emit a patch that does not reproduce the exact target image. The project release
+gate additionally round-trips a 290-direction image corpus and bounds the
+decoder footprint; see AGENTS.md.
+
 ## Device integration
+
+The decoder is three headers in `src/`: `patch_apply.h`, `patch_config.h`, and
+`rc_models.h`.
+
+**The decoder cannot execute from the flash range it is patching.** It erases
+and reprograms pages inside `PATCH_IMAGE_BASE .. PATCH_IMAGE_BASE +
+PATCH_IMAGE_CAPACITY` while running, so the updater code, the flash driver, and
+the active vector table must all live outside that range. Either extend the
+bootloader and link UltraPatch into it, or copy the updater to SRAM and execute
+it from there — practical on microcontrollers with at least 16 KiB of SRAM,
+given the decoder's roughly 12.5 KiB combined code, state, and stack budget.
 
 ### Integration steps
 
@@ -94,6 +135,54 @@ UltraPatch does not parse ELF files or look for sidecar files.
 
 `PatchApply` is caller-owned. Use a separate object for each run, and do not
 run two decoders concurrently against the same flash image.
+
+### Feeding the patch stream
+
+The decoder pulls its input: `patch_apply_run` invokes the byte callback
+synchronously, on the caller's stack, whenever it needs the next patch byte.
+The callback returns `PATCH_PULL_BYTE` after writing one byte to `*out`, or
+`PATCH_PULL_END` for end of input or truncation. Any other return value also
+aborts the patch. The callback may block. The patch body has a recorded length:
+the decoder stops after that body and does not consume trailing bytes, so outer
+framing such as signatures or manifests can follow the patch in the same
+stream.
+
+Byte-pull — the patch is already staged in local storage:
+
+```c
+typedef struct { uint32_t off, len; } Staged;
+
+int staged_pull(void *ctx, uint8_t *out) {
+    Staged *s = ctx;
+    if (s->off == s->len) return PATCH_PULL_END; /* truncation guard only:
+                                                    a valid patch ends itself */
+    *out = staging_read(s->off++);
+    return PATCH_PULL_BYTE;
+}
+```
+
+Byte-push — the transport delivers chunks asynchronously (BLE, UART, USB).
+Bridge push into pull by blocking on a buffer the transport fills:
+
+```c
+int ring_pull(void *ctx, uint8_t *out) {
+    Ring *r = ctx;
+    while (ring_empty(r)) {          /* transport ISR pushes into the ring */
+        if (r->aborted) return PATCH_PULL_END;
+        watchdog_feed();
+        wait_for_interrupt();
+    }
+    *out = ring_pop(r);
+    return PATCH_PULL_BYTE;
+}
+```
+
+Under an RTOS, block on a queue or stream buffer instead and run the apply in
+its own task.
+
+Staging the complete patch before applying is the recommended default: it
+composes directly with authenticating the whole patch before decoding, and a
+transport failure then cannot leave a half-applied image.
 
 ### Flash contract
 
@@ -139,22 +228,17 @@ does not already link it, define `HAND_ROLLED_MEMMOVE` before including
 `patch_apply.h` to use the decoder's private backward-copy loop. This changes
 code generation, not the patch format or RAM layout.
 
-Do not override other constants in `patch_config.h`. The encoder and decoder
-must use matching patch-format definitions. The device implementation targets
-Cortex-M0/ARMv6-M.
+Define `NO_GNU_EXTENSIONS` to force the plain-C11 fallbacks for compilers that
+define `__GNUC__` without full attribute support. The decoder behaves
+identically either way.
 
-### Patch input and recovery
-
-The byte callback returns `PATCH_PULL_BYTE` after writing one byte to `*out`.
-Return `PATCH_PULL_END` for end of input or truncation. Any other return value
-also aborts the patch. The callback may block.
-
-The patch body has a recorded length. The decoder stops after that body and
-does not consume trailing bytes. The caller can use them for outer framing.
+## Recovery and security
 
 `patch_apply_run` is synchronous. It checks the source CRC before the first
 write, applies the patch, commits buffered pages, and checks the target CRC.
-It returns `PATCH_APPLY_DONE` only when all steps succeed.
+It returns `PATCH_APPLY_DONE` only when all steps succeed. A mismatched wire
+revision, truncated header, implausible size, oversized image, or wrong or
+dirty source image all reject before the first flash write.
 
 CRC detects accidental corruption but does not authenticate an update.
 Authenticate the complete manifest and patch, and enforce target and
@@ -168,59 +252,46 @@ the patch. A reset or power loss during application has the same recovery
 requirement. The decoder has no resume, rollback, or persistent progress
 protocol.
 
-### Memory
+## Reference
 
-The decoder uses no heap or internal global state. `PatchApply` contains its
-working state and at most two dirty output pages; it never contains a full
-firmware image.
+### Parameters
 
-`make check-footprint` reports reference flash, state, and stack use for both
-copy modes. The project has a hard 12,288-byte `.bss` limit. The reported
-stack excludes `PatchApply` storage, platform flash and CRC functions, the byte
-callback, interrupts, and RTOS frames. Include those costs when measuring the
-final firmware. If stack space is tight, place `PatchApply` in caller-owned
-static or no-init storage.
+| Define | Role | Notes |
+|---|---|---|
+| `PATCH_IMAGE_BASE` | required, before include | absolute start of the patchable image; `OUTROW`-aligned (compile-time asserted) |
+| `PATCH_IMAGE_CAPACITY` | required, before include | physical capacity from that address; a nonzero multiple of `OUTROW`; base + capacity must fit `uint32_t` |
+| `CRC32_DECODE(start,size)` | optional | hardware or library CRC-32 replacement; zlib semantics; `start` is absolute |
+| `HAND_ROLLED_MEMMOVE` | optional | private backward-copy loop instead of libc `memmove`; codegen only |
+| `NO_GNU_EXTENSIONS` | optional | plain-C11 fallbacks for compilers with incomplete GNU attribute support |
+| `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256), `OUTROW_DEPTH` (2) | fixed wire contract | predefining any of them is a compile error; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
 
-## Design summary
+### Wire compatibility
 
-The encoder searches several source/target match plans and chooses a monotonic
-write direction. Growing images normally apply from high addresses to low
-addresses; shrinking images apply from low to high. This keeps most source
-bytes ahead of the overwrite point.
+Patches embed the wire revision (`PATCH_WIRE_VERSION`, currently 9), folded
+into the envelope's source CRC. A patch produced by a different UltraPatch
+revision fails that check and is rejected before the first flash write. After
+updating the decoder headers, regenerate patches with the matching `ultrapatch`
+build.
 
-The decoder buffers two 256-byte output pages. New bytes remain in RAM while
-the corresponding flash pages still contain the old bytes, allowing output
-matches to read RAM and source matches to read flash. Pages are programmed once
-when their buffer slot is reused.
+### Results and reject reasons
 
-The host identifies source copies that would read overwritten data and sends
-the required target bytes through the normal compressed content stream. The
-device therefore needs neither a full-image buffer nor an old-byte journal.
+`patch_apply_run` returns `PATCH_APPLY_DONE` (0) or `PATCH_APPLY_ERROR` (1).
+After an error, `patch_apply_reject()` returns:
 
-## Verification and release
+- `REJ_RESOURCE` — the patch needs more than the configured partition or
+  exceeds a decoder cap. A too-small `PATCH_IMAGE_CAPACITY` is the common
+  cause.
+- `REJ_CORRUPT` — everything else: malformed or truncated stream, wrong or
+  dirty source image, wire-revision mismatch, or a failed target CRC.
 
-Run the release gate from the commit that will be released:
+`patch_apply_from_size()`, `patch_apply_to_size()`, `patch_apply_image_span()`,
+and `patch_apply_forward()` expose the decoded envelope geometry for logging
+and manifest cross-checks; they are `static inline` and cost nothing when
+unused.
 
-```sh
-make gate
-```
-
-Do not release if it fails. Retain the commit SHA and complete output.
-
-The gate checks:
-
-- All 290 patch directions from the frozen 36-image corpus under
-  `test-bench/images`, `test-bench/fixtures`, and `test-bench/foreign`.
-- Both directions of the real one-face update, reported separately from the
-  corpus total.
-- Encoder self-application with the production decoder, exact target output,
-  complete patch consumption, and safe NVM writes.
-- Host `--decode` behavior, including in-place application and rejection of a
-  truncated patch without changing the input file.
-- Decoder flash, state, and stack limits in both copy modes.
-
-The gate reads the committed `watch.bin` files in place. Replacing a fixture is
-an explicit corpus and size-ratchet change, not part of a release build.
+For host-side triage, apply the patch to a copy of the source image with
+`--decode` and compare with `cmp`; the host tool rejects a truncated patch
+without modifying the input file.
 
 ## License and third-party notices
 
@@ -229,59 +300,11 @@ UltraPatch-authored source and documentation are licensed under
 
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.
 
-### libdivsufsort
-
 `vendor/libdivsufsort/` is vendored from libdivsufsort by Yuta Mori and retains
-its upstream MIT-style license headers in each vendored source file.
+its upstream MIT-style license headers in each vendored source file. Vendored
+third-party code is used by the host encoder only; nothing third party compiles
+into the device decoder.
 
-### CircuitPython test corpus
-
-The committed binaries under `test-bench/foreign/` are derived from official
-Adafruit CircuitPython releases for the `feather_m0_express` board. They are
-test data, not UltraPatch-authored firmware.
-
-The raw releases are `2.2.0`, `2.2.1`, `2.2.2`, `2.2.3`, `2.2.4`,
-`2.3.0`, `2.3.1`, `3.0.0`, `3.0.1`, `3.0.2`, and `3.0.3`. The UF2
-releases are `10.0.0`, `10.0.1`, `10.0.2`, `10.0.3`, `10.1.1`,
-`10.1.2`, and `10.1.3`; they were unpacked at application base `0x2000` to
-match the raw image layout. The committed files and their Git history are the
-frozen corpus provenance record.
-
-Official artifacts came from the Adafruit CircuitPython listings for
-[older raw binaries](https://adafruit-circuit-python.s3.amazonaws.com/index.html?prefix=bin/feather_m0_express/en_US/OLD/)
-and [current UF2 releases](https://adafruit-circuit-python.s3.amazonaws.com/index.html?prefix=bin/feather_m0_express/en_US/).
-Corresponding source and per-file notices are available from the release tags
-and history in the
-[Adafruit CircuitPython repository](https://github.com/adafruit/circuitpython).
-The available 2.x/3.x release tags carry this root notice:
-
-> Copyright (c) 2013, 2014 Damien P. George
-
-The available 10.x release tags carry this updated root notice:
-
-> Copyright (c) 2013-2025 Damien P. George
-
-Both grant the following MIT license:
-
-> Permission is hereby granted, free of charge, to any person obtaining a copy
-> of this software and associated documentation files (the "Software"), to deal
-> in the Software without restriction, including without limitation the rights
-> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-> copies of the Software, and to permit persons to whom the Software is
-> furnished to do so, subject to the following conditions:
->
-> The above copyright notice and this permission notice shall be included in
-> all copies or substantial portions of the Software.
->
-> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-> THE SOFTWARE.
-
-Individual CircuitPython source files and bundled components may name
-additional copyright holders or licenses; the corresponding source headers and
-license files in the upstream release history are authoritative for those
-components.
+The committed binaries under `test-bench/foreign/` are test data derived from
+official Adafruit CircuitPython releases (MIT). Full provenance and notices:
+[test-bench/foreign/NOTICE.md](test-bench/foreign/NOTICE.md).
