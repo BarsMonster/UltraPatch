@@ -1,7 +1,3 @@
-# Top-level benchmark outputs; keep summary documents.
-/artifacts/*
-!/artifacts/*.md
-
 # Local Python/cache noise.
 /.venv/
 /venv/
