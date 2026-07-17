@@ -9,8 +9,7 @@ devices. It provides:
 The host does the expensive analysis. The device decoder applies the patch to
 internal flash directly from a byte stream: no second image slot, no heap, no
 full-image RAM buffer, and no internal global state. New bytes are staged in two
-256-byte RAM pages, and each changed erase page of flash is erased and
-programmed at most once.
+256-byte RAM pages.
 
 The safety model in three lines:
 
