@@ -242,7 +242,11 @@ operations as the part requires.
 
 The decoder preserves bytes beyond the logical image end when it prepares the
 last page. If the hardware erase unit is larger than `OUTROW`, the driver must
-also preserve bytes outside the supplied page.
+also preserve bytes outside the supplied page. That configuration is highly
+discouraged: every page write then erases and reprograms the whole larger
+unit, which multiplies flash write amplification. `OUTROW` is very strongly
+advised to match the hardware erase-page size (see Parameters for
+retargeting).
 
 `flash_write_page` has no return value. Verify or retry the hardware operation
 inside the driver. A valid patch writes each changed output page at most once;
