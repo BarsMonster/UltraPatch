@@ -57,10 +57,10 @@
  * decoder invokes it exactly once per apply, after the source image is fully validated
  * (revision-tagged CRC32(from) match) and the pre-body flash scans are complete — immediately
  * before the first compressed-body byte is pulled. Not called when validation fails. A streaming
- * sender can hold the patch body until the device signals ready: send the envelope header first
- * (12..27 bytes; the first 27 patch bytes are always sufficient), wait for this hook's signal,
- * then stream the remainder — the receive ring then covers only ordinary decode bursts, not the
- * full-image scans. Default: no-op. */
+ * sender can hold the patch body until the device signals ready: always send the first 27 patch
+ * bytes (27 covers the envelope header of any valid patch; send the whole patch if smaller),
+ * wait for this hook's signal, then stream the remainder — the receive ring then covers only
+ * ordinary decode bursts, not the full-image scans. Default: no-op. */
 #ifndef CRC32_READY
 #define CRC32_READY() ((void)0)
 #endif

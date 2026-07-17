@@ -175,11 +175,11 @@ flow control, the ring must absorb the byte rate times the longest stall: at
 115200 baud (≈11 KiB/s) a one-second CRC scan needs an 11+ KiB ring.
 
 The `CRC32_READY` hook (see Optional hooks) removes the scan stall from the
-ring budget entirely. Protocol: send only the patch envelope header first —
-it is 12..27 bytes, so sending the first 27 bytes (or the whole patch, if
-smaller) is always sufficient — then wait for the device to report that
-`CRC32_READY` fired, and stream the remainder only then. The ring then only
-has to absorb page-commit bursts, so a few dozen bytes suffice.
+ring budget entirely. Protocol: always send exactly the first 27 bytes of the
+patch (27 covers the envelope header of any valid patch; send the whole patch
+if it is smaller), wait for the device to report that `CRC32_READY` fired,
+then stream the remainder. The ring then only has to absorb page-commit
+bursts, so a few dozen bytes suffice.
 
 ### Flash contract
 
