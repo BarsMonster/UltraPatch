@@ -172,8 +172,14 @@ bit-at-a-time CRC, on the order of seconds for a 100 KiB image; a hardware
 bytes accumulate in the ring. With link-level flow control a small ring is
 enough — assert flow control while the ring is more than half full. Without
 flow control, the ring must absorb the byte rate times the longest stall: at
-115200 baud (≈11 KiB/s) a one-second CRC scan needs an 11+ KiB ring, so pacing
-or flow control at the protocol level is usually the better answer.
+115200 baud (≈11 KiB/s) a one-second CRC scan needs an 11+ KiB ring.
+
+The `CRC32_READY` hook (see Optional hooks) removes the scan stall from the
+ring budget entirely. Protocol: send only the patch envelope header first —
+it is 12..27 bytes, so sending the first 27 bytes (or the whole patch, if
+smaller) is always sufficient — then wait for the device to report that
+`CRC32_READY` fired, and stream the remainder only then. The ring then only
+has to absorb page-commit bursts, so a few dozen bytes suffice.
 
 ### Flash contract
 
@@ -226,6 +232,17 @@ instead of pulling the library implementation into flash — a code-size saving
 when `memmove` would be linked only for the decoder. This changes code
 generation, not the patch format or RAM layout.
 
+`CRC32_READY()` is an optional notification hook for streaming senders. When
+defined before including the headers, the decoder invokes it exactly once per
+apply — after the source image is fully validated (source CRC match) and the
+pre-body flash scans are complete, immediately before the first
+compressed-body byte is pulled. It is not called when validation fails:
+
+```c
+#define CRC32_READY() transport_signal_ready()
+#include "patch_apply.h"
+```
+
 Define `NO_GNU_EXTENSIONS` to force the plain-C11 fallbacks for compilers that
 define `__GNUC__` without full attribute support. The decoder behaves
 identically either way.
@@ -259,6 +276,7 @@ A reset or power loss during application will also require full reflash.
 | `PATCH_IMAGE_CAPACITY` | required, before include | physical capacity from that address; a nonzero multiple of `OUTROW`; base + capacity must fit `uint32_t` |
 | `CRC32_DECODE(start,size)` | optional | hardware or library CRC-32 replacement; zlib semantics; `start` is absolute |
 | `HAND_ROLLED_MEMMOVE` | optional | private backward-copy loop instead of libc `memmove`; codegen only |
+| `CRC32_READY()` | optional | notification hook: called once when source validation and the pre-body scans finish, immediately before the first body byte is pulled; enables the send-header-then-wait streaming protocol |
 | `NO_GNU_EXTENSIONS` | optional | plain-C11 fallbacks for compilers with incomplete GNU attribute support |
 | `PATCH_WIRE_VERSION` (1), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | wire parameters — MUST match on encoder and decoder | adjust by editing `patch_config.h` and rebuilding both the CLI and the device decoder from the same headers (e.g. retarget `OUTROW` to the hardware erase-page size); predefining them per build is a compile error, which prevents silent mismatch; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
 

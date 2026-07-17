@@ -6,6 +6,11 @@
  * The device artifact remains src/patch_apply.h; this file exists only so the
  * host tool links one reference-decoder copy instead of one per harness.
  */
+/* CRC32_READY must be defined before the FIRST UltraPatch header (patch_config.h supplies the
+ * no-op default otherwise); the recorder itself is defined below, next to the NVM counters. */
+static void crc32_ready_hook(void);
+#define CRC32_READY() crc32_ready_hook()
+
 #include "enc_internal.h"
 
 /* Shared SAML22-shaped NVM page emulator for the host tool. The reusable decoder (patch_apply.h,
@@ -104,6 +109,19 @@ void flash_write_page(uint32_t a, const uint8_t page[OUTROW]){
     memcpy(sc_flash+row,page,OUTROW);
 }
 
+/* CRC32_READY contract recorder: every host apply (encoder selfcheck, CLI decode, the whole
+ * corpus matrix) asserts the hook contract — fired at most once, only inside the envelope-header
+ * pull window (12..27 bytes for any valid patch), before the first NVM write, and exactly once on
+ * any apply that reaches body decode. The live pull cursor is published around each run so the
+ * argument-less hook can snapshot the consumed-byte position. */
+static uint32_t sc_ready_calls, sc_ready_pull_pos, sc_ready_erases_seen;
+static const size_t *sc_ready_pull_i;
+static void crc32_ready_hook(void){
+    sc_ready_calls++;
+    sc_ready_pull_pos = sc_ready_pull_i ? (uint32_t)*sc_ready_pull_i : 0u;
+    sc_ready_erases_seen = (uint32_t)sc_erases;
+}
+
 #include "patch_apply.h"
 
 typedef struct { const uint8_t *d; size_t n, i; } PullCtx;
@@ -154,8 +172,24 @@ static void host_apply_blob(const uint8_t *blob, size_t blob_n,
     if (ts > span) span = ts;
     nvm_init(from, from_n, span, ts, pad_seed);
     PullCtx pc = { blob, blob_n, 0 };
+    sc_ready_calls = sc_ready_pull_pos = sc_ready_erases_seen = 0;
+    sc_ready_pull_i = &pc.i;
     out->rc = patch_apply_run(&out->pa, pull_next, &pc);
+    sc_ready_pull_i = NULL;
     out->consumed = pc.i;
+}
+
+/* NULL when the CRC32_READY contract held for the completed apply, else the violation. */
+static const char *ready_invariant_err(PatchApplyResult rc){
+    if (sc_ready_calls > 1) return "CRC32_READY fired more than once";
+    if (sc_ready_calls == 1) {
+        if (sc_ready_erases_seen) return "CRC32_READY fired after a flash write";
+        if (sc_ready_pull_pos < 12u || sc_ready_pull_pos > 27u)
+            return "CRC32_READY fired outside the envelope-header pull window";
+    }
+    if (rc == PATCH_APPLY_DONE && sc_ready_calls != 1)
+        return "successful apply without exactly one CRC32_READY";
+    return NULL;
 }
 
 const char *selfcheck(const uint8_t *blob, size_t blob_n,
@@ -164,9 +198,11 @@ const char *selfcheck(const uint8_t *blob, size_t blob_n,
 {
     if (blob_n < 8) return "selfcheck blob too short";
     HostApply ha;
-    const char *err = NULL;
     host_apply_blob(blob, blob_n, from, (uint32_t)from_n, &ha);
-    if (ha.rc != PATCH_APPLY_DONE) {
+    const char *err = ready_invariant_err(ha.rc);   /* hook contract outranks other failures */
+    if (err) {
+        /* keep err */
+    } else if (ha.rc != PATCH_APPLY_DONE) {
         err = patch_apply_reject(&ha.pa) == REJ_RESOURCE
                   ? "reference decoder rejected the patch (resource cap)"
                   : "reference decoder rejected the patch";
@@ -194,11 +230,14 @@ int decode_patch(const char *image_path, const char *patch_path){
     HostApply ha;
     host_apply_blob(blob.d, blob.n, image.d, (uint32_t)image.n, &ha);
 
+    { const char *herr = ready_invariant_err(ha.rc);
+      if(herr){ fprintf(stderr,"decode error - %s\n", herr); rc = 1; goto out; } }
     if(ha.rc != PATCH_APPLY_DONE){
         int reject = patch_apply_reject(&ha.pa);
         if(!reject) reject = REJ_CORRUPT;
-        fprintf(stderr,"decode error - rejected (reason=%d: %s)\n", reject,
-                reject==REJ_RESOURCE?"configured partition or decoder resource/wire cap exceeded":"corrupt/truncated patch");
+        fprintf(stderr,"decode error - rejected (reason=%d: %s) crc32_ready_calls=%u\n", reject,
+                reject==REJ_RESOURCE?"configured partition or decoder resource/wire cap exceeded":"corrupt/truncated patch",
+                sc_ready_calls);
         rc = 1; goto out;
     }
     if(ha.consumed != blob.n){

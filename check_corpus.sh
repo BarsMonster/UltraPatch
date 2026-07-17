@@ -169,6 +169,31 @@ decode_cli_regression() {
     echo "check_corpus.sh: rejected --decode modified its input file" >&2
     return 1
   fi
+
+  # CRC32_READY placement: a body-truncated patch fails only AFTER the hook fired (header parse
+  # and source scans completed), while a wrong source image must fail BEFORE it ever fires. The
+  # host backend also asserts the full contract (once, in the header window, before any write)
+  # on every apply in this script, including all 290 corpus self-verifications.
+  if ! grep -q 'crc32_ready_calls=1' "$d/reject.stderr"; then
+    echo "check_corpus.sh: truncated-body reject did not report crc32_ready_calls=1" >&2
+    return 1
+  fi
+  cp "$d/from.bin" "$d/wrongsrc.bin" || return 1
+  python3 -c 'import sys;p=sys.argv[1];d=bytearray(open(p,"rb").read());d[0]^=0xFF;open(p,"wb").write(bytes(d))' "$d/wrongsrc.bin" || return 1
+  cp "$d/wrongsrc.bin" "$d/wrongsrc.orig" || return 1
+  if "$UP" --decode "$d/wrongsrc.bin" "$d/patch.blob" \
+       >"$d/wrong.stdout" 2>"$d/wrong.stderr"; then
+    echo "check_corpus.sh: --decode accepted a patch against the wrong source image" >&2
+    return 1
+  fi
+  if ! grep -q 'crc32_ready_calls=0' "$d/wrong.stderr"; then
+    echo "check_corpus.sh: wrong-source reject fired CRC32_READY before validation" >&2
+    return 1
+  fi
+  if ! cmp -s "$d/wrongsrc.bin" "$d/wrongsrc.orig"; then
+    echo "check_corpus.sh: wrong-source --decode modified its input file" >&2
+    return 1
+  fi
 }
 
 if ! decode_cli_regression "$tmp/page-grow-past-page"; then

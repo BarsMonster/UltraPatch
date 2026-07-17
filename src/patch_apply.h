@@ -899,6 +899,10 @@ static int RC_NOINLINE up_decode_header(PatchApply *pa){
       up_lit_tree_from_hist(&pa->M_lit1,hist1); }
     /* Literal seeding occupied the same arena phase; initialize apply state only after it ends. */
     { up_ApplyState*s=&pa->ARENA.apply.sa; memset(s,0,sizeof*s); s->tp=pa->g_FWD?0:(int32_t)ts; s->fp=pa->g_FWD?fp_start:(int32_t)fpe; }
+    /* Source validated and every pre-body flash scan is done; the NEXT callback pull is the first
+     * compressed-body byte. A streaming sender may hold the body until this fires (CRC32_READY
+     * contract in patch_config.h). */
+    CRC32_READY();
     return 1;
 }
 static int up_decode_body(PatchApply *pa){
