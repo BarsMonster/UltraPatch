@@ -18,6 +18,8 @@ A wrong or stale patch is rejected by the source CRC before the first flash writ
 Applying is not power-fail-safe. A partially applied patch can only be recovered by
 a full reflash. UltraPatch can also do a full reflash: use an empty (zero-length)
 source image to generate a full-reflash patch (it is still compressed by ~30%).
+Also, if only a few bytes changed, only the minimum number of flash pages is
+erased and reprogrammed.
 
 The decoder targets Cortex-M0/ARMv6-M and is plain C11. It never divides,
 never touches floating point or 64-bit arithmetic, and holds all working state
@@ -76,6 +78,39 @@ Every encode self-applies its patch with the production decoder and will not
 emit a patch that does not reproduce the exact target image. The project release
 gate (`make gate`) also round-trips a 290-direction image corpus and bounds the
 decoder footprint.
+
+## How it works
+
+The encoder finds shared content between the old and new images with
+suffix-array matching (bsdiff-style, using libdivsufsort) and builds a plan of
+operations: copy a run of source bytes with per-byte differences, insert new
+bytes, seek in the source. The plan is applied in one monotonic direction so
+that source data is consumed before it is overwritten: a growing image is
+normally patched from high addresses down, a shrinking one from low addresses
+up. The two-page commit delay keeps just-overwritten source readable a little
+longer, and the few copies that would still read stale data are converted to
+literals at encode time.
+
+When code moves, every Cortex-M0 instruction that addresses it by offset
+changes its immediate field even though nothing else changed. UltraPatch finds
+BL branches and LDR literal loads on the device by scanning the instruction
+stream (no positions are shipped) and reconstructs their new immediates from a
+small piecewise "shift map" that describes how far each address range moved.
+Values the map does not predict come from two move-to-front caches of recent
+values with a coded escape, so mispredictions are cheap and never fatal.
+
+Everything else travels as a byte stream compressed with LZSS over a 2 KiB
+window of recent output: literal runs interleaved with matches, a
+repeat-last-distance shortcut, and long-range "out matches" into output
+written earlier in the apply.
+
+All of it is coded in a single adaptive binary range-coder stream. Literal
+bytes go through context-selected bit trees seeded from the source image's
+byte histogram, so the models start warm instead of flat. Lengths use adaptive
+Elias-gamma codes, distances and positions use adaptive Rice codes, and
+structural decisions (span vs match, distance reuse, cache hits) use small
+adaptive flag models. The decoder mirrors every model bit-exactly, which is
+why the whole patch fits in one stream with no shipped tables.
 
 ## Compression comparison
 
@@ -224,7 +259,7 @@ if it is smaller), waits for the device to report that `CRC32_READY` fired,
 and only then streams the remainder. The ring then only has to absorb
 page-commit bursts, so a 64-128 byte ring is typically enough.
 
-### Flash contract
+### Flash
 
 `PATCH_IMAGE_BASE` is the absolute start of the patchable image.
 `PATCH_IMAGE_CAPACITY` is the physical capacity from that address. Both must
@@ -250,7 +285,13 @@ retargeting).
 
 `flash_write_page` has no return value. Verify or retry the hardware operation
 inside the driver. A valid patch writes each changed output page at most once;
-after a write failure, the decoder cannot reconstruct the original image.
+after a write failure, the decoder cannot reconstruct the original image. If
+the driver detects an unrecoverable write failure, feel free to report a fatal
+error and reset the device: the image needs a full reflash either way.
+
+It is recommended not to update the bootloader with UltraPatch (or at all):
+flash retention reduces with write cycles, and the bootloader is the one
+component that must stay intact to recover the device.
 
 ### Optional hooks
 
