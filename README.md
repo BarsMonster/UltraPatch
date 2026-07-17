@@ -69,8 +69,8 @@ UltraPatch does not parse ELF files or look for sidecar files.
 
 Every encode self-applies its patch with the production decoder and refuses to
 emit a patch that does not reproduce the exact target image. The project release
-gate additionally round-trips a 290-direction image corpus and bounds the
-decoder footprint; see AGENTS.md.
+gate (`make gate`) additionally round-trips a 290-direction image corpus and
+bounds the decoder footprint.
 
 ## Compression comparison
 

@@ -30,3 +30,7 @@
 !/test-bench/foreign/
 !/test-bench/foreign/**/
 !/test-bench/foreign/**/*.bin
+
+# Local agent working documents; kept out of the repository.
+/AGENTS.md
+/failed.md
