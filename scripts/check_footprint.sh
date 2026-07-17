@@ -17,7 +17,7 @@ set -eu
 : "${ARM_DEC_FLAGS:?run via make check-footprint}"
 : "${ARM_OBJECT_OPT:?run via make check-footprint}"
 : "${DECODER_INTEGRATION_TU:?run via make check-footprint}"
-BASE_FOOTPRINT_FLASH=5264
+BASE_FOOTPRINT_FLASH=5260
 BASE_FOOTPRINT_STATE=6716
 BASE_FOOTPRINT_STACK=432
 ARM_BSS_HARD_CAP=12288
