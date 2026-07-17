@@ -7,19 +7,24 @@ provides:
 - `ultrapatch`, a host CLI that creates patches and can apply them for testing.
 - A header-only device decoder in `src/patch_apply.h`.
 
-The host does the expensive analysis. The device decoder applies the patch to
-internal flash directly from a byte stream: no second image slot, no heap, no
-full-image RAM buffer, and no internal global state. New bytes are staged in two
-256-byte RAM pages.
+The host does the expensive analysis. The device decoder is an in-place
+streaming patcher: it applies the patch to internal flash directly from a byte
+stream, so the patch never needs to be stored in full before application.
+There is no second image slot and no full-image RAM buffer; new bytes are
+staged in two 256-byte RAM pages. The decoder allocates nothing and keeps no
+internal global state.
 
 A wrong or stale patch is rejected by the source CRC before the first flash write.
 Applying is not power-fail-safe. A partially applied patch can only be recovered by
-a full reflash. UltraPatch can also do a full reflash — use an empty (zero-length)
+a full reflash. UltraPatch can also do a full reflash: use an empty (zero-length)
 source image to generate a full-reflash patch (it is still compressed by ~30%).
 
-The decoder targets Cortex-M0/ARMv6-M and is plain C11 with no heap, no
-file-scope state, no 64-bit integers, no floating point, and no division. All
-working state lives in one caller-owned `PatchApply`.
+The decoder targets Cortex-M0/ARMv6-M and is plain C11. It never divides,
+never touches floating point or 64-bit arithmetic, and holds all working state
+in one caller-owned `PatchApply` (no heap, no file-scope state). UltraPatch
+correctly applies any binary content beyond the M0 instruction set (the
+round-trip is always byte-exact), but compression there is less spectacular:
+core improvements would be needed to model M3/M4/M7 addressing modes.
 
 UltraPatch requires approximately 5.2 KiB of flash, 6.6+0.5 KiB of SRAM (with stack).
 
@@ -67,10 +72,10 @@ cmp test.bin new.bin
 Encoder inputs are raw firmware binaries. Every byte belongs to the image;
 UltraPatch does not parse ELF files or look for sidecar files.
 
-Every encode self-applies its patch with the production decoder and refuses to
+Every encode self-applies its patch with the production decoder and will not
 emit a patch that does not reproduce the exact target image. The project release
-gate (`make gate`) additionally round-trips a 290-direction image corpus and
-bounds the decoder footprint.
+gate (`make gate`) also round-trips a 290-direction image corpus and bounds the
+decoder footprint.
 
 ## Compression comparison
 
@@ -89,11 +94,11 @@ bytes:
 | detools in-place, lzma, 64 KiB segments | 71,423 |
 | detools in-place, heatshrink, 64 KiB segments | 107,795 |
 
-Fairness notes: detools *sequential* patches are not in-place — applying them
-needs a second image slot or external staging. The in-place runs used
+Note that detools *sequential* patches are not in-place: applying them needs a
+second image slot or external staging. The in-place runs used
 `--memory-size 131072` with the listed `--segment-size`. On the apply side,
 lzma decompression needs far more RAM than UltraPatch's 6.6 KiB total;
-heatshrink is the RAM-comparable codec class.
+heatshrink is the one with comparable RAM needs.
 
 Full image delivery (the same 113,484-byte target):
 
@@ -105,21 +110,22 @@ Full image delivery (the same 113,484-byte target):
 | zip -9 | 79,604 | 70.1% |
 
 The UltraPatch row is directly flashable in place by the same 6.6 KiB-RAM
-decoder; the archive rows are transport-only baselines that still need a
-decompressor and staging on the device.
+decoder. The archive rows are baselines for transport size only; on the device
+they would still need a decompressor and staging.
 
 ## Device integration
 
 The decoder is three headers in `src/`: `patch_apply.h`, `patch_config.h`, and
 `rc_models.h`.
 
-**The decoder cannot execute from the flash range it is patching.** It erases
+The decoder cannot execute from the flash range it is patching. It erases
 and reprograms pages inside `PATCH_IMAGE_BASE .. PATCH_IMAGE_BASE +
 PATCH_IMAGE_CAPACITY` while running, so the updater code, the flash driver, and
 the active vector table must all live outside that range. Either extend the
 bootloader and link UltraPatch into it, or copy the updater to SRAM and execute
-it from there — practical on microcontrollers with at least 16 KiB of SRAM,
-given the decoder's roughly 12.5 KiB required for code, state, and stack.
+it from there. The SRAM route is practical on microcontrollers with at least
+16 KiB of SRAM, given the decoder's roughly 12.5 KiB required for code, state,
+and stack.
 
 ### Integration steps
 
@@ -155,7 +161,7 @@ given the decoder's roughly 12.5 KiB required for code, state, and stack.
 
 `PatchApply` is caller-owned. Use a separate object for each run, and do not
 run two decoders concurrently against the same flash image. It can live in
-static, no-init, or reused bootloader work RAM — `patch_apply_run` zeroes the
+static, no-init, or reused bootloader work RAM: `patch_apply_run` zeroes the
 object itself, so no-init placement needs no initialization code.
 
 ### Feeding the patch stream
@@ -169,13 +175,13 @@ the decoder stops after that body and does not consume trailing bytes, so outer
 framing such as signatures or manifests can follow the patch in the same
 stream.
 
-Pull mode — the callback fetches the next byte itself. This fits transports
+Pull mode: the callback fetches the next byte itself. This fits transports
 that already buffer and flow-control in the driver or protocol (a TCP socket,
 USB with NAK, an RTS/CTS UART driver), and reads from staged local storage the
 same way:
 
 ```c
-int stream_pull(void *ctx, uint8_t *out) {
+int next_byte_stream_pull(void *ctx, uint8_t *out) {
     (void)ctx;
     int c = transport_read_byte_blocking();  /* service the watchdog inside */
     if (c < 0) return PATCH_PULL_END;        /* link closed or timed out */
@@ -184,11 +190,11 @@ int stream_pull(void *ctx, uint8_t *out) {
 }
 ```
 
-Push mode — the transport delivers bytes asynchronously (interrupt or DMA)
+Push mode: the transport delivers bytes asynchronously (interrupt or DMA)
 into a ring buffer; the callback drains the ring and sleeps while it is empty:
 
 ```c
-int ring_pull(void *ctx, uint8_t *out) {
+int next_byte_ring_pull(void *ctx, uint8_t *out) {
     Ring *r = ctx;
     while (ring_empty(r)) {          /* transport ISR pushes into the ring */
         if (r->aborted) return PATCH_PULL_END;
@@ -200,22 +206,23 @@ int ring_pull(void *ctx, uint8_t *out) {
 }
 ```
 
-Size the ring for the decoder's work bursts, not the average byte rate. Most
-patch bytes decode in microseconds, but a byte that completes an output page
-triggers a synchronous page erase and program, and the header bytes trigger
-the full-image source CRC scan — the longest stall by far (with the default
-bit-at-a-time CRC, on the order of seconds for a 100 KiB image; a hardware
-`CRC32_DECODE` shortens exactly this). While the decoder is stalled, incoming
-bytes accumulate in the ring. With link-level flow control a small ring is
-enough — assert flow control while the ring is more than half full. Without
-flow control, the ring must absorb the byte rate times the longest stall.
+Size the ring for the slowest stretch of decoding rather than for the average
+byte rate. Most patch bytes decode in microseconds, but a byte that completes
+an output page triggers a synchronous page erase and program, and the header
+bytes trigger the full-image source CRC scan, which is the longest stall by
+far. With the default bit-at-a-time CRC that scan takes on the order of
+seconds for a 100 KiB image; a hardware `CRC32_DECODE` shortens it. While the
+decoder is stalled, incoming bytes accumulate in the ring. With link-level
+flow control a small ring is enough: assert flow control while the ring is
+more than half full. Without flow control, the ring must absorb the byte rate
+times the longest stall.
 
 The `CRC32_READY` hook (see Optional hooks) removes the scan stall from the
-ring budget entirely. Protocol: always send exactly the first 27 bytes of the
+ring budget entirely. The sender always transmits the first 27 bytes of the
 patch (27 covers the envelope header of any valid patch; send the whole patch
-if it is smaller), wait for the device to report that `CRC32_READY` fired,
-then stream the remainder. The ring then only has to absorb page-commit
-bursts, so a 64-128 byte ring is typically enough.
+if it is smaller), waits for the device to report that `CRC32_READY` fired,
+and only then streams the remainder. The ring then only has to absorb
+page-commit bursts, so a 64-128 byte ring is typically enough.
 
 ### Flash contract
 
@@ -264,14 +271,14 @@ must see flash writes completed during the apply.
 The decoder uses the C library's `memmove` by default, which is free when the
 firmware already links it. If it does not, define `HAND_ROLLED_MEMMOVE` before
 including `patch_apply.h` to use the decoder's private backward-copy loop
-instead of pulling the library implementation into flash — a code-size saving
-when `memmove` would be linked only for the decoder. This changes code
-generation, not the patch format or RAM layout.
+instead of pulling the library implementation into flash, which saves code
+size when `memmove` would be linked only for the decoder. Only code generation
+changes; the patch format and RAM layout stay the same.
 
 `CRC32_READY()` is an optional notification hook for streaming senders. When
 defined before including the headers, the decoder invokes it exactly once per
-apply — after the source image is fully validated (source CRC match) and the
-pre-body flash scans are complete, immediately before the first
+apply, after the source image is fully validated (source CRC match) and the
+pre-body flash scans are complete, and immediately before the first
 compressed-body byte is pulled. It is not called when validation fails:
 
 ```c
@@ -287,9 +294,10 @@ identically either way.
 
 `patch_apply_run` is synchronous. It checks the source CRC before the first
 write, applies the patch, commits buffered pages, and checks the target CRC.
-It returns `PATCH_APPLY_DONE` only when all steps succeed. A mismatched wire
-revision, truncated header, implausible size, oversized image, or wrong or
-dirty source image all reject before the first flash write.
+It returns `PATCH_APPLY_DONE` only when all steps succeed. Anything wrong with
+the header or the source image (a mismatched wire revision, a truncated
+header, implausible sizes, an image over capacity, a wrong or dirty source) is
+rejected before the first flash write.
 
 CRC detects accidental corruption but does not authenticate an update.
 Authenticate the patch if needed, and enforce target and anti-rollback policy,
@@ -312,9 +320,9 @@ A reset or power loss during application will also require full reflash.
 | `PATCH_IMAGE_CAPACITY` | required, before include | physical capacity from that address; a nonzero multiple of `OUTROW`; base + capacity must fit `uint32_t` |
 | `CRC32_DECODE(start,size)` | optional | hardware or library CRC-32 replacement; zlib semantics; `start` is absolute |
 | `HAND_ROLLED_MEMMOVE` | optional | private backward-copy loop instead of libc `memmove`; codegen only |
-| `CRC32_READY()` | optional | notification hook: called once when source validation and the pre-body scans finish, immediately before the first body byte is pulled; enables the send-header-then-wait streaming protocol |
+| `CRC32_READY()` | optional | notification hook: called once when source validation and the pre-body scans finish, immediately before the first body byte is pulled; lets a streaming sender pause after the first 27 bytes until the device is ready |
 | `NO_GNU_EXTENSIONS` | optional | plain-C11 fallbacks for compilers with incomplete GNU attribute support |
-| `PATCH_WIRE_VERSION` (1), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | wire parameters — MUST match on encoder and decoder | adjust by editing `patch_config.h` and rebuilding both the CLI and the device decoder from the same headers (e.g. retarget `OUTROW` to the hardware erase-page size); predefining them per build is a compile error, which prevents silent mismatch; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
+| `PATCH_WIRE_VERSION` (1), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | wire parameters; MUST match on encoder and decoder | adjust by editing `patch_config.h` and rebuilding both the CLI and the device decoder from the same headers (e.g. retarget `OUTROW` to the hardware erase-page size); predefining them per build is a compile error, which prevents silent mismatch; they remain readable after the include (use `OUTROW` for the `flash_write_page` buffer size) |
 
 ### Wire compatibility
 
@@ -330,16 +338,17 @@ flash write.
 `patch_apply_run` returns `PATCH_APPLY_DONE` (0) or `PATCH_APPLY_ERROR` (1).
 After an error, `patch_apply_reject()` returns:
 
-- `REJ_RESOURCE` — the patch needs more than the configured partition or
+- `REJ_RESOURCE`: the patch needs more than the configured partition or
   exceeds a decoder cap. A too-small `PATCH_IMAGE_CAPACITY` is the common
   cause.
-- `REJ_CORRUPT` — everything else: malformed or truncated stream, wrong or
-  dirty source image, wire-revision mismatch, or a failed target CRC.
+- `REJ_CORRUPT`: everything else, such as a malformed or truncated stream, a
+  wrong or dirty source image, a wire-revision mismatch, or a failed target
+  CRC.
 
 `patch_apply_from_size()`, `patch_apply_to_size()`, `patch_apply_image_span()`,
 and `patch_apply_forward()` expose the decoded envelope geometry for logging
-and manifest cross-checks; they are `static inline` and cost nothing when
-unused.
+and manifest cross-checks; they are `static inline`, so unused ones add no
+code.
 
 For host-side triage, apply the patch to a copy of the source image with
 `--decode` and compare with `cmp`; the host tool rejects a truncated patch
