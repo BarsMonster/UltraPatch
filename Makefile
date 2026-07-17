@@ -104,8 +104,8 @@ $(HOST_TOOL): FORCE
 	$(CC) $(DECODER_CFLAGS) $(HOST_BACKEND_DEFINES) $(TOOL_SRCS) $(LDFLAGS) -o "$$tmp"; \
 	mv -f "$$tmp" "$@"; trap - EXIT TERM INT
 
-check-corpus-internal: ultrapatch check_corpus.sh
-	@./check_corpus.sh $(JOBS)
+check-corpus-internal: ultrapatch scripts/check_corpus.sh
+	@./scripts/check_corpus.sh $(JOBS)
 
 check-footprint-internal: $(DECODER_PUBLIC_HDRS) $(DECODER_INTEGRATION_TU) \
                           scripts/check_footprint.sh scripts/stack_bound.py
