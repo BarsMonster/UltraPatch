@@ -1,7 +1,8 @@
 # UltraPatch
 
 UltraPatch creates compact, in-place firmware delta patches for Cortex-M0/M0+-class
-devices. It provides:
+devices. It was inspired by [detools](https://github.com/eerimoq/detools). It
+provides:
 
 - `ultrapatch`, a host CLI that creates patches and can apply them for testing.
 - A header-only device decoder in `src/patch_apply.h`.
@@ -70,6 +71,42 @@ Every encode self-applies its patch with the production decoder and refuses to
 emit a patch that does not reproduce the exact target image. The project release
 gate additionally round-trips a 290-direction image corpus and bounds the
 decoder footprint; see AGENTS.md.
+
+## Compression comparison
+
+Measured on the real product update from this repository's fixtures
+(`v0_base` → `v1_one_face`, 113,124 → 113,484 bytes; detools 0.53.0). Sizes in
+bytes:
+
+| Tool / mode | Patch size |
+|---|---|
+| **UltraPatch** (in-place, 512 B page cache) | **573** (revert 290) |
+| detools sequential, zstd | 2,279 |
+| detools sequential, lzma | 2,439 (revert 2,096) |
+| detools sequential, heatshrink | 4,134 |
+| detools in-place, lzma, 512 B segments | 3,785 |
+| detools in-place, heatshrink, 512 B segments | 6,974 |
+| detools in-place, lzma, 64 KiB segments | 71,423 |
+| detools in-place, heatshrink, 64 KiB segments | 107,795 |
+
+Fairness notes: detools *sequential* patches are not in-place — applying them
+needs a second image slot or external staging. The in-place runs used
+`--memory-size 131072` with the listed `--segment-size`. On the apply side,
+lzma decompression needs far more RAM than UltraPatch's 6.6 KiB total;
+heatshrink is the RAM-comparable codec class.
+
+Full image delivery (the same 113,484-byte target):
+
+| Method | Size | % of image |
+|---|---|---|
+| 7z (LZMA2, `-mx=9`) | 71,524 | 63.0% |
+| **UltraPatch** empty-source full-reflash patch | **74,712** | 65.8% |
+| gzip -9 | 79,464 | 70.0% |
+| zip -9 | 79,604 | 70.1% |
+
+The UltraPatch row is directly flashable in place by the same 6.6 KiB-RAM
+decoder; the archive rows are transport-only baselines that still need a
+decompressor and staging on the device.
 
 ## Device integration
 
