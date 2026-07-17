@@ -191,8 +191,8 @@ be aligned to `OUTROW`, the capacity must be nonzero, and the complete range
 must fit in `uint32_t`. The decoder rejects an oversized image before scanning
 or writing image flash; the check includes the final partial page.
 
-`OUTROW` (256 bytes) is the erase-page size: the decoder changes flash only in
-whole, aligned erase pages. `flash_read` and `flash_write_page` receive
+`OUTROW` (256 bytes by default; retargetable, see Parameters) is the erase-page
+size: the decoder changes flash only in whole, aligned erase pages. `flash_read` and `flash_write_page` receive
 absolute addresses. `flash_read` must immediately observe completed writes.
 `flash_write_page` must synchronously erase and program one aligned `OUTROW`
 page from the complete supplied buffer. If the hardware program page is smaller
@@ -265,7 +265,7 @@ protocol.
 | `CRC32_DECODE(start,size)` | optional | hardware or library CRC-32 replacement; zlib semantics; `start` is absolute |
 | `HAND_ROLLED_MEMMOVE` | optional | private backward-copy loop instead of libc `memmove`; codegen only |
 | `NO_GNU_EXTENSIONS` | optional | plain-C11 fallbacks for compilers with incomplete GNU attribute support |
-| `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | fixed wire contract | predefining any of them is a compile error; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
+| `PATCH_WIRE_VERSION` (9), `MAX_IMAGE` (64 MiB), `WINDOW_LOG` (11), `DR_KCAP_BL` (152), `DR_KCAP_EX` (88), `OUTROW` (256, erase-page size), `OUTROW_DEPTH` (2) | wire parameters — MUST match on encoder and decoder | adjust by editing `patch_config.h` and rebuilding both the CLI and the device decoder from the same headers (e.g. retarget `OUTROW` to the hardware erase-page size); predefining them per build is a compile error, which prevents silent mismatch; they remain readable after the include — use `OUTROW` for the `flash_write_page` buffer size |
 
 ### Wire compatibility
 
@@ -274,6 +274,13 @@ into the envelope's source CRC. A patch produced by a different UltraPatch
 revision fails that check and is rejected before the first flash write. After
 updating the decoder headers, regenerate patches with the matching `ultrapatch`
 build.
+
+The wire parameters in the table above are part of the same contract: an
+encoder and a decoder built with different values (for example a retargeted
+`OUTROW`) are incompatible. Change them only by editing `patch_config.h` for
+both sides together, and when retargeting for a product line, also change
+`PATCH_WIRE_VERSION` so patches from other builds reject before the first
+flash write.
 
 ### Results and reject reasons
 

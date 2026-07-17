@@ -29,7 +29,10 @@
 
 /* Canonical constants, shared by decoder and encoder through rc_models.h. PATCH_IMAGE_BASE and
  * PATCH_IMAGE_CAPACITY remain decoder/device integration settings because they are not wire
- * properties. WINDOW_LOG is the LZ window log; DR_KCAP_* size the always-representable
+ * properties. The values below are adjustable by editing this file — e.g. retarget OUTROW to the
+ * hardware erase-page size — but encoder and decoder MUST be rebuilt from the same values; when
+ * retargeting for a product, also change PATCH_WIRE_VERSION so mismatched patches reject before
+ * the first flash write. WINDOW_LOG is the LZ window log; DR_KCAP_* size the always-representable
  * relocation caches; OUTROW is the NVM erase-page size (flash is changed only in whole erase
  * pages; a smaller program page is the driver's concern); OUTROW x OUTROW_DEPTH is the
  * uncommitted NVM page window. */
