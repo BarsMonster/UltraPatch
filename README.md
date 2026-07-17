@@ -117,7 +117,9 @@ given the decoder's roughly 12.5 KiB combined code, state, and stack budget.
    ```
 
 `PatchApply` is caller-owned. Use a separate object for each run, and do not
-run two decoders concurrently against the same flash image.
+run two decoders concurrently against the same flash image. It can live in
+static, no-init, or reused bootloader work RAM — `patch_apply_run` zeroes the
+object itself, so no-init placement needs no initialization code.
 
 ### Feeding the patch stream
 
