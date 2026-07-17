@@ -356,8 +356,8 @@ without modifying the input file.
 
 ## License and third-party notices
 
-UltraPatch-authored source and documentation are licensed under
-[LICENSE](LICENSE).
+UltraPatch-authored source and documentation are licensed under the
+[MIT license](LICENSE).
 
 Copyright (c) 2026 Mikhail Svarichevsky <mikhail@zeptobars.com>.
 
