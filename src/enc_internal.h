@@ -77,9 +77,6 @@ static inline uint8_t op_diff_byte(const uint8_t *frm, uint32_t from_size,
 /* One entry per aligned source word: distance to its nearest preceding LDR halfword (0 = none). */
 typedef struct { uint16_t *back; } LdrTargetIndex;
 typedef struct { int32_t *v; size_t n, cap; } IVec;
-typedef struct {
-    int deg_engaged;
-} EncStats;
 enum { PLAN_RAW_11, PLAN_RAW_6, PLAN_RAW_20, PLAN_RAW_N };
 enum { PLAN_SPEC_N = 4 };
 /* The ordered plan registry is the sole definition of sweep order. raw_key selects one of the
@@ -100,8 +97,7 @@ typedef struct {
     LdrTargetIndex ldr;
     SourceLitModels lit;
 } PlanPrep;
-typedef struct { OpVec ops; int32_t fp_end, fp_start; EncStats st; } PlanGeometry;
-typedef struct { Buf body; int32_t fp_end, fp_start; EncStats st; } PlanResult;
+typedef struct { OpVec ops; int32_t fp_end, fp_start; } PlanGeometry;
 
 typedef struct {
     uint64_t low;
@@ -286,9 +282,9 @@ void plan_geometry_prepare(PlanGeometry *geom, EncCtx *ctx,
                            const Buf *from, const Buf *to,
                            const PlanPrep *prep, int raw_key);
 void plan_geometry_free(PlanGeometry *geom);
-PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
-                       const PlanPrep *prep, const PlanGeometry *geom,
-                       int merge_fields, OutIndex *out_index);
+Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
+                const PlanPrep *prep, const PlanGeometry *geom,
+                int merge_fields, OutIndex *out_index);
 
 void encode_patch(const char *from_image, const char *to_image, const char *patch_out);
 int decode_patch(const char *image_path, const char *patch_path);

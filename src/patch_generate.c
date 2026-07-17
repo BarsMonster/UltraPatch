@@ -40,7 +40,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
      * returns an empty body and is skipped. */
     uint32_t from_crc = crc32_buf(from.d, from.n), to_crc = crc32_buf(to.d, to.n);
     EncCtx ctx = {0};
-    Buf best_blob = {0}; EncStats best_st = {0}; int bestv = -1;
+    Buf best_blob = {0}; int best_deg = 0; int bestv = -1;
     int natural_bestv = -1;
     /* The opposite direction is a fallback: admit it only when no natural plan was feasible or
      * the natural winner needed hazard literalization. Once admitted, retry only that winner;
@@ -49,7 +49,7 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
     int natdir = rc_natural_desc(from_size, to_size);
     for (int pass = 0; pass < 2; pass++) {           /* pass 0 = natural, pass 1 = unnatural */
         int dir = pass ? !natdir : natdir;           /* 0 = ascending (FWD), 1 = descending */
-        if (pass && bestv >= 0 && !best_st.deg_engaged) break;
+        if (pass && bestv >= 0 && !best_deg) break;
         if (pass) natural_bestv = bestv;
         ctx.fwd = (dir == 0);
         OutIndex out_index = {0};
@@ -63,14 +63,14 @@ void encode_patch(const char *from_image, const char *to_image, const char *patc
                 plan_geometry_prepare(&geom, &ctx, &from, &to, &prep, spec->raw_key);
                 geom_key = spec->raw_key;
             }
-            PlanResult pr = plan_encode(&ctx, &from, &to, &prep, &geom,
-                                        spec->merge_fields, &out_index);
-            if (pr.body.n == 0) { buf_free(&pr.body); continue; }        /* config infeasible on the wire */
+            Buf body = plan_encode(&ctx, &from, &to, &prep, &geom,
+                                   spec->merge_fields, &out_index);
+            if (body.n == 0) { buf_free(&body); continue; }              /* config infeasible on the wire */
             Buf cand = {0};
-            emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, pr.fp_end, pr.fp_start, &pr.body);
-            buf_free(&pr.body);                                          /* blob holds the copy */
+            emit_wire_blob(&cand, from_crc, to_crc, from_size, to_size, dir, geom.fp_end, geom.fp_start, &body);
+            buf_free(&body);                                             /* blob holds the copy */
             if (bestv < 0 || cand.n < best_blob.n) {
-                buf_free(&best_blob); best_blob = cand; best_st = pr.st; bestv = v;
+                buf_free(&best_blob); best_blob = cand; best_deg = ctx.deg_engaged; bestv = v;
             } else buf_free(&cand);
         }
         plan_geometry_free(&geom);

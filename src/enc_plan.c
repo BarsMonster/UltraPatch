@@ -107,7 +107,6 @@ void plan_geometry_prepare(PlanGeometry *geom, EncCtx *ctx,
     split_nonzero_diff_runs(ctx, &geom->ops, from, to, &prep->lit);
     uint32_t from_size = (uint32_t)from->n, to_size = (uint32_t)to->n;
     geom->fp_start = finalize_ops(ctx, &geom->ops, from_size, to_size, &geom->fp_end);
-    geom->st = (EncStats){ ctx->deg_engaged };
 }
 
 void plan_geometry_free(PlanGeometry *geom) {
@@ -116,16 +115,15 @@ void plan_geometry_free(PlanGeometry *geom) {
 }
 
 /* Encode either field mode from finalized geometry. encode_patch emits the smallest body. */
-PlanResult plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
-                       const PlanPrep *prep, const PlanGeometry *geom,
-                       int merge_fields, OutIndex *out_index) {
-    PlanResult r = { .fp_end = geom->fp_end, .fp_start = geom->fp_start, .st = geom->st };
+Buf plan_encode(EncCtx *ctx, const Buf *from, const Buf *to,
+                const PlanPrep *prep, const PlanGeometry *geom,
+                int merge_fields, OutIndex *out_index) {
     int emit_overflow = 0;
-    r.body = encode_body(ctx, &geom->ops, from->d, (uint32_t)from->n,
-                         to->d, (uint32_t)to->n, &prep->ldr, &prep->lit,
-                         merge_fields, geom->fp_start, out_index, &emit_overflow);
-    if (emit_overflow) { buf_free(&r.body); r.body = (Buf){0}; }
+    Buf body = encode_body(ctx, &geom->ops, from->d, (uint32_t)from->n,
+                           to->d, (uint32_t)to->n, &prep->ldr, &prep->lit,
+                           merge_fields, geom->fp_start, out_index, &emit_overflow);
+    if (emit_overflow) { buf_free(&body); body = (Buf){0}; }
     /* An infeasible plan returns an empty body and the sweep tries the remaining variants.
      * encode_patch dies only when every variant is infeasible. */
-    return r;
+    return body;
 }
