@@ -1,7 +1,7 @@
 # UltraPatch
 
 UltraPatch creates compact, in-place firmware delta patches for Cortex-M0/M0+-class
-devices (built for Sensor Watch). It provides:
+devices. It provides:
 
 - `ultrapatch`, a host CLI that creates patches and can apply them for testing.
 - A header-only device decoder rooted at `src/patch_apply.h`.
@@ -305,6 +305,9 @@ its upstream MIT-style license headers in each vendored source file. Vendored
 third-party code is used by the host encoder only; nothing third party compiles
 into the device decoder.
 
-The committed binaries under `test-bench/foreign/` are test data derived from
+The main test corpus (the committed firmware binaries under
+`test-bench/images/` and `test-bench/fixtures/`) consists of builds from the
+[Sensor Watch](https://github.com/joeycastillo/Sensor-Watch) project. The
+committed binaries under `test-bench/foreign/` are test data derived from
 official Adafruit CircuitPython releases (MIT). Full provenance and notices:
 [test-bench/foreign/NOTICE.md](test-bench/foreign/NOTICE.md).
