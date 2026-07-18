@@ -317,8 +317,7 @@ The decoder uses the C library's `memmove` by default, which is free when the
 firmware already links it. If it does not, define `HAND_ROLLED_MEMMOVE` before
 including `patch_apply.h` to use the decoder's private backward-copy loop
 instead of pulling the library implementation into flash, which saves code
-size when `memmove` would be linked only for the decoder. Only code generation
-changes; the patch format and RAM layout stay the same.
+size when fat `memmove` would be linked only for the decoder. 
 
 `CRC32_READY()` is an optional notification hook for streaming senders. When
 defined before including the headers, the decoder invokes it exactly once per
